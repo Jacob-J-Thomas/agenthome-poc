@@ -1,13 +1,22 @@
+using System.Security.Cryptography;
+using System.Text;
 using EmbodySense.Core.Common.Authority;
+using EmbodySense.Core.Common.Authority.Grants.Models;
+using EmbodySense.Core.Common.Authority.Models;
 using EmbodySense.Core.Common.ContextualRoles.Models;
+using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.Inference;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops;
 using EmbodySense.Core.Common.Loops.Execution;
+using EmbodySense.Core.Common.Loops.Execution.Retry;
 using EmbodySense.Core.Common.Loops.Execution.Sleep;
 using EmbodySense.Core.Common.Loops.Execution.Sleep.Models;
+using EmbodySense.Core.Common.Loops.Failures;
+using EmbodySense.Core.Common.Loops.Failures.Models;
+using EmbodySense.Core.Common.Loops.PureNodes;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
 using EmbodySense.Core.Common.Loops.Execution.Retry.Models;
@@ -15,11 +24,19 @@ using EmbodySense.Core.Startup.Loops.Execution.Models;
 using EmbodySense.Core.Startup.Governance;
 using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Capabilities;
+using EmbodySense.Core.Application.Governance.Authority.Models;
+using EmbodySense.Core.Application.Governance.Authority.Grants.Models;
+using EmbodySense.Core.Application.Loops.Sequential;
+using EmbodySense.Core.Application.Loops.GraphValidation;
+using EmbodySense.Core.Application.ContextualRoles.Models;
+using EmbodySense.Core.Application.ContextualRoles;
 using EmbodySense.Core.Application.CommandActions;
 using EmbodySense.Core.Clients.Capabilities;
 using EmbodySense.Core.Clients.CommandActions;
 using EmbodySense.Core.Common.CommandActions;
 using EmbodySense.Core.Common.CommandActions.Models;
+using EmbodySense.Core.Common.Capabilities;
+using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Application.Loops.Protocol;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
@@ -36,13 +53,16 @@ using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Common.Runtime;
 using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Core.Persistence.Loops.Execution.Sleep;
+using EmbodySense.Core.Persistence.Authority;
 using EmbodySense.Core.Persistence.Audit;
 using EmbodySense.Core.Persistence.Capabilities;
+using EmbodySense.Core.Persistence.ContextualRoles;
 using EmbodySense.Core.Persistence.Memory;
 using EmbodySense.Core.Persistence.Permissions;
 using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Core.Startup.Loops.GraphAuthoring;
 using EmbodySense.Core.Startup.Loops.GraphAuthoring.Models;
+using EmbodySense.Core.Startup.Loops.InvocationPreparation.Models;
 using EmbodySense.Core.Startup.Loops.Posture.Models;
 using EmbodySense.Core.Startup.Capabilities;
 using EmbodySense.Core.Startup.Loops;
@@ -340,6 +360,313 @@ public sealed class AgentRuntimeFactoryTests
         Assert.Equal(candidate.GraphId, reloaded.Lifecycle?.GraphId);
         Assert.Equal(candidate.RevisionId, reloaded.Lifecycle?.DraftRevision?.RevisionId);
         Assert.Single(reloaded.Artifacts);
+    }
+
+    [Fact]
+    public async Task CreateAsync_prepares_confirms_replays_and_scope_filters_one_published_web_invocation_grant()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        await using var runtime = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Web);
+
+        var invalidPreparation = await runtime.PrepareGovernedLoopInvocationAsync(new GovernedLoopInvocationPreparationRequest(string.Empty, string.Empty));
+        var missingPreparation = await runtime.PrepareGovernedLoopInvocationAsync(new GovernedLoopInvocationPreparationRequest("missing-browser-governed-graph", "revision-1"));
+        var invalidConfirmation = await runtime.ConfirmGovernedLoopInvocationAuthorityAsync(new GovernedLoopInvocationAuthorityConfirmation(
+            string.Empty,
+            string.Empty,
+            string.Empty,
+            string.Empty));
+        var catalog = await runtime.GovernedLoopGraphAuthoring.ReadCatalogAsync();
+        var role = Assert.Single(catalog.Roles.Roles, item => item.IsAdmissionReady);
+        var candidate = BrowserGraphCandidate(new ContextualRoleRevisionPin(
+            new ContextualRoleRevisionIdentity(role.RoleId, role.Revision),
+            role.ContentHash));
+        var created = await runtime.GovernedLoopGraphAuthoring.MutateAsync(new GovernedLoopGraphMutationInput(
+            "create-prepared-browser-governed-graph",
+            GovernedLoopGraphMutationKind.CreateDraft,
+            candidate.GraphId!,
+            GovernedLoopRevisionLifecycleStatus.Unknown,
+            0,
+            null,
+            null,
+            candidate));
+        var draft = Assert.IsType<GovernedLoopGraphReadResponse>(created.Current);
+        var draftHead = Assert.IsType<GovernedLoopRevisionLifecycleHead>(draft.Lifecycle);
+        var draftPreparation = await runtime.PrepareGovernedLoopInvocationAsync(new GovernedLoopInvocationPreparationRequest(candidate.GraphId!, candidate.RevisionId!));
+        var published = await runtime.GovernedLoopGraphAuthoring.MutateAsync(new GovernedLoopGraphMutationInput(
+            "publish-prepared-browser-governed-graph",
+            GovernedLoopGraphMutationKind.Publish,
+            candidate.GraphId!,
+            draftHead.Status,
+            draftHead.LifecycleVersion,
+            draftHead.DraftRevision,
+            draftHead.PublishedRevision,
+            null));
+        var publishedHead = Assert.IsType<GovernedLoopRevisionLifecycleHead>(published.Current?.Lifecycle);
+
+        var initial = await runtime.PrepareGovernedLoopInvocationAsync(new GovernedLoopInvocationPreparationRequest(candidate.GraphId!, candidate.RevisionId!));
+        var preview = Assert.IsType<GovernedLoopInvocationAuthorityPreview>(initial.Preview);
+        var confirmation = new GovernedLoopInvocationAuthorityConfirmation(
+            candidate.GraphId!,
+            candidate.RevisionId!,
+            preview.SemanticHash,
+            "confirm-prepared-browser-governed-graph");
+        var staleConfirmation = await runtime.ConfirmGovernedLoopInvocationAuthorityAsync(new GovernedLoopInvocationAuthorityConfirmation(
+            candidate.GraphId!,
+            candidate.RevisionId!,
+            new string('f', 64),
+            "stale-prepared-browser-governed-graph"));
+        var staleSelectorConfirmation = await runtime.ConfirmGovernedLoopInvocationAuthorityAsync(new GovernedLoopInvocationAuthorityConfirmation(
+            candidate.GraphId!,
+            "revision-0",
+            preview.SemanticHash,
+            "stale-selector-browser-governed-graph"));
+        var afterStaleConfirmation = await runtime.PrepareGovernedLoopInvocationAsync(new GovernedLoopInvocationPreparationRequest(candidate.GraphId!, candidate.RevisionId!));
+        var confirmed = await runtime.ConfirmGovernedLoopInvocationAuthorityAsync(confirmation);
+        var replayed = await runtime.ConfirmGovernedLoopInvocationAuthorityAsync(confirmation);
+        var duplicate = await runtime.ConfirmGovernedLoopInvocationAuthorityAsync(new GovernedLoopInvocationAuthorityConfirmation(
+            candidate.GraphId!,
+            candidate.RevisionId!,
+            preview.SemanticHash,
+            "duplicate-prepared-browser-governed-graph"));
+        var prepared = await runtime.PrepareGovernedLoopInvocationAsync(new GovernedLoopInvocationPreparationRequest(candidate.GraphId!, candidate.RevisionId!));
+        var stale = await runtime.PrepareGovernedLoopInvocationAsync(new GovernedLoopInvocationPreparationRequest(candidate.GraphId!, "revision-0"));
+        var authorityStore = new AuthorityProfileStore(new WorkspacePaths(workspace.RootPath), new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath));
+        var persistedGrant = await authorityStore.ReadAsync(Assert.IsType<AuthorityGrantReference>(confirmed.Grant).GrantId);
+        var persistedProfile = await authorityStore.ReadAsync(Assert.IsType<AuthorityGrantStoreSnapshot>(persistedGrant.Snapshot).CurrentGrant.Binding!.Profile.Reference.ProfileId.Value);
+        File.WriteAllText(new WorkspacePaths(workspace.RootPath).AuthorityProfilesDocumentPath, "{");
+        var unavailablePreparation = await runtime.PrepareGovernedLoopInvocationAsync(new GovernedLoopInvocationPreparationRequest(candidate.GraphId!, candidate.RevisionId!));
+        var unavailableConfirmation = await runtime.ConfirmGovernedLoopInvocationAuthorityAsync(confirmation);
+
+        Assert.Equal("committed", created.Status);
+        Assert.Equal("committed", published.Status);
+        Assert.Equal(GovernedLoopInvocationPreparationStatus.Invalid, invalidPreparation.Status);
+        Assert.Equal(GovernedLoopInvocationPreparationStatus.Unavailable, missingPreparation.Status);
+        Assert.Equal(GovernedLoopInvocationAuthorityConfirmationStatus.Invalid, invalidConfirmation.Status);
+        Assert.Equal(GovernedLoopInvocationPreparationStatus.NotFound, draftPreparation.Status);
+        Assert.Equal(GovernedLoopRevisionLifecycleStatus.Published, publishedHead.Status);
+        Assert.Equal(candidate.RevisionId, publishedHead.PublishedRevision?.Revision.RevisionId);
+        Assert.Equal(GovernedLoopInvocationPreparationStatus.ConfirmationRequired, initial.Status);
+        Assert.Empty(initial.EligibleGrants);
+        Assert.Equal(candidate.GraphId, initial.Publication?.Revision.GraphId);
+        Assert.Equal(candidate.RevisionId, initial.Publication?.Revision.RevisionId);
+        Assert.Equal(initial.AsOfUtc, preview.AsOfUtc);
+        Assert.Null(preview.ExpiresAtUtc);
+        Assert.Matches("^[0-9a-f]{64}$", preview.SemanticHash);
+        Assert.Equal(GovernedLoopInvocationAuthorityConfirmationStatus.Stale, staleConfirmation.Status);
+        Assert.Null(staleConfirmation.Grant);
+        Assert.Equal(GovernedLoopInvocationAuthorityConfirmationStatus.Stale, staleSelectorConfirmation.Status);
+        Assert.Null(staleSelectorConfirmation.Grant);
+        Assert.Equal(GovernedLoopInvocationPreparationStatus.ConfirmationRequired, afterStaleConfirmation.Status);
+        Assert.Equal(GovernedLoopInvocationAuthorityConfirmationStatus.Confirmed, confirmed.Status);
+        Assert.NotNull(confirmed.Grant);
+        Assert.Equal(confirmed.Grant, replayed.Grant);
+        Assert.Equal(GovernedLoopInvocationAuthorityConfirmationStatus.Confirmed, replayed.Status);
+        Assert.Equal(GovernedLoopInvocationAuthorityConfirmationStatus.Stale, duplicate.Status);
+        Assert.Null(duplicate.Grant);
+        Assert.Equal(GovernedLoopInvocationPreparationStatus.Ready, prepared.Status);
+        Assert.Null(prepared.Preview);
+        var eligibleGrant = Assert.Single(prepared.EligibleGrants);
+        Assert.Equal(confirmed.Grant, eligibleGrant.Grant);
+        Assert.Null(eligibleGrant.ExpiresAtUtc);
+        Assert.Null(prepared.ExpiresAtUtc);
+        Assert.Equal(GovernedLoopInvocationPreparationStatus.Stale, stale.Status);
+        Assert.Empty(stale.EligibleGrants);
+        Assert.Null(stale.Preview);
+        Assert.Equal(AuthorityGrantStoreReadStatus.Ready, persistedGrant.Status);
+        Assert.Equal(AuthorityProfileReadStatus.Available, persistedProfile.Status);
+        var currentGrant = Assert.IsType<AuthorityGrantStoreSnapshot>(persistedGrant.Snapshot).CurrentGrant;
+        var currentProfile = Assert.IsType<AuthorityProfileRecord>(persistedProfile.Record).CurrentProfile;
+        Assert.NotEqual(DateTimeOffset.UnixEpoch, currentProfile.IssuedAtUtc);
+        Assert.Equal(currentProfile.IssuedAtUtc, currentGrant.Boundary.EffectiveAtUtc);
+        Assert.Equal(GovernedLoopInvocationPreparationStatus.Unavailable, unavailablePreparation.Status);
+        Assert.Equal(GovernedLoopInvocationAuthorityConfirmationStatus.Unavailable, unavailableConfirmation.Status);
+    }
+
+    [Fact]
+    public async Task CreateAsync_prepares_the_manual_inference_validate_condition_bounded_retry_exit_fail_acceptance_shape()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        await using var runtime = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Web);
+
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var role = BrowserInvocationAcceptanceRole(paths);
+        var roleRequest = ContextualRoleRevisionMutationRequestHash.Apply(new ContextualRoleRevisionMutationRequest(
+            "create-browser-invocation-acceptance-role",
+            string.Empty,
+            ContextualRoleRevisionMutationKind.Create,
+            role.Identity.RoleId,
+            "test-author",
+            role,
+            null,
+            DateTimeOffset.UtcNow));
+        using (var roleStore = new ContextualRoleRevisionStore(paths, CapabilityWorkspaceScopeId.Create(paths.RootPath)))
+        {
+            Assert.Equal(ContextualRoleRevisionMutationStatus.Accepted, (await roleStore.MutateAsync(roleRequest)).Status);
+        }
+
+        var candidate = BrowserInvocationAcceptanceGraphCandidate(new ContextualRoleRevisionPin(role.Identity, role.ContentHash));
+        var created = await runtime.GovernedLoopGraphAuthoring.MutateAsync(new GovernedLoopGraphMutationInput(
+            "create-browser-invocation-acceptance-shape",
+            GovernedLoopGraphMutationKind.CreateDraft,
+            candidate.GraphId!,
+            GovernedLoopRevisionLifecycleStatus.Unknown,
+            0,
+            null,
+            null,
+            candidate));
+        var draft = Assert.IsType<GovernedLoopGraphReadResponse>(created.Current);
+        var head = Assert.IsType<GovernedLoopRevisionLifecycleHead>(draft.Lifecycle);
+        var published = await runtime.GovernedLoopGraphAuthoring.MutateAsync(new GovernedLoopGraphMutationInput(
+            "publish-browser-invocation-acceptance-shape",
+            GovernedLoopGraphMutationKind.Publish,
+            candidate.GraphId!,
+            head.Status,
+            head.LifecycleVersion,
+            head.DraftRevision,
+            head.PublishedRevision,
+            null));
+        var prepared = await runtime.PrepareGovernedLoopInvocationAsync(new GovernedLoopInvocationPreparationRequest(candidate.GraphId!, candidate.RevisionId!));
+
+        Assert.True(created.Status == "committed", string.Join(Environment.NewLine, created.Errors.Select(error => $"{error.Code}: {error.Message}")));
+        Assert.Equal("committed", published.Status);
+        Assert.Equal(GovernedLoopInvocationPreparationStatus.ConfirmationRequired, prepared.Status);
+        Assert.NotNull(prepared.Preview);
+        Assert.Empty(prepared.EligibleGrants);
+    }
+
+    [Fact]
+    public async Task CreateAsync_keeps_visible_governed_invocation_preparation_and_confirmation_unavailable_to_cli_without_authority_mutation()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        GovernedLoopGraphCandidate candidate;
+        GovernedLoopInvocationAuthorityPreview preview;
+        await using (var web = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Web))
+        {
+            var catalog = await web.GovernedLoopGraphAuthoring.ReadCatalogAsync();
+            var role = Assert.Single(catalog.Roles.Roles, item => item.IsAdmissionReady);
+            candidate = BrowserGraphCandidate(new ContextualRoleRevisionPin(
+                new ContextualRoleRevisionIdentity(role.RoleId, role.Revision),
+                role.ContentHash));
+            var created = await web.GovernedLoopGraphAuthoring.MutateAsync(new GovernedLoopGraphMutationInput(
+                "create-cli-denied-browser-governed-graph",
+                GovernedLoopGraphMutationKind.CreateDraft,
+                candidate.GraphId!,
+                GovernedLoopRevisionLifecycleStatus.Unknown,
+                0,
+                null,
+                null,
+                candidate));
+            var draft = Assert.IsType<GovernedLoopGraphReadResponse>(created.Current);
+            var head = Assert.IsType<GovernedLoopRevisionLifecycleHead>(draft.Lifecycle);
+            var published = await web.GovernedLoopGraphAuthoring.MutateAsync(new GovernedLoopGraphMutationInput(
+                "publish-cli-denied-browser-governed-graph",
+                GovernedLoopGraphMutationKind.Publish,
+                candidate.GraphId!,
+                head.Status,
+                head.LifecycleVersion,
+                head.DraftRevision,
+                head.PublishedRevision,
+                null));
+            var prepared = await web.PrepareGovernedLoopInvocationAsync(new GovernedLoopInvocationPreparationRequest(candidate.GraphId!, candidate.RevisionId!));
+
+            Assert.Equal("committed", created.Status);
+            Assert.Equal("committed", published.Status);
+            preview = Assert.IsType<GovernedLoopInvocationAuthorityPreview>(prepared.Preview);
+        }
+
+        var authorityBefore = new[] { paths.AuthorityProfilesDocumentPath, paths.AuthorityProfilesProofPath }
+            .Select(path => File.Exists(path) ? Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))) : null)
+            .ToArray();
+        await using var cli = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Cli);
+        var preparedByCli = await cli.PrepareGovernedLoopInvocationAsync(new GovernedLoopInvocationPreparationRequest(candidate.GraphId!, candidate.RevisionId!));
+        var confirmedByCli = await cli.ConfirmGovernedLoopInvocationAuthorityAsync(new GovernedLoopInvocationAuthorityConfirmation(
+            candidate.GraphId!,
+            candidate.RevisionId!,
+            preview.SemanticHash,
+            "confirm-cli-denied-browser-governed-graph"));
+        var authorityAfter = new[] { paths.AuthorityProfilesDocumentPath, paths.AuthorityProfilesProofPath }
+            .Select(path => File.Exists(path) ? Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))) : null)
+            .ToArray();
+
+        Assert.Equal(GovernedLoopInvocationPreparationStatus.Unavailable, preparedByCli.Status);
+        Assert.Empty(preparedByCli.EligibleGrants);
+        Assert.Null(preparedByCli.Preview);
+        Assert.Equal(GovernedLoopInvocationAuthorityConfirmationStatus.Unavailable, confirmedByCli.Status);
+        Assert.Null(confirmedByCli.Grant);
+        Assert.Equal(authorityBefore, authorityAfter);
+    }
+
+    [Fact]
+    public async Task CreateAsync_resumes_confirmation_after_an_exact_profile_only_crash_window()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        await using var runtime = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Web);
+
+        var catalog = await runtime.GovernedLoopGraphAuthoring.ReadCatalogAsync();
+        var role = Assert.Single(catalog.Roles.Roles, item => item.IsAdmissionReady);
+        var candidate = BrowserGraphCandidate(new ContextualRoleRevisionPin(
+            new ContextualRoleRevisionIdentity(role.RoleId, role.Revision),
+            role.ContentHash));
+        var created = await runtime.GovernedLoopGraphAuthoring.MutateAsync(new GovernedLoopGraphMutationInput(
+            "create-recovery-browser-governed-graph",
+            GovernedLoopGraphMutationKind.CreateDraft,
+            candidate.GraphId!,
+            GovernedLoopRevisionLifecycleStatus.Unknown,
+            0,
+            null,
+            null,
+            candidate));
+        var draftHead = Assert.IsType<GovernedLoopRevisionLifecycleHead>(created.Current?.Lifecycle);
+        var published = await runtime.GovernedLoopGraphAuthoring.MutateAsync(new GovernedLoopGraphMutationInput(
+            "publish-recovery-browser-governed-graph",
+            GovernedLoopGraphMutationKind.Publish,
+            candidate.GraphId!,
+            draftHead.Status,
+            draftHead.LifecycleVersion,
+            draftHead.DraftRevision,
+            draftHead.PublishedRevision,
+            null));
+        var publication = Assert.IsType<GovernedLoopRevisionPublicationPin>(published.Current?.Lifecycle?.PublishedRevision);
+        var initial = await runtime.PrepareGovernedLoopInvocationAsync(new GovernedLoopInvocationPreparationRequest(candidate.GraphId!, candidate.RevisionId!));
+        var preview = Assert.IsType<GovernedLoopInvocationAuthorityPreview>(initial.Preview);
+        const string OperationId = "resume-profile-only-browser-governed-graph";
+
+        var profile = CreateProfileOnlyRecoveryRecord(publication, preview.SemanticHash, OperationId, DateTimeOffset.UtcNow);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var profileStore = new AuthorityProfileStore(paths, new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath));
+        Assert.True(AuthorityActorId.TryParse("embodysense.web", out var actor, out _));
+        Assert.True(AuthorityPurpose.TryParse("governed-loop-invocation", out var purpose, out _));
+        var persistedProfile = await profileStore.MutateAsync(new AuthorityProfileMutation(
+            AuthorityProfileMutationKind.Create,
+            "invocation-profile-op-" + HashInvocationTestValue(OperationId),
+            0,
+            profile,
+            null,
+            null,
+            actor!,
+            purpose!));
+        var beforeResume = await runtime.PrepareGovernedLoopInvocationAsync(new GovernedLoopInvocationPreparationRequest(candidate.GraphId!, candidate.RevisionId!));
+        var resumed = await runtime.ConfirmGovernedLoopInvocationAuthorityAsync(new GovernedLoopInvocationAuthorityConfirmation(
+            candidate.GraphId!,
+            candidate.RevisionId!,
+            preview.SemanticHash,
+            OperationId));
+        var ready = await runtime.PrepareGovernedLoopInvocationAsync(new GovernedLoopInvocationPreparationRequest(candidate.GraphId!, candidate.RevisionId!));
+
+        Assert.Equal("committed", created.Status);
+        Assert.Equal("committed", published.Status);
+        Assert.Equal(GovernedLoopInvocationPreparationStatus.ConfirmationRequired, initial.Status);
+        Assert.Equal(AuthorityProfileMutationStatus.Applied, persistedProfile.Status);
+        Assert.Equal(GovernedLoopInvocationPreparationStatus.ConfirmationRequired, beforeResume.Status);
+        Assert.Equal(GovernedLoopInvocationAuthorityConfirmationStatus.Confirmed, resumed.Status);
+        Assert.NotNull(resumed.Grant);
+        Assert.Equal(GovernedLoopInvocationPreparationStatus.Ready, ready.Status);
+        Assert.Equal(resumed.Grant, Assert.Single(ready.EligibleGrants).Grant);
     }
 
     [Fact]
@@ -1753,6 +2080,182 @@ public sealed class AgentRuntimeFactoryTests
                 ]),
             EmbodySense.Core.Application.Tests.GovernedModelProfileApplicationTestFixture.DefaultRoutingPolicy());
     }
+
+    private static ContextualRoleRevision BrowserInvocationAcceptanceRole(WorkspacePaths paths)
+    {
+        var revision = new ContextualRoleRevision(
+            1,
+            new ContextualRoleRevisionIdentity("browser-invocation-acceptance", 1),
+            string.Empty,
+            "Browser invocation acceptance",
+            "Own one bounded visible governed invocation acceptance graph.",
+            ContextualRoleStatus.Published,
+            new ContextualRoleProvenance("test-author", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow),
+            new ContextualRoleWorkspaceApplicability([CapabilityWorkspaceScopeId.Create(paths.RootPath)]),
+            new ContextualRoleInstructionSourceReference(
+                ContextualRoleInstructionSourceKind.WorkspaceRoleMarkdown,
+                "role",
+                ContextualRoleInstructionClassification.RoleInstruction),
+            new ContextualRolePolicyMaxima([
+                "org.embodysense/conversation-turn",
+                "org.embodysense/model-inference",
+                BuiltInCapabilityCatalog.CodexModelProfileCapabilityId,
+            ]));
+        return ContextualRoleRevisionContentHash.Apply(revision);
+    }
+
+    private static GovernedLoopGraphCandidate BrowserInvocationAcceptanceGraphCandidate(ContextualRoleRevisionPin role)
+    {
+        const string ConversationTurnCapability = "org.embodysense/conversation-turn";
+        const string ModelInferenceCapability = "org.embodysense/model-inference";
+        var trigger = new GovernedLoopNodeDefinition(
+            "trigger",
+            GovernedLoopSequentialNodeDescriptors.ManualTrigger,
+            [
+                new GovernedLoopPortDefinition("request", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "text", true),
+                new GovernedLoopPortDefinition("invocation-context", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Context, "text", true),
+            ],
+            GovernedLoopAuthorityCeiling.Create([]),
+            new Dictionary<string, string>());
+        var inference = new GovernedLoopNodeDefinition(
+            "inference",
+            GovernedLoopSequentialNodeDescriptors.ProviderInference,
+            [
+                new GovernedLoopPortDefinition("request", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data, "text", true),
+                new GovernedLoopPortDefinition("invocation-context", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Context, "text", true),
+                new GovernedLoopPortDefinition("result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "text", true),
+            ],
+            GovernedLoopAuthorityCeiling.Create([ModelInferenceCapability, BuiltInCapabilityCatalog.CodexModelProfileCapabilityId]),
+            new Dictionary<string, string> { ["instruction"] = "Answer the bounded visible invocation." },
+            RetryPolicy: GovernedLoopRetryContract.CreatePolicy(
+                "browser-invocation-bounded-retry",
+                "inference",
+                [GovernedLoopFailureClass.DispatchProvedNotStarted],
+                ["provider-dispatch-not-started"],
+                2,
+                1_000,
+                5_000,
+                GovernedLoopRetryBackoffStrategy.Fixed,
+                100,
+                100,
+                GovernedLoopRetryJitterStrategy.None,
+                0,
+                maximumResourceUnits: 2));
+        var validate = new GovernedLoopNodeDefinition(
+            "validate",
+            GovernedLoopSequentialNodeDescriptors.SchemaConformance,
+            [
+                new GovernedLoopPortDefinition(GovernedLoopPureNodeVocabulary.InputPort, GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data, "text", true),
+                new GovernedLoopPortDefinition(GovernedLoopPureNodeVocabulary.ResultPort, GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "boolean", true),
+            ],
+            GovernedLoopAuthorityCeiling.Create([]),
+            new Dictionary<string, string>());
+        var condition = new GovernedLoopNodeDefinition(
+            "condition",
+            GovernedLoopSequentialNodeDescriptors.BooleanCondition,
+            [new GovernedLoopPortDefinition(GovernedLoopTopologyNodeVocabulary.ValuePort, GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data, "boolean", true)],
+            GovernedLoopAuthorityCeiling.Create([]),
+            new Dictionary<string, string>());
+        var exit = new GovernedLoopNodeDefinition(
+            "exit",
+            GovernedLoopSequentialNodeDescriptors.SuccessExit,
+            [
+                new GovernedLoopPortDefinition("result", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data, "text", true),
+                new GovernedLoopPortDefinition("published-result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "text", true),
+            ],
+            GovernedLoopAuthorityCeiling.Create([ConversationTurnCapability]),
+            new Dictionary<string, string>());
+        var fail = new GovernedLoopNodeDefinition(
+            "fail",
+            GovernedLoopSequentialNodeDescriptors.FailTerminal,
+            [],
+            GovernedLoopAuthorityCeiling.Create([]),
+            new Dictionary<string, string>
+            {
+                [GovernedLoopFailNodeVocabulary.CodeParameter] = "validation-rejected",
+                [GovernedLoopFailNodeVocabulary.ExplanationParameter] = "The bounded validation rejected the result.",
+            });
+        return new GovernedLoopGraphCandidate(
+            1,
+            "browser-invocation-acceptance-graph",
+            "revision-1",
+            "Execute one bounded visible graph with deterministic validation and retry.",
+            role,
+            trigger.Id,
+            [exit.Id, fail.Id],
+            GovernedLoopAuthorityCeiling.Create([ConversationTurnCapability, ModelInferenceCapability, BuiltInCapabilityCatalog.CodexModelProfileCapabilityId]),
+            [
+                new GovernedLoopValueSchemaDefinition("boolean", GovernedLoopValueKind.Boolean, false),
+                new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false),
+            ],
+            [trigger, inference, validate, condition, exit, fail],
+            [
+                new GovernedLoopControlEdgeDefinition("trigger-to-inference", trigger.Id, inference.Id, GovernedLoopControlCondition.Always),
+                new GovernedLoopControlEdgeDefinition("inference-to-validate", inference.Id, validate.Id, GovernedLoopControlCondition.Success),
+                new GovernedLoopControlEdgeDefinition("validate-to-condition", validate.Id, condition.Id, GovernedLoopControlCondition.Success),
+                new GovernedLoopControlEdgeDefinition("condition-true-to-exit", condition.Id, exit.Id, GovernedLoopControlCondition.True),
+                new GovernedLoopControlEdgeDefinition("condition-false-to-fail", condition.Id, fail.Id, GovernedLoopControlCondition.False),
+            ],
+            [
+                new GovernedLoopBindingDefinition("request-to-inference", GovernedLoopBindingKind.Data, trigger.Id, "request", inference.Id, "request"),
+                new GovernedLoopBindingDefinition("context-to-inference", GovernedLoopBindingKind.Context, trigger.Id, "invocation-context", inference.Id, "invocation-context"),
+                new GovernedLoopBindingDefinition("result-to-validate", GovernedLoopBindingKind.Data, inference.Id, "result", validate.Id, GovernedLoopPureNodeVocabulary.InputPort),
+                new GovernedLoopBindingDefinition("validation-to-condition", GovernedLoopBindingKind.Data, validate.Id, GovernedLoopPureNodeVocabulary.ResultPort, condition.Id, GovernedLoopTopologyNodeVocabulary.ValuePort),
+                new GovernedLoopBindingDefinition("result-to-exit", GovernedLoopBindingKind.Data, inference.Id, "result", exit.Id, "result"),
+            ],
+            new GovernedLoopOutputContract("Return the validated inference result.", [new GovernedLoopOutputDefinition("result", "text", exit.Id, "published-result", true)]),
+            new GovernedLoopDisplayMetadata(
+                "Browser invocation acceptance graph",
+                "Manual inference, validation, condition, bounded retry, and explicit terminals.",
+                [
+                    new GovernedLoopNodeDisplayMetadata(trigger.Id, "Trigger", "Start.", 0, 0),
+                    new GovernedLoopNodeDisplayMetadata(inference.Id, "Inference", "Infer with bounded retry.", 100, 0),
+                    new GovernedLoopNodeDisplayMetadata(validate.Id, "Validate", "Validate the inference result.", 200, 0),
+                    new GovernedLoopNodeDisplayMetadata(condition.Id, "Condition", "Choose the terminal path.", 300, 0),
+                    new GovernedLoopNodeDisplayMetadata(exit.Id, "Exit", "Publish.", 400, 0),
+                    new GovernedLoopNodeDisplayMetadata(fail.Id, "Fail", "Stop safely.", 400, 100),
+                ]),
+            EmbodySense.Core.Application.Tests.GovernedModelProfileApplicationTestFixture.DefaultRoutingPolicy());
+    }
+
+    private static AuthorityProfile CreateProfileOnlyRecoveryRecord(
+        GovernedLoopRevisionPublicationPin publication,
+        string semanticHash,
+        string operationId,
+        DateTimeOffset issuedAtUtc)
+    {
+        var basis = string.Join(
+            "\n",
+            "governed-loop-invocation-v1",
+            operationId,
+            semanticHash,
+            publication.Revision.GraphId,
+            publication.Revision.RevisionId,
+            publication.Revision.ExecutableHash,
+            publication.PublicationOperationId,
+            publication.ValidationEvidenceHash);
+        var digest = HashInvocationTestValue(basis);
+        Assert.True(AuthorityProfileId.TryParse("invocation-profile-" + digest, out var profileId, out _));
+        Assert.True(AuthorityProfileRevision.TryParse("1", out var revision, out _));
+        var descriptor = Assert.Single(BuiltInCapabilityCatalog.Descriptors, item => string.Equals(item.Id.Value, "org.embodysense/conversation-turn", StringComparison.Ordinal));
+        Assert.True(CapabilityDescriptorIdentity.TryCreate(descriptor, out var identity, out _));
+        Assert.True(AuthorityActorId.TryParse("embodysense.web", out var actor, out _));
+        Assert.True(AuthorityPurpose.TryParse("governed-loop-invocation", out var purpose, out _));
+        return new AuthorityProfile(
+            AuthorityProfile.CurrentSchemaVersion,
+            profileId!,
+            revision!,
+            AuthorityProfileStatus.Active,
+            purpose!,
+            new AuthorityProvenance(actor!, AuthorityProvenanceKind.UserDeclaration),
+            issuedAtUtc,
+            null,
+            new AuthorityCeiling([identity!], [], 0, CapabilitySideEffectClass.None, false, false, false),
+            []);
+    }
+
+    private static string HashInvocationTestValue(string value)
+        => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
 
     private static async Task<AgentRuntime> CreateRuntimeWithLiveDiscoveryAsync(TestWorkspace workspace)
     {

@@ -27,7 +27,7 @@ namespace EmbodySense.Core.Persistence.Authority;
 /// is a mutation base. This store only preserves declarations and evidence: profile existence is never a role binding, grant,
 /// delegation, admission decision, or runtime enforcement decision.
 /// </remarks>
-public sealed class AuthorityProfileStore : IAuthorityProfileStore, IAuthorityGrantStore
+public sealed class AuthorityProfileStore : IAuthorityProfileStore, IAuthorityGrantStore, IAuthorityGrantCatalogSource
 {
     private static readonly JsonSerializerOptions _jsonOptions = CreateJsonOptions(true);
     private static readonly JsonSerializerOptions _hashOptions = CreateJsonOptions(false);
@@ -293,6 +293,23 @@ public sealed class AuthorityProfileStore : IAuthorityProfileStore, IAuthorityGr
     }
 
     /// <inheritdoc />
+    public async Task<AuthorityGrantCatalogReadResult> ReadCurrentAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            return await _authorityTransaction.ExecuteAsync(token => ReadGrantCatalogCoreAsync(token), cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (IsAvailabilityFailure(exception))
+        {
+            return new AuthorityGrantCatalogReadResult(AuthorityGrantCatalogReadStatus.Unavailable, 0, []);
+        }
+    }
+
+    /// <inheritdoc />
     public async Task<AuthorityGrantStoreCommitResult> CommitAsync(AuthorityGrantStoreMutation mutation, CancellationToken cancellationToken = default)
     {
         if (!IsGrantStoreMutationValid(mutation))
@@ -351,6 +368,39 @@ public sealed class AuthorityProfileStore : IAuthorityProfileStore, IAuthorityGr
         }
 
         return GrantReadResult(grant is null ? AuthorityGrantStoreReadStatus.NotFound : AuthorityGrantStoreReadStatus.Ready, document.Generation, snapshot, null);
+    }
+
+    private async Task<AuthorityGrantCatalogReadResult> ReadGrantCatalogCoreAsync(CancellationToken cancellationToken)
+    {
+        await using var session = await AcquireLockAsync(cancellationToken);
+        var identity = CreateWorkspaceIdentity(session.PhysicalIdentityMaterial);
+        var trust = await _trustProvider.ReadAsync(identity, cancellationToken);
+        var loaded = await LoadAsync(session, identity, trust, cancellationToken);
+        if (loaded.Ambiguous || loaded.Recovered)
+        {
+            return new AuthorityGrantCatalogReadResult(AuthorityGrantCatalogReadStatus.Ambiguous, loaded.Document?.Generation ?? 0, []);
+        }
+
+        if (loaded.Document is null)
+        {
+            return new AuthorityGrantCatalogReadResult(AuthorityGrantCatalogReadStatus.Unavailable, 0, []);
+        }
+
+        var grants = new List<AuthorityGrant>(loaded.Document.Grants.Count);
+        foreach (var document in loaded.Document.Grants)
+        {
+            if (!TryMapGrant(document, out var revisions) || revisions.Count == 0)
+            {
+                return new AuthorityGrantCatalogReadResult(AuthorityGrantCatalogReadStatus.Ambiguous, loaded.Document.Generation, []);
+            }
+
+            grants.Add(revisions[^1]);
+        }
+
+        return new AuthorityGrantCatalogReadResult(
+            AuthorityGrantCatalogReadStatus.Available,
+            loaded.Document.Generation,
+            grants.OrderBy(value => value.GrantId.Value, StringComparer.Ordinal).ToArray());
     }
 
     private async Task<AuthorityGrantStoreReadResult> ReadGrantForMutationCoreAsync(
