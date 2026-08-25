@@ -85,6 +85,7 @@ public sealed class CustomLoopRunStore :
     private readonly TimeProvider _timeProvider;
     private readonly Func<string, FileSystemWatcher> _monitorWatcherFactory;
     private readonly Func<CustomLoopRunReadBoundary, string, CancellationToken, ValueTask>? _artifactReadObserver;
+    private readonly CustomLoopRunCanonicalPublisher _canonicalPublisher;
     private readonly object _monitorCacheGate = new();
     private readonly Dictionary<string, long> _monitorArtifactChangeVersions;
     private readonly HashSet<string> _monitorArtifactPaths;
@@ -103,7 +104,7 @@ public sealed class CustomLoopRunStore :
     /// </summary>
     /// <param name="paths">The paths.</param>
     /// <param name="timeProvider">The time provider.</param>
-    public CustomLoopRunStore(WorkspacePaths paths, TimeProvider? timeProvider = null) : this(paths, timeProvider, static path => new FileSystemWatcher(path), artifactReadObserver: null)
+    public CustomLoopRunStore(WorkspacePaths paths, TimeProvider? timeProvider = null) : this(paths, timeProvider, static path => new FileSystemWatcher(path), artifactReadObserver: null, publicationBoundaryObserver: null)
     {
     }
 
@@ -120,7 +121,19 @@ public sealed class CustomLoopRunStore :
     /// propagate and abort the read.
     /// Pass the normal two-parameter constructor when no observer is required.
     /// </param>
-    public CustomLoopRunStore(WorkspacePaths paths, TimeProvider? timeProvider, Func<CustomLoopRunReadBoundary, string, CancellationToken, ValueTask> artifactReadObserver) : this(paths, timeProvider, static path => new FileSystemWatcher(path), artifactReadObserver ?? throw new ArgumentNullException(nameof(artifactReadObserver)))
+    public CustomLoopRunStore(WorkspacePaths paths, TimeProvider? timeProvider, Func<CustomLoopRunReadBoundary, string, CancellationToken, ValueTask> artifactReadObserver) : this(paths, timeProvider, static path => new FileSystemWatcher(path), artifactReadObserver ?? throw new ArgumentNullException(nameof(artifactReadObserver)), publicationBoundaryObserver: null)
+    {
+    }
+
+    /// <summary>Initializes a new store with an observable canonical-publication boundary.</summary>
+    /// <param name="paths">The workspace paths.</param>
+    /// <param name="timeProvider">The time provider.</param>
+    /// <param name="publicationBoundaryObserver">
+    /// The non-null observer invoked after staging flush, exact rename, parent-directory durability, and exact target proof.
+    /// The observer must not re-enter this store. A failure after rename throws an internal, path-free <see cref="IOException"/>
+    /// so no caller may treat the possibly published candidate as acknowledged.
+    /// </param>
+    public CustomLoopRunStore(WorkspacePaths paths, TimeProvider? timeProvider, Func<CustomLoopRunPublicationBoundary, CancellationToken, ValueTask> publicationBoundaryObserver) : this(paths, timeProvider, static path => new FileSystemWatcher(path), artifactReadObserver: null, publicationBoundaryObserver ?? throw new ArgumentNullException(nameof(publicationBoundaryObserver)))
     {
     }
 
@@ -129,11 +142,11 @@ public sealed class CustomLoopRunStore :
     /// </summary>
     /// <param name="paths">The paths.</param>
     /// <param name="monitorWatcherFactory">The monitor watcher factory.</param>
-    public CustomLoopRunStore(WorkspacePaths paths, Func<string, FileSystemWatcher> monitorWatcherFactory) : this(paths, null, monitorWatcherFactory)
+    public CustomLoopRunStore(WorkspacePaths paths, Func<string, FileSystemWatcher> monitorWatcherFactory) : this(paths, null, monitorWatcherFactory, artifactReadObserver: null, publicationBoundaryObserver: null)
     {
     }
 
-    private CustomLoopRunStore(WorkspacePaths paths, TimeProvider? timeProvider, Func<string, FileSystemWatcher> monitorWatcherFactory, Func<CustomLoopRunReadBoundary, string, CancellationToken, ValueTask>? artifactReadObserver = null)
+    private CustomLoopRunStore(WorkspacePaths paths, TimeProvider? timeProvider, Func<string, FileSystemWatcher> monitorWatcherFactory, Func<CustomLoopRunReadBoundary, string, CancellationToken, ValueTask>? artifactReadObserver, Func<CustomLoopRunPublicationBoundary, CancellationToken, ValueTask>? publicationBoundaryObserver)
     {
         ArgumentNullException.ThrowIfNull(paths);
         ArgumentNullException.ThrowIfNull(monitorWatcherFactory);
@@ -155,6 +168,7 @@ public sealed class CustomLoopRunStore :
         _timeProvider = timeProvider ?? TimeProvider.System;
         _monitorWatcherFactory = monitorWatcherFactory;
         _artifactReadObserver = artifactReadObserver;
+        _canonicalPublisher = new CustomLoopRunCanonicalPublisher(publicationBoundaryObserver);
         _monitorArtifactChangeVersions = new Dictionary<string, long>(PathComparer);
         _monitorArtifactPaths = new HashSet<string>(PathComparer);
     }
@@ -3936,7 +3950,11 @@ public sealed class CustomLoopRunStore :
 
         try
         {
-            await WriteArtifactContentAsync(path, content, overwrite, cancellationToken);
+            var publication = await WriteArtifactContentAsync(path, content, overwrite, cancellationToken);
+            if (!publication.IsCommitted)
+            {
+                throw new CustomLoopRunCanonicalPublicationUnknownException(publication);
+            }
         }
         catch (Exception exception)
         {
@@ -3955,33 +3973,12 @@ public sealed class CustomLoopRunStore :
         }
     }
 
-    private async Task WriteArtifactContentAsync(string path, byte[] content, bool overwrite, CancellationToken cancellationToken)
+    private async Task<CustomLoopRunCanonicalPublicationResult> WriteArtifactContentAsync(string path, byte[] content, bool overwrite, CancellationToken cancellationToken)
     {
         EnsureSafeArtifactPath(path, mustExist: overwrite);
         var directory = Path.GetDirectoryName(path)!;
         EnsureSafeDirectory(directory, create: true);
-        var temporaryPath = Path.Combine(directory, $".{Path.GetFileName(path)}.{Guid.NewGuid():N}.tmp");
-        EnsureContained(_runsRoot, temporaryPath);
-        try
-        {
-            await using (var stream = new FileStream(temporaryPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 64 * 1024, FileOptions.Asynchronous | FileOptions.WriteThrough))
-            {
-                await stream.WriteAsync(content, cancellationToken);
-                await stream.FlushAsync(cancellationToken);
-                stream.Flush(flushToDisk: true);
-            }
-
-            EnsureSafeDirectory(directory, create: false);
-            EnsureSafeArtifactPath(temporaryPath, mustExist: true);
-            await MoveAtomicallyWithRetryAsync(temporaryPath, path, overwrite, CustomLoopRunPersistenceDiagnosticStage.CanonicalReplace, _canonicalAtomicMoveContentionTimeout, cancellationToken);
-        }
-        finally
-        {
-            if (File.Exists(temporaryPath))
-            {
-                File.Delete(temporaryPath);
-            }
-        }
+        return await _canonicalPublisher.PublishAsync(directory, Path.GetFileName(path), content, overwrite, _canonicalAtomicMoveContentionTimeout, _atomicMoveRetryDelay, cancellationToken);
     }
 
     private static async Task MoveAtomicallyWithRetryAsync(
@@ -4280,13 +4277,18 @@ public sealed class CustomLoopRunStore :
 
     private static (CustomLoopRunPersistenceNativeErrorKind ErrorKind, long? ErrorCode) FindNativeError(Exception exception)
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            return (CustomLoopRunPersistenceNativeErrorKind.None, null);
-        }
-
         for (var current = exception; current is not null; current = current.InnerException)
         {
+            if (current is CustomLoopRunNativeIOException native)
+            {
+                return (native.ErrorKind, native.ErrorCode);
+            }
+
+            if (!OperatingSystem.IsWindows())
+            {
+                continue;
+            }
+
             if (current is IOException or UnauthorizedAccessException)
             {
                 return (CustomLoopRunPersistenceNativeErrorKind.Win32, current.HResult & 0xFFFF);

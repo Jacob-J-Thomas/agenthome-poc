@@ -28,6 +28,7 @@ using EmbodySense.Core.Common.Loops.Posture;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Core.Persistence.Loops.Models;
+using EmbodySense.Core.Persistence.Tests.Verification;
 using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Persistence.Tests.Loops;
@@ -2808,6 +2809,264 @@ public sealed class CustomLoopRunStoreTests
         index.Remove("revision");
         await File.WriteAllTextAsync(indexPath, index.ToJsonString(_artifactJsonOptions) + "\n");
         Assert.Equal("run-alpha", Assert.Single((await store.ListPageAsync(new CustomLoopRunPageRequest(50))).Items).Id);
+    }
+
+    [Fact]
+    public async Task Canonical_run_and_tombstone_publication_acknowledge_only_after_flush_rename_parent_barrier_and_target_proof()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var observed = new List<CustomLoopRunPublicationBoundary>();
+        using var store = new CustomLoopRunStore(paths, null, (boundary, _) =>
+        {
+            observed.Add(boundary);
+            return ValueTask.CompletedTask;
+        });
+        var admitted = CreateRun("loop-durable", "run-durable", "invoke-durable");
+
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(admitted)).Status);
+        var running = Advance(admitted, CustomLoopRunStatus.Running);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(running, admitted.LifecycleVersion)).Status);
+        var completed = Advance(running, CustomLoopRunStatus.Completed);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(completed, running.LifecycleVersion)).Status);
+        var inspection = Assert.IsType<CustomLoopTraceInspection>(await store.InspectTraceAsync(completed.Id));
+        var request = new CustomLoopTraceDeletionRequest(completed.Id, inspection.PersistedArtifactHash, "delete-durable", "actor-user", "web");
+        var mutation = new CustomLoopTraceDeletionMutation(request, CustomLoopTraceDeletionRequestHash.Compute(request), _timestamp.AddMinutes(3));
+        Assert.Equal(CustomLoopTraceDeletionStoreStatus.Deleted, (await store.DeleteTerminalTraceAsync(mutation)).Status);
+
+        var expected = new[]
+        {
+            CustomLoopRunPublicationBoundary.StagedFileFlushed,
+            CustomLoopRunPublicationBoundary.CanonicalRenamed,
+            CustomLoopRunPublicationBoundary.ParentDirectoryFlushed,
+            CustomLoopRunPublicationBoundary.TargetProven
+        };
+        Assert.Equal(expected, observed.Take(4));
+        Assert.Equal(expected, observed.Skip(4).Take(4));
+        Assert.Equal(expected, observed.Skip(8).Take(4));
+        Assert.Equal(expected, observed.Skip(12).Take(4));
+        Assert.Equal(16, observed.Count);
+    }
+
+    [Fact]
+    public async Task Windows_fixed_local_ntfs_canonical_publication_completes_the_native_success_path()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        using var store = new CustomLoopRunStore(paths);
+        var run = CreateRun("loop-windows-native", "run-windows-native", "invoke-windows-native");
+
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(run)).Status);
+        AssertRun(run, await store.GetAsync(run.Id));
+    }
+
+    [Theory]
+    [InlineData(CustomLoopRunPublicationBoundary.CanonicalRenamed)]
+    [InlineData(CustomLoopRunPublicationBoundary.TargetProven)]
+    public async Task Separate_process_loss_after_canonical_rename_or_proof_preserves_one_run_without_derived_acknowledgement(CustomLoopRunPublicationBoundary boundary)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var expected = CreateRun("loop-process-loss", "run-process-loss", "invoke-process-loss");
+        using var process = CancellationHostProcess.Start("custom-loop-run-process-loss", workspace.RootPath, boundary.ToString());
+        var outputTask = process.StandardOutput.ReadToEndAsync();
+        var errorTask = process.StandardError.ReadToEndAsync();
+        try
+        {
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
+        }
+        finally
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync();
+            }
+        }
+
+        var output = await outputTask;
+        var error = await errorTask;
+        Assert.True(process.ExitCode != 0, $"Process-loss worker unexpectedly completed normally. stdout: {output} stderr: {error}");
+        Assert.Contains("test host process crashed", error, StringComparison.OrdinalIgnoreCase);
+        Assert.True(File.Exists(Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.pending")));
+        Assert.False(File.Exists(Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json")));
+        var artifacts = Directory.EnumerateFiles(Path.Combine(paths.CustomLoopRunsPath, expected.LoopId), "*.json").ToArray();
+        Assert.Single(artifacts);
+
+        using var restarted = new CustomLoopRunStore(paths);
+        AssertRun(expected, await restarted.GetAsync(expected.Id));
+        Assert.Equal(CustomLoopRunStoreStatus.AlreadyCreated, (await restarted.CreateAsync(expected)).Status);
+        Assert.Single(Directory.EnumerateFiles(Path.Combine(paths.CustomLoopRunsPath, expected.LoopId), "*.json"));
+    }
+
+    [Fact]
+    public async Task Post_rename_directory_barrier_failure_preserves_the_possible_winner_leaves_index_pending_and_restarts_idempotently()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var run = CreateRun("loop-unknown", "run-unknown", "invoke-unknown");
+        using var failing = new CustomLoopRunStore(paths, null, (boundary, _) => boundary == CustomLoopRunPublicationBoundary.CanonicalRenamed
+            ? ValueTask.FromException(new IOException("Injected post-rename durability barrier failure."))
+            : ValueTask.CompletedTask);
+
+        var exception = await Assert.ThrowsAnyAsync<IOException>(() => failing.CreateAsync(run));
+        var diagnostic = Assert.IsType<CustomLoopRunPersistenceDiagnostic>(CustomLoopRunPersistenceDiagnostic.Find(exception));
+        Assert.Equal(CustomLoopRunPersistenceDiagnosticStage.CanonicalDirectoryBarrier, diagnostic.Stage);
+        Assert.DoesNotContain(workspace.RootPath, exception.ToString(), StringComparison.Ordinal);
+        Assert.True(File.Exists(Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.pending")));
+        Assert.False(File.Exists(Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json")));
+
+        using var restarted = new CustomLoopRunStore(paths);
+        AssertRun(run, await restarted.GetAsync(run.Id));
+        Assert.Equal(CustomLoopRunStoreStatus.AlreadyCreated, (await restarted.CreateAsync(run)).Status);
+    }
+
+    [Fact]
+    public async Task Post_rename_directory_barrier_failure_during_update_preserves_one_possible_winner_and_does_not_acknowledge_the_index()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var admitted = CreateRun("loop-update-unknown", "run-update-unknown", "invoke-update-unknown");
+        var running = Advance(admitted, CustomLoopRunStatus.Running);
+        using (var established = new CustomLoopRunStore(paths))
+        {
+            Assert.Equal(CustomLoopRunStoreStatus.Created, (await established.CreateAsync(admitted)).Status);
+        }
+
+        var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
+        var indexBeforeFailure = await File.ReadAllBytesAsync(indexPath);
+        using (var failing = new CustomLoopRunStore(paths, null, (boundary, _) => boundary == CustomLoopRunPublicationBoundary.CanonicalRenamed
+            ? ValueTask.FromException(new IOException("Injected post-rename update durability failure."))
+            : ValueTask.CompletedTask))
+        {
+            var exception = await Assert.ThrowsAnyAsync<IOException>(() => failing.UpdateAsync(running, admitted.LifecycleVersion));
+            var diagnostic = Assert.IsType<CustomLoopRunPersistenceDiagnostic>(CustomLoopRunPersistenceDiagnostic.Find(exception));
+            Assert.Equal(CustomLoopRunPersistenceDiagnosticStage.CanonicalDirectoryBarrier, diagnostic.Stage);
+            Assert.DoesNotContain(workspace.RootPath, exception.ToString(), StringComparison.Ordinal);
+        }
+
+        Assert.True(File.Exists(Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.pending")));
+        Assert.Equal(indexBeforeFailure, await File.ReadAllBytesAsync(indexPath));
+        var artifactPaths = Directory.EnumerateFiles(Path.Combine(paths.CustomLoopRunsPath, admitted.LoopId), "*.json").ToArray();
+        Assert.Single(artifactPaths);
+
+        using var restarted = new CustomLoopRunStore(paths);
+        AssertRun(running, await restarted.GetAsync(running.Id));
+        var retry = await restarted.UpdateAsync(running, admitted.LifecycleVersion);
+        Assert.Equal(CustomLoopRunStoreStatus.Conflict, retry.Status);
+        Assert.Equal(running.LifecycleVersion, retry.Conflict!.ActualLifecycleVersion);
+    }
+
+    [Fact]
+    public async Task Post_rename_directory_barrier_failure_during_tombstone_preserves_one_tombstone_and_retries_the_pending_operation_safely()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var admitted = CreateRun("loop-tombstone-unknown", "run-tombstone-unknown", "invoke-tombstone-unknown");
+        var running = Advance(admitted, CustomLoopRunStatus.Running);
+        var completed = Advance(running, CustomLoopRunStatus.Completed);
+        CustomLoopTraceInspection inspection;
+        using (var established = new CustomLoopRunStore(paths))
+        {
+            Assert.Equal(CustomLoopRunStoreStatus.Created, (await established.CreateAsync(admitted)).Status);
+            Assert.Equal(CustomLoopRunStoreStatus.Updated, (await established.UpdateAsync(running, admitted.LifecycleVersion)).Status);
+            Assert.Equal(CustomLoopRunStoreStatus.Updated, (await established.UpdateAsync(completed, running.LifecycleVersion)).Status);
+            inspection = Assert.IsType<CustomLoopTraceInspection>(await established.InspectTraceAsync(completed.Id));
+        }
+
+        var request = new CustomLoopTraceDeletionRequest(completed.Id, inspection.PersistedArtifactHash, "delete-unknown", "actor-user", "web");
+        var mutation = new CustomLoopTraceDeletionMutation(request, CustomLoopTraceDeletionRequestHash.Compute(request), _timestamp.AddMinutes(4));
+        var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
+        var indexBeforeFailure = await File.ReadAllBytesAsync(indexPath);
+        using (var failing = new CustomLoopRunStore(paths, null, (boundary, _) => boundary == CustomLoopRunPublicationBoundary.CanonicalRenamed
+            ? ValueTask.FromException(new IOException("Injected post-rename tombstone durability failure."))
+            : ValueTask.CompletedTask))
+        {
+            var exception = await Assert.ThrowsAnyAsync<IOException>(() => failing.DeleteTerminalTraceAsync(mutation));
+            var diagnostic = Assert.IsType<CustomLoopRunPersistenceDiagnostic>(CustomLoopRunPersistenceDiagnostic.Find(exception));
+            Assert.Equal(CustomLoopRunPersistenceDiagnosticStage.CanonicalDirectoryBarrier, diagnostic.Stage);
+            Assert.DoesNotContain(workspace.RootPath, exception.ToString(), StringComparison.Ordinal);
+        }
+
+        Assert.True(File.Exists(Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.pending")));
+        Assert.Equal(indexBeforeFailure, await File.ReadAllBytesAsync(indexPath));
+        var artifactPaths = Directory.EnumerateFiles(Path.Combine(paths.CustomLoopRunsPath, completed.LoopId), "*.json").ToArray();
+        Assert.Single(artifactPaths);
+
+        using var restarted = new CustomLoopRunStore(paths);
+        var tombstone = Assert.IsType<CustomLoopTraceInspection>(await restarted.InspectTraceAsync(completed.Id));
+        Assert.Equal(CustomLoopTraceArtifactKind.Tombstone, tombstone.Kind);
+        Assert.Equal(mutation.Request.OperationId, tombstone.Tombstone!.DeletionOperationId);
+        Assert.Null(await restarted.GetAsync(completed.Id));
+        Assert.Equal(CustomLoopTraceDeletionStoreStatus.Deleted, (await restarted.DeleteTerminalTraceAsync(mutation)).Status);
+        Assert.Equal(CustomLoopTraceDeletionStoreStatus.AlreadyDeleted, (await restarted.DeleteTerminalTraceAsync(mutation)).Status);
+    }
+
+    [Fact]
+    public async Task Post_rename_directory_barrier_failure_during_tombstone_audit_mark_preserves_the_possible_winner_and_retries_safely()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var admitted = CreateRun("loop-tombstone-mark-unknown", "run-tombstone-mark-unknown", "invoke-tombstone-mark-unknown");
+        var running = Advance(admitted, CustomLoopRunStatus.Running);
+        var completed = Advance(running, CustomLoopRunStatus.Completed);
+        CustomLoopTraceDeletionMutation mutation;
+        using (var established = new CustomLoopRunStore(paths))
+        {
+            Assert.Equal(CustomLoopRunStoreStatus.Created, (await established.CreateAsync(admitted)).Status);
+            Assert.Equal(CustomLoopRunStoreStatus.Updated, (await established.UpdateAsync(running, admitted.LifecycleVersion)).Status);
+            Assert.Equal(CustomLoopRunStoreStatus.Updated, (await established.UpdateAsync(completed, running.LifecycleVersion)).Status);
+            var inspection = Assert.IsType<CustomLoopTraceInspection>(await established.InspectTraceAsync(completed.Id));
+            var request = new CustomLoopTraceDeletionRequest(completed.Id, inspection.PersistedArtifactHash, "delete-mark-unknown", "actor-user", "web");
+            mutation = new CustomLoopTraceDeletionMutation(request, CustomLoopTraceDeletionRequestHash.Compute(request), _timestamp.AddMinutes(5));
+            Assert.Equal(CustomLoopTraceDeletionStoreStatus.Deleted, (await established.DeleteTerminalTraceAsync(mutation)).Status);
+        }
+
+        var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
+        var indexBeforeFailure = await File.ReadAllBytesAsync(indexPath);
+        using (var failing = new CustomLoopRunStore(paths, null, (boundary, _) => boundary == CustomLoopRunPublicationBoundary.CanonicalRenamed
+            ? ValueTask.FromException(new IOException("Injected post-rename tombstone audit-mark durability failure."))
+            : ValueTask.CompletedTask))
+        {
+            var exception = await Assert.ThrowsAnyAsync<IOException>(() => failing.MarkTraceDeletionOutcomeAsync(mutation.Request.OperationId, CustomLoopTraceDeletionIntegrity.OutcomeAuditStarted));
+            var diagnostic = Assert.IsType<CustomLoopRunPersistenceDiagnostic>(CustomLoopRunPersistenceDiagnostic.Find(exception));
+            Assert.Equal(CustomLoopRunPersistenceDiagnosticStage.CanonicalDirectoryBarrier, diagnostic.Stage);
+            Assert.DoesNotContain(workspace.RootPath, exception.ToString(), StringComparison.Ordinal);
+        }
+
+        Assert.True(File.Exists(Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.pending")));
+        Assert.Equal(indexBeforeFailure, await File.ReadAllBytesAsync(indexPath));
+        Assert.Single(Directory.EnumerateFiles(Path.Combine(paths.CustomLoopRunsPath, completed.LoopId), "*.json"));
+
+        using var restarted = new CustomLoopRunStore(paths);
+        var possibleWinner = Assert.IsType<CustomLoopTraceInspection>(await restarted.InspectTraceAsync(completed.Id));
+        Assert.Equal(CustomLoopTraceDeletionIntegrity.OutcomeAuditStarted, possibleWinner.Tombstone!.OutcomeIntegrity);
+        Assert.Equal(CustomLoopTraceDeletionAuditMarkStatus.Marked, await restarted.MarkTraceDeletionOutcomeAsync(mutation.Request.OperationId, CustomLoopTraceDeletionIntegrity.OutcomeAuditStarted));
+        var operation = Assert.IsType<CustomLoopTraceDeletionOperation>((await restarted.GetTraceDeletionOperationAsync(mutation.Request.OperationId)).Operation);
+        Assert.Equal(CustomLoopTraceDeletionIntegrity.OutcomeAuditStarted, operation.Integrity);
+    }
+
+    [Fact]
+    public async Task Pre_rename_publication_failure_leaves_no_canonical_run_and_retains_a_path_free_canonical_replace_diagnostic()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var run = CreateRun("loop-prerename", "run-prerename", "invoke-prerename");
+        using var failing = new CustomLoopRunStore(paths, null, (boundary, _) => boundary == CustomLoopRunPublicationBoundary.StagedFileFlushed
+            ? ValueTask.FromException(new IOException("Injected pre-rename publication failure."))
+            : ValueTask.CompletedTask);
+
+        var exception = await Assert.ThrowsAsync<IOException>(() => failing.CreateAsync(run));
+        var diagnostic = Assert.IsType<CustomLoopRunPersistenceDiagnostic>(CustomLoopRunPersistenceDiagnostic.Find(exception));
+        Assert.Equal(CustomLoopRunPersistenceDiagnosticStage.CanonicalReplace, diagnostic.Stage);
+        Assert.DoesNotContain(workspace.RootPath, exception.ToString(), StringComparison.Ordinal);
+        using var restarted = new CustomLoopRunStore(paths);
+        Assert.Null(await restarted.GetAsync(run.Id));
     }
 
     private static async Task WriteDirectAsync(WorkspacePaths paths, CustomLoopRunRecord run)

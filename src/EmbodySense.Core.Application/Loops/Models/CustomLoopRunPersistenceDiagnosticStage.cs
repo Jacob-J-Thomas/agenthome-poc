@@ -20,4 +20,7 @@ public enum CustomLoopRunPersistenceDiagnosticStage
 
     /// <summary>The discovery-index pending marker could not be retained.</summary>
     Pending = 5,
+
+    /// <summary>The retained parent-directory durability barrier or target proof could not be completed.</summary>
+    CanonicalDirectoryBarrier = 6,
 }

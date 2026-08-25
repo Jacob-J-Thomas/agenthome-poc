@@ -31,6 +31,11 @@ if (args is ["custom-loop-run-stage", var runLockPath, var runStagingPath, var r
     return await CustomLoopRunStagingWriterHost.RunAsync(runLockPath, runStagingPath, runReadyMarker, runReleaseMarker);
 }
 
+if (args is ["custom-loop-run-process-loss", var runWorkspaceRoot, var runPublicationBoundary])
+{
+    return await CustomLoopRunProcessLossHost.RunAsync(runWorkspaceRoot, runPublicationBoundary);
+}
+
 if (args is ["codex-runtime-probe", var probeConfigurationPath, .. var probeArguments])
 {
     return await CodexRuntimeProbeHost.RunAsync(probeConfigurationPath, probeArguments);

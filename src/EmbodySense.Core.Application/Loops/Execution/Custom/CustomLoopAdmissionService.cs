@@ -1,6 +1,7 @@
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Application.Loops;
+using EmbodySense.Core.Application.Loops.Diagnostics;
 using EmbodySense.Core.Application.Loops.Execution.Custom.Models;
 using EmbodySense.Core.Application.Loops.Models;
 using System.Text;
@@ -196,6 +197,11 @@ public sealed class CustomLoopAdmissionService
         catch (UnsupportedCustomLoopRunDiscoveryIndexSchemaException)
         {
             throw;
+        }
+        catch (IOException exception) when (CustomLoopRunPersistenceDiagnostic.Find(exception)?.Stage == CustomLoopRunPersistenceDiagnosticStage.CanonicalDirectoryBarrier)
+        {
+            var result = Result(CustomLoopAdmissionStatus.Unknown, null, "Canonical run publication crossed its atomic rename boundary but durability could not be proved; no provider request was dispatched.");
+            return await AuditOutcomeAsync(request, result, useIntegrityWindow: false, cancellationToken);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
