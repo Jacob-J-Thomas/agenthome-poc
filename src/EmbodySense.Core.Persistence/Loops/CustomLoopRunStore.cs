@@ -51,6 +51,7 @@ public sealed class CustomLoopRunStore :
     private const string MutationLockFileName = ".custom-loop-runs.lock";
     private const string DiscoveryIndexFileName = ".custom-loop-run-index.json";
     private const string DiscoveryIndexPendingFileName = ".custom-loop-run-index.pending";
+    private const int DiscoveryIndexWindowsReplaceTemporaryNonceLength = 5;
     private const string ScheduleAdmissionRetirementFileName = ".schedule-admission-retirements.json";
     private const int MaximumScheduleAdmissionInterruptedWriteArtifacts = 32;
     private const int MaximumArtifactReadReconciliationAttempts = 3;
@@ -3773,6 +3774,11 @@ public sealed class CustomLoopRunStore :
     private static bool IsDiscoveryIndexTemporaryArtifactPath(string path)
     {
         var fileName = Path.GetFileName(path);
+        if (IsDiscoveryIndexWindowsReplaceTemporaryArtifactName(fileName))
+        {
+            return true;
+        }
+
         var indexPrefix = "." + DiscoveryIndexFileName + ".";
         var pendingPrefix = "." + DiscoveryIndexPendingFileName + ".";
         var prefix = fileName.StartsWith(indexPrefix, StringComparison.Ordinal)
@@ -3788,6 +3794,33 @@ public sealed class CustomLoopRunStore :
         var nonceStart = prefix.Length;
         var nonceLength = fileName.Length - nonceStart - ".tmp".Length;
         if (nonceLength != 32)
+        {
+            return false;
+        }
+
+        for (var index = nonceStart; index < nonceStart + nonceLength; index++)
+        {
+            if (fileName[index] is not (>= '0' and <= '9') and not (>= 'a' and <= 'f'))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool IsDiscoveryIndexWindowsReplaceTemporaryArtifactName(string fileName)
+    {
+        // #512: ReplaceFileW emits this short-lived sibling only while atomically replacing the derived discovery index.
+        var prefix = DiscoveryIndexFileName + "~RF";
+        if (!fileName.StartsWith(prefix, StringComparison.Ordinal) || !fileName.EndsWith(".TMP", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var nonceStart = prefix.Length;
+        var nonceLength = fileName.Length - nonceStart - ".TMP".Length;
+        if (nonceLength != DiscoveryIndexWindowsReplaceTemporaryNonceLength)
         {
             return false;
         }
