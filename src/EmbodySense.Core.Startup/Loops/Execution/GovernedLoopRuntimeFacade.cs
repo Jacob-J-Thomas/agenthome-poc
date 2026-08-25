@@ -244,7 +244,7 @@ internal sealed class GovernedLoopRuntimeFacade : IDisposable, ITriggerGovernedL
                 ?? await CaptureAsync(
                     input!,
                     existing?.CreatedAtUtc,
-                    includeInvokingConversation: triggerActorContext is null,
+                    includeInvokingConversation: triggerActorContext is null && input!.IncludeInvokingConversation,
                     triggerOrigin: triggerOrigin,
                     cancellationToken: cancellationToken).ConfigureAwait(false);
         }

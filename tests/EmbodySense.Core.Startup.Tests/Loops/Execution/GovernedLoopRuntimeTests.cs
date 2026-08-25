@@ -1761,6 +1761,7 @@ internal static class GovernedLoopRuntimeTests
             Assert.Equal("NeedsReview", review.ExecutionStatus);
             Assert.Equal(CustomLoopRunStatus.NeedsReview.ToString(), review.Run?.Status);
             Assert.Equal("conversation_publication_failed", review.Run?.FailureCode);
+            Assert.NotNull(review.Run?.InvokingConversation);
             Assert.Equal(GovernedLoopFrontierStatus.ReviewBlocked.ToString(), review.Run?.Frontier?.Status);
             Assert.NotNull(review.Run?.Frontier?.Nodes[^1].OutcomeEvidenceId);
             Assert.Equal(1, fixture.ProviderAttempts);

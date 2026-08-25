@@ -365,18 +365,30 @@ public sealed class WebSessionHubTests
     [Fact]
     public void Visible_governed_invocation_hub_contract_exposes_only_the_browser_safe_request_shape()
     {
-        var method = typeof(WebSessionHub).GetMethod(nameof(WebSessionHub.ConfirmAndInvokeGovernedLoop));
+        var request = new GovernedLoopVisibleInvocationRequest(
+            "graph-one",
+            "revision-one",
+            new string('a', 64),
+            new GovernedLoopVisibleInvocationGrantSelection("grant-one", 1, new string('b', 64)),
+            "visible-governed-operation",
+            "prompt");
+        var writer = new ArrayBufferWriter<byte>();
 
-        Assert.NotNull(method);
-        Assert.Null(typeof(WebSessionHub).GetMethod("InvokeGovernedLoop"));
-        var request = Assert.Single(method!.GetParameters());
-        Assert.Equal(typeof(GovernedLoopVisibleInvocationRequest), request.ParameterType);
-        Assert.Equal(
-            ["GraphId", "RevisionId", "PreviewHash", "GrantSelection", "OperationId", "InvocationPrompt"],
-            typeof(GovernedLoopVisibleInvocationRequest).GetProperties().Select(property => property.Name));
-        Assert.Equal(
-            ["GrantId", "Revision", "ContentHash"],
-            typeof(GovernedLoopVisibleInvocationGrantSelection).GetProperties().Select(property => property.Name));
+        new JsonHubProtocol().WriteMessage(
+            new InvocationMessage("visible-governed-invocation", nameof(WebSessionHub.ConfirmAndInvokeGovernedLoop), [request]),
+            writer);
+
+        var payload = Encoding.UTF8.GetString(writer.WrittenSpan).TrimEnd('\u001e');
+        Assert.Contains("\"target\":\"ConfirmAndInvokeGovernedLoop\"", payload, StringComparison.Ordinal);
+        Assert.Contains("\"graphId\":\"graph-one\"", payload, StringComparison.Ordinal);
+        Assert.Contains("\"revisionId\":\"revision-one\"", payload, StringComparison.Ordinal);
+        Assert.Contains("\"previewHash\"", payload, StringComparison.Ordinal);
+        Assert.Contains("\"grantSelection\"", payload, StringComparison.Ordinal);
+        Assert.Contains("\"operationId\":\"visible-governed-operation\"", payload, StringComparison.Ordinal);
+        Assert.Contains("\"invocationPrompt\":\"prompt\"", payload, StringComparison.Ordinal);
+        Assert.DoesNotContain("actor", payload, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("workspace", payload, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("authority", payload, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

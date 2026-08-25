@@ -701,6 +701,7 @@ public sealed class BrowserFlowTests
             using var successRun = JsonDocument.Parse(await WaitForTerminalRunFromBrowserAsync(browser, successRunId));
             Assert.Equal(CustomLoopRunStatus.Completed.ToString(), successRun.RootElement.GetProperty("status").GetString());
             Assert.Equal(SuccessPrompt, successRun.RootElement.GetProperty("triggerPrompt").GetString());
+            Assert.Equal(JsonValueKind.Null, successRun.RootElement.GetProperty("invokingConversation").ValueKind);
 
             var exhaustedRunId = await InvokePublishedGraphThroughVisibleControlsAsync(browser, ExhaustionPrompt);
             using var exhaustedRun = JsonDocument.Parse(await WaitForTerminalRunFromBrowserAsync(browser, exhaustedRunId));

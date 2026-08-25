@@ -717,7 +717,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
             }
 
             return await runtime.InvokeGovernedLoopAsync(
-                new GovernedLoopRunInvocationInput(request.OperationId, preparation.Publication, selectedChoices[0].Grant, request.InvocationPrompt),
+                new GovernedLoopRunInvocationInput(request.OperationId, preparation.Publication, selectedChoices[0].Grant, request.InvocationPrompt, IncludeInvokingConversation: false),
                 executionCancellation.Token);
         }
         finally
@@ -748,7 +748,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         }
 
         return await runtime.InvokeGovernedLoopAsync(
-            new GovernedLoopRunInvocationInput(request.OperationId, preparation.Publication, confirmedChoice.Grant, request.InvocationPrompt),
+            new GovernedLoopRunInvocationInput(request.OperationId, preparation.Publication, confirmedChoice.Grant, request.InvocationPrompt, IncludeInvokingConversation: false),
             cancellationToken);
     }
 

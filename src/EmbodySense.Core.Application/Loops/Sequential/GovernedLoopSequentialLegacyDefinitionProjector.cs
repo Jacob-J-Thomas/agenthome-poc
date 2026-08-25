@@ -108,14 +108,6 @@ public static class GovernedLoopSequentialLegacyDefinitionProjector
                 && node.AuthorityCeiling.CapabilityIds.Contains(WorkspaceCommandCapabilityId, StringComparer.Ordinal))
                 ? [CustomLoopToolAssignment.List, CustomLoopToolAssignment.Read, CustomLoopToolAssignment.Search]
                 : [];
-            var defaults = CustomLoopContextDefaults.CreatePrototypeDefaults();
-            var governedGraphDefaults = defaults with
-            {
-                Exit = defaults.Exit with
-                {
-                    ContextOut = defaults.Exit.ContextOut with { PublishToInvokingConversation = false }
-                }
-            };
             var definition = new CustomLoopDefinition(
                 CustomLoopDefinition.CurrentSchemaVersion,
                 graph.GraphId,
@@ -130,7 +122,7 @@ public static class GovernedLoopSequentialLegacyDefinitionProjector
                     CustomLoopTriggerPromptSource.Invocation,
                     string.Empty,
                     invocationSnapshot.InvokingConversation is not null),
-                governedGraphDefaults,
+                CustomLoopContextDefaults.CreatePrototypeDefaults(),
                 inferenceSteps,
                 toolAssignments,
                 new CustomLoopExitPolicy(
