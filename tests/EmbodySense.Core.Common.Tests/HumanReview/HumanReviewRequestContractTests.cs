@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Runtime.InteropServices;
 using EmbodySense.Core.Common.HumanReview;
 using EmbodySense.Core.Common.HumanReview.Models;
 
@@ -140,5 +141,42 @@ public sealed class HumanReviewRequestContractTests
         Assert.Equal("scope-alpha", snapshot.EligibleReviewers[0].ScopeIds[0]);
         Assert.Equal("A redacted action summary.", snapshot.Previews[0].Detail);
         Assert.True(HumanReviewContractValidator.ValidateRequest(snapshot).IsValid);
+    }
+
+    [Fact]
+    public void Request_snapshot_allocates_new_backing_storage_for_hostile_immutable_arrays()
+    {
+        var valid = HumanReviewTestData.Request();
+        var mutableDecisions = valid.RequestedDecisions.ToArray();
+        var mutableScopeIds = valid.EligibleReviewers[0].ScopeIds.ToArray();
+        var mutableReviewers = new[] { valid.EligibleReviewers[0] with { ScopeIds = ImmutableCollectionsMarshal.AsImmutableArray(mutableScopeIds) } };
+        var request = HumanReviewContractHash.ApplyRequest(valid with
+        {
+            RequestedDecisions = ImmutableCollectionsMarshal.AsImmutableArray(mutableDecisions),
+            EligibleReviewers = ImmutableCollectionsMarshal.AsImmutableArray(mutableReviewers),
+            RequestHash = string.Empty
+        });
+
+        Assert.True(HumanReviewContractSnapshot.TryCaptureRequest(request, out var snapshot, out var validation));
+        Assert.True(validation.IsValid);
+        Assert.NotNull(snapshot);
+
+        mutableDecisions[0] = HumanReviewDecisionKind.Cancel;
+        mutableScopeIds[0] = "scope-mutated";
+        mutableReviewers[0] = new HumanReviewReviewerScope("reviewer-role-mutated", ImmutableArray.Create("scope-mutated"));
+
+        Assert.Equal(HumanReviewDecisionKind.Approve, snapshot.RequestedDecisions[0]);
+        Assert.Equal("reviewer-role-one", snapshot.EligibleReviewers[0].ReviewerRoleId);
+        Assert.Equal("scope-alpha", snapshot.EligibleReviewers[0].ScopeIds[0]);
+        Assert.True(HumanReviewContractValidator.ValidateRequest(snapshot).IsValid);
+    }
+
+    [Fact]
+    public void Request_hash_match_rejects_missing_timing_without_throwing()
+    {
+        var malformed = HumanReviewTestData.Request() with { Timing = null! };
+
+        Assert.False(HumanReviewContractHash.MatchesRequest(malformed));
+        Assert.False(HumanReviewContractValidator.ValidateRequest(malformed).IsValid);
     }
 }
