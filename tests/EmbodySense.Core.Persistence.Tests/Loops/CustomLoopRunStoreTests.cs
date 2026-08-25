@@ -2862,7 +2862,9 @@ public sealed class CustomLoopRunStoreTests
         var run = CreateRun("loop-windows-native", "run-windows-native", "invoke-windows-native");
 
         Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(run)).Status);
-        AssertRun(run, await store.GetAsync(run.Id));
+        var updated = Advance(run, CustomLoopRunStatus.Running);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(updated, run.LifecycleVersion)).Status);
+        AssertRun(updated, await store.GetAsync(updated.Id));
     }
 
     [Theory]

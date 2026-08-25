@@ -33,8 +33,10 @@ internal static class CustomLoopRunNativeFileSystem
     private const uint NtFileWriteThrough = 0x00000002;
     private const uint FileAttributeNormal = 0x00000080;
     private const uint OpenExisting = 3;
-    private const int FileRenameInformation = 10;
+    private const int FileRenameInformationEx = 65;
+    private const uint FileRenameReplaceIfExists = 0x00000001;
     private const int FileDispositionInformation = 4;
+    private const int ErrorAccessDenied = 5;
     private const int ErrorSharingViolation = 32;
     private const int ErrorLockViolation = 33;
     private const int ErrorUnableToRemoveReplaced = 1175;
@@ -410,7 +412,7 @@ internal static class CustomLoopRunNativeFileSystem
         var error = exception is CustomLoopRunNativeIOException native && native.ErrorKind == CustomLoopRunPersistenceNativeErrorKind.Win32
             ? native.ErrorCode
             : exception.HResult & 0xffff;
-        return error is ErrorSharingViolation or ErrorLockViolation or ErrorUnableToRemoveReplaced;
+        return error is ErrorAccessDenied or ErrorSharingViolation or ErrorLockViolation or ErrorUnableToRemoveReplaced;
     }
 
     private static void EnsureSupportedWindowsVolume(SafeFileHandle parent, string directory)
@@ -503,11 +505,12 @@ internal static class CustomLoopRunNativeFileSystem
         try
         {
             Marshal.Copy(new byte[bufferSize], 0, buffer, bufferSize);
-            Marshal.WriteByte(buffer, overwrite ? (byte)1 : (byte)0);
+            // Keep external readers that deny delete access in #475's bounded contention path.
+            Marshal.WriteInt32(buffer, unchecked((int)(overwrite ? FileRenameReplaceIfExists : 0)));
             Marshal.WriteIntPtr(buffer, rootDirectoryOffset, parent.DangerousGetHandle());
             Marshal.WriteInt32(buffer, fileNameLengthOffset, nameBytes.Length);
             Marshal.Copy(nameBytes, 0, IntPtr.Add(buffer, fileNameOffset), nameBytes.Length);
-            var status = NtSetInformationFile(source, out _, buffer, (uint)bufferSize, FileRenameInformation);
+            var status = NtSetInformationFile(source, out _, buffer, (uint)bufferSize, FileRenameInformationEx);
             GC.KeepAlive(parent);
             if (status < 0)
             {

@@ -55,12 +55,12 @@ internal sealed class CustomLoopRunCanonicalPublisher
                 await ProveTargetAsync(parent, destinationName, stagedIdentity, content).ConfigureAwait(false);
                 await ObserveAsync(CustomLoopRunPublicationBoundary.TargetProven, CancellationToken.None).ConfigureAwait(false);
                 CustomLoopRunNativeFileSystem.RevalidateCanonicalParentDirectory(directory, parentIdentity);
-                return CustomLoopRunCanonicalPublicationResult.Committed();
+                return new CustomLoopRunCanonicalPublicationResult(true, null);
             }
             catch (Exception exception)
             {
                 _ = await TryProveTargetAsync(parent, destinationName, stagedIdentity, content).ConfigureAwait(false);
-                return CustomLoopRunCanonicalPublicationResult.Unknown(CreateDiagnostic(exception), exception);
+                return new CustomLoopRunCanonicalPublicationResult(false, CreateDiagnostic(exception), exception);
             }
         }
         finally
