@@ -15,7 +15,7 @@ internal static class HumanReviewTestData
             : null;
         var binding = HumanReviewContractHash.ApplyBinding(new HumanReviewBinding(
             1,
-            "workspace-one",
+            WorkspaceId,
             "run-one",
             "graph-one",
             "revision-one",
@@ -120,4 +120,6 @@ internal static class HumanReviewTestData
     }
 
     internal static string Hash(char character) => new(character, HumanReviewContractLimits.Sha256HexCharacters);
+
+    internal static string WorkspaceId => "workspace-sha256:" + Hash('a');
 }

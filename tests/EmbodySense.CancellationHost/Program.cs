@@ -36,6 +36,16 @@ if (args is ["custom-loop-run-process-loss", var runWorkspaceRoot, var runPublic
     return await CustomLoopRunProcessLossHost.RunAsync(runWorkspaceRoot, runPublicationBoundary);
 }
 
+if (args is ["human-review-admission-process-loss", var humanReviewWorkspaceRoot, var humanReviewRunId, var humanReviewPublicationBoundary])
+{
+    return await HumanReviewAdmissionProcessLossHost.RunAsync(humanReviewWorkspaceRoot, humanReviewRunId, humanReviewPublicationBoundary);
+}
+
+if (args is ["human-review-admission-race", var humanReviewRaceWorkspaceRoot, var humanReviewRaceRunId, var humanReviewRaceIdentity, var humanReviewRaceReadyPath, var humanReviewRaceReleasePath, var humanReviewRaceResultPath])
+{
+    return await HumanReviewAdmissionRaceHost.RunAsync(humanReviewRaceWorkspaceRoot, humanReviewRaceRunId, humanReviewRaceIdentity, humanReviewRaceReadyPath, humanReviewRaceReleasePath, humanReviewRaceResultPath);
+}
+
 if (args is ["codex-runtime-probe", var probeConfigurationPath, .. var probeArguments])
 {
     return await CodexRuntimeProbeHost.RunAsync(probeConfigurationPath, probeArguments);

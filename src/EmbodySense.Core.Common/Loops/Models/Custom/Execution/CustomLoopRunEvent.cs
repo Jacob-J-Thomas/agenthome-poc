@@ -3,6 +3,7 @@ using EmbodySense.Core.Common.Inference.Profiles.Models;
 using EmbodySense.Core.Common.Loops.Failures.Models;
 using EmbodySense.Core.Common.Loops.Execution.Retry.Models;
 using System.Text.Json.Serialization;
+using EmbodySense.Core.Common.HumanReview.Models;
 namespace EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 
 /// <summary>
@@ -84,4 +85,10 @@ public sealed record CustomLoopRunEvent(
     /// <remarks>The JSON property is required even when null so schema-1 run artifacts cannot omit retry posture.</remarks>
     [JsonRequired]
     public GovernedLoopRetryState? RetryState { get; init; }
+
+    /// <summary>Gets typed Human Review evidence for one review event, or null for every non-review event.</summary>
+    /// <remarks>The JSON property is required even when null so schema-1 artifacts cannot omit the review-evidence plane.</remarks>
+    [JsonRequired]
+    public HumanReviewEvidence? HumanReviewEvidence { get; init; }
+
 }
