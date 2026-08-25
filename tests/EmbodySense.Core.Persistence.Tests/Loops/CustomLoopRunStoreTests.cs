@@ -6,6 +6,7 @@ using EmbodySense.Core.Application.Loops.Posture.Models;
 using EmbodySense.Core.Application.Loops.TraceRetention.Models;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Reflection;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -44,6 +45,52 @@ public sealed class CustomLoopRunStoreTests
         WriteIndented = true,
         Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase, allowIntegerValues: false) }
     };
+
+    [Fact]
+    public void Canonical_graph_frontier_trace_capacity_uses_the_graph_hard_ceiling_not_the_legacy_projection_ceiling()
+    {
+        var calculate = typeof(CustomLoopRunStore).GetMethod("CalculateRequiredTraceCapacity", BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(calculate);
+        var legacyAttemptStarts = CreateClosedProviderAttempts("legacy");
+        var legacyRun = CreateRun();
+        var legacy = legacyRun with { Events = [.. legacyRun.Events, .. legacyAttemptStarts] };
+
+        var legacyException = Assert.Throws<TargetInvocationException>(() => calculate.Invoke(null, [legacy, 0L]));
+        Assert.IsType<FormatException>(legacyException.InnerException);
+
+        var canonicalContext = CustomLoopSequentialEvidenceStoreTests.CreateContext();
+        var canonicalAttemptStarts = CreateClosedProviderAttempts("canonical");
+        var canonical = canonicalContext.Run with { Events = [.. canonicalContext.Run.Events, .. canonicalAttemptStarts] };
+
+        var capacity = Assert.IsType<long>(calculate.Invoke(null, [canonical, 0L]));
+
+        Assert.InRange(capacity, 1, CustomLoopLimits.MaxRunTraceUtf8Bytes);
+
+        static CustomLoopRunEvent[] CreateClosedProviderAttempts(string prefix)
+        {
+            return Enumerable.Range(1, 3)
+                .SelectMany(attempt =>
+                {
+                    var startSequence = (attempt * 2L);
+                    return new[]
+                    {
+                        Event(startSequence, $"{prefix}-provider-start-{attempt}", CustomLoopRunEventKind.NodeAttemptStarted, _timestamp.AddMinutes(startSequence - 1)) with
+                        {
+                            Iteration = 1,
+                            StepId = "step-1",
+                            Attempt = attempt,
+                        },
+                        Event(startSequence + 1, $"{prefix}-provider-completed-{attempt}", CustomLoopRunEventKind.NodeAttemptCompleted, _timestamp.AddMinutes(startSequence)) with
+                        {
+                            Iteration = 1,
+                            StepId = "step-1",
+                            Attempt = attempt,
+                        },
+                    };
+                })
+                .ToArray();
+        }
+    }
 
     [Fact]
     public async Task Run_created_schedule_proof_remains_durable_while_provider_dispatch_can_still_resume()

@@ -7,6 +7,7 @@ namespace EmbodySense.E2EBrowserHost;
 
 internal sealed class BrowserExactOutputBoundInferenceClient(string modelId) : ILlmInferenceClient
 {
+    private static int _visibleCycleExhaustionAttempts;
     private readonly string _modelId = !string.IsNullOrWhiteSpace(modelId)
         ? modelId
         : throw new ArgumentException("The browser E2E exact adapter model identifier is required.", nameof(modelId));
@@ -43,14 +44,14 @@ internal sealed class BrowserExactOutputBoundInferenceClient(string modelId) : I
             await providerTransportCommitBoundary(_ => Task.CompletedTask, cancellationToken).ConfigureAwait(false);
         }
 
-        const string Output = "browser exact bounded response";
+        var output = ResolveOutput(request);
         if (responseChunkHandler is not null)
         {
-            await responseChunkHandler(Output, cancellationToken).ConfigureAwait(false);
+            await responseChunkHandler(output, cancellationToken).ConfigureAwait(false);
         }
 
         return new LlmInferenceResponse(
-            Output,
+            output,
             LlmInferenceSurface.OpenAiCodex,
             LlmInferenceUsageEvidence.Create(
                 1,
@@ -64,5 +65,29 @@ internal sealed class BrowserExactOutputBoundInferenceClient(string modelId) : I
             modelId,
             "browser-e2e-response",
             "openai");
+    }
+
+    private static string ResolveOutput(LlmInferenceRequest request)
+    {
+        var promptContent = string.Join('\n', request.Messages.Select(message => message.Content));
+        var instructionContent = request.InstructionContext is null
+            ? string.Empty
+            : string.Join('\n', request.InstructionContext.TrustedInstructions.Select(instruction => instruction.Content));
+        if (!promptContent.Contains("visible-cycle-success", StringComparison.Ordinal)
+            && !promptContent.Contains("visible-cycle-exhaustion", StringComparison.Ordinal)
+            && !instructionContent.Contains("visible-cycle-marker", StringComparison.Ordinal))
+        {
+            return "browser exact bounded response";
+        }
+
+        if (promptContent.Contains("visible-cycle-success", StringComparison.Ordinal))
+        {
+            return "terminal";
+        }
+
+        return promptContent.Contains("visible-cycle-exhaustion", StringComparison.Ordinal)
+            && Interlocked.Increment(ref _visibleCycleExhaustionAttempts) < 3
+            ? "retry"
+            : "terminal";
     }
 }

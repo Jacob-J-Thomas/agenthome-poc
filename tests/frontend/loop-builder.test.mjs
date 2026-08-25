@@ -306,6 +306,7 @@ test("visible governed invocation selects one exact current grant without browse
 
   assert.equal(app.elements.governedGraphGrantSelectionField.hidden, false);
   assert.equal(app.elements.governedGraphGrantSelection.children.length, 2);
+  assert.equal(app.elements.governedGraphConfirmInvokeButton.disabled, false);
   assert.match(
     app.elements.governedGraphGrantChoices.textContent,
     /grant-first r1.*expires.*grant-second r2.*expires/,

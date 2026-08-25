@@ -398,7 +398,7 @@ public sealed class WebSessionHubTests
             "prompt"));
 
         Assert.Equal("Rejected", rejected.Status);
-        Assert.Equal("Unavailable", rejected.AdmissionFailureCode);
+        Assert.Equal("NotFound", rejected.AdmissionFailureCode);
         Assert.DoesNotContain("workspace", rejected.Detail, StringComparison.OrdinalIgnoreCase);
     }
 

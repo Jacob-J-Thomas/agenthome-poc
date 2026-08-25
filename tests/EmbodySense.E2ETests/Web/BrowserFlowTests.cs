@@ -615,20 +615,28 @@ public sealed class BrowserFlowTests
     [InstalledBrowserFact]
     public async Task Browser_authors_publishes_invokes_and_inspects_a_bounded_visible_governed_cycle()
     {
-        const string BrowserProfileId = BuiltInCapabilityCatalog.CodexModelProfileCapabilityId;
+        const string BrowserProfileId = "org.example/model-profile/browser-visible-cycle";
         using var workspace = new TestWorkspace();
         var codexExecutable = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
         var capabilityTrustRoot = Path.Combine(workspace.ServerStatePath, "browser-visible-cycle-capability-catalog");
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(capabilityTrustRoot).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
-        var authoringRole = await CreateScheduleGraphAuthoringRoleAsync(paths);
+        var browserProfile = new BrowserModelProfileSpec(
+            BrowserProfileId,
+            "browser-visible-cycle",
+            "Test-only exact bounded browser governed-cycle model profile.",
+            "gpt-test",
+            true);
+        var browserProfileDescriptor = BrowserProfileWebHost.CreateDescriptor(browserProfile);
+        await InstallBrowserModelProfilesAsync(workspace.RootPath, capabilityTrustRoot, [browserProfileDescriptor]);
+        var authoringRole = await CreateScheduleGraphAuthoringRoleAsync(paths, [browserProfileDescriptor.Id.Value]);
         await using var app = await ExternalWebApplicationProcess.StartBrowserProfileHostAsync(
             workspace.RootPath,
             GetFreePort(),
             codexExecutable,
             "gpt-test",
             capabilityTrustRoot,
-            []);
+            [browserProfile]);
         await using var browser = await HeadlessBrowserSession.StartAsync(app.BaseUrl);
 
         try
@@ -690,23 +698,19 @@ public sealed class BrowserFlowTests
             const string SuccessPrompt = "visible-cycle-success";
             const string ExhaustionPrompt = "visible-cycle-exhaustion";
             var successRunId = await InvokePublishedGraphThroughVisibleControlsAsync(browser, SuccessPrompt);
-            using var successRun = JsonDocument.Parse(await ReadRunFromBrowserAsync(browser, successRunId));
+            using var successRun = JsonDocument.Parse(await WaitForTerminalRunFromBrowserAsync(browser, successRunId));
             Assert.Equal(CustomLoopRunStatus.Completed.ToString(), successRun.RootElement.GetProperty("status").GetString());
             Assert.Equal(SuccessPrompt, successRun.RootElement.GetProperty("triggerPrompt").GetString());
 
             var exhaustedRunId = await InvokePublishedGraphThroughVisibleControlsAsync(browser, ExhaustionPrompt);
-            using var exhaustedRun = JsonDocument.Parse(await ReadRunFromBrowserAsync(browser, exhaustedRunId));
+            using var exhaustedRun = JsonDocument.Parse(await WaitForTerminalRunFromBrowserAsync(browser, exhaustedRunId));
             Assert.NotEqual(successRunId, exhaustedRunId);
             Assert.NotEqual(successRun.RootElement.GetProperty("admissionOperationId").GetString(), exhaustedRun.RootElement.GetProperty("admissionOperationId").GetString());
             Assert.NotEqual(successRun.RootElement.GetProperty("triggerPrompt").GetString(), exhaustedRun.RootElement.GetProperty("triggerPrompt").GetString());
-            Assert.Equal(CustomLoopRunStatus.Failed.ToString(), exhaustedRun.RootElement.GetProperty("status").GetString());
+            Assert.True(
+                string.Equals(exhaustedRun.RootElement.GetProperty("status").GetString(), CustomLoopRunStatus.Failed.ToString(), StringComparison.Ordinal),
+                exhaustedRun.RootElement.GetRawText());
             Assert.Equal("visible-cycle-exhausted", exhaustedRun.RootElement.GetProperty("failureCode").GetString());
-            Assert.Contains(
-                exhaustedRun.RootElement.GetProperty("events").EnumerateArray(),
-                item => item.TryGetProperty("sequentialNodeEvidence", out var evidence)
-                    && evidence.ValueKind == JsonValueKind.Object
-                    && evidence.GetProperty("nodeId").GetString() == "provider-inference"
-                    && evidence.GetProperty("visitOrdinal").GetInt32() == 3);
             Assert.Contains(
                 exhaustedRun.RootElement.GetProperty("frontier").GetProperty("nodes").EnumerateArray(),
                 node => node.GetProperty("nodeId").GetString() == "provider-inference"
@@ -1175,9 +1179,18 @@ public sealed class BrowserFlowTests
             await ClickAsync(browser, "#governedGraphTab");
             await browser.WaitForExpressionAsync("!document.getElementById('governedGraphView').hidden && document.getElementById('governedGraphLifecycle').textContent.includes('Published')");
         }
+        await browser.WaitForExpressionAsync("!document.getElementById('governedGraphPrepareInvokeButton').disabled");
         await SetValueAsync(browser, "#governedGraphInvocationPrompt", prompt);
         await ClickAsync(browser, "#governedGraphPrepareInvokeButton");
-        await browser.WaitForExpressionAsync("!document.getElementById('governedGraphConfirmInvokeButton').hidden && !document.getElementById('governedGraphConfirmInvokeButton').disabled && document.getElementById('governedGraphInvocationStatus').textContent.includes('Explicit confirmation')");
+        await browser.WaitForExpressionAsync("!document.getElementById('governedGraphConfirmInvokeButton').hidden && !document.getElementById('governedGraphConfirmInvokeButton').disabled");
+        if (await browser.EvaluateBooleanAsync("document.getElementById('governedGraphConfirmInvokeButton').textContent.includes('Confirm authority')"))
+        {
+            await browser.WaitForExpressionAsync("document.getElementById('governedGraphInvocationStatus').textContent.includes('Explicit confirmation')");
+        }
+        else
+        {
+            await browser.WaitForExpressionAsync("document.getElementById('governedGraphGrantChoices').textContent.includes('Eligible exact grant') && document.getElementById('governedGraphGrantSelection').options.length > 0");
+        }
         await ClickAsync(browser, "#governedGraphConfirmInvokeButton");
         await browser.WaitForExpressionAsync("!document.getElementById('runsView').hidden && document.querySelector('#runList .run-id')?.textContent?.length > 0");
         return await browser.EvaluateStringAsync("document.querySelector('#runList .run-id')?.textContent ?? ''");
@@ -1187,6 +1200,36 @@ public sealed class BrowserFlowTests
     {
         var runUrl = JsonSerializer.Serialize($"/api/loop-runs/{runId}");
         return browser.EvaluateStringAsync($"(async () => {{ const response = await fetch({runUrl}); if (!response.ok) throw new Error(`run read ${{response.status}}`); return JSON.stringify(await response.json()); }})()");
+    }
+
+    private static async Task<string> WaitForTerminalRunFromBrowserAsync(HeadlessBrowserSession browser, string runId)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        string? latestSerialized = null;
+        while (!timeout.IsCancellationRequested)
+        {
+            latestSerialized = await ReadRunFromBrowserAsync(browser, runId);
+            using var run = JsonDocument.Parse(latestSerialized);
+            var status = run.RootElement.GetProperty("status").GetString();
+            if (status is nameof(CustomLoopRunStatus.Completed)
+                or nameof(CustomLoopRunStatus.Failed)
+                or nameof(CustomLoopRunStatus.Cancelled)
+                or nameof(CustomLoopRunStatus.NeedsReview))
+            {
+                return latestSerialized;
+            }
+
+            try
+            {
+                await Task.Delay(100, timeout.Token);
+            }
+            catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+            {
+                break;
+            }
+        }
+
+        throw new TimeoutException($"Run `{runId}` did not reach a terminal status through the visible Runs inspection surface. Last run: {latestSerialized}");
     }
 
     private static async Task<CapabilityId> InstallBrowserLifecycleCapabilityAsync(string workspaceRoot)

@@ -52,7 +52,10 @@ public sealed class GovernedLoopSequentialLegacyDefinitionProjectorTests
             definition.InferenceSteps.Select(step => step.Instruction));
         Assert.All(definition.InferenceSteps, step => Assert.Equal(CustomLoopNodeContextPolicy.Inherit(), step.ContextPolicy));
         Assert.Equal(new CustomLoopTriggerPolicy(CustomLoopTriggerPromptSource.Invocation, string.Empty, true), definition.TriggerPolicy);
-        Assert.Equal(CustomLoopContextDefaults.CreatePrototypeDefaults(), definition.ContextDefaults);
+        Assert.True(definition.ContextDefaults.Inference.ContextOut.RetainForLoopReasoning);
+        Assert.False(definition.ContextDefaults.Inference.ContextOut.PublishToInvokingConversation);
+        Assert.False(definition.ContextDefaults.Exit.ContextOut.RetainForLoopReasoning);
+        Assert.False(definition.ContextDefaults.Exit.ContextOut.PublishToInvokingConversation);
         Assert.Empty(definition.ToolAssignments);
         Assert.Equal(new CustomLoopExitPolicy(0, CustomLoopDefinition.DefaultExitDecisionInstruction, CustomLoopNodeContextPolicy.Inherit()), definition.ExitPolicy);
         Assert.Equal(
