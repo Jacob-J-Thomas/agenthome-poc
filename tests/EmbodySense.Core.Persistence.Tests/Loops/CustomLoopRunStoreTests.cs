@@ -1285,6 +1285,65 @@ public sealed class CustomLoopRunStoreTests
     }
 
     [Fact]
+    public async Task Windows_paused_consumer_continuation_preserves_the_auxiliary_replace_failure_after_its_deadline()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        using var store = new CustomLoopRunStore(paths);
+        var admitted = CreateRun("loop-paused-operation", "run-paused-operation", "invoke-paused-operation");
+        var running = Advance(admitted, CustomLoopRunStatus.Running);
+        var completed = Advance(running, CustomLoopRunStatus.Completed);
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(admitted)).Status);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(running, admitted.LifecycleVersion)).Status);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(completed, running.LifecycleVersion)).Status);
+        var inspection = Assert.IsType<CustomLoopTraceInspection>(await store.InspectTraceAsync(completed.Id));
+        var request = new CustomLoopTraceDeletionRequest(completed.Id, inspection.PersistedArtifactHash, "delete-paused-operation", "actor-user", "web");
+        var mutation = new CustomLoopTraceDeletionMutation(request, CustomLoopTraceDeletionRequestHash.Compute(request), _timestamp.AddMinutes(7));
+        Assert.Equal(CustomLoopTraceDeletionStoreStatus.Deleted, (await store.DeleteTerminalTraceAsync(mutation)).Status);
+        var operationPath = Path.Combine(paths.CustomLoopTraceDeletionOperationsPath, mutation.Request.OperationId + ".json");
+        var stagingPattern = $".{Path.GetFileName(operationPath)}.*.tmp";
+        var gated = new QueuedSynchronizationContext();
+        var previous = SynchronizationContext.Current;
+        Task<CustomLoopTraceDeletionAuditMarkStatus>? markTask = null;
+
+        using (var restrictiveReader = WindowsFileLock.OpenRestrictiveReader(operationPath, workspace.RootPath))
+        {
+            SynchronizationContext.SetSynchronizationContext(gated);
+            try
+            {
+                markTask = store.MarkTraceDeletionOutcomeAsync(mutation.Request.OperationId, CustomLoopTraceDeletionIntegrity.OutcomeAuditStarted);
+            }
+            finally
+            {
+                SynchronizationContext.SetSynchronizationContext(previous);
+            }
+
+            var stagingWait = Stopwatch.StartNew();
+            while (!Directory.EnumerateFiles(paths.CustomLoopTraceDeletionOperationsPath, stagingPattern).Any())
+            {
+                Assert.False(markTask.IsCompleted, "The trace-deletion operation did not reach its staged replacement boundary.");
+                Assert.True(stagingWait.Elapsed < TimeSpan.FromSeconds(10), "The trace-deletion operation did not reach its staged replacement boundary within the bounded wait.");
+                gated.Drain();
+                await Task.Delay(TimeSpan.FromMilliseconds(15));
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(100));
+            gated.Drain();
+            await Task.Delay(TimeSpan.FromMilliseconds(2200));
+            await gated.DrainUntilCompletedAsync(markTask, TimeSpan.FromSeconds(5));
+            var exception = await Assert.ThrowsAnyAsync<IOException>(() => markTask);
+            Assert.Equal(CustomLoopRunPersistenceDiagnosticStage.Unknown, Assert.IsType<CustomLoopRunPersistenceDiagnostic>(CustomLoopRunPersistenceDiagnostic.Find(exception)).Stage);
+        }
+
+        Assert.Equal(CustomLoopTraceDeletionAuditMarkStatus.Marked, await store.MarkTraceDeletionOutcomeAsync(mutation.Request.OperationId, CustomLoopTraceDeletionIntegrity.OutcomeAuditStarted));
+    }
+
+    [Fact]
     public async Task Queued_synchronization_context_drains_a_posted_task_until_completion()
     {
         var gated = new QueuedSynchronizationContext();
@@ -3121,6 +3180,67 @@ public sealed class CustomLoopRunStoreTests
         Assert.True(hardLinkCreated);
         Assert.Equal(CustomLoopRunPersistenceDiagnosticStage.CanonicalDirectoryBarrier, Assert.IsType<CustomLoopRunPersistenceDiagnostic>(CustomLoopRunPersistenceDiagnostic.Find(exception)).Stage);
         Assert.True(File.Exists(aliasPath));
+        Assert.True(File.Exists(Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.pending")));
+        Assert.False(File.Exists(Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json")));
+    }
+
+    [Theory]
+    [InlineData("identity")]
+    [InlineData("length")]
+    [InlineData("content")]
+    public async Task Target_proof_rejects_identity_length_and_content_substitution_after_the_directory_barrier(string substitution)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var run = CreateRun("loop-target-proof", "run-target-proof", "invoke-target-proof");
+        var artifactPath = Path.Combine(paths.CustomLoopRunsPath, run.LoopId, run.Id + ".json");
+        byte[]? expectedContent = null;
+        using var store = new CustomLoopRunStore(paths, null, (boundary, _) =>
+        {
+            if (boundary == CustomLoopRunPublicationBoundary.ParentDirectoryFlushed)
+            {
+                expectedContent = File.ReadAllBytes(artifactPath);
+                var replacementContent = expectedContent.ToArray();
+                switch (substitution)
+                {
+                    case "identity":
+                        File.Delete(artifactPath);
+                        File.WriteAllBytes(artifactPath, replacementContent);
+                        break;
+                    case "length":
+                        File.WriteAllBytes(artifactPath, replacementContent[..^1]);
+                        break;
+                    case "content":
+                        replacementContent[replacementContent.Length / 2] ^= 0x01;
+                        File.WriteAllBytes(artifactPath, replacementContent);
+                        break;
+                    default:
+                        throw new ArgumentOutOfRangeException(nameof(substitution));
+                }
+            }
+
+            return ValueTask.CompletedTask;
+        });
+
+        var exception = await Assert.ThrowsAnyAsync<IOException>(() => store.CreateAsync(run));
+
+        Assert.Equal(CustomLoopRunPersistenceDiagnosticStage.CanonicalDirectoryBarrier, Assert.IsType<CustomLoopRunPersistenceDiagnostic>(CustomLoopRunPersistenceDiagnostic.Find(exception)).Stage);
+        Assert.NotNull(expectedContent);
+        var observedContent = await File.ReadAllBytesAsync(artifactPath);
+        switch (substitution)
+        {
+            case "identity":
+                Assert.Equal(expectedContent, observedContent);
+                break;
+            case "length":
+                Assert.True(observedContent.Length < expectedContent.Length);
+                break;
+            case "content":
+                Assert.Equal(expectedContent.Length, observedContent.Length);
+                Assert.False(expectedContent.SequenceEqual(observedContent));
+                break;
+        }
+
         Assert.True(File.Exists(Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.pending")));
         Assert.False(File.Exists(Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json")));
     }
