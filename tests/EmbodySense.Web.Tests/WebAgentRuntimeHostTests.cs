@@ -191,6 +191,137 @@ public sealed class WebAgentRuntimeHostTests
     }
 
     [Fact]
+    public async Task ConfirmAndInvokeGovernedLoopAsync_rejects_browser_grant_selection_and_missing_preview_while_confirmation_is_required()
+    {
+        using var workspace = new TestWorkspace();
+        var codexPath = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
+        var modelProfile = VisibleInvocationTestModelProfile.Create();
+        await using var host = CreateVisibleInvocationHost(workspace, codexPath, modelProfile);
+        await host.InitializeWorkspaceAsync();
+        GovernedLoopGraphCandidate candidate;
+        GovernedLoopInvocationPreparationResponse preparation;
+        await using (var runtime = await CreateWebRuntimeAsync(workspace, codexPath, modelProfile))
+        {
+            candidate = await CreatePublishedVisibleInvocationGraphAsync(runtime);
+            preparation = await runtime.PrepareGovernedLoopInvocationAsync(
+                new GovernedLoopInvocationPreparationRequest(candidate.GraphId!, candidate.RevisionId!));
+        }
+        var preview = Assert.IsType<GovernedLoopInvocationAuthorityPreview>(preparation.Preview);
+
+        var selectedGrant = await host.ConfirmAndInvokeGovernedLoopAsync(
+            new GovernedLoopVisibleInvocationRequest(
+                candidate.GraphId!,
+                candidate.RevisionId!,
+                preview.SemanticHash,
+                new GovernedLoopVisibleInvocationGrantSelection("browser-grant", 1, new string('a', 64)),
+                "governed-invoke-confirmation-selected-grant",
+                "prompt"),
+            "connection-1");
+        var missingPreview = await host.ConfirmAndInvokeGovernedLoopAsync(
+            new GovernedLoopVisibleInvocationRequest(
+                candidate.GraphId!,
+                candidate.RevisionId!,
+                null,
+                null,
+                "governed-invoke-confirmation-missing-preview",
+                "prompt"),
+            "connection-1");
+        var stalePreview = await host.ConfirmAndInvokeGovernedLoopAsync(
+            new GovernedLoopVisibleInvocationRequest(
+                candidate.GraphId!,
+                candidate.RevisionId!,
+                new string('a', 64),
+                null,
+                "governed-invoke-confirmation-stale-preview",
+                "prompt"),
+            "connection-1");
+
+        Assert.Equal("Rejected", selectedGrant.Status);
+        Assert.Equal("Invalid", selectedGrant.AdmissionFailureCode);
+        Assert.Equal("Rejected", missingPreview.Status);
+        Assert.Equal("ConfirmationRequired", missingPreview.AdmissionFailureCode);
+        Assert.Equal("Rejected", stalePreview.Status);
+        Assert.Equal("Stale", stalePreview.AdmissionFailureCode);
+    }
+
+    [Fact]
+    public async Task ConfirmAndInvokeGovernedLoopAsync_rejects_mixed_missing_and_forged_grant_choices_after_preparation_is_ready()
+    {
+        using var workspace = new TestWorkspace();
+        var codexPath = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
+        var modelProfile = VisibleInvocationTestModelProfile.Create();
+        await using var host = CreateVisibleInvocationHost(workspace, codexPath, modelProfile);
+        await host.InitializeWorkspaceAsync();
+        GovernedLoopGraphCandidate candidate;
+        GovernedLoopInvocationPreparationResponse preparation;
+        await using (var runtime = await CreateWebRuntimeAsync(workspace, codexPath, modelProfile))
+        {
+            candidate = await CreatePublishedVisibleInvocationGraphAsync(runtime);
+            preparation = await runtime.PrepareGovernedLoopInvocationAsync(
+                new GovernedLoopInvocationPreparationRequest(candidate.GraphId!, candidate.RevisionId!));
+        }
+        var preview = Assert.IsType<GovernedLoopInvocationAuthorityPreview>(preparation.Preview);
+        _ = await host.ConfirmAndInvokeGovernedLoopAsync(
+            new GovernedLoopVisibleInvocationRequest(
+                candidate.GraphId!,
+                candidate.RevisionId!,
+                preview.SemanticHash,
+                null,
+                "governed-invoke-confirmation-create-grant",
+                "prompt"),
+            "connection-1");
+
+        var mixedPreviewAndGrant = await host.ConfirmAndInvokeGovernedLoopAsync(
+            new GovernedLoopVisibleInvocationRequest(
+                candidate.GraphId!,
+                candidate.RevisionId!,
+                preview.SemanticHash,
+                new GovernedLoopVisibleInvocationGrantSelection("browser-grant", 1, new string('a', 64)),
+                "governed-invoke-ready-mixed-preview",
+                "prompt"),
+            "connection-1");
+        var missingGrant = await host.ConfirmAndInvokeGovernedLoopAsync(
+            new GovernedLoopVisibleInvocationRequest(
+                candidate.GraphId!,
+                candidate.RevisionId!,
+                null,
+                null,
+                "governed-invoke-ready-missing-grant",
+                "prompt"),
+            "connection-1");
+        var forgedGrant = await host.ConfirmAndInvokeGovernedLoopAsync(
+            new GovernedLoopVisibleInvocationRequest(
+                candidate.GraphId!,
+                candidate.RevisionId!,
+                null,
+                new GovernedLoopVisibleInvocationGrantSelection("forged-grant", 1, new string('b', 64)),
+                "governed-invoke-ready-forged-grant",
+                "prompt"),
+            "connection-1");
+        GovernedLoopInvocationPreparationResponse ready;
+        await using (var runtime = await CreateWebRuntimeAsync(workspace, codexPath, modelProfile))
+        {
+            ready = await runtime.PrepareGovernedLoopInvocationAsync(
+                new GovernedLoopInvocationPreparationRequest(candidate.GraphId!, candidate.RevisionId!));
+        }
+        var exactGrant = Assert.Single(ready.EligibleGrants).Grant;
+        var selectedGrant = await host.ConfirmAndInvokeGovernedLoopAsync(
+            new GovernedLoopVisibleInvocationRequest(
+                candidate.GraphId!,
+                candidate.RevisionId!,
+                null,
+                new GovernedLoopVisibleInvocationGrantSelection(exactGrant.GrantId.Value, exactGrant.Revision.Value, exactGrant.ContentHash),
+                "governed-invoke-ready-exact-grant",
+                "prompt"),
+            "connection-1");
+
+        Assert.Equal("Invalid", mixedPreviewAndGrant.AdmissionFailureCode);
+        Assert.Equal("GrantChoiceRequired", missingGrant.AdmissionFailureCode);
+        Assert.Equal("Stale", forgedGrant.AdmissionFailureCode);
+        Assert.NotEqual("Rejected", selectedGrant.Status);
+    }
+
+    [Fact]
     public async Task InitializeWorkspaceAsync_serializes_concurrent_clients_and_reports_the_already_initialized_race()
     {
         using var workspace = new TestWorkspace();

@@ -77,8 +77,17 @@ public sealed class GovernedGraphsApiControllerTests
             var beforeInitialization = await SendAsync(client, HttpMethod.Get, "/api/governed-graphs/catalog", token);
             var detailBeforeInitialization = await SendAsync(client, HttpMethod.Get, "/api/governed-graphs/detail?graphId=before-init", token);
             var mutationBeforeInitialization = await SendAsync(client, HttpMethod.Post, "/api/governed-graphs/mutate", token);
+            var preparationBeforeInitialization = await SendAsync(client, HttpMethod.Post, "/api/governed-graphs/invocation-preparation", token);
             var initialized = await SendAsync(client, HttpMethod.Post, "/api/workspace/init", token);
             var catalog = await SendAsync(client, HttpMethod.Get, "/api/governed-graphs/catalog", token);
+            var missingRetryPreview = await SendAsync(client, HttpMethod.Post, "/api/governed-graphs/retry-preview", token);
+            var missingPreparationRequest = await SendAsync(client, HttpMethod.Post, "/api/governed-graphs/invocation-preparation", token);
+            var missingPreparation = await SendAsync(
+                client,
+                HttpMethod.Post,
+                "/api/governed-graphs/invocation-preparation",
+                token,
+                new { graphId = "missing-graph", revisionId = "missing-revision" });
             var retryPreview = await SendAsync(
                 client,
                 HttpMethod.Post,
@@ -138,8 +147,12 @@ public sealed class GovernedGraphsApiControllerTests
             Assert.Equal(HttpStatusCode.Conflict, beforeInitialization.StatusCode);
             Assert.Equal(HttpStatusCode.Conflict, detailBeforeInitialization.StatusCode);
             Assert.Equal(HttpStatusCode.Conflict, mutationBeforeInitialization.StatusCode);
+            Assert.Equal(HttpStatusCode.Conflict, preparationBeforeInitialization.StatusCode);
             Assert.Equal(HttpStatusCode.OK, initialized.StatusCode);
             Assert.True(catalog.StatusCode == HttpStatusCode.OK, catalogJson);
+            Assert.Equal(HttpStatusCode.BadRequest, missingRetryPreview.StatusCode);
+            Assert.Equal(HttpStatusCode.BadRequest, missingPreparationRequest.StatusCode);
+            Assert.Equal(HttpStatusCode.OK, missingPreparation.StatusCode);
             Assert.True(retryPreview.StatusCode == HttpStatusCode.OK, retryPreviewJson);
             Assert.Equal(HttpStatusCode.BadRequest, invalidRetryPreview.StatusCode);
             Assert.True(catalog.Headers.CacheControl?.NoStore == true);

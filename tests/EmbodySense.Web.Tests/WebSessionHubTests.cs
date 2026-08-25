@@ -415,6 +415,20 @@ public sealed class WebSessionHubTests
     }
 
     [Fact]
+    public async Task Confirm_and_invoke_governed_loop_rejects_a_malformed_public_request_without_leaking_runtime_details()
+    {
+        using var workspace = new TestWorkspace();
+        var approvals = new WebApprovalCoordinator();
+        await using var host = CreateHost(workspace, approvals);
+        var hub = CreateHub(host, approvals, new RecordingHubClients());
+
+        var exception = await Assert.ThrowsAsync<HubException>(() => hub.ConfirmAndInvokeGovernedLoop(null!));
+
+        Assert.Contains("could not be processed safely", exception.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("runtime", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void Governed_loop_invocation_response_retains_its_public_contract_on_the_signalr_wire()
     {
         var response = new GovernedLoopRunInvocationTransportResponse("Executed", "Admitted", null, "Created", "Completed", false, null, "Completed.");
