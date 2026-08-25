@@ -1,5 +1,11 @@
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Custom;
+using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
+using EmbodySense.Core.Common.Loops.Revisions.Models;
+using EmbodySense.Core.Common.ContextualRoles.Models;
+using EmbodySense.Core.Common.Inference.Profiles.Models;
+using EmbodySense.Core.Common.Capabilities;
+using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Web;
 using EmbodySense.Core.Startup.Loops.Execution.Models;
 using EmbodySense.Core.Startup.Loops.Models;
@@ -12,6 +18,8 @@ using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Core.Persistence.Memory;
 using EmbodySense.Core.Startup.Loops;
+using EmbodySense.Core.Startup.Loops.GraphAuthoring.Models;
+using EmbodySense.Core.Startup.Loops.InvocationPreparation.Models;
 using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Runtime.Models;
@@ -102,6 +110,84 @@ public sealed class WebAgentRuntimeHostTests
         var response = await host.InvokeGovernedLoopAsync(input!, "connection-1");
 
         Assert.Equal("NotFound", response.Status);
+    }
+
+    [Fact]
+    public async Task ConfirmAndInvokeGovernedLoopAsync_preserves_preparation_unavailability_without_retiring_the_browser_operation()
+    {
+        using var workspace = new TestWorkspace();
+        var codexPath = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
+        var modelProfile = VisibleInvocationTestModelProfile.Create();
+        await using var host = CreateVisibleInvocationHost(workspace, codexPath, modelProfile);
+        await host.InitializeWorkspaceAsync();
+        GovernedLoopGraphCandidate candidate;
+        GovernedLoopInvocationPreparationResponse preparation;
+        await using (var runtime = await CreateWebRuntimeAsync(workspace, codexPath, modelProfile))
+        {
+            candidate = await CreatePublishedVisibleInvocationGraphAsync(runtime);
+            preparation = await runtime.PrepareGovernedLoopInvocationAsync(
+                new GovernedLoopInvocationPreparationRequest(candidate.GraphId!, candidate.RevisionId!));
+        }
+        var preview = Assert.IsType<GovernedLoopInvocationAuthorityPreview>(preparation.Preview);
+        await File.WriteAllTextAsync(new WorkspacePaths(workspace.RootPath).AuthorityProfilesDocumentPath, "{");
+
+        var response = await host.ConfirmAndInvokeGovernedLoopAsync(
+            new GovernedLoopVisibleInvocationRequest(
+                candidate.GraphId!,
+                candidate.RevisionId!,
+                preview.SemanticHash,
+                null,
+                "governed-invoke-confirmation-unavailable",
+                "prompt"),
+            "connection-1");
+
+        Assert.Equal("Unavailable", response.Status);
+        Assert.Null(response.AdmissionStatus);
+        Assert.Null(response.AdmissionFailureCode);
+        Assert.Null(response.Run);
+    }
+
+    [Fact]
+    public async Task ConfirmAndInvokeGovernedLoopAsync_replays_a_preview_shaped_operation_after_confirmation_makes_preparation_ready()
+    {
+        using var workspace = new TestWorkspace();
+        var codexPath = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
+        var modelProfile = VisibleInvocationTestModelProfile.Create();
+        await using var host = CreateVisibleInvocationHost(workspace, codexPath, modelProfile);
+        await host.InitializeWorkspaceAsync();
+        GovernedLoopGraphCandidate candidate;
+        GovernedLoopInvocationPreparationResponse preparation;
+        await using (var runtime = await CreateWebRuntimeAsync(workspace, codexPath, modelProfile))
+        {
+            candidate = await CreatePublishedVisibleInvocationGraphAsync(runtime);
+            preparation = await runtime.PrepareGovernedLoopInvocationAsync(
+                new GovernedLoopInvocationPreparationRequest(candidate.GraphId!, candidate.RevisionId!));
+        }
+        var preview = Assert.IsType<GovernedLoopInvocationAuthorityPreview>(preparation.Preview);
+        var request = new GovernedLoopVisibleInvocationRequest(
+            candidate.GraphId!,
+            candidate.RevisionId!,
+            preview.SemanticHash,
+            null,
+            "governed-invoke-confirmation-replay",
+            "prompt");
+
+        var first = await host.ConfirmAndInvokeGovernedLoopAsync(request, "connection-1");
+        GovernedLoopInvocationPreparationResponse ready;
+        await using (var runtime = await CreateWebRuntimeAsync(workspace, codexPath, modelProfile))
+        {
+            ready = await runtime.PrepareGovernedLoopInvocationAsync(
+                new GovernedLoopInvocationPreparationRequest(candidate.GraphId!, candidate.RevisionId!));
+        }
+        var replay = await host.ConfirmAndInvokeGovernedLoopAsync(request, "connection-1");
+
+        Assert.NotEqual("Rejected", first.Status);
+        Assert.Equal(GovernedLoopInvocationPreparationStatus.Ready, ready.Status);
+        Assert.Null(ready.Preview);
+        Assert.NotEmpty(ready.EligibleGrants);
+        Assert.NotEqual("Rejected", replay.Status);
+        Assert.NotEqual("GrantChoiceRequired", replay.AdmissionFailureCode);
+        Assert.Null(replay.AdmissionFailureCode);
     }
 
     [Fact]
@@ -771,6 +857,153 @@ public sealed class WebAgentRuntimeHostTests
         var toolExecution = Assert.Single(audit.Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries), line => line.Contains("\"action\":\"tool.execute\"", StringComparison.Ordinal));
         Assert.Contains("\"outcome\":\"approval_rejected\"", toolExecution, StringComparison.Ordinal);
         Assert.Contains("\"approved_by_human\":false", toolExecution, StringComparison.Ordinal);
+    }
+
+    private static async Task<GovernedLoopGraphCandidate> CreatePublishedVisibleInvocationGraphAsync(AgentRuntime runtime)
+    {
+        var catalog = await runtime.GovernedLoopGraphAuthoring.ReadCatalogAsync();
+        var role = Assert.Single(catalog.Roles.Roles, item => item.IsAdmissionReady);
+        var candidate = VisibleInvocationGraphCandidate(new ContextualRoleRevisionPin(
+            new ContextualRoleRevisionIdentity(role.RoleId, role.Revision),
+            role.ContentHash));
+        var created = await runtime.GovernedLoopGraphAuthoring.MutateAsync(new GovernedLoopGraphMutationInput(
+            "create-visible-invocation-host-test",
+            GovernedLoopGraphMutationKind.CreateDraft,
+            candidate.GraphId!,
+            GovernedLoopRevisionLifecycleStatus.Unknown,
+            0,
+            null,
+            null,
+            candidate));
+        var draft = Assert.IsType<GovernedLoopGraphReadResponse>(created.Current);
+        var lifecycle = Assert.IsType<GovernedLoopRevisionLifecycleHead>(draft.Lifecycle);
+        var published = await runtime.GovernedLoopGraphAuthoring.MutateAsync(new GovernedLoopGraphMutationInput(
+            "publish-visible-invocation-host-test",
+            GovernedLoopGraphMutationKind.Publish,
+            candidate.GraphId!,
+            lifecycle.Status,
+            lifecycle.LifecycleVersion,
+            lifecycle.DraftRevision,
+            lifecycle.PublishedRevision,
+            null));
+
+        Assert.Equal("committed", created.Status);
+        Assert.Equal("committed", published.Status);
+        return candidate;
+    }
+
+    private static GovernedLoopGraphCandidate VisibleInvocationGraphCandidate(ContextualRoleRevisionPin role)
+    {
+        const string ConversationTurnCapability = "org.embodysense/conversation-turn";
+        var trigger = new GovernedLoopNodeDefinition(
+            "trigger",
+            new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Trigger, "manual-trigger", 1),
+            [
+                new GovernedLoopPortDefinition("request", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "text", true),
+                new GovernedLoopPortDefinition("invocation-context", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Context, "text", true),
+            ],
+            GovernedLoopAuthorityCeiling.Create([]),
+            new Dictionary<string, string>());
+        var exit = new GovernedLoopNodeDefinition(
+            "exit",
+            new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Exit, "success-exit", 1),
+            [
+                new GovernedLoopPortDefinition("result", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data, "text", true),
+                new GovernedLoopPortDefinition("published-result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "text", true),
+            ],
+            GovernedLoopAuthorityCeiling.Create([ConversationTurnCapability]),
+            new Dictionary<string, string>());
+        return new GovernedLoopGraphCandidate(
+            1,
+            "visible-invocation-host-test",
+            "revision-1",
+            "Prove the visible host retries one preview-shaped browser invocation safely.",
+            role,
+            trigger.Id,
+            [exit.Id],
+            GovernedLoopAuthorityCeiling.Create([ConversationTurnCapability]),
+            [new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false)],
+            [trigger, exit],
+            [new GovernedLoopControlEdgeDefinition("trigger-to-exit", trigger.Id, exit.Id, GovernedLoopControlCondition.Always)],
+            [new GovernedLoopBindingDefinition("request-to-result", GovernedLoopBindingKind.Data, trigger.Id, "request", exit.Id, "result")],
+            new GovernedLoopOutputContract(
+                "Return the exact invocation value.",
+                [new GovernedLoopOutputDefinition("result", "text", exit.Id, "published-result", true)]),
+            new GovernedLoopDisplayMetadata(
+                "Visible invocation host test",
+                "Exact browser-confirmed invocation fixture.",
+                [
+                    new GovernedLoopNodeDisplayMetadata(trigger.Id, "Trigger", "Start.", 0, 0),
+                    new GovernedLoopNodeDisplayMetadata(exit.Id, "Exit", "Publish.", 200, 0),
+                ]),
+            DefaultRoutingPolicy());
+    }
+
+    private static GovernedModelRoutingPolicy DefaultRoutingPolicy()
+    {
+        Assert.True(CapabilityId.TryParse("org.embodysense/model-profile/codex", out var profileId, out _));
+        Assert.True(CapabilityDataClass.TryParse("public", out var publicDataClass, out _));
+        var unbounded = GovernedModelUsageCeiling.Create(
+            GovernedModelUsageLimit.Unbounded,
+            GovernedModelUsageLimit.Unbounded,
+            GovernedModelUsageLimit.Unbounded,
+            GovernedModelUsageLimit.Unbounded,
+            GovernedModelMonetaryLimit.Unbounded);
+        var privacy = GovernedModelPrivacyRequirement.Create(
+            1,
+            localOnly: true,
+            CapabilityEgressMode.None,
+            [],
+            [publicDataClass!],
+            ["local"],
+            GovernedModelRetentionPosture.None,
+            GovernedModelTrainingPosture.Prohibited);
+        var requirements = GovernedModelProfileRequirements.Create(
+            1,
+            [GovernedModelModality.Text],
+            [],
+            1,
+            1,
+            privacy,
+            GovernedModelBudgetPolicy.Create(1, unbounded, unbounded, unbounded));
+        return GovernedModelRoutingPolicy.Create(1, GovernedModelRoutingSelector.Exact(profileId!), [], requirements);
+    }
+
+    private static WebAgentRuntimeHost CreateVisibleInvocationHost(
+        TestWorkspace workspace,
+        string codexPath,
+        VisibleInvocationTestModelProfile modelProfile)
+    {
+        var options = WebRunOptions.FromArguments(["--workdir", workspace.RootPath, "--model", "gpt-test", "--codex-path", codexPath]);
+        var approvals = new WebApprovalCoordinator();
+        return new WebAgentRuntimeHost(
+            options,
+            approvals,
+            WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath),
+            null,
+            runtimeStatus => AgentRuntimeFactory.ForFileCapabilityTrustRoot(
+                approvals,
+                workspace.ServerStatePath,
+                runtimeStatus,
+                additionalModelProfileProviders: [modelProfile.Provider]));
+    }
+
+    private static async Task<AgentRuntime> CreateWebRuntimeAsync(
+        TestWorkspace workspace,
+        string codexPath,
+        VisibleInvocationTestModelProfile modelProfile)
+    {
+        var factory = AgentRuntimeFactory.ForFileCapabilityTrustRoot(
+            new WebApprovalCoordinator(),
+            workspace.ServerStatePath,
+            CreateCompatibleRuntimeStatus(codexPath, "gpt-test"),
+            additionalModelProfileProviders: [modelProfile.Provider]);
+        return await factory.CreateAsync(
+            "gpt-test",
+            workspace.RootPath,
+            codexPath,
+            "read-only",
+            AgentRuntimeSurface.Web);
     }
 
     private static WebAgentRuntimeHost CreateHost(string rootPath, string? codexPath = null, string model = "gpt-test")
