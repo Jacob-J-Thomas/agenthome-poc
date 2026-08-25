@@ -1156,10 +1156,21 @@ public sealed class GovernedLoopSleepStoreTests
         var secondOutput = workspace.File("second-sleep-output");
         using var first = StartCrossProcessHost(workspace.RootPath, gate, firstReady, firstOutput);
         using var second = StartCrossProcessHost(workspace.RootPath, gate, secondReady, secondOutput);
-        // Track deterministic Windows child-readiness diagnostics under https://github.com/Jacob-J-Thomas/agenthome-poc/issues/514.
-        await Task.WhenAll(WaitForPathAsync(firstReady), WaitForPathAsync(secondReady));
+        var children = new[]
+        {
+            new Verification.CrossProcessReadinessChild("first", first, firstReady, firstOutput),
+            new Verification.CrossProcessReadinessChild("second", second, secondReady, secondOutput)
+        };
+        await Verification.CrossProcessReadinessDiagnostics.WaitForChildrenReadyAsync(
+            "sleep-store/publication",
+            children,
+            TimeSpan.FromSeconds(60));
         await File.WriteAllTextAsync(gate, "go");
-        await Task.WhenAll(first.WaitForExitAsync(), second.WaitForExitAsync()).WaitAsync(TimeSpan.FromSeconds(30));
+        await Verification.CrossProcessReadinessDiagnostics.WaitForChildrenCompletedAsync(
+            "sleep-store/publication",
+            "post-gate publication",
+            children,
+            TimeSpan.FromSeconds(30));
         await AssertProcessSucceededAsync(first);
         await AssertProcessSucceededAsync(second);
         var results = new[] { await File.ReadAllTextAsync(firstOutput), await File.ReadAllTextAsync(secondOutput) };

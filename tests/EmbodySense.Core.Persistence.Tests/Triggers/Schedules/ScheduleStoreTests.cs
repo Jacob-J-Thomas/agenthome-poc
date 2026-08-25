@@ -1240,10 +1240,21 @@ public sealed class ScheduleStoreTests
         var secondOutput = Path.Combine(workspace, "second-schedule-output");
         using var first = StartCrossProcessHost(workspace, gate, firstReady, firstOutput, firstSchedule, operation: operation, variant: 1);
         using var second = StartCrossProcessHost(workspace, gate, secondReady, secondOutput, secondSchedule, operation: operation, variant: 2);
-        // Track deterministic Windows child-readiness diagnostics under https://github.com/Jacob-J-Thomas/agenthome-poc/issues/514.
-        await Task.WhenAll(WaitForPathAsync(firstReady), WaitForPathAsync(secondReady));
+        var children = new[]
+        {
+            new Verification.CrossProcessReadinessChild("first", first, firstReady, firstOutput),
+            new Verification.CrossProcessReadinessChild("second", second, secondReady, secondOutput)
+        };
+        await Verification.CrossProcessReadinessDiagnostics.WaitForChildrenReadyAsync(
+            $"schedule-store/{operation}",
+            children,
+            _crossProcessReadinessTimeout);
         await File.WriteAllTextAsync(gate, "go");
-        await Task.WhenAll(first.WaitForExitAsync(), second.WaitForExitAsync()).WaitAsync(TimeSpan.FromSeconds(30));
+        await Verification.CrossProcessReadinessDiagnostics.WaitForChildrenCompletedAsync(
+            $"schedule-store/{operation}",
+            "post-gate decision",
+            children,
+            TimeSpan.FromSeconds(30));
         await AssertProcessSucceededAsync(first);
         await AssertProcessSucceededAsync(second);
         return [await File.ReadAllTextAsync(firstOutput), await File.ReadAllTextAsync(secondOutput)];
