@@ -35,6 +35,7 @@ internal static class CustomLoopRunNativeFileSystem
     private const uint OpenExisting = 3;
     private const int FileRenameInformationEx = 65;
     private const uint FileRenameReplaceIfExists = 0x00000001;
+    private const uint FileRenamePosixSemantics = 0x00000002;
     private const int FileDispositionInformation = 4;
     private const int ErrorAccessDenied = 5;
     private const int ErrorSharingViolation = 32;
@@ -505,8 +506,8 @@ internal static class CustomLoopRunNativeFileSystem
         try
         {
             Marshal.Copy(new byte[bufferSize], 0, buffer, bufferSize);
-            // Keep external readers that deny delete access in #475's bounded contention path.
-            Marshal.WriteInt32(buffer, unchecked((int)(overwrite ? FileRenameReplaceIfExists : 0)));
+            var flags = overwrite ? FileRenameReplaceIfExists | FileRenamePosixSemantics : 0;
+            Marshal.WriteInt32(buffer, unchecked((int)flags));
             Marshal.WriteIntPtr(buffer, rootDirectoryOffset, parent.DangerousGetHandle());
             Marshal.WriteInt32(buffer, fileNameLengthOffset, nameBytes.Length);
             Marshal.Copy(nameBytes, 0, IntPtr.Add(buffer, fileNameOffset), nameBytes.Length);
