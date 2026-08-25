@@ -4,7 +4,9 @@ namespace EmbodySense.Core.Persistence.Tests.Verification;
 
 internal sealed record CrossProcessReadinessChild(
     string Label,
-    Process Process,
+    CrossProcessProcess Process,
     string ReadyPath,
-    string ResultPath,
-    CrossProcessProcessOwnership Ownership);
+    string ResultPath)
+{
+    internal CrossProcessProcessOwnership Ownership => Process.Ownership;
+}

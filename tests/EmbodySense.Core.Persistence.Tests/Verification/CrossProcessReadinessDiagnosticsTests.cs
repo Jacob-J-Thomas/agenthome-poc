@@ -16,15 +16,13 @@ public sealed class CrossProcessReadinessDiagnosticsTests
 
         using var workspace = new TestWorkspace();
         var childProcessIdPath = workspace.File("pipe-holder-child.pid");
-        using var process = CancellationHostProcess.Start("pipe-holder", childProcessIdPath, "30000");
-        using var ownership = CrossProcessProcessOwnership.Attach(process);
+        using var process = CancellationHostProcess.StartOwned("pipe-holder", childProcessIdPath, "30000");
         await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
         var child = new CrossProcessReadinessChild(
             "pipe-holder",
             process,
             workspace.File("missing-ready"),
-            workspace.File("missing-result"),
-            ownership);
+            workspace.File("missing-result"));
 
         var wait = CrossProcessReadinessDiagnostics.WaitForChildrenReadyAsync(
             "verification/pipe-holder",

@@ -5,6 +5,13 @@ namespace EmbodySense.Core.Persistence.Tests.Verification;
 internal static class CancellationHostProcess
 {
     internal static Process Start(params string[] arguments)
+        => Process.Start(CreateStartInfo(arguments))
+            ?? throw new InvalidOperationException("The cancellation host process could not be started.");
+
+    internal static CrossProcessProcess StartOwned(params string[] arguments)
+        => CrossProcessProcessOwnership.Start(CreateStartInfo(arguments));
+
+    private static ProcessStartInfo CreateStartInfo(string[] arguments)
     {
         var outputDirectory = new DirectoryInfo(AppContext.BaseDirectory);
         var targetFramework = outputDirectory.Name;
@@ -42,8 +49,7 @@ internal static class CancellationHostProcess
         }
 
         startInfo.Environment["DOTNET_ROLL_FORWARD"] = "Major";
-        return Process.Start(startInfo)
-            ?? throw new InvalidOperationException("The cancellation host process could not be started.");
+        return startInfo;
     }
 
     private static string FindRepositoryRoot()

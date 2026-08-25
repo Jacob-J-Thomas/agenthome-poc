@@ -1155,13 +1155,11 @@ public sealed class GovernedLoopSleepStoreTests
         var firstOutput = workspace.File("first-sleep-output");
         var secondOutput = workspace.File("second-sleep-output");
         using var first = StartCrossProcessHost(workspace.RootPath, gate, firstReady, firstOutput);
-        using var firstOwnership = Verification.CrossProcessProcessOwnership.Attach(first);
         using var second = StartCrossProcessHost(workspace.RootPath, gate, secondReady, secondOutput);
-        using var secondOwnership = Verification.CrossProcessProcessOwnership.Attach(second);
         var children = new[]
         {
-            new Verification.CrossProcessReadinessChild("first", first, firstReady, firstOutput, firstOwnership),
-            new Verification.CrossProcessReadinessChild("second", second, secondReady, secondOutput, secondOwnership)
+            new Verification.CrossProcessReadinessChild("first", first, firstReady, firstOutput),
+            new Verification.CrossProcessReadinessChild("second", second, secondReady, secondOutput)
         };
         await Verification.CrossProcessReadinessDiagnostics.WaitForChildrenReadyAsync(
             "sleep-store/publication",
@@ -1413,7 +1411,7 @@ public sealed class GovernedLoopSleepStoreTests
         }
     }
 
-    private static Process StartCrossProcessHost(
+    private static Verification.CrossProcessProcess StartCrossProcessHost(
         string workspace,
         string gate,
         string ready,
@@ -1449,7 +1447,7 @@ public sealed class GovernedLoopSleepStoreTests
             startInfo.Environment[CrossProcessCrashBoundary] = crashBoundary.Value.ToString();
         }
 
-        return Process.Start(startInfo) ?? throw new InvalidOperationException("Cross-process sleep-store test host did not start.");
+        return Verification.CrossProcessProcessOwnership.Start(startInfo);
     }
 
     private static async Task WaitForPathAsync(string path, Process? process = null)
@@ -1527,6 +1525,13 @@ public sealed class GovernedLoopSleepStoreTests
     }
 
     private static async Task AssertProcessSucceededAsync(Process process)
+    {
+        var standardError = await process.StandardError.ReadToEndAsync();
+        var standardOutput = await process.StandardOutput.ReadToEndAsync();
+        Assert.True(process.ExitCode == 0, standardError + Environment.NewLine + standardOutput);
+    }
+
+    private static async Task AssertProcessSucceededAsync(Verification.CrossProcessProcess process)
     {
         var standardError = await process.StandardError.ReadToEndAsync();
         var standardOutput = await process.StandardOutput.ReadToEndAsync();
