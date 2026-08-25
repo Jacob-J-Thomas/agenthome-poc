@@ -83,8 +83,27 @@ public sealed class CustomLoopFrontierStoreTests
         Assert.NotSame(request.Binding, persisted.HumanReview.Request.Binding);
         Assert.NotSame(blocked, persisted.Frontier);
         Assert.NotSame(blocked.Payload, persisted.Frontier.Payload);
-        var replay = await new HumanReviewAdmissionService(restarted).AdmitAsync(new HumanReviewAdmissionCommand(persisted.Id, persisted.LifecycleVersion, request, blocked));
+        Assert.True(CustomLoopRunValidator.HasExactDurableEventPrefix(running, persisted));
+        var replay = await new HumanReviewAdmissionService(restarted).AdmitAsync(new HumanReviewAdmissionCommand(persisted.Id, running.LifecycleVersion, request, blocked));
         Assert.Equal(CustomLoopRunStoreStatus.AlreadyCreated, replay.Status);
+    }
+
+    [Fact]
+    public async Task Durable_version_and_prefix_authentication_reject_independently_valid_human_review_state_substitution()
+    {
+        using var workspace = new TestWorkspace();
+        var original = await PersistHumanReviewAdmissionAsync(new WorkspacePaths(workspace.RootPath), "durable-comparison");
+        var originalState = Assert.IsType<HumanReviewRunState>(original.HumanReview);
+        var substitutedProvenance = HumanReviewContractHash.ApplyProvenance(originalState.Lifecycle.Provenance with { SourceId = "human-review-substitute", ProvenanceHash = string.Empty });
+        var substitutedLifecycle = HumanReviewContractHash.ApplyLifecycle(originalState.Lifecycle with { Provenance = substitutedProvenance, LifecycleHash = string.Empty });
+        var substituted = original with { HumanReview = originalState with { Lifecycle = substitutedLifecycle } };
+        var laterSubstituted = substituted with { LifecycleVersion = substituted.LifecycleVersion + 1, UpdatedAtUtc = substituted.UpdatedAtUtc.AddTicks(1) };
+
+        Assert.True(CustomLoopRunValidator.Validate(substituted).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(substituted).Errors));
+        Assert.True(CustomLoopRunValidator.Validate(laterSubstituted).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(laterSubstituted).Errors));
+        Assert.False(CustomLoopRunValidator.HasSameDurableVersion(original, substituted));
+        Assert.False(CustomLoopRunValidator.HasExactDurableEventPrefix(original, substituted));
+        Assert.False(CustomLoopRunValidator.HasExactDurableEventPrefix(original, laterSubstituted));
     }
 
     [Theory]

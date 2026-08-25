@@ -198,6 +198,7 @@ public static class CustomLoopRunValidator
             || !string.Equals(expected.FailureCode, actual.FailureCode, StringComparison.Ordinal)
             || !string.Equals(expected.FailureDetail, actual.FailureDetail, StringComparison.Ordinal)
             || !FrontiersEqual(expected.Frontier, actual.Frontier)
+            || !HumanReviewStatesEqual(expected.HumanReview, actual.HumanReview)
             || !WaitEvidenceEqual(expected.WaitEvidence, actual.WaitEvidence))
         {
             return false;
@@ -234,6 +235,7 @@ public static class CustomLoopRunValidator
             || actual.LifecycleVersion < expectedPrefix.LifecycleVersion
             || actual.UpdatedAtUtc < expectedPrefix.UpdatedAtUtc
             || expectedPrefix.Events.Length > actual.Events.Length
+            || !HasHumanReviewPrefix(expectedPrefix.HumanReview, actual.HumanReview)
             || !HasWaitEvidencePrefix(expectedPrefix.WaitEvidence, actual.WaitEvidence))
         {
             return false;
@@ -3522,6 +3524,27 @@ public static class CustomLoopRunValidator
             && right is not null
             && left.Count == right.Count
             && left.Select(item => item?.ContentHash).SequenceEqual(right.Select(item => item?.ContentHash), StringComparer.Ordinal);
+
+    private static bool HumanReviewStatesEqual(HumanReviewRunState? left, HumanReviewRunState? right)
+        => ReferenceEquals(left, right)
+            || left is not null
+            && right is not null
+            && string.Equals(left.Request?.RequestHash, right.Request?.RequestHash, StringComparison.Ordinal)
+            && string.Equals(left.Lifecycle?.LifecycleHash, right.Lifecycle?.LifecycleHash, StringComparison.Ordinal)
+            && !left.Evidence.IsDefault
+            && !right.Evidence.IsDefault
+            && left.Evidence.Length == right.Evidence.Length
+            && left.Evidence.Select(item => item?.EvidenceHash).SequenceEqual(right.Evidence.Select(item => item?.EvidenceHash), StringComparer.Ordinal);
+
+    private static bool HasHumanReviewPrefix(HumanReviewRunState? expectedPrefix, HumanReviewRunState? actual)
+        => expectedPrefix is null
+            || actual is not null
+            && string.Equals(expectedPrefix.Request?.RequestHash, actual.Request?.RequestHash, StringComparison.Ordinal)
+            && string.Equals(expectedPrefix.Lifecycle?.LifecycleHash, actual.Lifecycle?.LifecycleHash, StringComparison.Ordinal)
+            && !expectedPrefix.Evidence.IsDefault
+            && !actual.Evidence.IsDefault
+            && expectedPrefix.Evidence.Length <= actual.Evidence.Length
+            && expectedPrefix.Evidence.Select((item, index) => string.Equals(item?.EvidenceHash, actual.Evidence[index]?.EvidenceHash, StringComparison.Ordinal)).All(value => value);
 
     private static bool HasWaitEvidencePrefix(
         IReadOnlyList<GovernedLoopWaitExecutionEvidence>? expectedPrefix,

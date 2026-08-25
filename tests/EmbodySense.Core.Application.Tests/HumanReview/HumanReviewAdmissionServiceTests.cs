@@ -51,10 +51,10 @@ public sealed class HumanReviewAdmissionServiceTests
         Assert.Equal(120_000, persisted.ExecutionClock.AccumulatedRunningMilliseconds);
 
         var restart = new HumanReviewAdmissionService(new HumanReviewAdmissionTestStore(shared));
-        var replay = await restart.AdmitAsync(new HumanReviewAdmissionCommand(persisted.Id, persisted.LifecycleVersion, fixture.Request, fixture.BlockedFrontier));
+        var replay = await restart.AdmitAsync(new HumanReviewAdmissionCommand(persisted.Id, fixture.Predecessor.LifecycleVersion, fixture.Request, fixture.BlockedFrontier));
         Assert.Equal(CustomLoopRunStoreStatus.AlreadyCreated, replay.Status);
         var divergent = Reissue(fixture.Request, "review-request-divergent", fixture.Request.RequestOperationId);
-        var conflict = await restart.AdmitAsync(new HumanReviewAdmissionCommand(persisted.Id, persisted.LifecycleVersion, divergent, fixture.BlockedFrontier));
+        var conflict = await restart.AdmitAsync(new HumanReviewAdmissionCommand(persisted.Id, fixture.Predecessor.LifecycleVersion, divergent, fixture.BlockedFrontier));
         Assert.Equal(CustomLoopRunStoreStatus.Conflict, conflict.Status);
         Assert.Equal(1, shared.UpdateCount);
     }
