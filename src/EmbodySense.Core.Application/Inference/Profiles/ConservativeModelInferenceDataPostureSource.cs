@@ -8,7 +8,9 @@ namespace EmbodySense.Core.Application.Inference.Profiles;
 /// <remarks>Content text is never inspected, inferred as public, or retained; the exact payload hash binds the evidence.</remarks>
 public sealed class ConservativeModelInferenceDataPostureSource : IModelInferenceDataPostureSource
 {
-    private static readonly CapabilityDataClass _sensitive = CreateSensitive();
+    /// <summary>Gets the fixed server-owned data class required for every provider inference payload.</summary>
+    /// <remarks>This value is deliberately independent of authored graph labels so preparation and dispatch share the same conservative boundary.</remarks>
+    public static CapabilityDataClass SensitiveDataClass { get; } = CreateSensitive();
 
     /// <inheritdoc />
     public Task<ModelInferenceDataPosture> ReadAsync(
@@ -33,7 +35,7 @@ public sealed class ConservativeModelInferenceDataPostureSource : IModelInferenc
             attempt.VisitOrdinal.ToString(CultureInfo.InvariantCulture),
             attempt.AttemptNumber.ToString(CultureInfo.InvariantCulture),
             attempt.AttemptOperationId,
-            _sensitive.Value);
+            SensitiveDataClass.Value);
         return Task.FromResult(new ModelInferenceDataPosture(
             ModelInferenceDataPostureStatus.Available,
             attempt.RunId,
@@ -44,7 +46,7 @@ public sealed class ConservativeModelInferenceDataPostureSource : IModelInferenc
             attempt.AttemptNumber,
             attempt.AttemptOperationId,
             request.InputPayloadHash,
-            [_sensitive],
+            [SensitiveDataClass],
             evidence));
     }
 

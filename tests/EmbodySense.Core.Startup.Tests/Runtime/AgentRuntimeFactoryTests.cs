@@ -6,6 +6,7 @@ using EmbodySense.Core.Common.Authority.Models;
 using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.Inference;
+using EmbodySense.Core.Common.Inference.Profiles.Models;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Custom;
@@ -675,7 +676,7 @@ public sealed class AgentRuntimeFactoryTests
     }
 
     [Fact]
-    public async Task CreateAsync_prepares_the_manual_inference_validate_condition_bounded_retry_exit_fail_acceptance_shape()
+    public async Task CreateAsync_prepares_and_confirms_the_manual_inference_validate_condition_bounded_retry_exit_fail_acceptance_shape()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
@@ -721,12 +722,25 @@ public sealed class AgentRuntimeFactoryTests
             head.PublishedRevision,
             null));
         var prepared = await runtime.PrepareGovernedLoopInvocationAsync(new GovernedLoopInvocationPreparationRequest(candidate.GraphId!, candidate.RevisionId!));
+        Assert.True(prepared.Status == GovernedLoopInvocationPreparationStatus.ConfirmationRequired, prepared.Detail);
+        var preview = Assert.IsType<GovernedLoopInvocationAuthorityPreview>(prepared.Preview);
+        var confirmed = await runtime.ConfirmGovernedLoopInvocationAuthorityAsync(new GovernedLoopInvocationAuthorityConfirmation(
+            candidate.GraphId!,
+            candidate.RevisionId!,
+            preview.SemanticHash,
+            "confirm-browser-invocation-acceptance-shape"));
+        var persistedGrant = await new AuthorityProfileStore(paths, new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath))
+            .ReadAsync(Assert.IsType<AuthorityGrantReference>(confirmed.Grant).GrantId);
 
         Assert.True(created.Status == "committed", string.Join(Environment.NewLine, created.Errors.Select(error => $"{error.Code}: {error.Message}")));
         Assert.Equal("committed", published.Status);
         Assert.Equal(GovernedLoopInvocationPreparationStatus.ConfirmationRequired, prepared.Status);
-        Assert.NotNull(prepared.Preview);
         Assert.Empty(prepared.EligibleGrants);
+        Assert.Equal(GovernedLoopInvocationAuthorityConfirmationStatus.Confirmed, confirmed.Status);
+        var currentGrant = Assert.IsType<AuthorityGrantStoreSnapshot>(persistedGrant.Snapshot).CurrentGrant;
+        Assert.Contains(currentGrant.RequestedCeiling.Capabilities, identity => identity.Id.Value == "org.embodysense/model-inference");
+        Assert.Contains(currentGrant.RequestedCeiling.Capabilities, identity => identity.Id.Equals(profile.Descriptor.Id));
+        Assert.Contains(currentGrant.RequestedCeiling.DataClasses, dataClass => dataClass.Value == "sensitive");
     }
 
     [Fact]
@@ -2741,7 +2755,40 @@ public sealed class AgentRuntimeFactoryTests
                     new GovernedLoopNodeDisplayMetadata(exit.Id, "Exit", "Publish.", 400, 0),
                     new GovernedLoopNodeDisplayMetadata(fail.Id, "Fail", "Stop safely.", 400, 100),
                 ]),
-            EmbodySense.Core.Application.Tests.GovernedModelProfileApplicationTestFixture.DefaultRoutingPolicy(modelProfileCapabilityId));
+            BrowserInvocationRoutingPolicy(modelProfileCapabilityId));
+    }
+
+    private static GovernedModelRoutingPolicy BrowserInvocationRoutingPolicy(string modelProfileCapabilityId)
+    {
+        Assert.True(CapabilityId.TryParse(modelProfileCapabilityId, out var exactProfileId, out _));
+        Assert.True(CapabilityDataClass.TryParse("sensitive", out var sensitiveData, out _));
+        var privacy = GovernedModelPrivacyRequirement.Create(
+            1,
+            localOnly: true,
+            CapabilityEgressMode.None,
+            [],
+            [sensitiveData!],
+            ["local"],
+            GovernedModelRetentionPosture.None,
+            GovernedModelTrainingPosture.Prohibited);
+        var unbounded = GovernedModelUsageCeiling.Create(
+            GovernedModelUsageLimit.Unbounded,
+            GovernedModelUsageLimit.Unbounded,
+            GovernedModelUsageLimit.Unbounded,
+            GovernedModelUsageLimit.Unbounded,
+            GovernedModelMonetaryLimit.Unbounded);
+        return GovernedModelRoutingPolicy.Create(
+            1,
+            GovernedModelRoutingSelector.Exact(exactProfileId!),
+            [],
+            GovernedModelProfileRequirements.Create(
+                1,
+                [GovernedModelModality.Text],
+                [],
+                1,
+                1,
+                privacy,
+                GovernedModelBudgetPolicy.Create(1, unbounded, unbounded, unbounded)));
     }
 
     private static AuthorityProfile CreateProfileOnlyRecoveryRecord(

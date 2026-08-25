@@ -24,7 +24,7 @@ internal sealed class InvocationPreparationReadyModelProfile
     {
         var descriptor = CreateDescriptor();
         Assert.True(CapabilityDescriptorIdentity.TryCreate(descriptor, out var identity, out _));
-        Assert.True(CapabilityDataClass.TryParse("public", out var publicData, out _));
+        Assert.True(CapabilityDataClass.TryParse("sensitive", out var sensitiveData, out _));
         var metadata = GovernedModelProfileMetadata.Create(
             1,
             identity!,
@@ -44,7 +44,7 @@ internal sealed class InvocationPreparationReadyModelProfile
                 GovernedModelLocality.LocalProcess,
                 CapabilityEgressMode.None,
                 [],
-                [publicData!],
+                [sensitiveData!],
                 ["local"],
                 GovernedModelRetentionPosture.None,
                 GovernedModelTrainingPosture.Prohibited),
