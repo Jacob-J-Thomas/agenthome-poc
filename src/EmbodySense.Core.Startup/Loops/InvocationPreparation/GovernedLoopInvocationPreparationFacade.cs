@@ -500,7 +500,9 @@ public sealed class GovernedLoopInvocationPreparationFacade
             return InvocationPreparationTerms.Failure(GovernedLoopInvocationPreparationStatus.Unavailable, null, "The current governed-loop publication is unavailable.");
         }
 
-        if (graphRead is null || graphRead.Status is GovernedLoopRevisionStoreReadStatus.Unavailable or GovernedLoopRevisionStoreReadStatus.Ambiguous || graphRead.Snapshot is null)
+        if (graphRead is null
+            || !Enum.IsDefined(graphRead.Status)
+            || graphRead.Status is GovernedLoopRevisionStoreReadStatus.Unknown or GovernedLoopRevisionStoreReadStatus.Unavailable or GovernedLoopRevisionStoreReadStatus.Ambiguous)
         {
             return InvocationPreparationTerms.Failure(GovernedLoopInvocationPreparationStatus.Unavailable, null, "The current governed-loop publication is unavailable or ambiguous.");
         }
@@ -508,6 +510,11 @@ public sealed class GovernedLoopInvocationPreparationFacade
         if (graphRead.Status == GovernedLoopRevisionStoreReadStatus.NotFound)
         {
             return InvocationPreparationTerms.Failure(GovernedLoopInvocationPreparationStatus.NotFound, null, "The selected governed loop does not exist.");
+        }
+
+        if (graphRead.Snapshot is null)
+        {
+            return InvocationPreparationTerms.Failure(GovernedLoopInvocationPreparationStatus.Unavailable, null, "The current governed-loop publication is unavailable or ambiguous.");
         }
 
         var publication = graphRead.Snapshot.Head.PublishedRevision;

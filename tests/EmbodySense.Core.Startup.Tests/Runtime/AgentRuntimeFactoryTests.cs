@@ -374,9 +374,15 @@ public sealed class AgentRuntimeFactoryTests
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         await using var runtime = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Web);
+        var paths = new WorkspacePaths(workspace.RootPath);
 
         var invalidPreparation = await runtime.PrepareGovernedLoopInvocationAsync(new GovernedLoopInvocationPreparationRequest(string.Empty, string.Empty));
         var missingPreparation = await runtime.PrepareGovernedLoopInvocationAsync(new GovernedLoopInvocationPreparationRequest("missing-browser-governed-graph", "revision-1"));
+        var missingConfirmation = await runtime.ConfirmGovernedLoopInvocationAuthorityAsync(new GovernedLoopInvocationAuthorityConfirmation(
+            "missing-browser-governed-graph",
+            "revision-1",
+            new string('a', 64),
+            "confirm-missing-browser-governed-graph"));
         var invalidConfirmation = await runtime.ConfirmGovernedLoopInvocationAuthorityAsync(new GovernedLoopInvocationAuthorityConfirmation(
             string.Empty,
             string.Empty,
@@ -443,11 +449,17 @@ public sealed class AgentRuntimeFactoryTests
         File.WriteAllText(new WorkspacePaths(workspace.RootPath).AuthorityProfilesDocumentPath, "{");
         var unavailablePreparation = await runtime.PrepareGovernedLoopInvocationAsync(new GovernedLoopInvocationPreparationRequest(candidate.GraphId!, candidate.RevisionId!));
         var unavailableConfirmation = await runtime.ConfirmGovernedLoopInvocationAuthorityAsync(confirmation);
+        File.WriteAllText(Path.Combine(paths.GovernedLoopRevisionsPath, "lifecycle.json"), "{");
+        var malformedPublicationPreparation = await runtime.PrepareGovernedLoopInvocationAsync(new GovernedLoopInvocationPreparationRequest(candidate.GraphId!, candidate.RevisionId!));
 
         Assert.Equal("committed", created.Status);
         Assert.Equal("committed", published.Status);
         Assert.Equal(GovernedLoopInvocationPreparationStatus.Invalid, invalidPreparation.Status);
-        Assert.Equal(GovernedLoopInvocationPreparationStatus.Unavailable, missingPreparation.Status);
+        Assert.Equal(GovernedLoopInvocationPreparationStatus.NotFound, missingPreparation.Status);
+        Assert.Empty(missingPreparation.EligibleGrants);
+        Assert.Null(missingPreparation.Preview);
+        Assert.Equal(GovernedLoopInvocationAuthorityConfirmationStatus.Stale, missingConfirmation.Status);
+        Assert.Null(missingConfirmation.Grant);
         Assert.Equal(GovernedLoopInvocationAuthorityConfirmationStatus.Invalid, invalidConfirmation.Status);
         Assert.Equal(GovernedLoopInvocationPreparationStatus.NotFound, draftPreparation.Status);
         Assert.Equal(GovernedLoopRevisionLifecycleStatus.Published, publishedHead.Status);
@@ -487,6 +499,9 @@ public sealed class AgentRuntimeFactoryTests
         Assert.Equal(currentProfile.IssuedAtUtc, currentGrant.Boundary.EffectiveAtUtc);
         Assert.Equal(GovernedLoopInvocationPreparationStatus.Unavailable, unavailablePreparation.Status);
         Assert.Equal(GovernedLoopInvocationAuthorityConfirmationStatus.Unavailable, unavailableConfirmation.Status);
+        Assert.Equal(GovernedLoopInvocationPreparationStatus.Unavailable, malformedPublicationPreparation.Status);
+        Assert.Empty(malformedPublicationPreparation.EligibleGrants);
+        Assert.Null(malformedPublicationPreparation.Preview);
     }
 
     [Fact]
