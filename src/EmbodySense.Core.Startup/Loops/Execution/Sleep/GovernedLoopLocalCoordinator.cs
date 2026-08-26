@@ -161,6 +161,7 @@ public sealed class GovernedLoopLocalCoordinator : IAsyncDisposable
 
             Interlocked.Exchange(ref session.StopRequested, 1);
             session.AdmissionStop.Cancel();
+            _ = await EnsureLifecycleAsync(session, GovernedLoopCoordinatorStatus.Stopping, terminal: false).ConfigureAwait(false);
             var outcome = await session.Completion.ConfigureAwait(false);
             _lastSnapshot = outcome.Snapshot;
             _session = null;
@@ -535,7 +536,7 @@ public sealed class GovernedLoopLocalCoordinator : IAsyncDisposable
             }
 
             var result = await AppendLifecycleCoreAsync(current, next).ConfigureAwait(false);
-            if (result.Snapshot is not null)
+            if (result.Snapshot is not null && result.Snapshot.Ownership == current.Ownership)
             {
                 session.Snapshot = result.Snapshot;
                 _lastSnapshot = result.Snapshot;

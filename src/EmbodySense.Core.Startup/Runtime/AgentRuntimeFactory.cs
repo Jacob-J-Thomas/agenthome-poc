@@ -28,7 +28,9 @@ using EmbodySense.Core.Application.Memory;
 using EmbodySense.Core.Application.LocalWorkspace;
 using EmbodySense.Core.Application.Inference.Profiles;
 using EmbodySense.Core.Application.Runtime.State;
+using EmbodySense.Core.Application.Triggers;
 using EmbodySense.Core.Application.Triggers.Models;
+using EmbodySense.Core.Application.Triggers.Schedules;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops.Models;
@@ -67,6 +69,8 @@ using EmbodySense.Core.Startup.Loops.GraphAuthoring;
 using EmbodySense.Core.Startup.Loops.InvocationPreparation;
 using EmbodySense.Core.Startup.ContextualRoles;
 using EmbodySense.Core.Startup.Runtime.Models;
+using EmbodySense.Core.Startup.Triggers;
+using EmbodySense.Core.Startup.Triggers.Schedules;
 using EmbodySense.Core.Startup.Workspace;
 
 namespace EmbodySense.Core.Startup.Runtime;
@@ -338,7 +342,7 @@ public sealed class AgentRuntimeFactory
         var customExecutionGate = new CustomLoopWorkspaceExecutionGate(paths);
         CustomLoopRunStore? customRunStore = null;
         var ownsCustomRunStore = _customLoopRunStoreProvider is null;
-        GovernedLoopWaitRuntimeHost? governedWaitRuntimeHost = null;
+        GovernedLoopBackgroundRuntimeHost? governedBackgroundRuntimeHost = null;
         GovernedLoopSleepService? governedSleep = null;
         try
         {
@@ -660,11 +664,8 @@ public sealed class AgentRuntimeFactory
             governedRetryNodeRelay.Bind(governedRetry);
             governedWaitContinuationRelay.Bind(governedWait);
             governedWaitContinuationRelay.BindRetry(governedRetry);
-            governedWaitRuntimeHost = new GovernedLoopWaitRuntimeHost(
-                scheduleStore,
-                governedSleepStore,
+            governedBackgroundRuntimeHost = new GovernedLoopBackgroundRuntimeHost(
                 coordinatorEvidenceStore,
-                governedSleep,
                 governedWait,
                 governedRetry,
                 operationalClock);
@@ -701,7 +702,7 @@ public sealed class AgentRuntimeFactory
             var operationalPosture = new GovernedLoopOperationalPostureService(
                 workspaceId,
                 triggerWorkspaceId,
-                GovernedLoopWaitRuntimeHost.CoordinatorId,
+                GovernedLoopBackgroundRuntimeHost.CoordinatorId,
                 new TriggerQueueOperationalPostureAdapter(triggerQueueStore, triggerWorkspaceId),
                 scheduleStore,
                 governedSleepStore,
@@ -782,7 +783,7 @@ public sealed class AgentRuntimeFactory
                 legacyRunner,
                 governedRunner,
                 customRuntimeContext,
-                governedWaitRuntimeHost,
+                governedBackgroundRuntimeHost,
                 customExecutionAvailable,
                 customExecutionReacquisitionAllowed,
                 customRecoveryRequired,
@@ -808,6 +809,36 @@ public sealed class AgentRuntimeFactory
                 workspaceId,
                 customModelSnapshot,
                 governedRoleStore);
+            var triggerAuthorizer = new TriggerWorkerCurrentEvidenceAuthorizer(
+                workspaceId,
+                governedBindingSource,
+                governedGrantResolver,
+                new AuthorityGrantProfileSource(governedAuthorityStore),
+                modelProfileCapabilityCatalog,
+                capabilityAuthority,
+                operationalClock);
+            var triggerWorker = new TriggerWorkerService(
+                triggerQueueStore,
+                new TriggerWorkerCurrentEvidenceAuthorizerAdapter(triggerAuthorizer),
+                new TriggerCustomLoopDispatcher(customLoops, governedLoops),
+                new ScheduleTriggerDispatchReadinessService(scheduleStore),
+                operationalClock);
+            var localBackgroundWork = new GovernedLoopLocalWorkRunner(
+                new GovernedLoopBackgroundWorkSource(scheduleStore, governedSleepStore),
+                new GovernedLoopWaitAndTriggerOneShotServices(
+                    customRunStore,
+                    scheduleStore,
+                    triggerQueueStore,
+                    triggerWorker,
+                    governedSleep,
+                    GovernedLoopLocalWorkRunnerOptions.MaximumCandidateReadLimit),
+                new GovernedLoopLocalWorkRunnerOptions(
+                    "agent-runtime-trigger-" + Guid.NewGuid().ToString("N"),
+                    TimeSpan.FromSeconds(30),
+                    1,
+                    GovernedLoopLocalWorkRunnerOptions.MaximumCandidateReadLimit),
+                operationalClock);
+            governedBackgroundRuntimeHost.BindBackgroundWork(localBackgroundWork);
             var runtime = new AgentRuntime(
                 paths,
                 runtimeSurface,
@@ -828,7 +859,7 @@ public sealed class AgentRuntimeFactory
                 modelProfileCatalogFacade,
                 defaultConversationReviews,
                 codexRuntimeStatus,
-                governedWaitRuntimeHost,
+                governedBackgroundRuntimeHost,
                 governedSleep);
             customRunStore = null;
             return runtime;
@@ -837,9 +868,9 @@ public sealed class AgentRuntimeFactory
         {
             try
             {
-                if (governedWaitRuntimeHost is not null)
+                if (governedBackgroundRuntimeHost is not null)
                 {
-                    await governedWaitRuntimeHost.DisposeAsync();
+                    await governedBackgroundRuntimeHost.DisposeAsync();
                 }
             }
             finally

@@ -61,7 +61,7 @@ public sealed class AgentRuntime : IAsyncDisposable
     private readonly GovernedLoopInvocationPreparationFacade _governedLoopInvocationPreparation;
     private readonly IModelProfileCatalogFacade _modelProfiles;
     private readonly DefaultConversationTurnReviewService _defaultConversationReviews;
-    private readonly GovernedLoopWaitRuntimeHost? _governedWaitRuntimeHost;
+    private readonly GovernedLoopBackgroundRuntimeHost? _governedBackgroundRuntimeHost;
     private readonly GovernedLoopSleepService? _governedSleep;
     private int _disposed;
 
@@ -85,7 +85,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         IModelProfileCatalogFacade modelProfiles,
         DefaultConversationTurnReviewService defaultConversationReviews,
         CodexRuntimeStatus codexRuntimeStatus,
-        GovernedLoopWaitRuntimeHost? governedWaitRuntimeHost = null,
+        GovernedLoopBackgroundRuntimeHost? governedBackgroundRuntimeHost = null,
         GovernedLoopSleepService? governedSleep = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
@@ -124,7 +124,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         _governedLoopInvocationPreparation = governedLoopInvocationPreparation;
         _modelProfiles = modelProfiles;
         _defaultConversationReviews = defaultConversationReviews;
-        _governedWaitRuntimeHost = governedWaitRuntimeHost;
+        _governedBackgroundRuntimeHost = governedBackgroundRuntimeHost;
         _governedSleep = governedSleep;
         _commandService = new RuntimeCommandService(conversationMemory, startupContext);
         CodexRuntimeStatus = codexRuntimeStatus;
@@ -413,36 +413,6 @@ public sealed class AgentRuntime : IAsyncDisposable
         return new TriggerWorkerRuntimeFacade(store, service);
     }
 
-    /// <summary>Creates one inert canonical local background runtime bound to this runtime's exact governed dispatcher.</summary>
-    /// <remarks>The caller owns the returned lifetime and explicitly chooses whether to run one-shot work or start coordination.</remarks>
-    public GovernedLoopLocalBackgroundRuntime CreateGovernedLoopLocalBackgroundRuntime(
-        IScheduleCurrentEvidencePort scheduleCurrentEvidence,
-        IScheduleOverlapPort scheduleOverlap,
-        IScheduleTimeZonePort scheduleTimeZone,
-        ITriggerWorkerCurrentEvidenceAuthorizer triggerAuthorizer,
-        IGovernedLoopSleepCurrentPosturePort sleepCurrentPosture,
-        IGovernedLoopWakeContinuationPort wakeContinuation,
-        IGovernedLoopAuthenticatedWakeVerificationPort authenticatedWakeVerification,
-        GovernedLoopLocalWorkRunnerOptions workOptions,
-        GovernedLoopLocalCoordinatorOptions coordinatorOptions,
-        TimeProvider? timeProvider = null)
-    {
-        ArgumentNullException.ThrowIfNull(triggerAuthorizer);
-        return GovernedLoopLocalBackgroundRuntimeFactory.Create(
-            Paths,
-            scheduleCurrentEvidence,
-            scheduleOverlap,
-            scheduleTimeZone,
-            new TriggerWorkerCurrentEvidenceAuthorizerAdapter(triggerAuthorizer),
-            new TriggerCustomLoopDispatcher(_customLoops, _governedLoops),
-            sleepCurrentPosture,
-            wakeContinuation,
-            authenticatedWakeVerification,
-            workOptions,
-            coordinatorOptions,
-            timeProvider);
-    }
-
     private TriggerWorkerService CreateTriggerWorkerService(
         ITriggerWorkerCurrentEvidenceAuthorizer authorizer,
         ITriggerWorkerStatePort state,
@@ -528,28 +498,102 @@ public sealed class AgentRuntime : IAsyncDisposable
         return _customLoops.ResumeAsync(input, cancellationToken);
     }
 
-    /// <summary>
-    /// Explicitly activates this process as the browser-independent local host for canonical governed Wait recovery and wake delivery.
-    /// </summary>
+    /// <summary>Explicitly activates this process as the browser-independent host for canonical local governed-loop background work.</summary>
     /// <remarks>
-    /// Normal Web, CLI, and request runtimes are inert until their process-level host calls this member. The returned activation
-    /// outcome never changes whether ordinary custom-loop invocation is available when another live coordinator owns delivery.
+    /// Normal Web, CLI, and request runtimes are inert until their process-level host calls this member. The retained
+    /// coordinator borrows the factory-composed canonical run, queue, schedule, sleep, and evidence stores; callers cannot
+    /// construct a second coordinator through this runtime. The returned activation outcome never changes whether ordinary
+    /// custom-loop invocation is available when another live coordinator owns delivery.
     /// </remarks>
     /// <param name="cancellationToken">The token used to cancel recovery and coordinator acquisition.</param>
-    /// <returns>The coordinator activation outcome projected through the shared Startup boundary.</returns>
-    public async Task<CustomLoopExecutionActivationResult> StartGovernedWaitBackgroundAsync(
+    /// <returns>The typed coordinator ownership and readiness outcome projected through the shared Startup boundary.</returns>
+    public async Task<AgentRuntimeGovernedLoopBackgroundStartResult> StartGovernedLoopLocalBackgroundWithStatusAsync(
         CancellationToken cancellationToken = default)
     {
-        if (_governedWaitRuntimeHost is null)
+        if (_governedBackgroundRuntimeHost is null)
+        {
+            return new AgentRuntimeGovernedLoopBackgroundStartResult(
+                AgentRuntimeGovernedLoopBackgroundStartStatus.Unavailable,
+                AgentRuntimeGovernedLoopBackgroundReadiness.Unavailable,
+                AgentRuntimeGovernedLoopBackgroundOwnership.Unknown,
+                false,
+                "governed_local_background_unavailable: this runtime was not composed with canonical local background support.");
+        }
+
+        var activationSequence = _governedBackgroundRuntimeHost.ActivationSequence;
+        _governedBackgroundRuntimeHost.RequestActivation();
+        var current = await _governedBackgroundRuntimeHost.ReadStatusAsync(cancellationToken);
+        if (current.Ownership == AgentRuntimeGovernedLoopBackgroundOwnership.LivePeer)
+        {
+            return new AgentRuntimeGovernedLoopBackgroundStartResult(
+                AgentRuntimeGovernedLoopBackgroundStartStatus.OwnedByLivePeer,
+                current.Readiness,
+                current.Ownership,
+                true,
+                "governed_local_background_owned_by_live_peer: another process retains canonical background-work delivery.");
+        }
+
+        if (current.Readiness == AgentRuntimeGovernedLoopBackgroundReadiness.Ready
+            && current.Ownership == AgentRuntimeGovernedLoopBackgroundOwnership.Local)
+        {
+            return new AgentRuntimeGovernedLoopBackgroundStartResult(
+                AgentRuntimeGovernedLoopBackgroundStartStatus.AlreadyRunning,
+                current.Readiness,
+                current.Ownership,
+                true,
+                "governed_local_background_ready: this runtime already owns canonical background-work delivery.");
+        }
+
+        if (current.Readiness == AgentRuntimeGovernedLoopBackgroundReadiness.Draining)
+        {
+            return new AgentRuntimeGovernedLoopBackgroundStartResult(
+                AgentRuntimeGovernedLoopBackgroundStartStatus.Unavailable,
+                current.Readiness,
+                current.Ownership,
+                true,
+                "governed_local_background_draining: the prior stop request has not reached a durable safe boundary.");
+        }
+
+        var availability = await _customLoops.EnsureCustomExecutionAvailableAsync(cancellationToken);
+        if (!availability.Available)
+        {
+            return new AgentRuntimeGovernedLoopBackgroundStartResult(
+                AgentRuntimeGovernedLoopBackgroundStartStatus.Unavailable,
+                AgentRuntimeGovernedLoopBackgroundReadiness.Unavailable,
+                AgentRuntimeGovernedLoopBackgroundOwnership.Unknown,
+                _customLoops.CustomExecutionReacquisitionAllowed,
+                availability.Detail);
+        }
+
+        if (_governedBackgroundRuntimeHost.TryGetActivationResultAfter(activationSequence, out var activation))
+        {
+            return activation!;
+        }
+
+        return await _governedBackgroundRuntimeHost.StartAsync(cancellationToken);
+    }
+
+    /// <summary>Explicitly activates canonical local governed-loop background work through the legacy availability projection.</summary>
+    /// <remarks>
+    /// This compatibility member preserves the historical availability contract, including an available result when a live
+    /// peer already owns delivery. Process hosts that need exact ownership, readiness, and retry semantics must call
+    /// <see cref="StartGovernedLoopLocalBackgroundWithStatusAsync"/> instead.
+    /// </remarks>
+    /// <param name="cancellationToken">The token used to cancel recovery and coordinator acquisition.</param>
+    /// <returns>The historical availability projection for the canonical coordinator outcome.</returns>
+    public async Task<CustomLoopExecutionActivationResult> StartGovernedLoopLocalBackgroundAsync(
+        CancellationToken cancellationToken = default)
+    {
+        if (_governedBackgroundRuntimeHost is null)
         {
             return new CustomLoopExecutionActivationResult(
                 false,
                 false,
                 "Failed",
-                "governed_wait_background_unavailable: this runtime was not composed with canonical Wait background support.");
+                "governed_local_background_unavailable: this runtime was not composed with canonical local background support.");
         }
 
-        _governedWaitRuntimeHost.RequestActivation();
+        _governedBackgroundRuntimeHost.RequestActivation();
         var availability = await _customLoops.EnsureCustomExecutionAvailableAsync(cancellationToken);
         if (!availability.Available)
         {
@@ -560,8 +604,52 @@ public sealed class AgentRuntime : IAsyncDisposable
                 availability.Detail);
         }
 
-        return await _governedWaitRuntimeHost.ActivateAsync(cancellationToken);
+        return await _governedBackgroundRuntimeHost.ActivateAsync(cancellationToken);
     }
+
+    /// <summary>Explicitly activates canonical local background work for callers that previously requested only Wait recovery.</summary>
+    /// <remarks>
+    /// This compatibility-shaped name now activates the same canonical local coordinator that owns retained Wait recovery,
+    /// schedule-finalization retry, and trigger dispatch. It never creates a second coordinator or workspace-store lifetime.
+    /// </remarks>
+    /// <param name="cancellationToken">The token used to cancel recovery and coordinator acquisition.</param>
+    /// <returns>The compatibility activation projection for the canonical coordinator outcome.</returns>
+    public Task<CustomLoopExecutionActivationResult> StartGovernedWaitBackgroundAsync(
+        CancellationToken cancellationToken = default)
+        => StartGovernedLoopLocalBackgroundAsync(cancellationToken);
+
+    /// <summary>Reads non-sensitive ownership and lifecycle readiness for canonical local governed-loop background work.</summary>
+    /// <remarks>
+    /// This member intentionally projects only process-host information. It does not expose durable coordinator records,
+    /// owner identities, run contents, queue entries, or persistence implementation details.
+    /// </remarks>
+    /// <param name="cancellationToken">The token used to cancel the bounded status read.</param>
+    /// <returns>The current typed readiness and active-ownership classification.</returns>
+    public Task<AgentRuntimeGovernedLoopBackgroundStatus> ReadGovernedLoopLocalBackgroundStatusAsync(
+        CancellationToken cancellationToken = default)
+        => _governedBackgroundRuntimeHost?.ReadStatusAsync(cancellationToken)
+            ?? Task.FromResult(new AgentRuntimeGovernedLoopBackgroundStatus(
+                AgentRuntimeGovernedLoopBackgroundReadiness.Unavailable,
+                AgentRuntimeGovernedLoopBackgroundOwnership.Unknown,
+                "governed_local_background_unavailable: this runtime was not composed with canonical local background support."));
+
+    /// <summary>Requests an idempotent bounded drain of locally owned canonical governed-loop background work.</summary>
+    /// <remarks>
+    /// The call never fabricates a terminal or parked result when a one-shot is still executing. If its fixed safe drain
+    /// bound expires, it returns <see cref="AgentRuntimeGovernedLoopBackgroundStopStatus.Draining"/> while the retained
+    /// coordinator continues to stop admission and preserve durable evidence until a later status read reaches terminal state.
+    /// Callers must retain this runtime until it is stopped or disposed.
+    /// </remarks>
+    /// <param name="cancellationToken">The token used to cancel before the stop request begins.</param>
+    /// <returns>The typed stop outcome or truthful bounded-drain state.</returns>
+    public Task<AgentRuntimeGovernedLoopBackgroundStopResult> StopGovernedLoopLocalBackgroundAsync(
+        CancellationToken cancellationToken = default)
+        => _governedBackgroundRuntimeHost?.StopAsync(cancellationToken)
+            ?? Task.FromResult(new AgentRuntimeGovernedLoopBackgroundStopResult(
+                AgentRuntimeGovernedLoopBackgroundStopStatus.Unavailable,
+                AgentRuntimeGovernedLoopBackgroundReadiness.Unavailable,
+                AgentRuntimeGovernedLoopBackgroundOwnership.Unknown,
+                "governed_local_background_unavailable: this runtime was not composed with canonical local background support."));
 
     /// <summary>
     /// Attempts to handle a runtime command that does not require an initialized runtime instance.
@@ -589,9 +677,9 @@ public sealed class AgentRuntime : IAsyncDisposable
 
         try
         {
-            if (_governedWaitRuntimeHost is not null)
+            if (_governedBackgroundRuntimeHost is not null)
             {
-                await _governedWaitRuntimeHost.DisposeAsync();
+                await _governedBackgroundRuntimeHost.DisposeAsync();
             }
         }
         finally

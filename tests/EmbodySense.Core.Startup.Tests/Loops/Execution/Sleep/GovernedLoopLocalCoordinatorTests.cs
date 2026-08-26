@@ -278,7 +278,7 @@ public sealed class GovernedLoopLocalCoordinatorTests
         await Task.Delay(50);
 
         Assert.False(stopping.IsCompleted);
-        Assert.Equal(GovernedLoopCoordinatorStatus.Running, evidence.Snapshot!.LatestLifecycle.Status);
+        Assert.Equal(GovernedLoopCoordinatorStatus.Stopping, evidence.Snapshot!.LatestLifecycle.Status);
         Assert.DoesNotContain(evidence.Lifecycles, item => item.Status == GovernedLoopCoordinatorStatus.Stopped);
 
         release.TrySetResult();
@@ -780,7 +780,7 @@ public sealed class GovernedLoopLocalCoordinatorTests
         var result = await coordinator.StopAsync();
 
         Assert.Equal(GovernedLoopLocalCoordinatorStopStatus.OwnershipLost, result.Status);
-        Assert.Equal(GovernedLoopCoordinatorStatus.Running, evidence.Snapshot!.LatestLifecycle.Status);
+        Assert.Equal(GovernedLoopCoordinatorStatus.Stopping, evidence.Snapshot!.LatestLifecycle.Status);
         Assert.DoesNotContain(evidence.Lifecycles, item => item.Status == GovernedLoopCoordinatorStatus.Failed);
     }
 
