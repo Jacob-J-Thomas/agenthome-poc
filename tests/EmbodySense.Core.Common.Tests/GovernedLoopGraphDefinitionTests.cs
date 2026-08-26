@@ -59,7 +59,7 @@ public sealed class GovernedLoopGraphDefinitionTests
     [Fact]
     public void All_declared_descriptor_kinds_are_accepted_without_runtime_claims()
     {
-        var nonterminalKinds = Enum.GetValues<GovernedLoopNodeKind>().Where(kind => kind is not GovernedLoopNodeKind.Unknown and not GovernedLoopNodeKind.Trigger and not GovernedLoopNodeKind.Exit and not GovernedLoopNodeKind.Fail);
+        var nonterminalKinds = Enum.GetValues<GovernedLoopNodeKind>().Where(kind => kind is not GovernedLoopNodeKind.Unknown and not GovernedLoopNodeKind.Trigger and not GovernedLoopNodeKind.Exit and not GovernedLoopNodeKind.Fail and not GovernedLoopNodeKind.HumanInput);
 
         foreach (var kind in nonterminalKinds)
         {

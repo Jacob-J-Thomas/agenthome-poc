@@ -7,6 +7,7 @@ using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Inference.Profiles;
 using EmbodySense.Core.Common.Inference.Profiles.Models;
 using EmbodySense.Core.Common.Loops.Execution.Retry;
+using EmbodySense.Core.Common.Loops.HumanInput;
 
 namespace EmbodySense.Core.Common.Loops.Custom.Graph;
 
@@ -187,6 +188,11 @@ public static class GovernedLoopGraphNormalizer
     {
         ValidateIdentities(nodes, value => value?.Id, "nodes", GovernedLoopGraphElementKind.Node, errors);
         var schemaIds = schemas.Where(schema => schema is not null && CustomLoopArtifactIdentifier.IsValid(schema.Id)).Select(schema => schema!.Id).ToHashSet(StringComparer.Ordinal);
+        var semanticSchemas = schemas
+            .Where(schema => schema is not null && CustomLoopArtifactIdentifier.IsValid(schema.Id))
+            .GroupBy(schema => schema!.Id, StringComparer.Ordinal)
+            .Where(group => group.Count() == 1)
+            .ToDictionary(group => group.Key, group => group.Single()!, StringComparer.Ordinal);
         var loopCapabilities = loopAuthority?.CapabilityIds.ToHashSet(StringComparer.Ordinal) ?? [];
         foreach (var (node, index) in nodes.Select((value, index) => (value, index)))
         {
@@ -229,6 +235,15 @@ public static class GovernedLoopGraphNormalizer
 
             ValidatePorts(node, path, schemaIds, errors);
             ValidateParameters(node, path, errors);
+            if (node.Descriptor?.Kind == GovernedLoopNodeKind.HumanInput
+                && !GovernedLoopHumanInputNodeConfigurationValidator.HasExactNodeSemantics(node, semanticSchemas))
+            {
+                errors.Add("node.human-input-contract.invalid", GovernedLoopGraphElementKind.Node, node.Id, $"{path}.humanInputConfiguration", "Human Input requires one exact data-only schema-1 configuration, authority-free response port, and canonical response-schema binding.");
+            }
+            else if (node.Descriptor?.Kind != GovernedLoopNodeKind.HumanInput && node.HumanInputConfiguration is not null)
+            {
+                errors.Add("node.human-input-configuration.kind.invalid", GovernedLoopGraphElementKind.Node, node.Id, $"{path}.humanInputConfiguration", "Only a Human Input node may declare Human Input configuration.");
+            }
             if (node.RetryPolicy is not null
                 && (!GovernedLoopRetryContract.IsValid(node.RetryPolicy)
                     || !string.Equals(node.RetryPolicy.NodeId, node.Id, StringComparison.Ordinal)

@@ -6,6 +6,7 @@ using EmbodySense.Core.Common.Inference.Profiles;
 using EmbodySense.Core.Common.Inference.Profiles.Models;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Loops.Execution.Retry;
+using EmbodySense.Core.Common.Loops.HumanInput;
 
 namespace EmbodySense.Core.Common.Loops.Custom.Graph;
 
@@ -13,6 +14,8 @@ namespace EmbodySense.Core.Common.Loops.Custom.Graph;
 /// <remarks>Construction enforces local canonical value invariants only. Graph-wide topology and executability validation remain downstream concerns; this contract owns no persistence, revision lifecycle, traversal, dispatch, provider, UI, or compatibility behavior.</remarks>
 public sealed class GovernedLoopGraphDefinition
 {
+    private readonly GovernedLoopNodeDefinition[] _nodes;
+
     private GovernedLoopGraphDefinition(
         string graphId,
         string revisionId,
@@ -37,7 +40,7 @@ public sealed class GovernedLoopGraphDefinition
         TerminalNodeIds = Array.AsReadOnly(terminalNodeIds);
         AuthorityCeiling = authorityCeiling;
         ValueSchemas = Array.AsReadOnly(valueSchemas);
-        Nodes = Array.AsReadOnly(nodes);
+        _nodes = GovernedLoopGraphNodeCopier.Copy(nodes);
         ControlEdges = Array.AsReadOnly(controlEdges);
         Bindings = Array.AsReadOnly(bindings);
         OutputContract = outputContract;
@@ -79,7 +82,7 @@ public sealed class GovernedLoopGraphDefinition
     public IReadOnlyList<GovernedLoopValueSchemaDefinition> ValueSchemas { get; }
     /// <summary>Gets the canonical node declarations.</summary>
     /// <value>The immutable nodes ordered by identifier.</value>
-    public IReadOnlyList<GovernedLoopNodeDefinition> Nodes { get; }
+    public IReadOnlyList<GovernedLoopNodeDefinition> Nodes => Array.AsReadOnly(GovernedLoopGraphNodeCopier.Copy(_nodes));
     /// <summary>Gets control flow, which is intentionally separate from value binding.</summary>
     /// <value>The immutable control edges ordered by identifier.</value>
     public IReadOnlyList<GovernedLoopControlEdgeDefinition> ControlEdges { get; }
@@ -240,6 +243,7 @@ public sealed class GovernedLoopGraphDefinition
         RequireCount(values.Length, 2, CustomLoopLimits.MaxGraphNodes, nameof(nodes));
         RequireDistinct(values, node => node.Id, nameof(nodes));
         var schemaIds = schemas.Select(schema => schema.Id).ToHashSet(StringComparer.Ordinal);
+        var schemasById = schemas.ToDictionary(schema => schema.Id, StringComparer.Ordinal);
         var loopCapabilities = loopCeiling.CapabilityIds.ToHashSet(StringComparer.Ordinal);
         var canonical = new List<GovernedLoopNodeDefinition>(values.Length);
         foreach (var node in values)
@@ -324,6 +328,18 @@ public sealed class GovernedLoopGraphDefinition
                     || node.Descriptor.Kind is GovernedLoopNodeKind.Trigger or GovernedLoopNodeKind.Wait or GovernedLoopNodeKind.HumanReview or GovernedLoopNodeKind.HumanInput or GovernedLoopNodeKind.Exit or GovernedLoopNodeKind.Fail))
             {
                 throw new ArgumentException($"Node `{node.Id}` has an invalid or inapplicable retry policy.", nameof(nodes));
+            }
+
+            if (node.Descriptor.Kind == GovernedLoopNodeKind.HumanInput)
+            {
+                if (!GovernedLoopHumanInputNodeConfigurationValidator.HasExactNodeSemantics(node, schemasById))
+                {
+                    throw new ArgumentException($"Human Input node `{node.Id}` must retain its exact data-only configuration, authority-free response port, and response-schema binding.", nameof(nodes));
+                }
+            }
+            else if (node.HumanInputConfiguration is not null)
+            {
+                throw new ArgumentException($"Only Human Input node `{node.Id}` may declare Human Input configuration.", nameof(nodes));
             }
 
             canonical.Add(node with

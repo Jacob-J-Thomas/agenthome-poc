@@ -1,6 +1,7 @@
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Inference.Profiles.Models;
 using EmbodySense.Core.Common.Loops.Execution.Retry.Models;
+using System.Text.Json.Serialization;
 
 namespace EmbodySense.Core.Persistence.Loops.GraphAuthoring.Models;
 
@@ -14,4 +15,5 @@ internal sealed record NodeJson(
     PortJson[]? Ports,
     GovernedModelRoutingPolicy? ModelRoutingPolicy,
     CapabilityDataClass[]? AuthoredInputDataClasses,
-    GovernedLoopRetryPolicy? RetryPolicy);
+    GovernedLoopRetryPolicy? RetryPolicy,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] HumanInputNodeConfigurationJson? HumanInputConfiguration);
