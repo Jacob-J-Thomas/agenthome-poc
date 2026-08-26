@@ -106,7 +106,7 @@ public sealed class GovernedLoopHumanInputWaitingCheckpointContractTests
         var approval = GovernedLoopHumanInputWaitingCheckpointTestData.Pending(configuration: GovernedLoopHumanInputWaitingCheckpointTestData.Configuration(timeoutPolicyReference: "approval-policy-one"));
         var unknown = GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(new GovernedLoopHumanInputWaitingCheckpoint(1, pending.Binding, pending.NodeConfiguration, pending.Request, GovernedLoopHumanInputWaitingCheckpointPosture.Unknown, pending.Evidence, string.Empty));
         var stale = GovernedLoopHumanInputWaitingCheckpointTestData.Pending(binding: GovernedLoopHumanInputWaitingCheckpointTestData.Binding(generation: 2));
-        var divergent = GovernedLoopHumanInputWaitingCheckpointTestData.Pending(binding: GovernedLoopHumanInputWaitingCheckpointTestData.Binding(frontierHash: GovernedLoopHumanInputWaitingCheckpointTestData.Hash('z')));
+        var divergent = GovernedLoopHumanInputWaitingCheckpointTestData.Pending(binding: GovernedLoopHumanInputWaitingCheckpointTestData.Binding(frontierHash: GovernedLoopHumanInputWaitingCheckpointTestData.Hash('a')));
         var authorityForged = GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(answered.Evidence[1] with { AnswerSelection = answered.Evidence[1].AnswerSelection! with { SelectionId = "authority-grant-one" } });
 
         Assert.False(GovernedLoopHumanInputWaitingCheckpointContractValidator.Validate(secret).IsValid);
@@ -115,6 +115,34 @@ public sealed class GovernedLoopHumanInputWaitingCheckpointContractTests
         Assert.Contains(GovernedLoopHumanInputWaitingCheckpointContractValidator.ValidateEvidence(authorityForged).Errors, error => error.Code == "invalid_answer_selection");
         Assert.Contains(GovernedLoopHumanInputWaitingCheckpointStateTransitionValidator.ValidateTransition(pending, stale).Errors, error => error.Code == "immutable_coordinate_rebound");
         Assert.Equal(GovernedLoopHumanInputWaitingCheckpointReplayDisposition.DivergentReuse, GovernedLoopHumanInputWaitingCheckpointReplayClassifier.Classify(pending, divergent));
+    }
+
+    [Fact]
+    public void Self_hashed_semantically_invalid_checkpoint_and_evidence_artifacts_never_classify_as_replay()
+    {
+        var pending = GovernedLoopHumanInputWaitingCheckpointTestData.Pending();
+        var invalidCheckpoint = GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(new GovernedLoopHumanInputWaitingCheckpoint(1, pending.Binding, pending.NodeConfiguration, pending.Request, GovernedLoopHumanInputWaitingCheckpointPosture.Unknown, pending.Evidence, string.Empty));
+        var invalidEvidence = GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(pending.Evidence[0] with { TerminalizationReceiptId = "terminal-receipt-one", TerminalizationReceiptHash = GovernedLoopHumanInputWaitingCheckpointTestData.Hash('a') });
+
+        Assert.True(GovernedLoopHumanInputWaitingCheckpointContractHash.Matches(invalidCheckpoint));
+        Assert.False(GovernedLoopHumanInputWaitingCheckpointContractValidator.Validate(invalidCheckpoint).IsValid);
+        Assert.Equal(GovernedLoopHumanInputWaitingCheckpointReplayDisposition.Invalid, GovernedLoopHumanInputWaitingCheckpointReplayClassifier.Classify(invalidCheckpoint, pending));
+        Assert.Equal(GovernedLoopHumanInputWaitingCheckpointReplayDisposition.Invalid, GovernedLoopHumanInputWaitingCheckpointReplayClassifier.Classify(pending, invalidCheckpoint));
+        Assert.True(GovernedLoopHumanInputWaitingCheckpointContractHash.Matches(invalidEvidence));
+        Assert.False(GovernedLoopHumanInputWaitingCheckpointContractValidator.ValidateEvidence(invalidEvidence).IsValid);
+        Assert.Equal(GovernedLoopHumanInputWaitingCheckpointReplayDisposition.Invalid, GovernedLoopHumanInputWaitingCheckpointReplayClassifier.Classify(invalidEvidence, pending.Evidence[0]));
+        Assert.Equal(GovernedLoopHumanInputWaitingCheckpointReplayDisposition.Invalid, GovernedLoopHumanInputWaitingCheckpointReplayClassifier.Classify(pending.Evidence[0], invalidEvidence));
+    }
+
+    [Fact]
+    public void Supersession_requires_a_distinct_replacing_checkpoint_identity()
+    {
+        var superseded = GovernedLoopHumanInputWaitingCheckpointTestData.Superseded();
+        var selfSupersedingEvidence = GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(superseded.Evidence[1] with { SupersedingCheckpointId = superseded.Binding.CheckpointId });
+        var selfSuperseded = GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(new GovernedLoopHumanInputWaitingCheckpoint(1, superseded.Binding, superseded.NodeConfiguration, superseded.Request, GovernedLoopHumanInputWaitingCheckpointPosture.Superseded, [superseded.Evidence[0], selfSupersedingEvidence], string.Empty));
+
+        Assert.True(GovernedLoopHumanInputWaitingCheckpointContractValidator.Validate(superseded).IsValid);
+        Assert.Contains(GovernedLoopHumanInputWaitingCheckpointContractValidator.Validate(selfSuperseded).Errors, error => error.Code == "self_supersession");
     }
 
     [Fact]

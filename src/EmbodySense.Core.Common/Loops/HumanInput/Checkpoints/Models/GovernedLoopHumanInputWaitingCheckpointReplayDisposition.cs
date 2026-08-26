@@ -10,5 +10,8 @@ public enum GovernedLoopHumanInputWaitingCheckpointReplayDisposition
     ExactReplay = 1,
 
     /// <summary>The proposed artifact reuses an identity with divergent canonical contents.</summary>
-    DivergentReuse = 2
+    DivergentReuse = 2,
+
+    /// <summary>At least one compared artifact is semantically invalid even when its self-hash is internally consistent.</summary>
+    Invalid = 3
 }

@@ -315,6 +315,12 @@ public static class GovernedLoopHumanInputWaitingCheckpointContractValidator
         {
             Add(errors, "terminal_after_deadline", "$.evidence[1].occurredAtUtc", "Cancellation and supersession must occur before the pending request expires.");
         }
+        if (posture == GovernedLoopHumanInputWaitingCheckpointPosture.Superseded
+            && evidence[1] is { } supersession
+            && string.Equals(supersession.SupersedingCheckpointId, binding.CheckpointId, StringComparison.Ordinal))
+        {
+            Add(errors, "self_supersession", "$.evidence[1].supersedingCheckpointId", "A superseded checkpoint must name a distinct immutable replacing checkpoint.");
+        }
     }
 
     private static void ValidateEvidenceShape(GovernedLoopHumanInputWaitingCheckpointEvidence? evidence, string path, List<GovernedLoopHumanInputWaitingCheckpointValidationError> errors)
