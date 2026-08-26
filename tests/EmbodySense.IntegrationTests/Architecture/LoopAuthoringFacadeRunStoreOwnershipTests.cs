@@ -103,7 +103,47 @@ public sealed class LoopAuthoringFacadeRunStoreOwnershipTests
         Assert.True(fieldTransfer.SpanStart > runtimeConstructor.SpanStart);
         Assert.Equal("DisposeAsync", disposeMethod.Identifier.ValueText);
         Assert.True(ownershipFence.SpanStart < disposal.SpanStart);
-        Assert.Contains(ownershipFence.Statement.DescendantNodesAndSelf().OfType<ReturnStatementSyntax>(), _ => true);
+    }
+
+    [Fact]
+    public void Disposal_fence_guard_rejects_inverted_or_nonimmediate_return_variants()
+    {
+        const string Source = """
+            internal sealed class Runtime
+            {
+                private int _disposed;
+
+                private void Dispose()
+                {
+                    if (Interlocked.Exchange(ref _disposed, 1) != 0)
+                    {
+                        return;
+                    }
+
+                    if (Interlocked.Exchange(ref _disposed, 1) == 0)
+                    {
+                        return;
+                    }
+
+                    if (Interlocked.Exchange(ref _disposed, 1) != 0)
+                    {
+                        Observe();
+                        return;
+                    }
+                }
+
+                private void Observe()
+                {
+                }
+            }
+            """;
+
+        var fences = Parse(Source).DescendantNodes().OfType<IfStatementSyntax>().ToArray();
+
+        Assert.Equal(3, fences.Length);
+        Assert.True(IsIdempotentDisposalFence(fences[0]));
+        Assert.False(IsIdempotentDisposalFence(fences[1]));
+        Assert.False(IsIdempotentDisposalFence(fences[2]));
     }
 
     [Theory]
@@ -191,21 +231,27 @@ public sealed class LoopAuthoringFacadeRunStoreOwnershipTests
 
     private static bool IsIdempotentDisposalFence(IfStatementSyntax statement)
     {
-        var exchange = statement.Condition.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>().SingleOrDefault(invocation =>
-            invocation.Expression is MemberAccessExpressionSyntax
+        if (statement.Condition is not BinaryExpressionSyntax
+            {
+                Left: InvocationExpressionSyntax exchange,
+                Right: LiteralExpressionSyntax { Token.ValueText: "0" }
+            } comparison
+            || comparison.RawKind != (int)SyntaxKind.NotEqualsExpression
+            || exchange.Expression is not MemberAccessExpressionSyntax
             {
                 Expression: IdentifierNameSyntax { Identifier.ValueText: "Interlocked" },
                 Name: IdentifierNameSyntax { Identifier.ValueText: "Exchange" }
-            });
-        if (exchange is null)
+            }
+            || exchange.ArgumentList.Arguments.Count != 2
+            || exchange.ArgumentList.Arguments[0].RefOrOutKeyword.RawKind != (int)SyntaxKind.RefKeyword
+            || exchange.ArgumentList.Arguments[0].Expression is not IdentifierNameSyntax { Identifier.ValueText: "_disposed" }
+            || exchange.ArgumentList.Arguments[1].Expression is not LiteralExpressionSyntax { Token.ValueText: "1" })
         {
             return false;
         }
 
-        return exchange.ArgumentList.Arguments.Count == 2
-            && exchange.ArgumentList.Arguments[0].RefOrOutKeyword.RawKind == (int)SyntaxKind.RefKeyword
-            && exchange.ArgumentList.Arguments[0].Expression is IdentifierNameSyntax { Identifier.ValueText: "_disposed" }
-            && exchange.ArgumentList.Arguments[1].Expression is LiteralExpressionSyntax { Token.ValueText: "1" };
+        return statement.Statement is ReturnStatementSyntax
+            || statement.Statement is BlockSyntax { Statements.Count: 1 } block && block.Statements[0] is ReturnStatementSyntax;
     }
 
     private static string FindRepositoryRoot()
