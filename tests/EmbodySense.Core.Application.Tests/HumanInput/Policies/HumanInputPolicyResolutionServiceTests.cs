@@ -39,12 +39,16 @@ public sealed class HumanInputPolicyResolutionServiceTests
         var unavailableSource = Source();
         unavailableSource.Results[new HumanInputPolicyReference("failure-one", "revision-one")] = new(HumanInputPolicySourceReadStatus.Unavailable, null, 0);
         var unavailable = await new HumanInputPolicyResolutionService(unavailableSource, new FixedTimeProvider(_at)).ResolveAsync(Request());
+        var zeroGenerationSource = Source();
+        zeroGenerationSource.Results[new HumanInputPolicyReference("failure-one", "revision-one")] = new(HumanInputPolicySourceReadStatus.Ready, Failure(), 0);
+        var zeroGeneration = await new HumanInputPolicyResolutionService(zeroGenerationSource, new FixedTimeProvider(_at)).ResolveAsync(Request());
 
         Assert.Equal(HumanInputPolicyResolutionStatus.NotFound, missing.Status);
         Assert.Equal(HumanInputPolicyResolutionStatus.Divergent, divergent.Status);
         Assert.Equal(HumanInputPolicyResolutionStatus.WrongKind, wrongKind.Status);
         Assert.Equal(HumanInputPolicyResolutionStatus.ScopeMismatch, scope.Status);
         Assert.Equal(HumanInputPolicyResolutionStatus.Unavailable, unavailable.Status);
+        Assert.Equal(HumanInputPolicyResolutionStatus.Unavailable, zeroGeneration.Status);
     }
 
     [Fact]
@@ -52,12 +56,15 @@ public sealed class HumanInputPolicyResolutionServiceTests
     {
         var malformed = Request() with { Configuration = Configuration("timeout-one", "failure-one@revision-one") };
         var defaulted = Request() with { Configuration = Configuration("default@revision-one", "failure-one@revision-one") };
+        var secret = Request() with { Configuration = Configuration("ghp_fake@revision-one", "failure-one@revision-one") };
         var malformedResult = await new HumanInputPolicyResolutionService(Source(), new FixedTimeProvider(_at)).ResolveAsync(malformed);
         var defaultedResult = await new HumanInputPolicyResolutionService(Source(), new FixedTimeProvider(_at)).ResolveAsync(defaulted);
+        var secretResult = await new HumanInputPolicyResolutionService(Source(), new FixedTimeProvider(_at)).ResolveAsync(secret);
         var clockResult = await new HumanInputPolicyResolutionService(Source(), new FixedTimeProvider(new DateTimeOffset(2026, 8, 26, 10, 0, 0, TimeSpan.FromHours(-5)))).ResolveAsync(Request());
 
         Assert.Equal(HumanInputPolicyResolutionStatus.Invalid, malformedResult.Status);
         Assert.Equal(HumanInputPolicyResolutionStatus.Invalid, defaultedResult.Status);
+        Assert.Equal(HumanInputPolicyResolutionStatus.Invalid, secretResult.Status);
         Assert.Equal(HumanInputPolicyResolutionStatus.Unavailable, clockResult.Status);
     }
 

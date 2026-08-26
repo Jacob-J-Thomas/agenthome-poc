@@ -76,7 +76,7 @@ public sealed class HumanInputPolicyResolutionService
     {
         if (!IsDefined(timeout) || !IsDefined(failure)) return HumanInputPolicyResolutionStatus.Unavailable;
         if (timeout!.Status == HumanInputPolicySourceReadStatus.NotFound || failure!.Status == HumanInputPolicySourceReadStatus.NotFound) return HumanInputPolicyResolutionStatus.NotFound;
-        if (timeout.Status != HumanInputPolicySourceReadStatus.Ready || failure.Status != HumanInputPolicySourceReadStatus.Ready || timeout.Policy is null || failure.Policy is null || timeout.StoreGeneration < 0 || failure.StoreGeneration < 0) return HumanInputPolicyResolutionStatus.Unavailable;
+        if (timeout.Status != HumanInputPolicySourceReadStatus.Ready || failure.Status != HumanInputPolicySourceReadStatus.Ready || timeout.Policy is null || failure.Policy is null || timeout.StoreGeneration <= 0 || failure.StoreGeneration <= 0) return HumanInputPolicyResolutionStatus.Unavailable;
         return null;
     }
 

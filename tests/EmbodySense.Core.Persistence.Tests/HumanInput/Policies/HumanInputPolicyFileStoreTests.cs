@@ -1,3 +1,4 @@
+using System.Text;
 using EmbodySense.Core.Application.HumanInput.Policies.Models;
 using EmbodySense.Core.Common.Loops.HumanInput.Policies;
 using EmbodySense.Core.Common.Loops.HumanInput.Policies.Models;
@@ -64,6 +65,23 @@ public sealed class HumanInputPolicyFileStoreTests
 
         Assert.Equal(HumanInputPolicySourceReadStatus.Unavailable, result.Status);
         Assert.Null(result.Policy);
+    }
+
+    [Fact]
+    public async Task Semantically_equivalent_noncanonical_persisted_policy_bytes_are_unavailable()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var policy = Timeout();
+        var store = new HumanInputPolicyFileStore(paths);
+        Assert.Equal(HumanInputPolicyFileStoreWriteStatus.Committed, (await store.CommitAsync(policy, 0)).Status);
+
+        var path = Path.Combine(paths.AgentPath, "human-input", "policies", "timeout-one@revision-one.json");
+        await File.WriteAllBytesAsync(path, Encoding.UTF8.GetBytes(" " + Encoding.UTF8.GetString(HumanInputPolicyArtifactJson.Serialize(policy))));
+
+        var result = await new HumanInputPolicyFileStore(paths).ReadAsync(policy.Reference);
+
+        Assert.Equal(HumanInputPolicySourceReadStatus.Unavailable, result.Status);
     }
 
     [Fact]

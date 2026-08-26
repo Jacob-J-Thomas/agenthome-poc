@@ -1,5 +1,3 @@
-using EmbodySense.Core.Common.HumanInput;
-
 namespace EmbodySense.Core.Common.Loops.HumanInput.Policies;
 
 /// <summary>References one exact immutable Human Input policy revision without selecting a current or default revision.</summary>
@@ -27,8 +25,8 @@ public sealed record HumanInputPolicyReference(string PolicyId, string RevisionI
         var separator = value.IndexOf(Separator, StringComparison.Ordinal);
         var policyId = value[..separator];
         var revisionId = value[(separator + 1)..];
-        if (!HumanInputIdentifier.IsValid(policyId)
-            || !HumanInputIdentifier.IsValid(revisionId)
+        if (!HumanInputPolicyTextSafety.IsSafeIdentifier(policyId)
+            || !HumanInputPolicyTextSafety.IsSafeIdentifier(revisionId)
             || _nonExactIdentifiers.Contains(policyId, StringComparer.Ordinal)
             || _nonExactIdentifiers.Contains(revisionId, StringComparer.Ordinal))
         {

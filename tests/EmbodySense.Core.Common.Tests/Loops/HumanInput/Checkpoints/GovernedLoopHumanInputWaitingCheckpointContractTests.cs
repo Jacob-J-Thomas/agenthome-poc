@@ -2,6 +2,7 @@ using EmbodySense.Core.Common.HumanInput;
 using EmbodySense.Core.Common.HumanInput.Models;
 using EmbodySense.Core.Common.Loops.HumanInput.Checkpoints;
 using EmbodySense.Core.Common.Loops.HumanInput.Checkpoints.Models;
+using EmbodySense.Core.Common.Loops.HumanInput.Policies;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 
 namespace EmbodySense.Core.Common.Tests.Loops.HumanInput.Checkpoints;
@@ -14,11 +15,15 @@ public sealed class GovernedLoopHumanInputWaitingCheckpointContractTests
         var pending = GovernedLoopHumanInputWaitingCheckpointTestData.Pending();
         var malformedPolicy = pending.ResolvedPolicy with { NodeId = "other-node" };
         var malformed = GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(new GovernedLoopHumanInputWaitingCheckpoint(1, pending.Binding, pending.NodeConfiguration, malformedPolicy, pending.Request, pending.Posture, pending.Evidence, string.Empty));
+        var policy = pending.ResolvedPolicy;
+        var secretPolicy = new HumanInputPolicyResolutionSnapshot(policy.SchemaVersion, policy.WorkspaceId, policy.GraphId, policy.GraphRevisionId, policy.NodeId, policy.ActorId, HumanInputPolicyArtifactHash.Apply(policy.TimeoutPolicy with { PolicyId = "ghp_fake" }), policy.FailurePolicy, policy.ResolvedAtUtc, policy.ExpiresAtUtc, policy.TerminalDisposition, policy.ResolutionHash);
+        var secret = GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(new GovernedLoopHumanInputWaitingCheckpoint(1, pending.Binding, pending.NodeConfiguration, secretPolicy, pending.Request, pending.Posture, pending.Evidence, string.Empty));
         var retimedRequest = HumanInputRequestHash.Apply(pending.Request with { Timing = new HumanInputTiming(pending.Request.Timing.RequestedAtUtc, pending.Request.Timing.ExpiresAtUtc.AddMinutes(-1)), RequestHash = string.Empty });
         var retimed = GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(new GovernedLoopHumanInputWaitingCheckpoint(1, pending.Binding, pending.NodeConfiguration, pending.ResolvedPolicy, retimedRequest, pending.Posture, pending.Evidence, string.Empty));
 
         Assert.True(GovernedLoopHumanInputWaitingCheckpointContractValidator.Validate(pending).IsValid);
         Assert.Contains(GovernedLoopHumanInputWaitingCheckpointContractValidator.Validate(malformed).Errors, error => error.Code == "invalid_resolved_policy");
+        Assert.Contains(GovernedLoopHumanInputWaitingCheckpointContractValidator.Validate(secret).Errors, error => error.Code == "invalid_resolved_policy");
         Assert.Contains(GovernedLoopHumanInputWaitingCheckpointContractValidator.Validate(retimed).Errors, error => error.Code == "request_policy_timing_mismatch");
     }
 

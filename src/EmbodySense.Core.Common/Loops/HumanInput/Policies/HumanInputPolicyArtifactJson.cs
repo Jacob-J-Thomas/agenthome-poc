@@ -59,6 +59,7 @@ public static class HumanInputPolicyArtifactJson
                 (HumanInputTerminalDisposition)root.GetProperty("terminalDisposition").GetInt32(),
                 root.GetProperty("contentHash").GetString()!);
             if (!HumanInputPolicyArtifactValidator.Validate(artifact).IsValid) throw new FormatException("The Human Input policy JSON artifact is invalid.");
+            if (!utf8Json.SequenceEqual(Serialize(artifact))) throw new FormatException("The Human Input policy JSON bytes are not canonical.");
             return artifact;
         }
         catch (JsonException exception)

@@ -6,8 +6,6 @@ namespace EmbodySense.Core.Common.Loops.HumanInput.Policies;
 /// <summary>Validates immutable schema-1 Human Input timeout and failure policy artifacts without resolving, persisting, or authorizing them.</summary>
 public static class HumanInputPolicyArtifactValidator
 {
-    private static readonly string[] _forbiddenTerms = ["secret", "password", "token", "credential", "api-key", "apikey", "approve", "approval", "grant", "authorize", "review"];
-
     /// <summary>Validates one complete immutable policy artifact and its canonical content hash.</summary>
     /// <param name="artifact">The untrusted artifact candidate.</param>
     /// <returns>Every deterministic artifact validation failure.</returns>
@@ -50,7 +48,7 @@ public static class HumanInputPolicyArtifactValidator
 
     private static void Identifier(string? value, string path, List<HumanInputPolicyArtifactValidationError> errors)
     {
-        if (!HumanInputIdentifier.IsValid(value) || _forbiddenTerms.Any(term => value!.Contains(term, StringComparison.OrdinalIgnoreCase))) Add(errors, "unsafe_identifier", path, "Policy identities and scopes must be canonical non-secret data-only identifiers.");
+        if (!HumanInputPolicyTextSafety.IsSafeIdentifier(value)) Add(errors, "unsafe_identifier", path, "Policy identities and scopes must be canonical non-secret data-only identifiers.");
     }
 
     private static void Add(List<HumanInputPolicyArtifactValidationError> errors, string code, string path, string message) => errors.Add(new HumanInputPolicyArtifactValidationError(code, path, message));

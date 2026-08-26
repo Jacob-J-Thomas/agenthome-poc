@@ -1,3 +1,5 @@
+using System.Text;
+using System.Text.Json;
 using EmbodySense.Core.Common.Loops.HumanInput.Policies;
 using EmbodySense.Core.Common.Loops.HumanInput.Policies.Models;
 
@@ -14,6 +16,7 @@ public sealed class HumanInputPolicyArtifactTests
 
         Assert.True(HumanInputPolicyReference.TryParse("timeout-one@revision-one", out var reference));
         Assert.Equal(timeout.Reference, reference);
+        Assert.True(HumanInputPolicyReference.TryParse("task-one@revision-one", out _));
         Assert.False(HumanInputPolicyReference.TryParse("timeout-one", out _));
         Assert.False(HumanInputPolicyReference.TryParse("default@revision-one", out _));
         Assert.True(HumanInputPolicyArtifactValidator.Validate(timeout).IsValid);
@@ -42,6 +45,35 @@ public sealed class HumanInputPolicyArtifactTests
     }
 
     [Fact]
+    public void Shared_text_safety_rejects_secret_markers_in_policy_ids_references_and_artifacts()
+    {
+        var timeout = Timeout();
+        var unsafePolicyIds = new[] { "api_key-one", "authorization-one", "ghp_fake", "github_pat_fake", "xoxb-fake", "sk-fake", "access_token-one", "private_key-one" };
+
+        Assert.All(unsafePolicyIds, policyId =>
+        {
+            Assert.False(HumanInputPolicyReference.TryParse(policyId + "@revision-one", out _));
+            Assert.False(HumanInputPolicyArtifactValidator.Validate(HumanInputPolicyArtifactHash.Apply(timeout with { PolicyId = policyId })).IsValid);
+        });
+    }
+
+    [Fact]
+    public void Equivalent_noncanonical_json_bytes_are_rejected_before_artifact_admission()
+    {
+        var canonical = HumanInputPolicyArtifactJson.Serialize(Timeout());
+        var text = Encoding.UTF8.GetString(canonical);
+        var variants = new[]
+        {
+            Encoding.UTF8.GetBytes(" " + text),
+            Encoding.UTF8.GetBytes(text.Replace("\"timeout-one\"", "\"time\\u006fut-one\"", StringComparison.Ordinal)),
+            Encoding.UTF8.GetBytes(text.Replace("\"responseWindowMilliseconds\":3600000", "\"responseWindowMilliseconds\":3600000.0", StringComparison.Ordinal)),
+            ReverseProperties(canonical)
+        };
+
+        Assert.All(variants, variant => Assert.Throws<FormatException>(() => HumanInputPolicyArtifactJson.Deserialize(variant)));
+    }
+
+    [Fact]
     public void Trusted_snapshot_binds_exact_scope_policies_and_overflow_safe_finite_window()
     {
         var snapshot = HumanInputPolicyResolutionSnapshot.TryCreate("workspace-one", "graph-one", "revision-one", "node-one", "actor-one", Timeout(), Failure(), At);
@@ -61,4 +93,21 @@ public sealed class HumanInputPolicyArtifactTests
 
     internal static HumanInputPolicyArtifact Failure()
         => HumanInputPolicyArtifactHash.Apply(new HumanInputPolicyArtifact(1, "failure-one", "revision-one", HumanInputPolicyKind.DeadlineDisposition, "workspace-one", "graph-one", "actor-one", null, HumanInputTerminalDisposition.Expired, string.Empty));
+
+    private static byte[] ReverseProperties(byte[] json)
+    {
+        using var document = JsonDocument.Parse(json);
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream))
+        {
+            writer.WriteStartObject();
+            foreach (var property in document.RootElement.EnumerateObject().Reverse())
+            {
+                writer.WritePropertyName(property.Name);
+                property.Value.WriteTo(writer);
+            }
+            writer.WriteEndObject();
+        }
+        return stream.ToArray();
+    }
 }
