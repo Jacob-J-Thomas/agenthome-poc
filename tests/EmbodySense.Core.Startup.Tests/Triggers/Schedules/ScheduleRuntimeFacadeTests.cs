@@ -537,9 +537,11 @@ public sealed class ScheduleRuntimeFacadeTests
     {
         using var workspace = new TestWorkspace();
         var context = ScheduleCurrentEvidenceTestContext.Create();
+        var runStore = new ScheduleOverlapRunStore();
         var runtime = ScheduleRuntimeFactory.Create(
             new WorkspacePaths(workspace.RootPath),
             context,
+            runStore,
             new FixedTimeProvider(_now));
 
         Assert.Equal(ScheduleStoreReadStatus.NotFound, (await runtime.ReadAsync(context.Definition.ScheduleId)).Status);
@@ -549,6 +551,51 @@ public sealed class ScheduleRuntimeFacadeTests
         await Assert.ThrowsAsync<ObjectDisposedException>(() => runtime.ReadAsync(context.Definition.ScheduleId));
         await Assert.ThrowsAsync<ObjectDisposedException>(() => runtime.EvaluateOnceAsync(context.Definition.ScheduleId));
         await Assert.ThrowsAsync<ObjectDisposedException>(() => runtime.CreateAsync(context.Definition));
+        Assert.Equal(0, runStore.DisposeCount);
+    }
+
+    [Fact]
+    public async Task Current_evidence_and_run_store_composition_observes_the_exact_borrowed_store_without_taking_ownership()
+    {
+        using var workspace = new TestWorkspace();
+        var context = ScheduleCurrentEvidenceTestContext.Create();
+        var runStore = new ScheduleOverlapRunStore();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var runtime = ScheduleRuntimeFactory.Create(
+            paths,
+            context.AdapterUnderTest(),
+            runStore,
+            new RuntimeTimeZone(),
+            new FixedTimeProvider(_now));
+
+        Assert.Equal(ScheduleRuntimeCreateStatus.Created, (await runtime.CreateAsync(context.Definition)).Status);
+        var evaluated = await runtime.EvaluateOnceAsync(context.Definition.ScheduleId);
+
+        Assert.Equal(ScheduleEvaluationStatus.Queued, evaluated.Status);
+        Assert.Equal(context.Definition.Target.LoopId, runStore.LastRequestedLoopId);
+        Assert.Equal(1, runStore.ReadCount);
+
+        runtime.Dispose();
+
+        Assert.Equal(0, runStore.DisposeCount);
+        await runStore.GetNonterminalByLoopAsync(context.Definition.Target.LoopId);
+        Assert.Equal(2, runStore.ReadCount);
+    }
+
+    [Fact]
+    public void Current_evidence_and_run_store_composition_failure_does_not_dispose_the_borrowed_store()
+    {
+        using var workspace = new TestWorkspace();
+        var context = ScheduleCurrentEvidenceTestContext.Create();
+        var runStore = new ScheduleOverlapRunStore();
+
+        Assert.Throws<ArgumentNullException>(() => ScheduleRuntimeFactory.Create(
+            new WorkspacePaths(workspace.RootPath),
+            context.AdapterUnderTest(),
+            runStore,
+            null!));
+
+        Assert.Equal(0, runStore.DisposeCount);
     }
 
     [Fact]
@@ -589,6 +636,7 @@ public sealed class ScheduleRuntimeFacadeTests
             paths,
             new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath),
             context,
+            new ScheduleOverlapRunStore(),
             new FixedTimeProvider(timeZoneEvidence.EarlierUtc.Value.AddMinutes(1)));
 
         var created = await runtime.CreateAsync(definition);

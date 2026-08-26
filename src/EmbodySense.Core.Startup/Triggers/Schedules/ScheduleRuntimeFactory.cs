@@ -1,5 +1,6 @@
 using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Application.Governance.Authority.Grants;
+using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Revisions;
 using EmbodySense.Core.Application.Triggers;
 using EmbodySense.Core.Application.Triggers.Models;
@@ -22,31 +23,53 @@ namespace EmbodySense.Core.Startup.Triggers.Schedules;
 public static class ScheduleRuntimeFactory
 {
     /// <summary>Creates production composition with the default server-owned capability trust root.</summary>
+    /// <remarks>
+    /// <paramref name="runStore"/> remains owned by the caller and must outlive the returned facade. The facade and
+    /// its overlap adapter borrow the store only; disposing the facade never disposes the store.
+    /// </remarks>
+    /// <param name="paths">The workspace paths for schedule and authority persistence.</param>
+    /// <param name="payloadSource">The retained governed payload source.</param>
+    /// <param name="runStore">The caller-owned canonical run store used for overlap reads.</param>
+    /// <param name="timeProvider">The optional clock used by the composition.</param>
+    /// <returns>An inert one-shot schedule facade.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="paths"/>, <paramref name="payloadSource"/>, or <paramref name="runStore"/> is null.</exception>
     public static ScheduleRuntimeFacade Create(
         WorkspacePaths paths,
         IScheduleGovernedPayloadSource payloadSource,
+        ICustomLoopRunStore runStore,
         TimeProvider? timeProvider = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
         ArgumentNullException.ThrowIfNull(payloadSource);
-        return Create(paths, FileCapabilityCatalogTrustProvider.CreateDefault(), payloadSource, timeProvider);
+        ArgumentNullException.ThrowIfNull(runStore);
+        return Create(paths, FileCapabilityCatalogTrustProvider.CreateDefault(), payloadSource, runStore, timeProvider);
     }
 
     /// <summary>Creates production composition with explicit, retained trust and payload sources.</summary>
     /// <remarks>
     /// The supplied sources are captured once for the facade lifetime and are never accepted per evaluation. Composition
     /// creates no timer, worker, watcher, or background task; callers invoke <see cref="ScheduleRuntimeFacade.EvaluateOnceAsync"/>
-    /// explicitly.
+    /// explicitly. <paramref name="runStore"/> remains owned by the caller, must outlive the returned facade, and is
+    /// borrowed only for schedule overlap reads; factory or facade disposal never disposes it.
     /// </remarks>
+    /// <param name="paths">The workspace paths for schedule and authority persistence.</param>
+    /// <param name="trustProvider">The retained capability catalog trust provider.</param>
+    /// <param name="payloadSource">The retained governed payload source.</param>
+    /// <param name="runStore">The caller-owned canonical run store used for overlap reads.</param>
+    /// <param name="timeProvider">The optional clock used by the composition.</param>
+    /// <returns>An inert one-shot schedule facade.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="paths"/>, <paramref name="trustProvider"/>, <paramref name="payloadSource"/>, or <paramref name="runStore"/> is null.</exception>
     public static ScheduleRuntimeFacade Create(
         WorkspacePaths paths,
         ICapabilityCatalogTrustProvider trustProvider,
         IScheduleGovernedPayloadSource payloadSource,
+        ICustomLoopRunStore runStore,
         TimeProvider? timeProvider = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
         ArgumentNullException.ThrowIfNull(trustProvider);
         ArgumentNullException.ThrowIfNull(payloadSource);
+        ArgumentNullException.ThrowIfNull(runStore);
         trustProvider.RequireDisjointWorkspace(paths.RootPath);
 
         var clock = timeProvider ?? TimeProvider.System;
@@ -110,7 +133,7 @@ public static class ScheduleRuntimeFactory
                 payloadSource,
                 authorityTransaction,
                 clock);
-            var overlap = new ScheduleRunOverlapAdapter(new CustomLoopRunStore(paths));
+            var overlap = new ScheduleRunOverlapAdapter(runStore);
             var queue = CreateQueue(paths, clock);
             return CreateCore(
                 new ScheduleStore(paths),
@@ -127,6 +150,42 @@ public static class ScheduleRuntimeFactory
             roleStore.Dispose();
             throw;
         }
+    }
+
+    /// <summary>Creates canonical durable schedule and queue composition over caller-owned current evidence and run state.</summary>
+    /// <remarks>
+    /// <paramref name="runStore"/> is borrowed only for overlap reads, remains owned by the caller, and must outlive
+    /// the returned facade. Disposing the facade never disposes the store, including when construction or evaluation fails.
+    /// </remarks>
+    /// <param name="paths">The workspace paths for schedule and queue persistence.</param>
+    /// <param name="currentEvidence">The caller-owned port that resolves current governed target evidence.</param>
+    /// <param name="runStore">The caller-owned canonical run store used for overlap reads.</param>
+    /// <param name="timeZone">The caller-owned time-zone evidence port.</param>
+    /// <param name="timeProvider">The optional clock used by the composition.</param>
+    /// <returns>An inert one-shot schedule facade.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="paths"/>, <paramref name="currentEvidence"/>, <paramref name="runStore"/>, or <paramref name="timeZone"/> is null.</exception>
+    public static ScheduleRuntimeFacade Create(
+        WorkspacePaths paths,
+        IScheduleCurrentEvidencePort currentEvidence,
+        ICustomLoopRunStore runStore,
+        IScheduleTimeZonePort timeZone,
+        TimeProvider? timeProvider = null)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        ArgumentNullException.ThrowIfNull(currentEvidence);
+        ArgumentNullException.ThrowIfNull(runStore);
+        ArgumentNullException.ThrowIfNull(timeZone);
+        var clock = timeProvider ?? TimeProvider.System;
+        var queue = CreateQueue(paths, clock);
+        return CreateCore(
+            new ScheduleStore(paths),
+            currentEvidence,
+            new ScheduleRunOverlapAdapter(runStore),
+            timeZone,
+            queue.Admission,
+            queue.History,
+            clock,
+            null);
     }
 
     /// <summary>Creates canonical durable schedule and queue composition over caller-owned evidence ports.</summary>
