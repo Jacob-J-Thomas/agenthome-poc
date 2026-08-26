@@ -168,6 +168,18 @@ public sealed class HumanReviewContinuationRecoveryStoreTests
         Assert.False(page.SourceTruncated);
     }
 
+    [Fact]
+    public async Task Discovery_propagates_requested_cancellation_from_the_source_page()
+    {
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        var recovery = new HumanReviewContinuationRecoveryStore(
+            new HumanReviewContinuationRecoveryPagingTestStore(new CustomLoopRunPage([], null), listException: new OperationCanceledException(cancellation.Token)),
+            new HumanReviewContinuationRecoveryUnusedGraphStore());
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => recovery.ListCandidatesAsync(1, null, new DateTimeOffset(2026, 8, 26, 12, 0, 0, TimeSpan.Zero), cancellation.Token));
+    }
+
     [Theory]
     [InlineData(typeof(FormatException), HumanReviewContinuationRecoveryPageStatus.Invalid)]
     [InlineData(typeof(IOException), HumanReviewContinuationRecoveryPageStatus.Unavailable)]
@@ -185,6 +197,22 @@ public sealed class HumanReviewContinuationRecoveryStoreTests
         Assert.Equal(expected, page.Status);
         Assert.Empty(page.Candidates);
         Assert.Null(page.NextScanCursor);
+    }
+
+    [Fact]
+    public async Task Discovery_propagates_requested_cancellation_from_an_exact_summary_reread()
+    {
+        var now = new DateTimeOffset(2026, 8, 26, 12, 0, 0, TimeSpan.Zero);
+        var summary = new CustomLoopRunSummary("run-raced-away", "loop-one", "admit-one", 1, 1, CustomLoopRunStatus.Paused, now, now, null, 0, 0, null, false);
+        using var cancellation = new CancellationTokenSource();
+        var recovery = new HumanReviewContinuationRecoveryStore(
+            new HumanReviewContinuationRecoveryPagingTestStore(
+                new CustomLoopRunPage([summary], null),
+                getException: new OperationCanceledException(cancellation.Token),
+                onGet: cancellation.Cancel),
+            new HumanReviewContinuationRecoveryUnusedGraphStore());
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => recovery.ListCandidatesAsync(1, null, now, cancellation.Token));
     }
 
     [Fact]
@@ -257,6 +285,18 @@ public sealed class HumanReviewContinuationRecoveryStoreTests
     }
 
     [Fact]
+    public async Task Exact_reread_propagates_requested_cancellation_from_the_canonical_run_source()
+    {
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        var recovery = new HumanReviewContinuationRecoveryStore(
+            new HumanReviewContinuationRecoveryPagingTestStore(new CustomLoopRunPage([], null), getException: new OperationCanceledException(cancellation.Token)),
+            new HumanReviewContinuationRecoveryUnusedGraphStore());
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => recovery.ReadAsync(new HumanReviewContinuationCandidateQuery("run-one", null!, null!, null, null, null, null), cancellation.Token));
+    }
+
+    [Fact]
     public async Task Exact_reread_rejects_any_changed_continuation_fence()
     {
         using var workspace = new TestWorkspace();
@@ -308,6 +348,26 @@ public sealed class HumanReviewContinuationRecoveryStoreTests
         var missing = await new HumanReviewContinuationRecoveryStore(runs, new HumanReviewContinuationRecoveryUnusedGraphStore(null, GovernedLoopRevisionStoreReadStatus.NotFound)).ReadAsync(exact);
 
         Assert.Equal(HumanReviewContinuationCandidateReadStatus.Missing, missing.Status);
+    }
+
+    [Fact]
+    public async Task Exact_reread_propagates_requested_cancellation_from_the_immutable_graph_source()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var published = await PublishApprovedWakeAsync(paths, "recovery-reread-cancellation");
+        using var runs = new CustomLoopRunStore(paths);
+        var discovery = new HumanReviewContinuationRecoveryStore(runs, new HumanReviewContinuationRecoveryUnusedGraphStore());
+        var candidate = Assert.Single((await discovery.ListCandidatesAsync(1, null, published.Continuation.Wake.PublishedAtUtc.AddSeconds(1))).Candidates);
+        var query = new HumanReviewContinuationCandidateQuery(candidate.RunId, candidate.Request, candidate.Decision, candidate.Wake, null, candidate.Reservation, candidate.ExpectedGeneration);
+        using var cancellation = new CancellationTokenSource();
+        var recovery = new HumanReviewContinuationRecoveryStore(
+            runs,
+            new HumanReviewContinuationRecoveryUnusedGraphStore(
+                exception: new OperationCanceledException(cancellation.Token),
+                onRead: cancellation.Cancel));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => recovery.ReadAsync(query, cancellation.Token));
     }
 
     [Fact]

@@ -9,14 +9,18 @@ internal sealed class HumanReviewContinuationRecoveryPagingTestStore(
     CustomLoopRunPage page,
     CustomLoopRunRecord? run = null,
     Exception? listException = null,
-    Exception? getException = null) : ICustomLoopRunStore
+    Exception? getException = null,
+    Action? onGet = null) : ICustomLoopRunStore
 {
     public string? ReceivedCursor { get; private set; }
 
     public Task<CustomLoopRunStoreResult> CreateAsync(CustomLoopRunRecord run, CancellationToken cancellationToken = default) => throw new NotSupportedException();
 
     public Task<CustomLoopRunRecord?> GetAsync(string runId, CancellationToken cancellationToken = default)
-        => getException is null ? Task.FromResult(run) : Task.FromException<CustomLoopRunRecord?>(getException);
+    {
+        onGet?.Invoke();
+        return getException is null ? Task.FromResult(run) : Task.FromException<CustomLoopRunRecord?>(getException);
+    }
 
     public Task<CustomLoopRunRecord?> GetByAdmissionOperationAsync(string admissionOperationId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
 

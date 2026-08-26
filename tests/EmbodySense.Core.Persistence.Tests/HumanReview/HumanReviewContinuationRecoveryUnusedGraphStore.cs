@@ -9,14 +9,18 @@ namespace EmbodySense.Core.Persistence.Tests.HumanReview;
 internal sealed class HumanReviewContinuationRecoveryUnusedGraphStore(
     GovernedLoopGraphRevisionArtifact? artifact = null,
     GovernedLoopRevisionStoreReadStatus? status = null,
-    Exception? exception = null) : IGovernedLoopGraphRevisionStore
+    Exception? exception = null,
+    Action? onRead = null) : IGovernedLoopGraphRevisionStore
 {
     public Task<GovernedLoopGraphRevisionReadResult> ReadGraphAsync(string graphId, CancellationToken cancellationToken = default) => throw new NotSupportedException();
 
     public Task<GovernedLoopGraphRevisionArtifactReadResult> ReadArtifactAsync(GovernedLoopRevisionReference revision, CancellationToken cancellationToken = default)
-        => exception is null
+    {
+        onRead?.Invoke();
+        return exception is null
             ? Task.FromResult(new GovernedLoopGraphRevisionArtifactReadResult(status ?? (artifact is null ? GovernedLoopRevisionStoreReadStatus.Unavailable : GovernedLoopRevisionStoreReadStatus.Ready), 1, artifact))
             : Task.FromException<GovernedLoopGraphRevisionArtifactReadResult>(exception);
+    }
 
     public Task<GovernedLoopGraphRevisionMutationReadResult> ReadForMutationAsync(string graphId, string operationId, string lifecycleRequestHash, string authoringRequestHash, CancellationToken cancellationToken = default) => throw new NotSupportedException();
 
