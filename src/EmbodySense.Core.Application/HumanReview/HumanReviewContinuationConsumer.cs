@@ -12,7 +12,7 @@ using EmbodySense.Core.Common.Loops.Sequential.Models;
 namespace EmbodySense.Core.Application.HumanReview;
 
 /// <summary>Consumes detached canonical Human Review candidates into fail-closed declared paths without persisting, leasing, resuming, or dispatching work.</summary>
-/// <remarks>Approval remains consent only. Every release intent requires exact current run, frontier, graph, authority, and—when applicable—effect-certainty evidence. The later durable worker owns compare-exchange, callback execution, and completion or retirement artifact construction.</remarks>
+/// <remarks>Approval remains consent only. Every release intent requires exact current run, frontier, graph, authority, nondecreasing trusted UTC observations, and—when applicable—effect-certainty evidence. The later durable worker owns compare-exchange, callback execution, and completion or retirement artifact construction.</remarks>
 public sealed class HumanReviewContinuationConsumer : IHumanReviewContinuationConsumer
 {
     private readonly IHumanReviewContinuationAuthoritySource _authority;
@@ -66,71 +66,77 @@ public sealed class HumanReviewContinuationConsumer : IHumanReviewContinuationCo
         }
         var current = approved!;
 
-        var initialTiming = ObserveApprovalEmission(context, current, cancellationToken);
+        var initialTiming = ObserveApprovalEmission(context, current, null, cancellationToken, out var initialObservedAtUtc);
         if (initialTiming is not null)
         {
             return initialTiming;
         }
 
         var firstAuthority = await ReadAuthorityAsync(context, cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
         if (firstAuthority == HumanReviewContinuationAuthorityReadStatus.Unavailable)
         {
             return Unavailable();
         }
         if (firstAuthority != HumanReviewContinuationAuthorityReadStatus.Current)
         {
-            return BlockedOrObserved(context, current, cancellationToken);
+            return BlockedOrObserved(context, current, initialObservedAtUtc, cancellationToken);
         }
 
         if (context.Request.Binding.EffectAttempt is null)
         {
             var finalAuthority = await ReadAuthorityAsync(context, cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
             return finalAuthority switch
             {
-                HumanReviewContinuationAuthorityReadStatus.Current => ReleaseOrObserved(context, current, HumanReviewContinuationAction.ReleaseContinuation, null, cancellationToken),
+                HumanReviewContinuationAuthorityReadStatus.Current => ReleaseOrObserved(context, current, initialObservedAtUtc, HumanReviewContinuationAction.ReleaseContinuation, null, cancellationToken),
                 HumanReviewContinuationAuthorityReadStatus.Unavailable => Unavailable(),
-                _ => BlockedOrObserved(context, current, cancellationToken),
+                _ => BlockedOrObserved(context, current, initialObservedAtUtc, cancellationToken),
             };
         }
 
         var firstEffect = await ReadEffectAsync(context, cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
         if (firstEffect.Status == HumanReviewEffectReleaseReadStatus.Unavailable)
         {
             return Unavailable();
         }
         if (firstEffect.Status != HumanReviewEffectReleaseReadStatus.ExactNotStarted)
         {
-            return BlockedOrObserved(context, current, cancellationToken);
+            return BlockedOrObserved(context, current, initialObservedAtUtc, cancellationToken);
         }
 
         var finalAuthorityForEffect = await ReadAuthorityAsync(context, cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
         if (finalAuthorityForEffect == HumanReviewContinuationAuthorityReadStatus.Unavailable)
         {
             return Unavailable();
         }
         if (finalAuthorityForEffect != HumanReviewContinuationAuthorityReadStatus.Current)
         {
-            return BlockedOrObserved(context, current, cancellationToken);
+            return BlockedOrObserved(context, current, initialObservedAtUtc, cancellationToken);
         }
 
         var finalEffect = await ReadEffectAsync(context, cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
         if (finalEffect.Status == HumanReviewEffectReleaseReadStatus.Unavailable)
         {
             return Unavailable();
         }
         if (finalEffect.Status != HumanReviewEffectReleaseReadStatus.ExactNotStarted || finalEffect.Query is null)
         {
-            return BlockedOrObserved(context, current, cancellationToken);
+            return BlockedOrObserved(context, current, initialObservedAtUtc, cancellationToken);
         }
 
         // This query is the same one whose paired certainty read just proved ExactNotStarted. No later, unproven
         // effect-evidence reread may replace it before the later effect boundary performs its own revalidation.
-        return ReleaseOrObserved(context, current, HumanReviewContinuationAction.ReleaseEffect, finalEffect.Query, cancellationToken);
+        return ReleaseOrObserved(context, current, initialObservedAtUtc, HumanReviewContinuationAction.ReleaseEffect, finalEffect.Query, cancellationToken);
     }
 
     private async Task<EffectRead> ReadEffectAsync(CanonicalContext context, CancellationToken cancellationToken)
     {
         var query = await ReadEffectQueryAsync(context, cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
         if (query.Status == HumanReviewCurrentEffectAttemptEvidenceReadStatus.Unavailable)
         {
             return new EffectRead(HumanReviewEffectReleaseReadStatus.Unavailable, null);
@@ -144,6 +150,7 @@ public sealed class HumanReviewContinuationConsumer : IHumanReviewContinuationCo
         try
         {
             result = await _effectCertainty.ReadAsync(query.Query, cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -151,6 +158,7 @@ public sealed class HumanReviewContinuationConsumer : IHumanReviewContinuationCo
         }
         catch
         {
+            cancellationToken.ThrowIfCancellationRequested();
             return new EffectRead(HumanReviewEffectReleaseReadStatus.Unavailable, null);
         }
 
@@ -169,6 +177,7 @@ public sealed class HumanReviewContinuationConsumer : IHumanReviewContinuationCo
         try
         {
             read = await _effectEvidence.ReadAsync(new HumanReviewCurrentEffectAttemptEvidenceQuery(context.Request.Binding, reviewed), cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -176,6 +185,7 @@ public sealed class HumanReviewContinuationConsumer : IHumanReviewContinuationCo
         }
         catch
         {
+            cancellationToken.ThrowIfCancellationRequested();
             return new EffectQueryRead(HumanReviewCurrentEffectAttemptEvidenceReadStatus.Unavailable, null);
         }
 
@@ -204,6 +214,7 @@ public sealed class HumanReviewContinuationConsumer : IHumanReviewContinuationCo
         try
         {
             result = await _authority.ReadAsync(new HumanReviewContinuationAuthorityQuery(context.Request.Binding, context.AdapterBinding, context.GraphArtifact), cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -211,6 +222,7 @@ public sealed class HumanReviewContinuationConsumer : IHumanReviewContinuationCo
         }
         catch
         {
+            cancellationToken.ThrowIfCancellationRequested();
             return HumanReviewContinuationAuthorityReadStatus.Unavailable;
         }
 
@@ -395,25 +407,27 @@ public sealed class HumanReviewContinuationConsumer : IHumanReviewContinuationCo
         return DecisionPath(context, action);
     }
 
-    private HumanReviewContinuationConsumptionResult BlockedOrObserved(CanonicalContext context, ApprovedContinuation approved, CancellationToken cancellationToken)
+    private HumanReviewContinuationConsumptionResult BlockedOrObserved(CanonicalContext context, ApprovedContinuation approved, DateTimeOffset initialObservedAtUtc, CancellationToken cancellationToken)
     {
-        var timing = ObserveApprovalEmission(context, approved, cancellationToken);
+        var timing = ObserveApprovalEmission(context, approved, initialObservedAtUtc, cancellationToken, out _);
         return timing ?? Retire(context, approved, HumanReviewContinuationOutcome.Blocked, HumanReviewContinuationRetirementReason.Blocked);
     }
 
     private HumanReviewContinuationConsumptionResult ReleaseOrObserved(
         CanonicalContext context,
         ApprovedContinuation approved,
+        DateTimeOffset initialObservedAtUtc,
         HumanReviewContinuationAction action,
         GovernedLoopEffectCertaintySnapshotQuery? effectQuery,
         CancellationToken cancellationToken)
     {
-        var timing = ObserveApprovalEmission(context, approved, cancellationToken);
+        var timing = ObserveApprovalEmission(context, approved, initialObservedAtUtc, cancellationToken, out _);
         return timing ?? Release(context, approved, action, effectQuery);
     }
 
-    private HumanReviewContinuationConsumptionResult? ObserveApprovalEmission(CanonicalContext context, ApprovedContinuation approved, CancellationToken cancellationToken)
+    private HumanReviewContinuationConsumptionResult? ObserveApprovalEmission(CanonicalContext context, ApprovedContinuation approved, DateTimeOffset? initialObservedAtUtc, CancellationToken cancellationToken, out DateTimeOffset observedAtUtc)
     {
+        observedAtUtc = default;
         cancellationToken.ThrowIfCancellationRequested();
         if (!TryGetTrustedNow(context, approved, out var now))
         {
@@ -421,6 +435,12 @@ public sealed class HumanReviewContinuationConsumer : IHumanReviewContinuationCo
         }
 
         cancellationToken.ThrowIfCancellationRequested();
+        if (initialObservedAtUtc is not null && now < initialObservedAtUtc.Value)
+        {
+            return Unavailable();
+        }
+
+        observedAtUtc = now;
         if (now >= approved.Wake.ExpiresAtUtc)
         {
             return Retire(context, approved, HumanReviewContinuationOutcome.Expired, HumanReviewContinuationRetirementReason.Expired);

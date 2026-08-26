@@ -11,11 +11,15 @@ internal sealed class RecordingEffectEvidenceSource(params HumanReviewCurrentEff
 
     public List<HumanReviewCurrentEffectAttemptEvidenceQuery> Queries { get; } = [];
 
+    public Action<int>? AfterRead { get; set; }
+
     public Task<HumanReviewCurrentEffectAttemptEvidenceReadResult> ReadAsync(HumanReviewCurrentEffectAttemptEvidenceQuery query, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         ReadCount++;
         Queries.Add(query);
-        return Task.FromResult(_results.Count == 0 ? new HumanReviewCurrentEffectAttemptEvidenceReadResult(HumanReviewCurrentEffectAttemptEvidenceReadStatus.Unavailable) : _results.Dequeue());
+        var result = _results.Count == 0 ? new HumanReviewCurrentEffectAttemptEvidenceReadResult(HumanReviewCurrentEffectAttemptEvidenceReadStatus.Unavailable) : _results.Dequeue();
+        AfterRead?.Invoke(ReadCount);
+        return Task.FromResult(result);
     }
 }

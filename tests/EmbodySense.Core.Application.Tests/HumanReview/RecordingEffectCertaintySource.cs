@@ -10,10 +10,14 @@ internal sealed class RecordingEffectCertaintySource(params GovernedLoopEffectCe
 
     public int ReadCount { get; private set; }
 
+    public Action<int>? AfterRead { get; set; }
+
     public Task<GovernedLoopEffectCertaintySnapshotResult> ReadAsync(GovernedLoopEffectCertaintySnapshotQuery query, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         ReadCount++;
-        return Task.FromResult(_results.Count == 0 ? new GovernedLoopEffectCertaintySnapshotResult(GovernedLoopEffectCertaintySnapshotStatus.Unavailable) : _results.Dequeue());
+        var result = _results.Count == 0 ? new GovernedLoopEffectCertaintySnapshotResult(GovernedLoopEffectCertaintySnapshotStatus.Unavailable) : _results.Dequeue();
+        AfterRead?.Invoke(ReadCount);
+        return Task.FromResult(result);
     }
 }

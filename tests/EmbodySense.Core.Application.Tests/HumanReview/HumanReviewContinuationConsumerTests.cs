@@ -144,6 +144,68 @@ public sealed class HumanReviewContinuationConsumerTests
         Assert.Equal(2, clock.ReadCount);
     }
 
+    [Fact]
+    public async Task Partial_trusted_time_rollback_during_non_effect_rereads_fails_closed_without_release_or_retirement()
+    {
+        var fixture = await ApprovedCandidateAsync();
+        var state = Assert.IsType<HumanReviewContinuationState>(fixture.Candidate.Continuation);
+        var reservation = Assert.IsType<EmbodySense.Core.Common.Loops.Models.Custom.Execution.HumanReviewRunState>(fixture.Run.HumanReview).ContinuationReservation;
+        var initialObservedAtUtc = fixture.Claim.ClaimedAtUtc.AddSeconds(40);
+        var finalObservedAtUtc = fixture.Claim.ClaimedAtUtc.AddSeconds(20);
+        Assert.True(finalObservedAtUtc > fixture.Run.UpdatedAtUtc);
+        Assert.True(finalObservedAtUtc > Assert.IsType<HumanReviewContinuationReservation>(reservation).ReservedAtUtc);
+        Assert.True(finalObservedAtUtc > state.Wake.PublishedAtUtc);
+        Assert.True(finalObservedAtUtc > fixture.Claim.ClaimedAtUtc);
+        Assert.True(finalObservedAtUtc < initialObservedAtUtc);
+        var authority = new RecordingAuthoritySource(HumanReviewContinuationAuthorityReadStatus.Current, HumanReviewContinuationAuthorityReadStatus.Current);
+        var clock = new HumanReviewDecisionTestClock(initialObservedAtUtc, finalObservedAtUtc);
+        var consumer = Consumer(authority, new RecordingEffectEvidenceSource(), new RecordingEffectCertaintySource(), clock);
+
+        var result = await consumer.ConsumeAsync(fixture.Candidate);
+
+        Assert.Equal(HumanReviewContinuationConsumptionStatus.Unavailable, result.Status);
+        Assert.Null(result.Action);
+        Assert.Null(result.Completion);
+        Assert.Null(result.Retirement);
+        Assert.Equal(2, authority.ReadCount);
+        Assert.Equal(2, clock.ReadCount);
+    }
+
+    [Fact]
+    public async Task Partial_trusted_time_rollback_during_effect_rereads_fails_closed_without_release_or_retirement()
+    {
+        var fixture = await ApprovedCandidateAsync(includeEffectAttempt: true);
+        var binding = Assert.IsType<EmbodySense.Core.Common.Loops.Models.Custom.Execution.HumanReviewRunState>(fixture.Run.HumanReview).Request.Binding;
+        var state = Assert.IsType<HumanReviewContinuationState>(fixture.Candidate.Continuation);
+        var reservation = Assert.IsType<EmbodySense.Core.Common.Loops.Models.Custom.Execution.HumanReviewRunState>(fixture.Run.HumanReview).ContinuationReservation;
+        var effectAttempt = Assert.IsType<GovernedLoopEffectAttempt>(fixture.EffectAttempt);
+        var evidence = EffectEvidence(binding, effectAttempt);
+        var snapshot = HumanReviewEffectReleaseContract.Create(binding, effectAttempt, effectAttempt.Payload.UpdatedAtUtc.AddSeconds(1));
+        var initialObservedAtUtc = fixture.Claim.ClaimedAtUtc.AddSeconds(40);
+        var finalObservedAtUtc = fixture.Claim.ClaimedAtUtc.AddSeconds(20);
+        Assert.True(finalObservedAtUtc > fixture.Run.UpdatedAtUtc);
+        Assert.True(finalObservedAtUtc > Assert.IsType<HumanReviewContinuationReservation>(reservation).ReservedAtUtc);
+        Assert.True(finalObservedAtUtc > state.Wake.PublishedAtUtc);
+        Assert.True(finalObservedAtUtc > fixture.Claim.ClaimedAtUtc);
+        Assert.True(finalObservedAtUtc < initialObservedAtUtc);
+        var authority = new RecordingAuthoritySource(HumanReviewContinuationAuthorityReadStatus.Current, HumanReviewContinuationAuthorityReadStatus.Current);
+        var effectEvidence = new RecordingEffectEvidenceSource(CurrentEvidence(evidence), CurrentEvidence(evidence));
+        var effectCertainty = new RecordingEffectCertaintySource(CurrentSnapshot(snapshot), CurrentSnapshot(snapshot));
+        var clock = new HumanReviewDecisionTestClock(initialObservedAtUtc, finalObservedAtUtc);
+        var consumer = Consumer(authority, effectEvidence, effectCertainty, clock);
+
+        var result = await consumer.ConsumeAsync(fixture.Candidate);
+
+        Assert.Equal(HumanReviewContinuationConsumptionStatus.Unavailable, result.Status);
+        Assert.Null(result.Action);
+        Assert.Null(result.Completion);
+        Assert.Null(result.Retirement);
+        Assert.Equal(2, authority.ReadCount);
+        Assert.Equal(2, effectEvidence.ReadCount);
+        Assert.Equal(2, effectCertainty.ReadCount);
+        Assert.Equal(2, clock.ReadCount);
+    }
+
     [Theory]
     [InlineData(HumanReviewContinuationAuthorityReadStatus.Narrowed)]
     [InlineData(HumanReviewContinuationAuthorityReadStatus.Revoked)]
@@ -415,6 +477,62 @@ public sealed class HumanReviewContinuationConsumerTests
         Assert.Equal(0, authority.ReadCount);
         Assert.Equal(0, effectEvidence.ReadCount);
         Assert.Equal(0, effectCertainty.ReadCount);
+    }
+
+    [Fact]
+    public async Task Cancellation_during_an_unavailable_authority_reread_takes_precedence_over_unavailable()
+    {
+        var fixture = await ApprovedCandidateAsync();
+        var authority = new RecordingAuthoritySource(HumanReviewContinuationAuthorityReadStatus.Unavailable);
+        var effectEvidence = new RecordingEffectEvidenceSource();
+        var effectCertainty = new RecordingEffectCertaintySource();
+        var consumer = Consumer(authority, effectEvidence, effectCertainty, fixture.Claim.ClaimedAtUtc.AddSeconds(1));
+        using var cancellation = new CancellationTokenSource();
+        authority.AfterRead = _ => cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => consumer.ConsumeAsync(fixture.Candidate, cancellation.Token));
+
+        Assert.Equal(1, authority.ReadCount);
+        Assert.Equal(0, effectEvidence.ReadCount);
+        Assert.Equal(0, effectCertainty.ReadCount);
+    }
+
+    [Fact]
+    public async Task Cancellation_during_unavailable_effect_evidence_takes_precedence_over_unavailable()
+    {
+        var fixture = await ApprovedCandidateAsync(includeEffectAttempt: true);
+        var authority = new RecordingAuthoritySource(HumanReviewContinuationAuthorityReadStatus.Current);
+        var effectEvidence = new RecordingEffectEvidenceSource();
+        var effectCertainty = new RecordingEffectCertaintySource();
+        var consumer = Consumer(authority, effectEvidence, effectCertainty, fixture.Claim.ClaimedAtUtc.AddSeconds(1));
+        using var cancellation = new CancellationTokenSource();
+        effectEvidence.AfterRead = _ => cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => consumer.ConsumeAsync(fixture.Candidate, cancellation.Token));
+
+        Assert.Equal(1, authority.ReadCount);
+        Assert.Equal(1, effectEvidence.ReadCount);
+        Assert.Equal(0, effectCertainty.ReadCount);
+    }
+
+    [Fact]
+    public async Task Cancellation_during_unavailable_effect_certainty_takes_precedence_over_unavailable()
+    {
+        var fixture = await ApprovedCandidateAsync(includeEffectAttempt: true);
+        var binding = Assert.IsType<EmbodySense.Core.Common.Loops.Models.Custom.Execution.HumanReviewRunState>(fixture.Run.HumanReview).Request.Binding;
+        var effectAttempt = Assert.IsType<GovernedLoopEffectAttempt>(fixture.EffectAttempt);
+        var authority = new RecordingAuthoritySource(HumanReviewContinuationAuthorityReadStatus.Current);
+        var effectEvidence = new RecordingEffectEvidenceSource(CurrentEvidence(EffectEvidence(binding, effectAttempt)));
+        var effectCertainty = new RecordingEffectCertaintySource();
+        var consumer = Consumer(authority, effectEvidence, effectCertainty, fixture.Claim.ClaimedAtUtc.AddSeconds(1));
+        using var cancellation = new CancellationTokenSource();
+        effectCertainty.AfterRead = _ => cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => consumer.ConsumeAsync(fixture.Candidate, cancellation.Token));
+
+        Assert.Equal(1, authority.ReadCount);
+        Assert.Equal(1, effectEvidence.ReadCount);
+        Assert.Equal(1, effectCertainty.ReadCount);
     }
 
     [Fact]
