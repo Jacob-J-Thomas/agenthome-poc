@@ -2,6 +2,7 @@ namespace EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Inference.Profiles.Models;
+using EmbodySense.Core.Common.Loops.HumanInput;
 using EmbodySense.Core.Common.Loops.Execution.Retry;
 using EmbodySense.Core.Common.Loops.Execution.Retry.Models;
 
@@ -14,6 +15,7 @@ using EmbodySense.Core.Common.Loops.Execution.Retry.Models;
 /// <param name="ModelRoutingPolicy">The optional typed Inference-node routing override.</param>
 /// <param name="AuthoredInputDataClasses">The optional exact authored Inference input classification.</param>
 /// <param name="RetryPolicy">The optional exact bounded retry policy for this node.</param>
+/// <param name="HumanInputConfiguration">The optional exact data-only Human Input configuration.</param>
 public sealed record GovernedLoopNodeDefinition(
     string Id,
     GovernedLoopNodeDescriptor Descriptor,
@@ -22,7 +24,8 @@ public sealed record GovernedLoopNodeDefinition(
     IReadOnlyDictionary<string, string> Parameters,
     GovernedModelRoutingPolicy? ModelRoutingPolicy = null,
     IReadOnlyList<CapabilityDataClass>? AuthoredInputDataClasses = null,
-    GovernedLoopRetryPolicy? RetryPolicy = null)
+    GovernedLoopRetryPolicy? RetryPolicy = null,
+    GovernedLoopHumanInputNodeConfiguration? HumanInputConfiguration = null)
 {
     /// <summary>Gets an exact optional Inference-node routing override.</summary>
     public GovernedModelRoutingPolicy? ModelRoutingPolicy { get; } = ModelRoutingPolicy;
@@ -36,4 +39,9 @@ public sealed record GovernedLoopNodeDefinition(
     public GovernedLoopRetryPolicy? RetryPolicy { get; } = RetryPolicy is null
         ? null
         : GovernedLoopRetryContract.CopyPolicy(RetryPolicy);
+
+    /// <summary>Gets the exact optional data-only Human Input configuration, which is present only for Human Input nodes.</summary>
+    public GovernedLoopHumanInputNodeConfiguration? HumanInputConfiguration { get; } = HumanInputConfiguration is null
+        ? null
+        : GovernedLoopHumanInputNodeConfigurationSnapshot.Copy(HumanInputConfiguration);
 }

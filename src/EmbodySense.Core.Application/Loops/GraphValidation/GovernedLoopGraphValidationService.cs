@@ -227,6 +227,18 @@ public sealed class GovernedLoopGraphValidationService
                 path,
                 "Reserved Wait descriptor keys must retain their complete canonical executable contract.");
         }
+
+        if (GovernedLoopHumanInputNodeCatalogContract.TryResolve(descriptor.Descriptor, out _)
+            && !GovernedLoopHumanInputNodeCatalogContract.HasExactCatalogSemantics(descriptor))
+        {
+            Add(
+                errors,
+                "catalog.human-input-contract.mismatch",
+                GovernedLoopGraphElementKind.Catalog,
+                id,
+                path,
+                "The reserved Human Input descriptor key must retain its complete data-only canonical executable contract.");
+        }
     }
 
     private static void ValidateParameterContracts(GovernedLoopNodeCatalogDescriptor descriptor, string descriptorPath, List<GovernedLoopGraphValidationError> errors)
@@ -372,6 +384,7 @@ public sealed class GovernedLoopGraphValidationService
             ValidatePureNodeSchemaSemantics(graph, node, errors);
             ValidateTopologyNodeSchemaSemantics(graph, node, descriptor, errors);
             ValidateWaitNodeSemantics(node, descriptor, errors);
+            ValidateHumanInputNodeSemantics(graph, node, descriptor, errors);
             ValidateNodeAuthority(node, descriptor, errors);
         }
 
@@ -456,6 +469,31 @@ public sealed class GovernedLoopGraphValidationService
                 node.Id,
                 $"graph.nodes[{node.Id}]",
                 "The Wait condition is not one exact canonical UTC timestamp or bounded governed event reference.");
+        }
+    }
+
+    private static void ValidateHumanInputNodeSemantics(
+        GovernedLoopGraphDefinition graph,
+        GovernedLoopNodeDefinition node,
+        GovernedLoopNodeCatalogDescriptor admittedDescriptor,
+        List<GovernedLoopGraphValidationError> errors)
+    {
+        if (!GovernedLoopHumanInputNodeCatalogContract.TryResolve(node.Descriptor, out _)
+            || !GovernedLoopHumanInputNodeCatalogContract.HasExactCatalogSemantics(admittedDescriptor))
+        {
+            return;
+        }
+
+        var schemas = graph.ValueSchemas.ToDictionary(schema => schema.Id, StringComparer.Ordinal);
+        if (!GovernedLoopHumanInputNodeCatalogContract.HasExactSchemaSemantics(node, schemas))
+        {
+            Add(
+                errors,
+                "node.human-input-contract.incompatible",
+                GovernedLoopGraphElementKind.Node,
+                node.Id,
+                $"graph.nodes[{node.Id}].humanInputConfiguration",
+                "The Human Input node must retain one exact data-only request schema, recipient/privacy, policy, authority-free response port, and typed output binding.");
         }
     }
 

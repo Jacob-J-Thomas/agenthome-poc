@@ -6,6 +6,7 @@ using EmbodySense.Core.Common.Inference.Profiles;
 using EmbodySense.Core.Common.Inference.Profiles.Models;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Loops.Execution.Retry;
+using EmbodySense.Core.Common.Loops.HumanInput;
 
 namespace EmbodySense.Core.Common.Loops.Custom.Graph;
 
@@ -240,6 +241,7 @@ public sealed class GovernedLoopGraphDefinition
         RequireCount(values.Length, 2, CustomLoopLimits.MaxGraphNodes, nameof(nodes));
         RequireDistinct(values, node => node.Id, nameof(nodes));
         var schemaIds = schemas.Select(schema => schema.Id).ToHashSet(StringComparer.Ordinal);
+        var schemasById = schemas.ToDictionary(schema => schema.Id, StringComparer.Ordinal);
         var loopCapabilities = loopCeiling.CapabilityIds.ToHashSet(StringComparer.Ordinal);
         var canonical = new List<GovernedLoopNodeDefinition>(values.Length);
         foreach (var node in values)
@@ -324,6 +326,18 @@ public sealed class GovernedLoopGraphDefinition
                     || node.Descriptor.Kind is GovernedLoopNodeKind.Trigger or GovernedLoopNodeKind.Wait or GovernedLoopNodeKind.HumanReview or GovernedLoopNodeKind.HumanInput or GovernedLoopNodeKind.Exit or GovernedLoopNodeKind.Fail))
             {
                 throw new ArgumentException($"Node `{node.Id}` has an invalid or inapplicable retry policy.", nameof(nodes));
+            }
+
+            if (node.Descriptor.Kind == GovernedLoopNodeKind.HumanInput)
+            {
+                if (!GovernedLoopHumanInputNodeConfigurationValidator.HasExactNodeSemantics(node, schemasById))
+                {
+                    throw new ArgumentException($"Human Input node `{node.Id}` must retain its exact data-only configuration, authority-free response port, and response-schema binding.", nameof(nodes));
+                }
+            }
+            else if (node.HumanInputConfiguration is not null)
+            {
+                throw new ArgumentException($"Only Human Input node `{node.Id}` may declare Human Input configuration.", nameof(nodes));
             }
 
             canonical.Add(node with

@@ -74,13 +74,15 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
             .Concat(GovernedLoopPureNodeCatalogContract.Descriptors)
             .Concat(GovernedLoopTopologyNodeCatalogContract.Descriptors)
             .Concat(GovernedLoopWaitNodeCatalogContract.Descriptors)
+            .Append(GovernedLoopHumanInputNodeCatalogContract.Descriptor)
             .Concat(GovernedLoopFailNodeCatalogContract.Descriptors)
             .Concat(graphCompatibleCommandActions.Select(candidate => CommandAction(candidate.Registration, candidate.PayloadCharacters, isCommandActionExecutable?.Invoke(candidate.Registration) == true)))
             .OrderBy(DescriptorKey, StringComparer.Ordinal)
             .ToArray();
-        if (descriptors.Length != 25 + graphCompatibleCommandActions.Length
+        if (descriptors.Length != 26 + graphCompatibleCommandActions.Length
             || descriptors.Select(item => item.Descriptor).Distinct().Count() != descriptors.Length
-            || descriptors.Any(item => !GovernedLoopSequentialNodeDescriptors.IsSupported(item.Descriptor)))
+            || descriptors.Any(item => !GovernedLoopSequentialNodeDescriptors.IsSupported(item.Descriptor)
+                && !GovernedLoopHumanInputNodeCatalogContract.TryResolve(item.Descriptor, out _)))
         {
             throw new InvalidOperationException("The built-in schema-1 governed-loop catalog is incomplete or contains an unsupported descriptor.");
         }

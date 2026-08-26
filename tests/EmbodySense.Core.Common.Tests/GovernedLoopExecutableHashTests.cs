@@ -10,7 +10,7 @@ public sealed class GovernedLoopExecutableHashTests
     [Fact]
     public void Canonical_schema_one_hash_is_pinned()
     {
-        Assert.Equal("6275b7fd96c7aa2c5b7859600b7e1bc7ab3114366fa5573a058f4bf198bd59f3", GovernedLoopGraphTestFixture.Create().ExecutableHash);
+        Assert.Equal("5a60882e796e1a3ad6867f458d38cd367cbe02235289f019c821e1ed96c6d3ab", GovernedLoopGraphTestFixture.Create().ExecutableHash);
     }
 
     [Fact]

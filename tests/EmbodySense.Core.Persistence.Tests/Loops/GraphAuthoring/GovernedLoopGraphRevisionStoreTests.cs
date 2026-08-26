@@ -15,8 +15,10 @@ using EmbodySense.Core.Application.Loops.Revisions.Models;
 using EmbodySense.Core.Common.Authority;
 using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.ContextualRoles.Models;
+using EmbodySense.Core.Common.HumanInput.Models;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
+using EmbodySense.Core.Common.Loops.HumanInput;
 using EmbodySense.Core.Common.Loops.Execution.Retry;
 using EmbodySense.Core.Common.Loops.Execution.Retry.Models;
 using EmbodySense.Core.Common.Loops.Failures.Models;
@@ -215,6 +217,54 @@ public sealed class GovernedLoopGraphRevisionStoreTests
             Enum.GetValues<GovernedLoopControlCondition>().Where(value => value != GovernedLoopControlCondition.Unknown).Order(),
             read.Artifact.Graph.ControlEdges.Select(edge => edge.Condition).Order());
         Assert.Contains(read.Artifact.Graph.Bindings, binding => binding.Kind == GovernedLoopBindingKind.Context);
+        var humanInput = Assert.Single(read.Artifact.Graph.Nodes, node => node.Descriptor.Kind == GovernedLoopNodeKind.HumanInput);
+        Assert.Equal(GovernedLoopHumanInputVocabulary.TypeId, humanInput.Descriptor.TypeId);
+        Assert.Equal("text", humanInput.HumanInputConfiguration!.RequestSchemaReference);
+        Assert.Equal("timeout-policy-one", humanInput.HumanInputConfiguration.TimeoutPolicyReference);
+        Assert.Equal("failure-policy-one", humanInput.HumanInputConfiguration.FailurePolicyReference);
+    }
+
+    [Fact]
+    public async Task Human_input_configuration_is_restart_stable_defensively_copied_and_rejects_unknown_nested_fields()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var trust = new TestCapabilityLifecycleTrustProvider();
+        var graph = GraphWithEveryClosedEnum();
+        var mutation = CreateDraft(graph, "create-human-input", HashA, HashB, 0, _time);
+
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Committed, (await Store(paths, trust).CommitAsync(mutation)).Status);
+        var restarted = await Store(paths, trust).ReadArtifactAsync(graph.RevisionReference);
+        var restoredConfiguration = Assert.Single(restarted.Artifact!.Graph.Nodes, node => node.Descriptor.Kind == GovernedLoopNodeKind.HumanInput).HumanInputConfiguration!;
+        var originalConfiguration = Assert.Single(graph.Nodes, node => node.Descriptor.Kind == GovernedLoopNodeKind.HumanInput).HumanInputConfiguration!;
+
+        Assert.Equal(GovernedLoopRevisionStoreReadStatus.Ready, restarted.Status);
+        Assert.NotSame(originalConfiguration, restoredConfiguration);
+        Assert.NotSame(originalConfiguration.ResponseSchema, restoredConfiguration.ResponseSchema);
+        Assert.NotSame(originalConfiguration.EligibleRespondents, restoredConfiguration.EligibleRespondents);
+        Assert.Equal(originalConfiguration.SchemaVersion, restoredConfiguration.SchemaVersion);
+        Assert.Equal(originalConfiguration.RequestSchemaReference, restoredConfiguration.RequestSchemaReference);
+        Assert.Equal(originalConfiguration.Purpose, restoredConfiguration.Purpose);
+        Assert.Equal(originalConfiguration.Prompt, restoredConfiguration.Prompt);
+        Assert.Equal(originalConfiguration.PrivacyClass, restoredConfiguration.PrivacyClass);
+        Assert.Equal(originalConfiguration.TimeoutPolicyReference, restoredConfiguration.TimeoutPolicyReference);
+        Assert.Equal(originalConfiguration.FailurePolicyReference, restoredConfiguration.FailurePolicyReference);
+        Assert.Equal(originalConfiguration.ResponseSchema, restoredConfiguration.ResponseSchema);
+        Assert.Equal(originalConfiguration.EligibleRespondents, restoredConfiguration.EligibleRespondents);
+        Assert.Equal(originalConfiguration.ResponsePolicy, restoredConfiguration.ResponsePolicy);
+        var path = ArtifactPath(paths, graph);
+        var bytes = await File.ReadAllBytesAsync(path);
+        var corrupted = Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(bytes).Replace(
+            "\"humanInputConfiguration\": {",
+            "\"humanInputConfiguration\": {\"unknown\":true,",
+            StringComparison.Ordinal));
+        Assert.False(bytes.SequenceEqual(corrupted));
+        await File.WriteAllBytesAsync(path, corrupted);
+
+        var rejected = await Store(paths, trust).ReadArtifactAsync(graph.RevisionReference);
+
+        Assert.Equal(GovernedLoopRevisionStoreReadStatus.Ambiguous, rejected.Status);
+        Assert.Null(rejected.Artifact);
     }
 
     [Fact]
@@ -1648,7 +1698,10 @@ public sealed class GovernedLoopGraphRevisionStoreTests
             .ToArray();
         var nodes = kinds.Select((kind, index) => new GovernedLoopNodeDefinition(
             kind.ToString().ToLowerInvariant(),
-            new GovernedLoopNodeDescriptor(kind, kind.ToString().ToLowerInvariant() + "-type", 1),
+            new GovernedLoopNodeDescriptor(
+                kind,
+                kind == GovernedLoopNodeKind.HumanInput ? GovernedLoopHumanInputVocabulary.TypeId : kind.ToString().ToLowerInvariant() + "-type",
+                1),
             kind switch
             {
                 GovernedLoopNodeKind.Trigger =>
@@ -1667,10 +1720,32 @@ public sealed class GovernedLoopGraphRevisionStoreTests
                     new GovernedLoopPortDefinition("published", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "text", true),
                     new GovernedLoopPortDefinition("result", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data, "text", true),
                 ],
+                GovernedLoopNodeKind.HumanInput =>
+                [
+                    new GovernedLoopPortDefinition(GovernedLoopHumanInputVocabulary.ResponsePortId, GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "text", true),
+                ],
                 _ => [],
             },
             GovernedLoopAuthorityCeiling.Create(kind == GovernedLoopNodeKind.Inference ? [ModelInferenceCapabilityId] : []),
-            new Dictionary<string, string> { ["ordinal"] = index.ToString(System.Globalization.CultureInfo.InvariantCulture) }))
+            kind == GovernedLoopNodeKind.HumanInput
+                ? new Dictionary<string, string>()
+                : new Dictionary<string, string> { ["ordinal"] = index.ToString(System.Globalization.CultureInfo.InvariantCulture) },
+            null,
+            null,
+            null,
+            kind == GovernedLoopNodeKind.HumanInput
+                ? new GovernedLoopHumanInputNodeConfiguration(
+                    GovernedLoopHumanInputNodeConfiguration.CurrentSchemaVersion,
+                    "text",
+                    "Collect untrusted data.",
+                    "Provide a bounded response.",
+                    new HumanInputResponseSchema(HumanInputResponseKind.Text, 64, null, null, null),
+                    HumanInputPrivacyClass.Private,
+                    [new HumanInputEligibleRespondent("user-one", "role-one", "route-one")],
+                    new HumanInputResponsePolicy(HumanInputResponsePolicyKind.FirstValid, null, null),
+                    "timeout-policy-one",
+                    "failure-policy-one")
+                : null))
             .ToArray();
         var display = nodes.Select((node, index) => new GovernedLoopNodeDisplayMetadata(
             node.Id,

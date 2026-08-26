@@ -2,8 +2,10 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Collections.Immutable;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.ContextualRoles.Models;
+using EmbodySense.Core.Common.HumanInput.Models;
 using EmbodySense.Core.Common.Inference.Profiles;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
@@ -227,7 +229,8 @@ internal static class GovernedLoopGraphRevisionStoreJson
                 node.Ports.Select(port => new PortJson(port.Id, PortDirection(port.Direction), BindingKind(port.BindingKind), port.ValueSchemaId, port.Required)).ToArray(),
                 node.ModelRoutingPolicy,
                 node.AuthoredInputDataClasses?.ToArray(),
-                node.RetryPolicy)).ToArray(),
+                node.RetryPolicy,
+                HumanInputConfiguration(node.HumanInputConfiguration))).ToArray(),
             graph.ControlEdges.Select(edge => new ControlEdgeJson(edge.Id, edge.FromNodeId, edge.ToNodeId, ControlCondition(edge.Condition))).ToArray(),
             graph.Bindings.Select(binding => new BindingJson(binding.Id, BindingKind(binding.Kind), binding.FromNodeId, binding.FromPortId, binding.ToNodeId, binding.ToPortId)).ToArray(),
             new OutputContractJson(
@@ -280,7 +283,125 @@ internal static class GovernedLoopGraphRevisionStoreJson
             Required(node.Parameters, "node parameters"),
             node.ModelRoutingPolicy is null ? null : RequiredRoutingPolicy(node.ModelRoutingPolicy, "node model-routing policy"),
             node.AuthoredInputDataClasses,
-            node.RetryPolicy);
+            node.RetryPolicy,
+            HumanInputConfiguration(node.HumanInputConfiguration));
+
+    private static HumanInputNodeConfigurationJson? HumanInputConfiguration(GovernedLoopHumanInputNodeConfiguration? configuration)
+        => configuration is null
+            ? null
+            : new HumanInputNodeConfigurationJson(
+                configuration.SchemaVersion,
+                configuration.RequestSchemaReference,
+                configuration.Purpose,
+                configuration.Prompt,
+                ResponseSchema(configuration.ResponseSchema),
+                PrivacyClass(configuration.PrivacyClass),
+                configuration.EligibleRespondents?.Select(EligibleRespondent).ToArray(),
+                ResponsePolicy(configuration.ResponsePolicy),
+                configuration.TimeoutPolicyReference,
+                configuration.FailurePolicyReference);
+
+    private static GovernedLoopHumanInputNodeConfiguration? HumanInputConfiguration(HumanInputNodeConfigurationJson? configuration)
+        => configuration is null
+            ? null
+            : new GovernedLoopHumanInputNodeConfiguration(
+                configuration.SchemaVersion,
+                Required(configuration.RequestSchemaReference, "Human Input request schema reference"),
+                Required(configuration.Purpose, "Human Input purpose"),
+                Required(configuration.Prompt, "Human Input prompt"),
+                ResponseSchema(configuration.ResponseSchema),
+                PrivacyClass(Required(configuration.PrivacyClass, "Human Input privacy class")),
+                Required(configuration.EligibleRespondents, "Human Input eligible respondents").Select(EligibleRespondent).ToArray(),
+                ResponsePolicy(configuration.ResponsePolicy),
+                Required(configuration.TimeoutPolicyReference, "Human Input timeout policy reference"),
+                Required(configuration.FailurePolicyReference, "Human Input failure policy reference"));
+
+    private static HumanInputResponseSchemaJson? ResponseSchema(HumanInputResponseSchema? schema)
+        => schema is null
+            ? null
+            : new HumanInputResponseSchemaJson(
+                ResponseKind(schema.Kind),
+                schema.MaxTextCharacters,
+                schema.Choices?.Select(Choice).ToArray(),
+                schema.StructuredFields?.Select(StructuredField).ToArray(),
+                ReferencePolicy(schema.ReferencePolicy));
+
+    private static HumanInputResponseSchema ResponseSchema(HumanInputResponseSchemaJson? schema)
+    {
+        if (schema is null)
+        {
+            throw new FormatException("The Human Input response schema is missing.");
+        }
+
+        return new HumanInputResponseSchema(
+            ResponseKind(Required(schema.Kind, "Human Input response kind")),
+            schema.MaxTextCharacters,
+            schema.Choices?.Select(Choice).ToArray(),
+            schema.StructuredFields?.Select(StructuredField).ToArray(),
+            ReferencePolicy(schema.ReferencePolicy));
+    }
+
+    private static HumanInputChoiceJson? Choice(HumanInputChoice? choice)
+        => choice is null ? null : new HumanInputChoiceJson(choice.ChoiceId, choice.DisplayText);
+
+    private static HumanInputChoice Choice(HumanInputChoiceJson? choice)
+        => choice is null
+            ? throw new FormatException("A Human Input choice is missing.")
+            : new HumanInputChoice(Required(choice.ChoiceId, "Human Input choice ID"), Required(choice.DisplayText, "Human Input choice display text"));
+
+    private static HumanInputStructuredFieldSchemaJson? StructuredField(HumanInputStructuredFieldSchema? field)
+        => field is null
+            ? null
+            : new HumanInputStructuredFieldSchemaJson(field.FieldId, StructuredFieldKind(field.Kind), field.Required, field.MaxTextCharacters, field.Choices?.Select(Choice).ToArray());
+
+    private static HumanInputStructuredFieldSchema StructuredField(HumanInputStructuredFieldSchemaJson? field)
+        => field is null
+            ? throw new FormatException("A Human Input structured field is missing.")
+            : new HumanInputStructuredFieldSchema(
+                Required(field.FieldId, "Human Input structured field ID"),
+                StructuredFieldKind(Required(field.Kind, "Human Input structured field kind")),
+                field.Required,
+                field.MaxTextCharacters,
+                field.Choices?.Select(Choice).ToArray());
+
+    private static HumanInputReferencePolicyJson? ReferencePolicy(HumanInputReferencePolicy? policy)
+        => policy is null ? null : new HumanInputReferencePolicyJson(ReferenceKind(policy.Kind), policy.MaxReferenceCharacters);
+
+    private static HumanInputReferencePolicy? ReferencePolicy(HumanInputReferencePolicyJson? policy)
+        => policy is null
+            ? null
+            : new HumanInputReferencePolicy(ReferenceKind(Required(policy.Kind, "Human Input reference kind")), policy.MaxReferenceCharacters);
+
+    private static HumanInputEligibleRespondentJson? EligibleRespondent(HumanInputEligibleRespondent? respondent)
+        => respondent is null
+            ? null
+            : new HumanInputEligibleRespondentJson(respondent.RespondentId, respondent.RespondentRoleId, respondent.RoutingReference);
+
+    private static HumanInputEligibleRespondent EligibleRespondent(HumanInputEligibleRespondentJson? respondent)
+        => respondent is null
+            ? throw new FormatException("A Human Input eligible respondent is missing.")
+            : new HumanInputEligibleRespondent(
+                Required(respondent.RespondentId, "Human Input respondent ID"),
+                Required(respondent.RespondentRoleId, "Human Input respondent role ID"),
+                Required(respondent.RoutingReference, "Human Input routing reference"));
+
+    private static HumanInputResponsePolicyJson? ResponsePolicy(HumanInputResponsePolicy? policy)
+        => policy is null
+            ? null
+            : new HumanInputResponsePolicyJson(ResponsePolicyKind(policy.Kind), policy.RequiredResponseCount, policy.OrderedRoleIds?.ToArray());
+
+    private static HumanInputResponsePolicy ResponsePolicy(HumanInputResponsePolicyJson? policy)
+    {
+        if (policy is null)
+        {
+            throw new FormatException("The Human Input response policy is missing.");
+        }
+
+        return new HumanInputResponsePolicy(
+            ResponsePolicyKind(Required(policy.Kind, "Human Input response policy kind")),
+            policy.RequiredResponseCount,
+            policy.OrderedRoleIds is null ? null : policy.OrderedRoleIds.ToImmutableArray());
+    }
 
     private static GovernedLoopControlEdgeDefinition ControlEdge(ControlEdgeJson edge)
         => new(
@@ -463,6 +584,88 @@ internal static class GovernedLoopGraphRevisionStoreJson
         GovernedLoopNodeKind.ChildLoop => "child-loop",
         GovernedLoopNodeKind.Exit => "exit",
         GovernedLoopNodeKind.Fail => "fail",
+        _ => throw new ArgumentOutOfRangeException(nameof(value)),
+    };
+
+    private static HumanInputPrivacyClass PrivacyClass(string value) => value switch
+    {
+        "private" => HumanInputPrivacyClass.Private,
+        "sensitive" => HumanInputPrivacyClass.Sensitive,
+        _ => throw new FormatException("The Human Input privacy class is not canonical."),
+    };
+
+    private static string PrivacyClass(HumanInputPrivacyClass value) => value switch
+    {
+        HumanInputPrivacyClass.Private => "private",
+        HumanInputPrivacyClass.Sensitive => "sensitive",
+        _ => throw new ArgumentOutOfRangeException(nameof(value)),
+    };
+
+    private static HumanInputResponseKind ResponseKind(string value) => value switch
+    {
+        "text" => HumanInputResponseKind.Text,
+        "choice" => HumanInputResponseKind.Choice,
+        "confirmation" => HumanInputResponseKind.Confirmation,
+        "structured" => HumanInputResponseKind.Structured,
+        "reference" => HumanInputResponseKind.Reference,
+        _ => throw new FormatException("The Human Input response kind is not canonical."),
+    };
+
+    private static string ResponseKind(HumanInputResponseKind value) => value switch
+    {
+        HumanInputResponseKind.Text => "text",
+        HumanInputResponseKind.Choice => "choice",
+        HumanInputResponseKind.Confirmation => "confirmation",
+        HumanInputResponseKind.Structured => "structured",
+        HumanInputResponseKind.Reference => "reference",
+        _ => throw new ArgumentOutOfRangeException(nameof(value)),
+    };
+
+    private static HumanInputStructuredFieldKind StructuredFieldKind(string value) => value switch
+    {
+        "text" => HumanInputStructuredFieldKind.Text,
+        "choice" => HumanInputStructuredFieldKind.Choice,
+        _ => throw new FormatException("The Human Input structured field kind is not canonical."),
+    };
+
+    private static string StructuredFieldKind(HumanInputStructuredFieldKind value) => value switch
+    {
+        HumanInputStructuredFieldKind.Text => "text",
+        HumanInputStructuredFieldKind.Choice => "choice",
+        _ => throw new ArgumentOutOfRangeException(nameof(value)),
+    };
+
+    private static HumanInputReferenceKind ReferenceKind(string value) => value switch
+    {
+        "artifact" => HumanInputReferenceKind.Artifact,
+        "reference" => HumanInputReferenceKind.Reference,
+        _ => throw new FormatException("The Human Input reference kind is not canonical."),
+    };
+
+    private static string ReferenceKind(HumanInputReferenceKind value) => value switch
+    {
+        HumanInputReferenceKind.Artifact => "artifact",
+        HumanInputReferenceKind.Reference => "reference",
+        _ => throw new ArgumentOutOfRangeException(nameof(value)),
+    };
+
+    private static HumanInputResponsePolicyKind ResponsePolicyKind(string value) => value switch
+    {
+        "first-valid" => HumanInputResponsePolicyKind.FirstValid,
+        "quorum" => HumanInputResponsePolicyKind.Quorum,
+        "named-roles" => HumanInputResponsePolicyKind.NamedRoles,
+        "merge" => HumanInputResponsePolicyKind.Merge,
+        "manual-selection" => HumanInputResponsePolicyKind.ManualSelection,
+        _ => throw new FormatException("The Human Input response policy kind is not canonical."),
+    };
+
+    private static string ResponsePolicyKind(HumanInputResponsePolicyKind value) => value switch
+    {
+        HumanInputResponsePolicyKind.FirstValid => "first-valid",
+        HumanInputResponsePolicyKind.Quorum => "quorum",
+        HumanInputResponsePolicyKind.NamedRoles => "named-roles",
+        HumanInputResponsePolicyKind.Merge => "merge",
+        HumanInputResponsePolicyKind.ManualSelection => "manual-selection",
         _ => throw new ArgumentOutOfRangeException(nameof(value)),
     };
 

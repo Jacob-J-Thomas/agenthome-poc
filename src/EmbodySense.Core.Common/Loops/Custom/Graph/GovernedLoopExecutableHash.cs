@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.PureNodes;
+using EmbodySense.Core.Common.HumanInput.Models;
 
 namespace EmbodySense.Core.Common.Loops.Custom.Graph;
 
@@ -70,6 +71,7 @@ public static class GovernedLoopExecutableHash
             writer.WriteString("kind", ToCanonical(node.Descriptor.Kind));
             writer.WriteString("typeId", node.Descriptor.TypeId);
             writer.WriteNumber("descriptorVersion", node.Descriptor.Version);
+            WriteHumanInputConfiguration(writer, node.HumanInputConfiguration);
             writer.WriteString("modelRoutingPolicyHash", node.ModelRoutingPolicy?.ContentHash);
             if (node.RetryPolicy is { } retryPolicy)
             {
@@ -116,6 +118,171 @@ public static class GovernedLoopExecutableHash
         }
 
         writer.WriteEndArray();
+    }
+
+    private static void WriteHumanInputConfiguration(Utf8JsonWriter writer, GovernedLoopHumanInputNodeConfiguration? configuration)
+    {
+        writer.WritePropertyName("humanInputConfiguration");
+        if (configuration is null)
+        {
+            writer.WriteNullValue();
+            return;
+        }
+
+        writer.WriteStartObject();
+        writer.WriteNumber("schemaVersion", configuration.SchemaVersion);
+        writer.WriteString("requestSchemaReference", configuration.RequestSchemaReference);
+        writer.WriteString("purpose", configuration.Purpose);
+        writer.WriteString("prompt", configuration.Prompt);
+        writer.WriteString("privacyClass", ToCanonical(configuration.PrivacyClass));
+        writer.WriteString("timeoutPolicyReference", configuration.TimeoutPolicyReference);
+        writer.WriteString("failurePolicyReference", configuration.FailurePolicyReference);
+        WriteHumanInputResponseSchema(writer, configuration.ResponseSchema);
+        writer.WritePropertyName("eligibleRespondents");
+        if (configuration.EligibleRespondents is null)
+        {
+            writer.WriteNullValue();
+        }
+        else
+        {
+            writer.WriteStartArray();
+            foreach (var respondent in configuration.EligibleRespondents)
+            {
+                if (respondent is null)
+                {
+                    writer.WriteNullValue();
+                    continue;
+                }
+
+                writer.WriteStartObject();
+                writer.WriteString("respondentId", respondent.RespondentId);
+                writer.WriteString("respondentRoleId", respondent.RespondentRoleId);
+                writer.WriteString("routingReference", respondent.RoutingReference);
+                writer.WriteEndObject();
+            }
+            writer.WriteEndArray();
+        }
+
+        writer.WritePropertyName("responsePolicy");
+        if (configuration.ResponsePolicy is null)
+        {
+            writer.WriteNullValue();
+        }
+        else
+        {
+            writer.WriteStartObject();
+            writer.WriteString("kind", ToCanonical(configuration.ResponsePolicy.Kind));
+            WriteNullableInteger(writer, "requiredResponseCount", configuration.ResponsePolicy.RequiredResponseCount);
+            writer.WritePropertyName("orderedRoleIds");
+            if (configuration.ResponsePolicy.OrderedRoleIds is not { } roles)
+            {
+                writer.WriteNullValue();
+            }
+            else
+            {
+                writer.WriteStartArray();
+                foreach (var roleId in roles)
+                {
+                    writer.WriteStringValue(roleId);
+                }
+                writer.WriteEndArray();
+            }
+            writer.WriteEndObject();
+        }
+        writer.WriteEndObject();
+    }
+
+    private static void WriteHumanInputResponseSchema(Utf8JsonWriter writer, HumanInputResponseSchema? schema)
+    {
+        writer.WritePropertyName("responseSchema");
+        if (schema is null)
+        {
+            writer.WriteNullValue();
+            return;
+        }
+
+        writer.WriteStartObject();
+        writer.WriteString("kind", ToCanonical(schema.Kind));
+        WriteNullableInteger(writer, "maxTextCharacters", schema.MaxTextCharacters);
+        WriteHumanInputChoices(writer, "choices", schema.Choices);
+        writer.WritePropertyName("structuredFields");
+        if (schema.StructuredFields is null)
+        {
+            writer.WriteNullValue();
+        }
+        else
+        {
+            writer.WriteStartArray();
+            foreach (var field in schema.StructuredFields)
+            {
+                if (field is null)
+                {
+                    writer.WriteNullValue();
+                    continue;
+                }
+
+                writer.WriteStartObject();
+                writer.WriteString("fieldId", field.FieldId);
+                writer.WriteString("kind", ToCanonical(field.Kind));
+                writer.WriteBoolean("required", field.Required);
+                WriteNullableInteger(writer, "maxTextCharacters", field.MaxTextCharacters);
+                WriteHumanInputChoices(writer, "choices", field.Choices);
+                writer.WriteEndObject();
+            }
+            writer.WriteEndArray();
+        }
+
+        writer.WritePropertyName("referencePolicy");
+        if (schema.ReferencePolicy is null)
+        {
+            writer.WriteNullValue();
+        }
+        else
+        {
+            writer.WriteStartObject();
+            writer.WriteString("kind", ToCanonical(schema.ReferencePolicy.Kind));
+            writer.WriteNumber("maxReferenceCharacters", schema.ReferencePolicy.MaxReferenceCharacters);
+            writer.WriteEndObject();
+        }
+        writer.WriteEndObject();
+    }
+
+    private static void WriteHumanInputChoices(Utf8JsonWriter writer, string name, HumanInputChoice[]? choices)
+    {
+        writer.WritePropertyName(name);
+        if (choices is null)
+        {
+            writer.WriteNullValue();
+            return;
+        }
+
+        writer.WriteStartArray();
+        foreach (var choice in choices)
+        {
+            if (choice is null)
+            {
+                writer.WriteNullValue();
+                continue;
+            }
+
+            writer.WriteStartObject();
+            writer.WriteString("choiceId", choice.ChoiceId);
+            writer.WriteString("displayText", choice.DisplayText);
+            writer.WriteEndObject();
+        }
+        writer.WriteEndArray();
+    }
+
+    private static void WriteNullableInteger(Utf8JsonWriter writer, string name, int? value)
+    {
+        if (value is { } bounded)
+        {
+            writer.WriteNumber(name, bounded);
+        }
+        else
+        {
+            writer.WriteNull(name);
+        }
     }
 
     private static void WriteEdges(Utf8JsonWriter writer, IReadOnlyList<GovernedLoopControlEdgeDefinition> edges)
@@ -214,6 +381,52 @@ public static class GovernedLoopExecutableHash
             _ => throw new ArgumentOutOfRangeException(nameof(value))
         };
     }
+
+    private static string ToCanonical(HumanInputPrivacyClass value)
+        => value switch
+        {
+            HumanInputPrivacyClass.Private => "private",
+            HumanInputPrivacyClass.Sensitive => "sensitive",
+            _ => throw new ArgumentOutOfRangeException(nameof(value))
+        };
+
+    private static string ToCanonical(HumanInputResponseKind value)
+        => value switch
+        {
+            HumanInputResponseKind.Text => "text",
+            HumanInputResponseKind.Choice => "choice",
+            HumanInputResponseKind.Confirmation => "confirmation",
+            HumanInputResponseKind.Structured => "structured",
+            HumanInputResponseKind.Reference => "reference",
+            _ => throw new ArgumentOutOfRangeException(nameof(value))
+        };
+
+    private static string ToCanonical(HumanInputStructuredFieldKind value)
+        => value switch
+        {
+            HumanInputStructuredFieldKind.Text => "text",
+            HumanInputStructuredFieldKind.Choice => "choice",
+            _ => throw new ArgumentOutOfRangeException(nameof(value))
+        };
+
+    private static string ToCanonical(HumanInputReferenceKind value)
+        => value switch
+        {
+            HumanInputReferenceKind.Artifact => "artifact",
+            HumanInputReferenceKind.Reference => "reference",
+            _ => throw new ArgumentOutOfRangeException(nameof(value))
+        };
+
+    private static string ToCanonical(HumanInputResponsePolicyKind value)
+        => value switch
+        {
+            HumanInputResponsePolicyKind.FirstValid => "first-valid",
+            HumanInputResponsePolicyKind.Quorum => "quorum",
+            HumanInputResponsePolicyKind.NamedRoles => "named-roles",
+            HumanInputResponsePolicyKind.Merge => "merge",
+            HumanInputResponsePolicyKind.ManualSelection => "manual-selection",
+            _ => throw new ArgumentOutOfRangeException(nameof(value))
+        };
 
     private static string ToCanonical(GovernedLoopBindingKind value)
     {

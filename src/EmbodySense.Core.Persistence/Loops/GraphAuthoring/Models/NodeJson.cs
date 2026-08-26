@@ -14,4 +14,5 @@ internal sealed record NodeJson(
     PortJson[]? Ports,
     GovernedModelRoutingPolicy? ModelRoutingPolicy,
     CapabilityDataClass[]? AuthoredInputDataClasses,
-    GovernedLoopRetryPolicy? RetryPolicy);
+    GovernedLoopRetryPolicy? RetryPolicy,
+    HumanInputNodeConfigurationJson? HumanInputConfiguration);
