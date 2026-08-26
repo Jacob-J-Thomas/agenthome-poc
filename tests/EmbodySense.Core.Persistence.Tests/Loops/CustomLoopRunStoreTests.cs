@@ -2142,14 +2142,16 @@ public sealed class CustomLoopRunStoreTests
         Assert.False(File.Exists(orphanedIndexTemporaryPath));
     }
 
-    [Fact]
-    public async Task Canonical_run_reads_ignore_and_mutation_recovery_reclaims_the_exact_windows_discovery_index_replace_temporary()
+    [Theory]
+    [InlineData(".custom-loop-run-index.json~RF55ffa.TMP")]
+    [InlineData(".custom-loop-run-index.json~RF100810.TMP")]
+    public async Task Canonical_run_reads_ignore_and_mutation_recovery_reclaims_bounded_windows_discovery_index_replace_temporaries(string fileName)
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         var run = At(CreateRun("loop-alpha", "run-alpha", "invoke-alpha"), 1);
         await WriteDirectAsync(paths, run);
-        var replacementTemporaryPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json~RF55ffa.TMP");
+        var replacementTemporaryPath = Path.Combine(paths.CustomLoopRunsPath, fileName);
         await File.WriteAllTextAsync(replacementTemporaryPath, "replace-in-progress");
         using var store = new CustomLoopRunStore(paths);
 
@@ -2164,11 +2166,15 @@ public sealed class CustomLoopRunStoreTests
     }
 
     [Theory]
-    [InlineData(".custom-loop-run-index.pending~RF55ffa.TMP")]
-    [InlineData(".custom-loop-run-index.json~RF55ffa.tmp")]
-    [InlineData(".custom-loop-run-index.json~RF55ffg.TMP")]
     [InlineData(".custom-loop-run-index.json~RF55ff.TMP")]
-    [InlineData(".unrelated.json~RF55ffa.TMP")]
+    [InlineData(".custom-loop-run-index.json~RF1008100.TMP")]
+    [InlineData(".custom-loop-run-index.json~RF10081A.TMP")]
+    [InlineData(".custom-loop-run-index.json~RF10081g.TMP")]
+    [InlineData(".custom-loop-run-index.json~Rf100810.TMP")]
+    [InlineData(".custom-loop-run-index.json~RF100810.tmp")]
+    [InlineData(".custom-loop-run-index.json~RF100810.TMPx")]
+    [InlineData(".custom-loop-run-index.pending~RF100810.TMP")]
+    [InlineData(".unrelated.json~RF100810.TMP")]
     public async Task Root_discovery_index_replace_temporary_lookalikes_fail_closed_with_filename_evidence(string fileName)
     {
         using var workspace = new TestWorkspace();
@@ -2189,7 +2195,7 @@ public sealed class CustomLoopRunStoreTests
         var paths = new WorkspacePaths(workspace.RootPath);
         var run = At(CreateRun("loop-alpha", "run-alpha", "invoke-alpha"), 1);
         await WriteDirectAsync(paths, run);
-        var replacementTemporaryPath = Path.Combine(paths.CustomLoopRunsPath, run.LoopId, run.Id + ".json~RF55ffa.TMP");
+        var replacementTemporaryPath = Path.Combine(paths.CustomLoopRunsPath, run.LoopId, run.Id + ".json~RF100810.TMP");
         await File.WriteAllTextAsync(replacementTemporaryPath, "unexpected");
 
         var exception = await Assert.ThrowsAsync<FormatException>(() => new CustomLoopRunStore(paths).GetAsync(run.Id));
