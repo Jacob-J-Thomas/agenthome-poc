@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Net.Http.Json;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using EmbodySense.E2EBrowserHost;
 using EmbodySense.Web.Models;
 
@@ -8,7 +9,7 @@ namespace EmbodySense.E2ETests.Web;
 
 internal sealed class ExternalWebApplicationProcess : IAsyncDisposable
 {
-    private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web);
+    private static readonly JsonSerializerOptions _jsonOptions = CreateJsonOptions();
     private readonly Process _process;
     private readonly ProcessOutputBuffer _output;
     private readonly ProcessOutputBuffer _error;
@@ -183,6 +184,37 @@ internal sealed class ExternalWebApplicationProcess : IAsyncDisposable
         Assert.DoesNotContain("Unhandled exception", _output.Text, StringComparison.OrdinalIgnoreCase);
     }
 
+    public async Task StopAsync()
+    {
+        if (_process.HasExited)
+        {
+            return;
+        }
+
+        if (OperatingSystem.IsWindows())
+        {
+            _process.Kill(entireProcessTree: true);
+            await _process.WaitForExitAsync();
+            return;
+        }
+
+        using var signal = Process.Start(new ProcessStartInfo
+        {
+            FileName = "/bin/kill",
+            RedirectStandardError = true,
+            RedirectStandardOutput = true,
+            UseShellExecute = false,
+            ArgumentList = { "-INT", _process.Id.ToString(System.Globalization.CultureInfo.InvariantCulture) }
+        }) ?? throw new InvalidOperationException("The external Web shutdown signal process did not start.");
+        await signal.WaitForExitAsync();
+        if (signal.ExitCode != 0)
+        {
+            throw new InvalidOperationException("The external Web shutdown signal process failed: " + await signal.StandardError.ReadToEndAsync());
+        }
+
+        await _process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(15));
+    }
+
     public async ValueTask DisposeAsync()
     {
         if (!_process.HasExited)
@@ -222,5 +254,12 @@ internal sealed class ExternalWebApplicationProcess : IAsyncDisposable
         }
 
         throw new TimeoutException($"External Web process did not serve /api/status.{Environment.NewLine}{FormatOutput()}", lastException);
+    }
+
+    private static JsonSerializerOptions CreateJsonOptions()
+    {
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        options.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.KebabCaseLower, allowIntegerValues: false));
+        return options;
     }
 }

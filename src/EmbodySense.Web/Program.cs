@@ -108,6 +108,8 @@ public static class Program
             provider.GetRequiredService<WebApprovalCoordinator>(),
             WorkspaceInitializer.ForWeb(),
             provider.GetRequiredService<IAgentRuntimeConversationPublicationObserver>()));
+        services.AddSingleton(provider => new WebGovernedLoopBackgroundHostedService(provider.GetRequiredService<WebAgentRuntimeHost>()));
+        services.AddSingleton<IHostedService>(provider => provider.GetRequiredService<WebGovernedLoopBackgroundHostedService>());
         services.AddSingleton<IWebLoopRuntimeInvoker>(provider => provider.GetRequiredService<WebAgentRuntimeHost>());
         services.AddSingleton<ILoopReceiptRetentionFacade>(_ => new LoopReceiptRetentionFacade(options.WorkingDirectory));
         services.AddSingleton<ICapabilityCatalogFacade>(_ => new CapabilityCatalogFacade(options.WorkingDirectory));

@@ -8,9 +8,14 @@ using System.Net.WebSockets;
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
+using EmbodySense.Core.Application.Loops.Sleep.Models;
+using EmbodySense.Core.Common.Loops.Execution.Sleep.Models;
 using EmbodySense.Core.Common.Workspace;
+using EmbodySense.Core.Persistence.Loops.Execution.Sleep;
 using EmbodySense.Core.Persistence.Memory;
 using EmbodySense.Core.Startup.Loops.Execution;
+using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Tests.Support;
 using EmbodySense.Web;
 using EmbodySense.Web.Models;
@@ -22,7 +27,7 @@ namespace EmbodySense.E2ETests.Web;
 
 public sealed class WebClientFlowTests
 {
-    private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web);
+    private static readonly JsonSerializerOptions _jsonOptions = CreateJsonOptions();
 
     [Fact]
     public async Task Localhost_web_client_serves_assets_and_bootstrap_endpoints()
@@ -184,6 +189,55 @@ public sealed class WebClientFlowTests
         }
     }
 
+    [Fact]
+    public async Task External_web_process_gracefully_stops_and_restarts_the_background_lifetime()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForWeb().InitializeAsync(workspace.RootPath);
+        var codexExecutable = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
+        var port = GetFreePort();
+        var first = await ExternalWebApplicationProcess.StartAsync(workspace.RootPath, port, codexExecutable, "gpt-test");
+
+        try
+        {
+            using var firstClient = new HttpClient { BaseAddress = new Uri(first.BaseUrl) };
+            Assert.Equal(
+                WebGovernedLoopBackgroundPosture.Ready,
+                (await WaitForBackgroundPostureAsync(firstClient, WebGovernedLoopBackgroundPosture.Ready, TimeSpan.FromSeconds(5))).BackgroundPosture);
+            await first.StopAsync();
+            Assert.Contains("Application is shutting down", first.FormatOutput(), StringComparison.Ordinal);
+            var stoppedEvidence = await new GovernedLoopCoordinatorEvidenceStore(new WorkspacePaths(workspace.RootPath)).ReadAsync("local-background");
+            Assert.Equal(GovernedLoopCoordinatorReadStatus.Found, stoppedEvidence!.Status);
+            Assert.Equal(GovernedLoopCoordinatorStatus.Stopped, stoppedEvidence.Snapshot!.LatestLifecycle.Status);
+
+            var reacquisitionWindow = stoppedEvidence.Snapshot.LatestHeartbeat.LeaseExpiresAtUtc - DateTimeOffset.UtcNow + TimeSpan.FromSeconds(5);
+            Assert.InRange(reacquisitionWindow, TimeSpan.Zero, TimeSpan.FromSeconds(45));
+
+            await using var second = await ExternalWebApplicationProcess.StartAsync(workspace.RootPath, port, codexExecutable, "gpt-test");
+            using var secondClient = new HttpClient { BaseAddress = new Uri(second.BaseUrl) };
+            Assert.Equal(
+                WebGovernedLoopBackgroundPosture.Degraded,
+                (await WaitForBackgroundPostureAsync(secondClient, WebGovernedLoopBackgroundPosture.Degraded, TimeSpan.FromSeconds(5), second)).BackgroundPosture);
+            Assert.Equal(
+                WebGovernedLoopBackgroundPosture.Ready,
+                (await WaitForBackgroundPostureAsync(secondClient, WebGovernedLoopBackgroundPosture.Ready, reacquisitionWindow, second)).BackgroundPosture);
+
+            var restartedEvidence = await new GovernedLoopCoordinatorEvidenceStore(new WorkspacePaths(workspace.RootPath)).ReadAsync("local-background");
+            Assert.Equal(GovernedLoopCoordinatorReadStatus.Found, restartedEvidence!.Status);
+            Assert.Equal(2, restartedEvidence.Snapshot!.Ownership.OwnershipEpoch);
+            Assert.Equal(GovernedLoopCoordinatorStatus.Running, restartedEvidence.Snapshot.LatestLifecycle.Status);
+
+            await second.StopAsync();
+            var restoppedEvidence = await new GovernedLoopCoordinatorEvidenceStore(new WorkspacePaths(workspace.RootPath)).ReadAsync("local-background");
+            Assert.Equal(GovernedLoopCoordinatorReadStatus.Found, restoppedEvidence!.Status);
+            Assert.Equal(GovernedLoopCoordinatorStatus.Stopped, restoppedEvidence.Snapshot!.LatestLifecycle.Status);
+        }
+        finally
+        {
+            await first.DisposeAsync();
+        }
+    }
+
     private static WebApplication CreateApp(
         string rootPath,
         out WebRunOptions options,
@@ -284,6 +338,36 @@ public sealed class WebClientFlowTests
         }
 
         throw new TimeoutException("Web process did not serve /api/status." + Environment.NewLine + process.FormatOutput(), lastException);
+    }
+
+    private static async Task<WebStatus> WaitForBackgroundPostureAsync(
+        HttpClient client,
+        WebGovernedLoopBackgroundPosture posture,
+        TimeSpan timeout,
+        ExternalWebApplicationProcess? process = null)
+    {
+        WebStatus? last = null;
+        var deadline = DateTimeOffset.UtcNow + timeout;
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            var status = await client.GetFromJsonAsync<WebStatus>("/api/status", _jsonOptions);
+            last = status;
+            if (status?.BackgroundPosture == posture)
+            {
+                return status;
+            }
+
+            await Task.Delay(100);
+        }
+
+        throw new TimeoutException($"The external Web host did not reach background posture `{posture}`; last posture: `{last?.BackgroundPosture}`. {process?.FormatOutput()}");
+    }
+
+    private static JsonSerializerOptions CreateJsonOptions()
+    {
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        options.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.KebabCaseLower, allowIntegerValues: false));
+        return options;
     }
 
     private static async Task StopProcessAsync(WebProcess process)
