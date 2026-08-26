@@ -2962,6 +2962,52 @@ public sealed class CustomLoopRunStoreTests
     }
 
     [Fact]
+    public async Task Update_returns_limit_exceeded_for_a_valid_successor_that_exhausts_reserved_trace_capacity()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var blocks = Enumerable.Range(0, 46).Select(index => CapacityContextBlock(index, "source-current")).ToArray();
+        var initial = CreateRun();
+        var current = initial with { Events = [initial.Events[0] with { ContextBlocks = blocks }] };
+        using var store = new CustomLoopRunStore(paths);
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(current)).Status);
+        var appendedBlocks = new[] { CapacityContextBlock(0, "source-successor"), CapacityContextBlock(1, "source-successor") };
+        var checkpoint = new CustomLoopRunEvent(
+            current.Events.LongLength + 1,
+            "event-reserved-capacity-exhausted",
+            current.UpdatedAtUtc,
+            CustomLoopRunEventKind.CheckpointCommitted,
+            1,
+            null,
+            null,
+            "Checkpoint evidence exhausted the remaining reserved trace capacity.",
+            appendedBlocks,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null);
+        var candidate = current with
+        {
+            LifecycleVersion = current.LifecycleVersion + 1,
+            Events = [.. current.Events, checkpoint]
+        };
+        Assert.True(CustomLoopRunValidator.ValidateUpdate(current, candidate).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.ValidateUpdate(current, candidate).Errors));
+        var artifactPath = Path.Combine(paths.CustomLoopRunsPath, current.LoopId, current.Id + ".json");
+        var preservedBytes = await File.ReadAllBytesAsync(artifactPath);
+
+        var result = await store.UpdateAsync(candidate, current.LifecycleVersion);
+
+        Assert.Equal(CustomLoopRunStoreStatus.LimitExceeded, result.Status);
+        Assert.Equal(preservedBytes, await File.ReadAllBytesAsync(artifactPath));
+    }
+
+    [Fact]
     public async Task Artifact_directory_occupied_by_file_fails_without_writing_elsewhere()
     {
         using var workspace = new TestWorkspace();
@@ -2979,6 +3025,13 @@ public sealed class CustomLoopRunStoreTests
         var admitted = Event(1, "event-1", CustomLoopRunEventKind.Admitted, _timestamp);
         var run = new CustomLoopRunRecord(CustomLoopRunRecord.CurrentSchemaVersion, runId, loopId, 1, CustomLoopRunStatus.Admitted, _timestamp, _timestamp, null, "web", new CustomLoopModelSnapshot("openai", "gpt-5"), operationId, "test-user", string.Empty, definition, "Initial prompt", null, context, CustomLoopExecutionClock.NotStarted(), CustomLoopRunCheckpoint.Start(), [admitted], null, null, null) { CapabilityAdmission = TestCapabilityAdmissionFactory.Create(definition.CapabilityRequirements, _timestamp) };
         return CustomLoopAdmissionRequestHash.Apply(run);
+    }
+
+    private static CustomLoopContextBlock CapacityContextBlock(int index, string prefix)
+    {
+        var label = $"{prefix}-{index:D2}:";
+        var content = label + new string('x', CustomLoopLimits.MaxLogicalProviderRequestCharacters - label.Length);
+        return new CustomLoopContextBlock(CustomLoopContextSource.HarnessGovernance, $"{prefix}-{index:D2}", LlmMessageRole.System, true, null, content, CustomLoopTraceContentHash.Compute(content), content.Length, false, EmbodySenseDeveloperInstructions.CurrentVersion);
     }
 
     private static (CustomLoopRunRecord Run, EmbodySense.Core.Common.Triggers.Models.TriggerDeliveryEnvelope Envelope) CreateScheduledRun(

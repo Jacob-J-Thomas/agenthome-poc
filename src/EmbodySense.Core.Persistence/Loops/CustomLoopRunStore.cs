@@ -1787,7 +1787,10 @@ public sealed class CustomLoopRunStore :
             Events = [.. current.Events, warning]
         };
         var serialized = SerializeBounded(candidate);
-        ValidateReservedTraceCapacity(current, candidate, artifact.PersistedUtf8Bytes, serialized.LongLength);
+        if (!HasReservedTraceCapacity(current, candidate, artifact.PersistedUtf8Bytes, serialized.LongLength))
+        {
+            return CustomLoopRunStoreResult.LimitExceeded();
+        }
         await WriteArtifactAsync(matches[0].Path, serialized, ToSummary(candidate), overwrite: true, cancellationToken);
         return CustomLoopRunStoreResult.Updated(candidate);
     }
@@ -1852,7 +1855,10 @@ public sealed class CustomLoopRunStore :
         }
 
         var serialized = SerializeBounded(run);
-        ValidateReservedTraceCapacity(current, run, artifact.PersistedUtf8Bytes, serialized.LongLength);
+        if (!HasReservedTraceCapacity(current, run, artifact.PersistedUtf8Bytes, serialized.LongLength))
+        {
+            return CustomLoopRunStoreResult.LimitExceeded();
+        }
 
         await WriteArtifactAsync(matches[0].Path, serialized, ToSummary(run), overwrite: true, cancellationToken);
         return CustomLoopRunStoreResult.Updated(run);
@@ -3078,7 +3084,7 @@ public sealed class CustomLoopRunStore :
         return new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
     }
 
-    private static void ValidateReservedTraceCapacity(CustomLoopRunRecord current, CustomLoopRunRecord candidate, long currentUtf8Bytes, long candidateUtf8Bytes)
+    private static bool HasReservedTraceCapacity(CustomLoopRunRecord current, CustomLoopRunRecord candidate, long currentUtf8Bytes, long candidateUtf8Bytes)
     {
         var appended = candidate.Events.Skip(current.Events.Length).ToArray();
         var delta = Math.Max(0, candidateUtf8Bytes - currentUtf8Bytes);
@@ -3159,8 +3165,10 @@ public sealed class CustomLoopRunStore :
         var committedAndReserved = CalculateRequiredTraceCapacity(candidate, candidateUtf8Bytes);
         if (committedAndReserved > CustomLoopLimits.MaxRunTraceUtf8Bytes)
         {
-            throw new FormatException("The run trace lacks atomically reserved capacity for all mandatory pure-node/provider/tool evidence, remaining lifecycle/control events, and terminal/integrity evidence.");
+            return false;
         }
+
+        return true;
     }
 
     /// <summary>

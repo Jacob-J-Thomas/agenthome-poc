@@ -32,4 +32,9 @@ public sealed record HumanReviewRunState(
     /// <summary>Gets the one approval continuation reservation, or null unless the accepted terminal decision is an approval.</summary>
     [JsonRequired]
     public HumanReviewContinuationReservation? ContinuationReservation { get; init; }
+
+    /// <summary>Gets the append-only continuation wake, claim, and terminal-result state, or null until an accepted approval is published.</summary>
+    /// <remarks>The canonical run artifact is the only authority for this state. A non-null value is validated against the exact request and approval reservation.</remarks>
+    [JsonRequired]
+    public HumanReviewContinuationState? Continuation { get; init; }
 }

@@ -56,6 +56,21 @@ if (args is ["human-review-decision-race", var humanReviewDecisionRaceWorkspaceR
     return await HumanReviewDecisionRaceHost.RunAsync(humanReviewDecisionRaceWorkspaceRoot, humanReviewDecisionRaceRunId, humanReviewDecisionRaceIdentity, humanReviewDecisionRaceKind, humanReviewDecisionRaceReadyPath, humanReviewDecisionRaceReleasePath, humanReviewDecisionRaceResultPath);
 }
 
+if (args is ["human-review-continuation-claim-race", var humanReviewContinuationWorkspaceRoot, var humanReviewContinuationRunId, var humanReviewContinuationIdentity, var humanReviewContinuationReadyPath, var humanReviewContinuationReleasePath, var humanReviewContinuationResultPath])
+{
+    return await HumanReviewContinuationClaimRaceHost.RunAsync(humanReviewContinuationWorkspaceRoot, humanReviewContinuationRunId, humanReviewContinuationIdentity, humanReviewContinuationReadyPath, humanReviewContinuationReleasePath, humanReviewContinuationResultPath);
+}
+
+if (args is ["human-review-continuation-publication-process-loss", var humanReviewContinuationPublicationWorkspaceRoot, var humanReviewContinuationPublicationRunId, var humanReviewContinuationPublicationBoundary])
+{
+    return await HumanReviewContinuationPublicationProcessLossHost.RunAsync(humanReviewContinuationPublicationWorkspaceRoot, humanReviewContinuationPublicationRunId, humanReviewContinuationPublicationBoundary);
+}
+
+if (args is ["human-review-continuation-transition-process-loss", var humanReviewContinuationTransitionWorkspaceRoot, var humanReviewContinuationTransitionRunId, var humanReviewContinuationTransition, var humanReviewContinuationTransitionBoundary])
+{
+    return await HumanReviewContinuationTransitionProcessLossHost.RunAsync(humanReviewContinuationTransitionWorkspaceRoot, humanReviewContinuationTransitionRunId, humanReviewContinuationTransition, humanReviewContinuationTransitionBoundary);
+}
+
 if (args is ["codex-runtime-probe", var probeConfigurationPath, .. var probeArguments])
 {
     return await CodexRuntimeProbeHost.RunAsync(probeConfigurationPath, probeArguments);

@@ -1630,7 +1630,7 @@ public sealed class CustomLoopFrontierStoreTests
         Assert.Null(state["continuationReservation"]);
         Assert.Equal(encoded, CustomLoopRunArtifactSerializer.Serialize(CustomLoopRunArtifactSerializer.Deserialize(encoded)));
 
-        foreach (var property in new[] { "evidence", "lifecycleHistory", "operationReceipts", "acceptedDecisions", "acceptedTerminalDecision", "continuationReservation" })
+        foreach (var property in new[] { "evidence", "lifecycleHistory", "operationReceipts", "acceptedDecisions", "acceptedTerminalDecision", "continuationReservation", "continuation" })
         {
             var omitted = JsonNode.Parse(encoded)!.AsObject();
             Assert.True(omitted["run"]!["humanReview"]!.AsObject().Remove(property));
@@ -1695,7 +1695,7 @@ public sealed class CustomLoopFrontierStoreTests
         Assert.Equal(expectedLifecycleHash, persisted.HumanReview.LifecycleHistory[^1].LifecycleHash);
     }
 
-    private static async Task<CustomLoopRunRecord> PersistHumanReviewAdmissionAsync(WorkspacePaths paths, string identity)
+    internal static async Task<CustomLoopRunRecord> PersistHumanReviewAdmissionAsync(WorkspacePaths paths, string identity)
     {
         var predecessor = await PersistRealRunningPredecessorAsync(paths);
         var transition = GovernedLoopSequentialFrontierMachine.ReviewBlockCurrent(predecessor.Frontier, predecessor.SequentialAdapterBinding, null, null, predecessor.UpdatedAtUtc.AddMinutes(1));
