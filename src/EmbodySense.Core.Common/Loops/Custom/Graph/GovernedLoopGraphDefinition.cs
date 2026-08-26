@@ -14,6 +14,8 @@ namespace EmbodySense.Core.Common.Loops.Custom.Graph;
 /// <remarks>Construction enforces local canonical value invariants only. Graph-wide topology and executability validation remain downstream concerns; this contract owns no persistence, revision lifecycle, traversal, dispatch, provider, UI, or compatibility behavior.</remarks>
 public sealed class GovernedLoopGraphDefinition
 {
+    private readonly GovernedLoopNodeDefinition[] _nodes;
+
     private GovernedLoopGraphDefinition(
         string graphId,
         string revisionId,
@@ -38,7 +40,7 @@ public sealed class GovernedLoopGraphDefinition
         TerminalNodeIds = Array.AsReadOnly(terminalNodeIds);
         AuthorityCeiling = authorityCeiling;
         ValueSchemas = Array.AsReadOnly(valueSchemas);
-        Nodes = Array.AsReadOnly(nodes);
+        _nodes = GovernedLoopGraphNodeCopier.Copy(nodes);
         ControlEdges = Array.AsReadOnly(controlEdges);
         Bindings = Array.AsReadOnly(bindings);
         OutputContract = outputContract;
@@ -80,7 +82,7 @@ public sealed class GovernedLoopGraphDefinition
     public IReadOnlyList<GovernedLoopValueSchemaDefinition> ValueSchemas { get; }
     /// <summary>Gets the canonical node declarations.</summary>
     /// <value>The immutable nodes ordered by identifier.</value>
-    public IReadOnlyList<GovernedLoopNodeDefinition> Nodes { get; }
+    public IReadOnlyList<GovernedLoopNodeDefinition> Nodes => Array.AsReadOnly(GovernedLoopGraphNodeCopier.Copy(_nodes));
     /// <summary>Gets control flow, which is intentionally separate from value binding.</summary>
     /// <value>The immutable control edges ordered by identifier.</value>
     public IReadOnlyList<GovernedLoopControlEdgeDefinition> ControlEdges { get; }

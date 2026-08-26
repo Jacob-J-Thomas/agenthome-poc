@@ -6,7 +6,7 @@ using EmbodySense.Core.Common.Loops.PureNodes;
 
 namespace EmbodySense.Core.Application.Loops.GraphValidation;
 
-/// <summary>Defines the closed executable catalog contract for the data-only schema-1 Human Input graph node.</summary>
+/// <summary>Defines the closed catalog contract for the data-only schema-1 Human Input graph node.</summary>
 public static class GovernedLoopHumanInputNodeCatalogContract
 {
     private static readonly IReadOnlyList<GovernedLoopControlCondition> _success =
@@ -66,7 +66,7 @@ public static class GovernedLoopHumanInputNodeCatalogContract
         => new(
             new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.HumanInput, GovernedLoopHumanInputVocabulary.TypeId, GovernedLoopHumanInputVocabulary.DescriptorVersion),
             IsAdvertised: true,
-            IsExecutable: true,
+            IsExecutable: false,
             IsLegalEntry: false,
             IsLegalTerminal: false,
             _successFailure,

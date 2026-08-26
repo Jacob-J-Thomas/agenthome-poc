@@ -268,6 +268,95 @@ public sealed class GovernedLoopGraphRevisionStoreTests
     }
 
     [Fact]
+    public async Task Captured_nested_human_input_values_cannot_diverge_from_persisted_graph_identity_or_json()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var trust = new TestCapabilityLifecycleTrustProvider();
+        var nestedChoices = new[] { new HumanInputChoice("nested-choice", "Nested choice"), new HumanInputChoice("other-choice", "Other choice") };
+        var structuredFields = new[] { new HumanInputStructuredFieldSchema("field-one", HumanInputStructuredFieldKind.Choice, true, null, nestedChoices) };
+        var configuration = new GovernedLoopHumanInputNodeConfiguration(
+            GovernedLoopHumanInputNodeConfiguration.CurrentSchemaVersion,
+            "object",
+            "Collect untrusted structured data.",
+            "Choose one bounded nested value.",
+            new HumanInputResponseSchema(HumanInputResponseKind.Structured, null, null, structuredFields, null),
+            HumanInputPrivacyClass.Private,
+            [new HumanInputEligibleRespondent("user-one", "role-one", "route-one")],
+            new HumanInputResponsePolicy(HumanInputResponsePolicyKind.FirstValid, null, null),
+            "timeout-policy-one",
+            "failure-policy-one");
+        var graph = GraphWithEveryClosedEnum(configuration);
+        var hash = graph.ExecutableHash;
+        var captured = Assert.Single(graph.Nodes, node => node.Descriptor.Kind == GovernedLoopNodeKind.HumanInput).HumanInputConfiguration!;
+
+        nestedChoices[0] = new HumanInputChoice("source-mutated", "Source mutated");
+        structuredFields[0] = new HumanInputStructuredFieldSchema("source-mutated", HumanInputStructuredFieldKind.Text, false, 64, null);
+        captured.ResponseSchema!.StructuredFields![0].Choices![0] = new HumanInputChoice("returned-mutated", "Returned mutated");
+        Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Committed, (await Store(paths, trust).CommitAsync(CreateDraft(graph, "create-nested-human-input", HashA, HashB, 0, _time))).Status);
+        using var payload = JsonDocument.Parse(await File.ReadAllBytesAsync(ArtifactPath(paths, graph)));
+        var persistedConfiguration = Assert.Single(
+            payload.RootElement.GetProperty("executableGraph").GetProperty("nodes").EnumerateArray(),
+            node => node.GetProperty("kind").GetString() == "human-input").GetProperty("humanInputConfiguration");
+        var restarted = await Store(paths, trust).ReadArtifactAsync(graph.RevisionReference);
+
+        Assert.Equal(hash, graph.ExecutableHash);
+        Assert.Equal("field-one", persistedConfiguration.GetProperty("responseSchema").GetProperty("structuredFields")[0].GetProperty("fieldId").GetString());
+        Assert.Equal("nested-choice", persistedConfiguration.GetProperty("responseSchema").GetProperty("structuredFields")[0].GetProperty("choices")[0].GetProperty("choiceId").GetString());
+        Assert.Equal(GovernedLoopRevisionStoreReadStatus.Ready, restarted.Status);
+        Assert.Equal(hash, restarted.Artifact!.Graph.ExecutableHash);
+    }
+
+    [Fact]
+    public async Task Legacy_wait_and_human_review_artifacts_restart_with_pinned_hashes_and_omit_human_input_configuration()
+    {
+        var legacyNodes = new (string Name, GovernedLoopNodeDefinition Node, string ExpectedHash)[]
+        {
+            (
+                "wait",
+                new GovernedLoopNodeDefinition(
+                    "infer",
+                    new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Wait, "wait-timestamp", 1),
+                    [InputPort("request"), OutputPort("result")],
+                    GovernedLoopAuthorityCeiling.Create([]),
+                    new Dictionary<string, string> { ["deadline-utc"] = "2026-08-13T01:02:03.4567890Z" }),
+                "b02aea19be748a3b8f1a9b9ccaee120588551968aed75401fb083d365c98a54a"),
+            (
+                "human-review",
+                new GovernedLoopNodeDefinition(
+                    "infer",
+                    new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.HumanReview, "human-review", 1),
+                    [InputPort("request"), OutputPort("result")],
+                    GovernedLoopAuthorityCeiling.Create([]),
+                    new Dictionary<string, string>()),
+                "cd0080d3f9aeca9480585a304a18a0d9aff21dd66da8198c0577fe05e030649e"),
+        };
+
+        foreach (var legacy in legacyNodes)
+        {
+            using var workspace = new TestWorkspace();
+            var paths = new WorkspacePaths(workspace.RootPath);
+            var trust = new TestCapabilityLifecycleTrustProvider();
+            var graph = Graph(
+                graphId: "legacy-" + legacy.Name,
+                revisionId: "legacy-" + legacy.Name + "-revision",
+                intermediate: legacy.Node);
+            var mutation = CreateDraft(graph, "create-legacy-" + legacy.Name, HashA, HashB, 0, _time);
+
+            Assert.Equal(legacy.ExpectedHash, graph.ExecutableHash);
+            Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Committed, (await Store(paths, trust).CommitAsync(mutation)).Status);
+            var payload = await File.ReadAllTextAsync(ArtifactPath(paths, graph));
+            using var payloadJson = JsonDocument.Parse(payload);
+            var restarted = await Store(paths, trust).ReadArtifactAsync(graph.RevisionReference);
+
+            Assert.All(payloadJson.RootElement.GetProperty("executableGraph").GetProperty("nodes").EnumerateArray(), node => Assert.False(node.TryGetProperty("humanInputConfiguration", out _)));
+            Assert.Equal(GovernedLoopRevisionStoreReadStatus.Ready, restarted.Status);
+            Assert.Equal(graph.ExecutableHash, restarted.Artifact!.Graph.ExecutableHash);
+            Assert.DoesNotContain(restarted.Artifact.Graph.Nodes, node => node.HumanInputConfiguration is not null);
+        }
+    }
+
+    [Fact]
     public async Task Lifecycle_only_publication_persists_full_intent_without_a_second_graph_payload()
     {
         using var workspace = new TestWorkspace();
@@ -1627,8 +1716,19 @@ public sealed class GovernedLoopGraphRevisionStoreTests
         string revisionId = "revision-one",
         GovernedLoopDisplayMetadata? display = null,
         ContextualRoleRevisionPin? owningRole = null,
-        GovernedLoopRetryPolicy? retryPolicy = null)
-        => GovernedLoopGraphDefinition.Create(
+        GovernedLoopRetryPolicy? retryPolicy = null,
+        GovernedLoopNodeDefinition? intermediate = null)
+    {
+        var canonicalIntermediate = intermediate ?? new GovernedLoopNodeDefinition(
+            "infer",
+            new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Inference, "provider-inference", 1),
+            [InputPort("request"), OutputPort("result")],
+            GovernedLoopAuthorityCeiling.Create([ModelInferenceCapabilityId]),
+            new Dictionary<string, string> { ["instruction"] = "Answer from the explicit input." },
+            null,
+            null,
+            retryPolicy);
+        return GovernedLoopGraphDefinition.Create(
             1,
             graphId,
             revisionId,
@@ -1645,15 +1745,7 @@ public sealed class GovernedLoopGraphRevisionStoreTests
                     [OutputPort("request")],
                     GovernedLoopAuthorityCeiling.Create([]),
                     new Dictionary<string, string>()),
-                new GovernedLoopNodeDefinition(
-                    "infer",
-                    new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Inference, "provider-inference", 1),
-                    [InputPort("request"), OutputPort("result")],
-                    GovernedLoopAuthorityCeiling.Create([ModelInferenceCapabilityId]),
-                    new Dictionary<string, string> { ["instruction"] = "Answer from the explicit input." },
-                    null,
-                    null,
-                    retryPolicy),
+                canonicalIntermediate,
                 new GovernedLoopNodeDefinition(
                     "exit",
                     new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Exit, "success-exit", 1),
@@ -1674,6 +1766,7 @@ public sealed class GovernedLoopGraphRevisionStoreTests
                 [new GovernedLoopOutputDefinition("result", "text", "exit", "published-result", true)]),
             display ?? Display("Graph one", 100, 200),
             GovernedLoopGraphTestFixture.DefaultModelRoutingPolicy());
+    }
 
     private static GovernedLoopRetryPolicy RetryPolicy()
         => GovernedLoopRetryContract.CreatePolicy(
@@ -1691,8 +1784,19 @@ public sealed class GovernedLoopGraphRevisionStoreTests
             0,
             maximumTokens: 3_000);
 
-    private static GovernedLoopGraphDefinition GraphWithEveryClosedEnum()
+    private static GovernedLoopGraphDefinition GraphWithEveryClosedEnum(GovernedLoopHumanInputNodeConfiguration? humanInputConfiguration = null)
     {
+        var configuration = humanInputConfiguration ?? new GovernedLoopHumanInputNodeConfiguration(
+            GovernedLoopHumanInputNodeConfiguration.CurrentSchemaVersion,
+            "text",
+            "Collect untrusted data.",
+            "Provide a bounded response.",
+            new HumanInputResponseSchema(HumanInputResponseKind.Text, 64, null, null, null),
+            HumanInputPrivacyClass.Private,
+            [new HumanInputEligibleRespondent("user-one", "role-one", "route-one")],
+            new HumanInputResponsePolicy(HumanInputResponsePolicyKind.FirstValid, null, null),
+            "timeout-policy-one",
+            "failure-policy-one");
         var kinds = Enum.GetValues<GovernedLoopNodeKind>()
             .Where(value => value != GovernedLoopNodeKind.Unknown)
             .ToArray();
@@ -1722,7 +1826,7 @@ public sealed class GovernedLoopGraphRevisionStoreTests
                 ],
                 GovernedLoopNodeKind.HumanInput =>
                 [
-                    new GovernedLoopPortDefinition(GovernedLoopHumanInputVocabulary.ResponsePortId, GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "text", true),
+                    new GovernedLoopPortDefinition(GovernedLoopHumanInputVocabulary.ResponsePortId, GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, configuration.RequestSchemaReference!, true),
                 ],
                 _ => [],
             },
@@ -1733,19 +1837,7 @@ public sealed class GovernedLoopGraphRevisionStoreTests
             null,
             null,
             null,
-            kind == GovernedLoopNodeKind.HumanInput
-                ? new GovernedLoopHumanInputNodeConfiguration(
-                    GovernedLoopHumanInputNodeConfiguration.CurrentSchemaVersion,
-                    "text",
-                    "Collect untrusted data.",
-                    "Provide a bounded response.",
-                    new HumanInputResponseSchema(HumanInputResponseKind.Text, 64, null, null, null),
-                    HumanInputPrivacyClass.Private,
-                    [new HumanInputEligibleRespondent("user-one", "role-one", "route-one")],
-                    new HumanInputResponsePolicy(HumanInputResponsePolicyKind.FirstValid, null, null),
-                    "timeout-policy-one",
-                    "failure-policy-one")
-                : null))
+            kind == GovernedLoopNodeKind.HumanInput ? configuration : null))
             .ToArray();
         var display = nodes.Select((node, index) => new GovernedLoopNodeDisplayMetadata(
             node.Id,

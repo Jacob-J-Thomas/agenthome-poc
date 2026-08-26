@@ -106,6 +106,41 @@ public sealed class GovernedLoopHumanInputNodeConfigurationTests
         Assert.All(variants, variant => Assert.NotEqual(baselineHash, Graph(variant, variant.RequestSchemaReference!, GovernedLoopValueKind.Text).ExecutableHash));
     }
 
+    [Fact]
+    public void Captured_nested_choice_and_structured_field_arrays_cannot_mutate_graph_identity()
+    {
+        var nestedChoices = new[] { new HumanInputChoice("nested-choice", "Nested choice"), new HumanInputChoice("other-choice", "Other choice") };
+        var fields = new[] { new HumanInputStructuredFieldSchema("field-one", HumanInputStructuredFieldKind.Choice, true, null, nestedChoices) };
+        var configuration = new GovernedLoopHumanInputNodeConfiguration(
+            1,
+            "object",
+            "Collect untrusted structured data.",
+            "Choose one bounded nested value.",
+            new HumanInputResponseSchema(HumanInputResponseKind.Structured, null, null, fields, null),
+            HumanInputPrivacyClass.Private,
+            [new HumanInputEligibleRespondent("user-one", "role-one", "route-one")],
+            new HumanInputResponsePolicy(HumanInputResponsePolicyKind.FirstValid, null, null),
+            "timeout-policy-one",
+            "failure-policy-one");
+        var graph = Graph(configuration, "object", GovernedLoopValueKind.Object);
+        var node = graph.Nodes.Single(value => value.Id == "human-input");
+        var hash = graph.ExecutableHash;
+        var captured = node.HumanInputConfiguration!;
+
+        nestedChoices[0] = new HumanInputChoice("source-mutated", "Source mutated");
+        fields[0] = new HumanInputStructuredFieldSchema("source-mutated", HumanInputStructuredFieldKind.Choice, false, null, null);
+        captured.ResponseSchema!.StructuredFields![0].Choices![0] = new HumanInputChoice("returned-mutated", "Returned mutated");
+        var afterNestedChoiceMutation = graph.Nodes.Single(value => value.Id == "human-input").HumanInputConfiguration!;
+        captured.ResponseSchema.StructuredFields[0] = new HumanInputStructuredFieldSchema("returned-field-mutated", HumanInputStructuredFieldKind.Text, false, 64, null);
+        var afterStructuredFieldMutation = graph.Nodes.Single(value => value.Id == "human-input").HumanInputConfiguration!;
+
+        Assert.Equal(hash, graph.ExecutableHash);
+        Assert.Equal("field-one", afterNestedChoiceMutation.ResponseSchema!.StructuredFields![0].FieldId);
+        Assert.Equal("nested-choice", afterNestedChoiceMutation.ResponseSchema.StructuredFields[0].Choices![0].ChoiceId);
+        Assert.Equal("field-one", afterStructuredFieldMutation.ResponseSchema!.StructuredFields![0].FieldId);
+        Assert.True(GovernedLoopHumanInputNodeConfigurationValidator.HasExactNodeSemantics(node, graph.ValueSchemas.ToDictionary(value => value.Id, StringComparer.Ordinal)));
+    }
+
     private static GovernedLoopHumanInputNodeConfiguration Configuration(
         int schemaVersion = GovernedLoopHumanInputNodeConfiguration.CurrentSchemaVersion,
         string requestSchemaReference = "text",

@@ -12,14 +12,14 @@ namespace EmbodySense.Core.Application.Tests.Loops.GraphValidation;
 public sealed class GovernedLoopHumanInputNodeCatalogContractTests
 {
     [Fact]
-    public void Catalog_is_closed_executable_data_only_and_authority_free()
+    public void Catalog_is_closed_advertised_but_not_runner_executable_data_only_and_authority_free()
     {
         var descriptor = GovernedLoopHumanInputNodeCatalogContract.Descriptor;
         var port = Assert.Single(descriptor.Ports);
 
         Assert.Equal(new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.HumanInput, GovernedLoopHumanInputVocabulary.TypeId, 1), descriptor.Descriptor);
         Assert.True(descriptor.IsAdvertised);
-        Assert.True(descriptor.IsExecutable);
+        Assert.False(descriptor.IsExecutable);
         Assert.False(descriptor.IsLegalEntry);
         Assert.False(descriptor.IsLegalTerminal);
         Assert.Equal([GovernedLoopControlCondition.Success, GovernedLoopControlCondition.Failure], descriptor.AllowedControlOutcomes);
@@ -45,7 +45,7 @@ public sealed class GovernedLoopHumanInputNodeCatalogContractTests
         var descriptor = GovernedLoopHumanInputNodeCatalogContract.Descriptor;
         var mutations = new GovernedLoopNodeCatalogDescriptor[]
         {
-            descriptor with { IsExecutable = false },
+            descriptor with { IsExecutable = true },
             descriptor with { RequiredCapabilityIds = ["org.embodysense/workspace-read"] },
             descriptor with { Ports = [] },
             descriptor with { RequiredControlOutcomes = [GovernedLoopControlCondition.Failure] },
@@ -54,6 +54,7 @@ public sealed class GovernedLoopHumanInputNodeCatalogContractTests
         Assert.True(GovernedLoopHumanInputNodeCatalogContract.TryResolve(descriptor.Descriptor, out var resolved));
         Assert.Equal(descriptor, resolved);
         Assert.False(GovernedLoopSequentialNodeDescriptors.IsSupported(descriptor.Descriptor));
+        Assert.Equal(descriptor.IsExecutable, GovernedLoopSequentialNodeDescriptors.IsSupported(descriptor.Descriptor));
         Assert.False(GovernedLoopHumanInputNodeCatalogContract.TryResolve(descriptor.Descriptor with { Kind = GovernedLoopNodeKind.HumanReview }, out _));
         Assert.False(GovernedLoopHumanInputNodeCatalogContract.TryResolve(descriptor.Descriptor with { TypeId = "human-review" }, out _));
         Assert.False(GovernedLoopHumanInputNodeCatalogContract.TryResolve(descriptor.Descriptor with { Version = 2 }, out _));

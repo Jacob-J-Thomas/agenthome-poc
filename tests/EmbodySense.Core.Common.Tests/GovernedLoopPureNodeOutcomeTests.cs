@@ -63,7 +63,7 @@ public sealed class GovernedLoopPureNodeOutcomeTests
         Assert.Equal(["binding-left", "binding-right"], outcome!.Inputs.Select(value => value.BindingId));
         Assert.Throws<NotSupportedException>(() => ((IList<GovernedLoopTypedBindingValue>)outcome.Inputs).Add(item.Inputs[0]));
         Assert.Throws<NotSupportedException>(() => ((IList<GovernedLoopTypedNodeOutput>)outcome.Outputs).Add(item.Output));
-        Assert.Equal("8c77d9993d831ce7d95aa482f4de3e559c003bd4fd2c8591b977a9a536aa4fc2", outcome.ContentHash);
+        Assert.Equal("6f6a28438f48a0254b3d42524e20b6c3aaf7317c9b3ae8fca8a06605777ab3c1", outcome.ContentHash);
         Assert.False(GovernedLoopPureNodeOutcomeHash.Matches(outcome, new string('A', 64)));
         Assert.False(GovernedLoopPureNodeOutcomeHash.Matches(null, outcome.ContentHash));
         Assert.Throws<ArgumentNullException>(() => GovernedLoopPureNodeOutcomeHash.Compute(null!));

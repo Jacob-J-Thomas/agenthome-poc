@@ -71,7 +71,10 @@ public static class GovernedLoopExecutableHash
             writer.WriteString("kind", ToCanonical(node.Descriptor.Kind));
             writer.WriteString("typeId", node.Descriptor.TypeId);
             writer.WriteNumber("descriptorVersion", node.Descriptor.Version);
-            WriteHumanInputConfiguration(writer, node.HumanInputConfiguration);
+            if (node.HumanInputConfiguration is { } humanInputConfiguration)
+            {
+                WriteHumanInputConfiguration(writer, humanInputConfiguration);
+            }
             writer.WriteString("modelRoutingPolicyHash", node.ModelRoutingPolicy?.ContentHash);
             if (node.RetryPolicy is { } retryPolicy)
             {
@@ -120,15 +123,9 @@ public static class GovernedLoopExecutableHash
         writer.WriteEndArray();
     }
 
-    private static void WriteHumanInputConfiguration(Utf8JsonWriter writer, GovernedLoopHumanInputNodeConfiguration? configuration)
+    private static void WriteHumanInputConfiguration(Utf8JsonWriter writer, GovernedLoopHumanInputNodeConfiguration configuration)
     {
         writer.WritePropertyName("humanInputConfiguration");
-        if (configuration is null)
-        {
-            writer.WriteNullValue();
-            return;
-        }
-
         writer.WriteStartObject();
         writer.WriteNumber("schemaVersion", configuration.SchemaVersion);
         writer.WriteString("requestSchemaReference", configuration.RequestSchemaReference);

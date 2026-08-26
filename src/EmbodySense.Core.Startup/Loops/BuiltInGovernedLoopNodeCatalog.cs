@@ -81,10 +81,9 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
             .ToArray();
         if (descriptors.Length != 26 + graphCompatibleCommandActions.Length
             || descriptors.Select(item => item.Descriptor).Distinct().Count() != descriptors.Length
-            || descriptors.Any(item => !GovernedLoopSequentialNodeDescriptors.IsSupported(item.Descriptor)
-                && !GovernedLoopHumanInputNodeCatalogContract.TryResolve(item.Descriptor, out _)))
+            || descriptors.Any(item => item.IsExecutable && !GovernedLoopSequentialNodeDescriptors.IsSupported(item.Descriptor)))
         {
-            throw new InvalidOperationException("The built-in schema-1 governed-loop catalog is incomplete or contains an unsupported descriptor.");
+            throw new InvalidOperationException("The built-in schema-1 governed-loop catalog is incomplete or advertises an executable descriptor that the runner does not support.");
         }
 
         return new GovernedLoopNodeCatalogSnapshot(
