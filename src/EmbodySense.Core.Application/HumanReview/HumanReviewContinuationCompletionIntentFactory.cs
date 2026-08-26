@@ -18,7 +18,7 @@ public static class HumanReviewContinuationCompletionIntentFactory
     /// <param name="completionId">The unique durable completion identity assigned after the release concludes.</param>
     /// <param name="resultHash">The canonical conclusive governed-release result hash.</param>
     /// <param name="frontierReceiptHash">The canonical persisted frontier-receipt hash.</param>
-    /// <param name="completedAtUtc">The trusted UTC instant at which the release concluded.</param>
+    /// <param name="completedAtUtc">The trusted UTC instant at which the release concluded, strictly before the active claim lease expires.</param>
     /// <param name="evidence">The bounded, canonical, redacted completion evidence.</param>
     /// <param name="provenance">The canonical coordinator provenance observed at <paramref name="completedAtUtc"/>.</param>
     /// <param name="completion">The exact canonical completion when validation succeeds; otherwise <see langword="null"/>.</param>
@@ -41,6 +41,7 @@ public static class HumanReviewContinuationCompletionIntentFactory
         try
         {
             if (!Matches(intent, request, wake, reservation, claim) || intent is null || request is null || wake is null || reservation is null || claim is null
+                || completedAtUtc >= claim.LeaseExpiresAtUtc
                 || !HumanReviewContinuationContractValidator.ValidateWake(request, reservation, wake).IsValid
                 || !HumanReviewContinuationContractValidator.ValidateClaim(wake, reservation, claim).IsValid)
             {

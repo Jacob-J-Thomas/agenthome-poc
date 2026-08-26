@@ -209,7 +209,7 @@ public sealed class HumanReviewContinuationConsumer : IHumanReviewContinuationCo
         {
             return new EffectQueryRead(read.Status, null);
         }
-        if (!MatchesReviewedEffect(context.Request.Binding, reviewed, evidence)
+        if (!MatchesReviewedEffect(context.Request.Binding, context.AdapterBinding.ExecutionBinding, reviewed, evidence)
             || !HumanReviewEffectReleaseContract.TryCaptureExpectation(evidence.Identity, evidence.Preparation, out var identity, out var preparation, out _)
             || identity is null
             || preparation is null)
@@ -375,14 +375,16 @@ public sealed class HumanReviewContinuationConsumer : IHumanReviewContinuationCo
             && string.Equals(binding.ExecutionBinding.Revision.RevisionId, artifact.RevisionArtifact.Revision.RevisionId, StringComparison.Ordinal)
             && string.Equals(binding.ExecutionBinding.Revision.ExecutableHash, artifact.RevisionArtifact.Revision.ExecutableHash, StringComparison.Ordinal);
 
-    private static bool MatchesReviewedEffect(HumanReviewBinding binding, HumanReviewEffectAttemptBinding reviewed, HumanReviewCurrentEffectAttemptEvidence evidence)
+    private static bool MatchesReviewedEffect(HumanReviewBinding binding, GovernedLoopExecutionBinding executionBinding, HumanReviewEffectAttemptBinding reviewed, HumanReviewCurrentEffectAttemptEvidence evidence)
     {
         try
         {
-            return string.Equals(evidence.Identity.RunId, binding.RunId, StringComparison.Ordinal)
+            return string.Equals(evidence.Identity.WorkspaceId, binding.WorkspaceId, StringComparison.Ordinal)
+                && string.Equals(evidence.Identity.RunId, binding.RunId, StringComparison.Ordinal)
                 && string.Equals(evidence.Identity.GraphId, binding.GraphId, StringComparison.Ordinal)
                 && string.Equals(evidence.Identity.RevisionId, binding.RevisionId, StringComparison.Ordinal)
                 && string.Equals(evidence.Identity.RevisionHash, binding.RevisionHash, StringComparison.Ordinal)
+                && evidence.Identity.ExecutionGeneration == executionBinding.ExecutionGeneration
                 && string.Equals(evidence.Identity.FrontierId, binding.FrontierId, StringComparison.Ordinal)
                 && evidence.Identity.FrontierVersion == binding.FrontierVersion
                 && string.Equals(evidence.Identity.FrontierHash, binding.FrontierHash, StringComparison.Ordinal)

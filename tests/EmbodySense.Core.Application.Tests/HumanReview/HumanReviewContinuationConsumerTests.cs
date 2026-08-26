@@ -8,6 +8,7 @@ using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Execution.Models;
 using EmbodySense.Core.Common.Loops.Execution.Effects;
 using EmbodySense.Core.Common.Loops.Execution.Effects.Models;
+using EmbodySense.Core.Common.Loops.Sequential.Models;
 
 namespace EmbodySense.Core.Application.Tests.HumanReview;
 
@@ -312,6 +313,7 @@ public sealed class HumanReviewContinuationConsumerTests
     {
         var fixture = await ApprovedCandidateAsync(includeEffectAttempt: true);
         var binding = Assert.IsType<EmbodySense.Core.Common.Loops.Models.Custom.Execution.HumanReviewRunState>(fixture.Run.HumanReview).Request.Binding;
+        var executionBinding = Assert.IsType<GovernedLoopSequentialAdapterBinding>(fixture.Run.SequentialAdapterBinding).ExecutionBinding;
         var effectAttempt = Assert.IsType<GovernedLoopEffectAttempt>(fixture.EffectAttempt);
         var evidence = EffectEvidence(binding, effectAttempt);
         var snapshot = HumanReviewEffectReleaseContract.Create(binding, effectAttempt, effectAttempt.Payload.UpdatedAtUtc.AddSeconds(1));
@@ -329,6 +331,8 @@ public sealed class HumanReviewContinuationConsumerTests
         Assert.Equal(HumanReviewContinuationConsumptionStatus.EffectReleasePrepared, result.Status);
         Assert.Equal(HumanReviewContinuationAction.ReleaseEffect, result.Action?.Action);
         Assert.Equal(new GovernedLoopEffectCertaintySnapshotQuery(evidence.Identity, evidence.Preparation), result.Action?.EffectQuery);
+        Assert.Equal(binding.WorkspaceId, evidence.Identity.WorkspaceId);
+        Assert.Equal(executionBinding.ExecutionGeneration, evidence.Identity.ExecutionGeneration);
         Assert.Equal(fixture.Run.Id, result.Completion?.RunId);
         Assert.Equal(fixture.Run.LifecycleVersion, result.Completion?.ExpectedLifecycleVersion);
         Assert.Equal(fixture.Claim.ClaimHash, result.Completion?.Claim.ClaimHash);
@@ -345,6 +349,42 @@ public sealed class HumanReviewContinuationConsumerTests
             Assert.Equal(binding, query.Binding);
             Assert.Equal(binding.EffectAttempt, query.EffectAttempt);
         });
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Well_formed_effect_evidence_from_another_workspace_or_execution_generation_fails_closed(bool differentWorkspace)
+    {
+        var fixture = await ApprovedCandidateAsync(includeEffectAttempt: true);
+        var binding = Assert.IsType<EmbodySense.Core.Common.Loops.Models.Custom.Execution.HumanReviewRunState>(fixture.Run.HumanReview).Request.Binding;
+        var effectAttempt = Assert.IsType<GovernedLoopEffectAttempt>(fixture.EffectAttempt);
+        var evidence = EffectEvidence(binding, effectAttempt);
+        var alternateWorkspaceId = binding.WorkspaceId[..^1] + (binding.WorkspaceId[^1] == 'a' ? "b" : "a");
+        var alternateGeneration = evidence.Identity.ExecutionGeneration == 1 ? 2 : 1;
+        var changedIdentity = evidence.Identity with
+        {
+            WorkspaceId = differentWorkspace ? alternateWorkspaceId : evidence.Identity.WorkspaceId,
+            ExecutionGeneration = differentWorkspace ? evidence.Identity.ExecutionGeneration : alternateGeneration,
+            IdentityHash = string.Empty,
+        };
+        changedIdentity = changedIdentity with { IdentityHash = HumanReviewEffectReleaseContract.ComputeIdentity(changedIdentity) };
+        var changedEvidence = evidence with { Identity = changedIdentity };
+        Assert.True(HumanReviewEffectReleaseContract.TryCaptureExpectation(changedEvidence.Identity, changedEvidence.Preparation, out _, out _, out _));
+        var authority = new RecordingAuthoritySource(HumanReviewContinuationAuthorityReadStatus.Current);
+        var effectEvidence = new RecordingEffectEvidenceSource(CurrentEvidence(changedEvidence));
+        var effectCertainty = new RecordingEffectCertaintySource();
+        var consumer = Consumer(authority, effectEvidence, effectCertainty, fixture.Claim.ClaimedAtUtc.AddSeconds(1));
+
+        var result = await consumer.ConsumeAsync(fixture.Candidate);
+
+        Assert.Equal(HumanReviewContinuationConsumptionStatus.RetirementRequired, result.Status);
+        Assert.Equal(HumanReviewContinuationOutcome.Blocked, result.Retirement?.Outcome);
+        Assert.Null(result.Action);
+        Assert.Null(result.Completion);
+        Assert.Equal(1, authority.ReadCount);
+        Assert.Equal(1, effectEvidence.ReadCount);
+        Assert.Equal(0, effectCertainty.ReadCount);
     }
 
     [Fact]
@@ -419,6 +459,69 @@ public sealed class HumanReviewContinuationConsumerTests
             Provenance("replayed-completion", completedAtUtc),
             out var replayedCompletion));
         Assert.Null(replayedCompletion);
+    }
+
+    [Fact]
+    public async Task Completion_factory_requires_a_completion_time_strictly_before_the_claim_lease_expiry()
+    {
+        var fixture = await ApprovedCandidateAsync();
+        var review = Assert.IsType<EmbodySense.Core.Common.Loops.Models.Custom.Execution.HumanReviewRunState>(fixture.Run.HumanReview);
+        var reservation = Assert.IsType<HumanReviewContinuationReservation>(review.ContinuationReservation);
+        var state = Assert.IsType<HumanReviewContinuationState>(fixture.Candidate.Continuation);
+        var consumer = Consumer(
+            new RecordingAuthoritySource(HumanReviewContinuationAuthorityReadStatus.Current, HumanReviewContinuationAuthorityReadStatus.Current),
+            new RecordingEffectEvidenceSource(),
+            new RecordingEffectCertaintySource(),
+            fixture.Claim.ClaimedAtUtc.AddSeconds(1));
+        var intent = Assert.IsType<HumanReviewContinuationCompletionIntent>((await consumer.ConsumeAsync(fixture.Candidate)).Completion);
+        var beforeExpiry = fixture.Claim.LeaseExpiresAtUtc.AddTicks(-1);
+        var atExpiry = fixture.Claim.LeaseExpiresAtUtc;
+        var afterExpiry = fixture.Claim.LeaseExpiresAtUtc.AddTicks(1);
+
+        Assert.True(HumanReviewContinuationCompletionIntentFactory.TryCreate(
+            intent,
+            review.Request,
+            state.Wake,
+            reservation,
+            fixture.Claim,
+            "completion-before-expiry",
+            Hash('b'),
+            Hash('c'),
+            beforeExpiry,
+            ImmutableArray<HumanReviewRedactedPreview>.Empty,
+            Provenance("completion-before-expiry", beforeExpiry),
+            out var beforeExpiryCompletion));
+        Assert.NotNull(beforeExpiryCompletion);
+
+        Assert.False(HumanReviewContinuationCompletionIntentFactory.TryCreate(
+            intent,
+            review.Request,
+            state.Wake,
+            reservation,
+            fixture.Claim,
+            "completion-at-expiry",
+            Hash('b'),
+            Hash('c'),
+            atExpiry,
+            ImmutableArray<HumanReviewRedactedPreview>.Empty,
+            Provenance("completion-at-expiry", atExpiry),
+            out var atExpiryCompletion));
+        Assert.Null(atExpiryCompletion);
+
+        Assert.False(HumanReviewContinuationCompletionIntentFactory.TryCreate(
+            intent,
+            review.Request,
+            state.Wake,
+            reservation,
+            fixture.Claim,
+            "completion-after-expiry",
+            Hash('b'),
+            Hash('c'),
+            afterExpiry,
+            ImmutableArray<HumanReviewRedactedPreview>.Empty,
+            Provenance("completion-after-expiry", afterExpiry),
+            out var afterExpiryCompletion));
+        Assert.Null(afterExpiryCompletion);
     }
 
     [Fact]
