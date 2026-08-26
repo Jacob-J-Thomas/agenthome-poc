@@ -1,6 +1,4 @@
 using EmbodySense.Core.Application.Capabilities;
-using EmbodySense.Core.Application.Loops;
-using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Triggers.Schedules;
 using EmbodySense.Core.Application.Triggers.Schedules.Models;
 using EmbodySense.Core.Application.Triggers.Models;
@@ -587,9 +585,12 @@ public sealed class ScheduleRuntimeFacadeTests
         using var workspace = new TestWorkspace();
         var context = ScheduleCurrentEvidenceTestContext.Create();
         var paths = new WorkspacePaths(workspace.RootPath);
-        using var runStore = new CustomLoopRunStore(paths);
+        using var runStore = new TrackingCustomLoopRunStore(new CustomLoopRunStore(paths));
         var (run, target) = await ScheduleRunOverlapAdapterTests.MaterializeGovernedRunAsync(runStore);
         var definition = context.Definition with { Target = target, Overlap = ScheduleOverlapPolicy.Skip };
+        Assert.Equal(1, runStore.CreateCallCount);
+        Assert.Equal(run.Id, runStore.LastCreatedRunId);
+        Assert.Equal(0, runStore.GetNonterminalByLoopCallCount);
 
         using (var runtime = ScheduleRuntimeFactory.Create(
                    paths,
@@ -598,19 +599,44 @@ public sealed class ScheduleRuntimeFacadeTests
                    new RuntimeTimeZone(),
                    new FixedTimeProvider(_now)))
         {
-            Assert.Equal(ScheduleRuntimeCreateStatus.Created, (await runtime.CreateAsync(definition)).Status);
+            var created = await runtime.CreateAsync(definition);
+            Assert.Equal(ScheduleRuntimeCreateStatus.Created, created.Status);
+            Assert.NotNull(created.CurrentState);
+            Assert.True(ScheduleIdentityDerivation.TryDerive(
+                created.CurrentState.ScheduleId,
+                created.CurrentState.DefinitionRevision,
+                created.CurrentState.DefinitionHash,
+                created.CurrentState.NextOccurrence,
+                out var identity,
+                out _));
+            var expectedOverlap = await new ScheduleRunOverlapAdapter(runStore).GetStatusAsync(definition.Target, identity!, _now);
+            Assert.Equal(ScheduleOverlapStatus.Active, expectedOverlap.Status);
+            Assert.Equal(1, runStore.GetNonterminalByLoopCallCount);
+            Assert.Equal(run.LoopId, runStore.LastNonterminalLoopId);
 
             var evaluated = await runtime.EvaluateOnceAsync(definition.ScheduleId);
 
             Assert.Equal(ScheduleEvaluationStatus.Skipped, evaluated.Status);
             Assert.Equal("overlap-policy-skip", evaluated.ReasonCode);
+            Assert.NotNull(evaluated.State);
+            var disposition = Assert.Single(evaluated.State.DispositionEvidence);
+            Assert.Equal(ScheduleOccurrenceDisposition.OverlapSkipped, disposition.Disposition);
+            Assert.Matches("^[0-9a-f]{64}$", disposition.DecisionEvidenceHash!);
+            Assert.Equal(expectedOverlap.EvidenceHash, disposition.DecisionEvidenceHash);
             Assert.Equal(0, context.PayloadReadCount);
+            Assert.Equal(2, runStore.GetNonterminalByLoopCallCount);
+            Assert.Equal(run.LoopId, runStore.LastNonterminalLoopId);
         }
 
+        Assert.False(runStore.IsDisposed);
+        Assert.Equal(0, runStore.DisposeCount);
+        Assert.Equal(0, runStore.InnerDisposeCount);
         var retained = await runStore.GetNonterminalByLoopAsync(run.LoopId);
         Assert.NotNull(retained);
         Assert.Equal(run.Id, retained.Id);
         Assert.Equal(run.AdmissionOperationId, retained.AdmissionOperationId);
+        Assert.Equal(3, runStore.GetNonterminalByLoopCallCount);
+        Assert.Equal(run.LoopId, runStore.LastNonterminalLoopId);
     }
 
     [Fact]

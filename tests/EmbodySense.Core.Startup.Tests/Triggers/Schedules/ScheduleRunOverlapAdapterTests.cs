@@ -1,4 +1,5 @@
 using System.Text.Json;
+using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Admission;
 using EmbodySense.Core.Application.Loops.Admission.Models;
 using EmbodySense.Core.Application.Loops.Sequential;
@@ -232,7 +233,7 @@ public sealed class ScheduleRunOverlapAdapterTests
     }
 
     internal static async Task<(CustomLoopRunRecord Run, TriggerLoopReference Target)> MaterializeGovernedRunAsync(
-        CustomLoopRunStore store)
+        ICustomLoopRunStore store)
     {
         var fixture = ConversationPublicationAuthorityTestFixture.Create(
             runId: "run-governed-overlap",
