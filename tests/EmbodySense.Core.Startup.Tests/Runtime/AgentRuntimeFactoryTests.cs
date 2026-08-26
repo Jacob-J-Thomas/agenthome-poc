@@ -326,6 +326,76 @@ public sealed class AgentRuntimeFactoryTests
     }
 
     [Fact]
+    public async Task StartGovernedLoopLocalBackgroundAsync_immediately_restarts_a_confirmed_local_terminal_owner_with_exact_fenced_evidence()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        await using var runtime = await CreateRuntimeAsync(workspace);
+        var store = new GovernedLoopCoordinatorEvidenceStore(new WorkspacePaths(workspace.RootPath));
+
+        var initial = await runtime.StartGovernedLoopLocalBackgroundWithStatusAsync();
+        var stopped = await runtime.StopGovernedLoopLocalBackgroundAsync();
+        var restarted = await runtime.StartGovernedLoopLocalBackgroundWithStatusAsync();
+        var durable = await store.ReadAsync("local-background");
+
+        Assert.Equal(AgentRuntimeGovernedLoopBackgroundStartStatus.Started, initial.Status);
+        Assert.Equal(AgentRuntimeGovernedLoopBackgroundStopStatus.Stopped, stopped.Status);
+        Assert.Equal(AgentRuntimeGovernedLoopBackgroundStartStatus.Started, restarted.Status);
+        Assert.Equal(GovernedLoopCoordinatorReadStatus.Found, durable!.Status);
+        Assert.Equal(2, durable.Snapshot!.Ownership.OwnershipEpoch);
+        Assert.Equal(GovernedLoopCoordinatorStatus.Running, durable.Snapshot.LatestLifecycle.Status);
+        Assert.True(durable.Snapshot.LatestHeartbeat.LeaseExpiresAtUtc > durable.Snapshot.LatestHeartbeat.RecordedAtUtc);
+
+        Assert.Equal(AgentRuntimeGovernedLoopBackgroundStopStatus.Stopped, (await runtime.StopGovernedLoopLocalBackgroundAsync()).Status);
+    }
+
+    [Fact]
+    public async Task StopGovernedLoopLocalBackgroundAsync_preserves_expired_nonterminal_peer_posture_instead_of_fabricating_stopped()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var acquisition = await new GovernedLoopCoordinatorEvidenceStore(paths).TryAcquireAsync(ExpiredPeerAcquisition());
+        await using var runtime = await CreateRuntimeAsync(workspace);
+
+        var stop = await runtime.StopGovernedLoopLocalBackgroundAsync();
+        var durable = await new GovernedLoopCoordinatorEvidenceStore(paths).ReadAsync("local-background");
+
+        Assert.Equal(GovernedLoopCoordinatorAcquisitionStatus.Acquired, acquisition!.Status);
+        Assert.Equal(AgentRuntimeGovernedLoopBackgroundStopStatus.Unavailable, stop.Status);
+        Assert.Equal(AgentRuntimeGovernedLoopBackgroundReadiness.Degraded, stop.Readiness);
+        Assert.Equal(AgentRuntimeGovernedLoopBackgroundOwnership.Unknown, stop.Ownership);
+        Assert.Equal(GovernedLoopCoordinatorReadStatus.Found, durable!.Status);
+        Assert.Equal(GovernedLoopCoordinatorStatus.Starting, durable.Snapshot!.LatestLifecycle.Status);
+        Assert.Equal("expired-peer", durable.Snapshot.Ownership.OwnerId);
+    }
+
+    [Fact]
+    public async Task StopGovernedLoopLocalBackgroundAsync_preserves_corrupt_durable_evidence_instead_of_fabricating_stopped()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new GovernedLoopCoordinatorEvidenceStore(paths);
+        Assert.Equal(GovernedLoopCoordinatorAcquisitionStatus.Acquired, (await store.TryAcquireAsync(ExpiredPeerAcquisition()))!.Status);
+        var ledger = Directory.EnumerateFiles(
+                paths.AgentFile(Path.Combine("loops", "execution", "coordinator")),
+                "ledger-*.json")
+            .Order(StringComparer.Ordinal)
+            .Last();
+        await File.WriteAllTextAsync(ledger, "{invalid");
+        await using var runtime = await CreateRuntimeAsync(workspace);
+
+        var stop = await runtime.StopGovernedLoopLocalBackgroundAsync();
+        var durable = await new GovernedLoopCoordinatorEvidenceStore(paths).ReadAsync("local-background");
+
+        Assert.Equal(AgentRuntimeGovernedLoopBackgroundStopStatus.Unavailable, stop.Status);
+        Assert.Equal(AgentRuntimeGovernedLoopBackgroundReadiness.Unavailable, stop.Readiness);
+        Assert.Equal(AgentRuntimeGovernedLoopBackgroundOwnership.Unknown, stop.Ownership);
+        Assert.Equal(GovernedLoopCoordinatorReadStatus.Corrupt, durable!.Status);
+    }
+
+    [Fact]
     public async Task StartGovernedLoopLocalBackgroundWithStatusAsync_reports_unavailable_without_claiming_background_ownership()
     {
         using var workspace = new TestWorkspace();
@@ -2780,6 +2850,40 @@ public sealed class AgentRuntimeFactoryTests
             executablePath,
             "read-only",
             runtimeSurface ?? AgentRuntimeSurface.Cli);
+    }
+
+    private static GovernedLoopCoordinatorAcquisitionRequest ExpiredPeerAcquisition()
+    {
+        var observedAtUtc = DateTimeOffset.UtcNow.AddMinutes(-2).ToUniversalTime();
+        var ownership = GovernedLoopSleepContractHash.Apply(new GovernedLoopCoordinatorOwnership(
+            GovernedLoopCoordinatorOwnership.CurrentSchemaVersion,
+            "local-background",
+            "expired-peer",
+            1,
+            observedAtUtc,
+            string.Empty));
+        var lifecycle = GovernedLoopSleepContractHash.Apply(new GovernedLoopCoordinatorLifecycle(
+            GovernedLoopCoordinatorLifecycle.CurrentSchemaVersion,
+            1,
+            ownership,
+            GovernedLoopCoordinatorStatus.Starting,
+            observedAtUtc,
+            null,
+            string.Empty));
+        var heartbeat = GovernedLoopSleepContractHash.Apply(new GovernedLoopCoordinatorHeartbeat(
+            GovernedLoopCoordinatorHeartbeat.CurrentSchemaVersion,
+            1,
+            ownership,
+            observedAtUtc,
+            observedAtUtc.AddMinutes(1),
+            string.Empty));
+        return new GovernedLoopCoordinatorAcquisitionRequest(
+            GovernedLoopCoordinatorPriorEvidenceExpectation.NotFound,
+            null,
+            null,
+            ownership,
+            lifecycle,
+            heartbeat);
     }
 
     private static async Task InstallModelProfileAsync(WorkspacePaths paths, string trustRootPath, CapabilityDescriptor descriptor)

@@ -251,6 +251,28 @@ public sealed class GovernedLoopLocalCoordinatorTests
     }
 
     [Fact]
+    public async Task Confirmed_local_stopped_session_restarts_immediately_with_a_fenced_same_owner_successor()
+    {
+        var evidence = new RecordingCoordinatorEvidencePort();
+        await using var coordinator = Coordinator(evidence, new ScriptedLocalWorkRunner(), Clock(), "owner-a");
+
+        var initial = await coordinator.StartAsync();
+        var stopped = await coordinator.StopAsync();
+        var restarted = await coordinator.StartAsync();
+        var snapshot = evidence.Snapshot;
+
+        Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Started, initial.Status);
+        Assert.Equal(GovernedLoopLocalCoordinatorStopStatus.Stopped, stopped.Status);
+        Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Started, restarted.Status);
+        Assert.Equal("owner-a", snapshot!.Ownership.OwnerId);
+        Assert.Equal(2, snapshot.Ownership.OwnershipEpoch);
+        Assert.Equal(GovernedLoopCoordinatorStatus.Running, snapshot.LatestLifecycle.Status);
+        Assert.True(snapshot.LatestHeartbeat.LeaseExpiresAtUtc > snapshot.LatestHeartbeat.RecordedAtUtc);
+
+        Assert.Equal(GovernedLoopLocalCoordinatorStopStatus.Stopped, (await coordinator.StopAsync()).Status);
+    }
+
+    [Fact]
     public async Task Shutdown_waits_for_hostile_one_shot_safe_boundary_before_recording_stopped()
     {
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -304,6 +326,27 @@ public sealed class GovernedLoopLocalCoordinatorTests
         Assert.Single(evidence.Failures);
         Assert.Equal(GovernedLoopCoordinatorFailureKind.CorruptState, evidence.Failures[0].Kind);
         Assert.Equal("schedule-result-corrupt", evidence.Failures[0].DetailEvidenceReference);
+    }
+
+    [Fact]
+    public async Task Completed_failed_session_is_reaped_and_never_reports_ready_already_running_posture()
+    {
+        var evidence = new RecordingCoordinatorEvidencePort();
+        var work = new ScriptedLocalWorkRunner
+        {
+            Handler = static (_, _) => Task.FromResult<GovernedLoopLocalWorkResult?>(null)
+        };
+        await using var coordinator = Coordinator(evidence, work, Clock(), "owner-a");
+
+        Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Started, (await coordinator.StartAsync()).Status);
+        await WaitUntilAsync(() => evidence.Snapshot?.LatestLifecycle.Status == GovernedLoopCoordinatorStatus.Failed);
+        var afterFailure = await coordinator.StartAsync();
+        var durable = evidence.Snapshot;
+
+        Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Failed, afterFailure.Status);
+        Assert.Equal(GovernedLoopCoordinatorStatus.Failed, durable!.LatestLifecycle.Status);
+        Assert.Equal(durable, afterFailure.Snapshot);
+        Assert.Single(evidence.Failures);
     }
 
     [Fact]

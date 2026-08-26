@@ -57,7 +57,8 @@ public static class GovernedLoopCoordinatorEvidenceContract
             GovernedLoopCoordinatorPriorEvidenceExpectation.NotFound => request.ExpectedOwnershipHash is null
                 && request.ExpectedHeartbeatHash is null
                 && request.ProposedOwnership.OwnershipEpoch == 1,
-            GovernedLoopCoordinatorPriorEvidenceExpectation.Existing => IsCanonicalHash(request.ExpectedOwnershipHash)
+            GovernedLoopCoordinatorPriorEvidenceExpectation.Existing
+                or GovernedLoopCoordinatorPriorEvidenceExpectation.TerminalSameOwner => IsCanonicalHash(request.ExpectedOwnershipHash)
                 && IsCanonicalHash(request.ExpectedHeartbeatHash)
                 && request.ProposedOwnership.OwnershipEpoch > 1,
             _ => false

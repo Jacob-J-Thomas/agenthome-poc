@@ -19,5 +19,8 @@ public enum GovernedLoopLocalCoordinatorStartStatus
     Corrupt = 5,
 
     /// <summary>A required durable coordinator dependency was unavailable.</summary>
-    Unavailable = 6
+    Unavailable = 6,
+
+    /// <summary>The previous owned session durably terminated fail closed and requires explicit repair before restart.</summary>
+    Failed = 7
 }

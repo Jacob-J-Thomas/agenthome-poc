@@ -127,6 +127,12 @@ internal sealed class GovernedLoopBackgroundRuntimeHost : ICustomLoopExecutionAc
         CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        return await StopCoreAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<AgentRuntimeGovernedLoopBackgroundStopResult> StopCoreAsync(
+        CancellationToken cancellationToken)
+    {
         Task<GovernedLoopLocalCoordinatorStopResult>? stopTask;
         await _activationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -274,29 +280,21 @@ internal sealed class GovernedLoopBackgroundRuntimeHost : ICustomLoopExecutionAc
             return;
         }
 
-        Task<GovernedLoopLocalCoordinatorStopResult>? stopTask;
-        GovernedLoopLocalCoordinator? coordinator;
-        await _activationGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
-        try
+        _ = await StopCoreAsync(CancellationToken.None).ConfigureAwait(false);
+        var coordinator = _coordinator;
+        var stopTask = _stopTask;
+        if (coordinator is null)
         {
-            Volatile.Write(ref _activationRequested, 0);
-            coordinator = _coordinator;
-            stopTask = coordinator is null ? null : _stopTask ??= coordinator.StopAsync(CancellationToken.None);
-        }
-        finally
-        {
-            _activationGate.Release();
+            return;
         }
 
-        if (stopTask is not null)
+        if (stopTask is { IsCompleted: false })
         {
-            await stopTask.ConfigureAwait(false);
+            _ = DisposeAfterDrainAsync(stopTask, coordinator);
+            return;
         }
 
-        if (coordinator is not null)
-        {
-            await coordinator.DisposeAsync().ConfigureAwait(false);
-        }
+        await coordinator.DisposeAsync().ConfigureAwait(false);
     }
 
     private AgentRuntimeGovernedLoopBackgroundStartResult PublishActivation(
@@ -448,6 +446,12 @@ internal sealed class GovernedLoopBackgroundRuntimeHost : ICustomLoopExecutionAc
                 AgentRuntimeGovernedLoopBackgroundOwnership.LivePeer,
                 true,
                 "governed_local_background_owned_by_live_peer: another process retains the active fenced coordinator lease."),
+            GovernedLoopLocalCoordinatorStartStatus.Failed => new(
+                AgentRuntimeGovernedLoopBackgroundStartStatus.RepairRequired,
+                AgentRuntimeGovernedLoopBackgroundReadiness.Degraded,
+                AgentRuntimeGovernedLoopBackgroundOwnership.None,
+                false,
+                "governed_local_background_failed: the prior coordinator session durably terminated fail closed and requires explicit repair before restart."),
             GovernedLoopLocalCoordinatorStartStatus.Conflict or GovernedLoopLocalCoordinatorStartStatus.Unavailable => new(
                 AgentRuntimeGovernedLoopBackgroundStartStatus.Unavailable,
                 AgentRuntimeGovernedLoopBackgroundReadiness.Unavailable,
@@ -474,7 +478,12 @@ internal sealed class GovernedLoopBackgroundRuntimeHost : ICustomLoopExecutionAc
                 AgentRuntimeGovernedLoopBackgroundReadiness.Stopped,
                 AgentRuntimeGovernedLoopBackgroundOwnership.None,
                 "governed_local_background_stopped: local admission drained to a durable safe boundary."),
-            GovernedLoopLocalCoordinatorStopStatus.AlreadyStopped => AlreadyStopped(),
+            GovernedLoopLocalCoordinatorStopStatus.AlreadyStopped when IsConfirmedStopped(current) => AlreadyStopped(),
+            GovernedLoopLocalCoordinatorStopStatus.AlreadyStopped => new(
+                AgentRuntimeGovernedLoopBackgroundStopStatus.Unavailable,
+                current.Readiness,
+                current.Ownership,
+                "governed_local_background_stop_unconfirmed: no local session remained, but durable coordinator evidence is not confirmed terminal."),
             GovernedLoopLocalCoordinatorStopStatus.OwnershipLost => new(
                 AgentRuntimeGovernedLoopBackgroundStopStatus.OwnershipLost,
                 current.Readiness,
@@ -528,6 +537,25 @@ internal sealed class GovernedLoopBackgroundRuntimeHost : ICustomLoopExecutionAc
             AgentRuntimeGovernedLoopBackgroundReadiness.Stopped,
             AgentRuntimeGovernedLoopBackgroundOwnership.None,
             "governed_local_background_stopped: this runtime has no active local coordinator to stop.");
+
+    private static bool IsConfirmedStopped(AgentRuntimeGovernedLoopBackgroundStatus status)
+        => status.Readiness == AgentRuntimeGovernedLoopBackgroundReadiness.Stopped
+            && status.Ownership == AgentRuntimeGovernedLoopBackgroundOwnership.None;
+
+    private static async Task DisposeAfterDrainAsync(
+        Task<GovernedLoopLocalCoordinatorStopResult> stopTask,
+        GovernedLoopLocalCoordinator coordinator)
+    {
+        try
+        {
+            _ = await stopTask.ConfigureAwait(false);
+            await coordinator.DisposeAsync().ConfigureAwait(false);
+        }
+        catch
+        {
+            // A retained coordinator failure is already represented in durable evidence; disposal must not fabricate a terminal posture.
+        }
+    }
 
     private bool IsDrainInProgress()
         => _stopTask is { IsCompleted: false };

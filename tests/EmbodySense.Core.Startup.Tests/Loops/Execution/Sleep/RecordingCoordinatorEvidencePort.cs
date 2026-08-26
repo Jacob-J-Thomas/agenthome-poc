@@ -139,7 +139,8 @@ internal sealed class RecordingCoordinatorEvidencePort : IGovernedLoopCoordinato
                     new GovernedLoopCoordinatorAcquisitionResult(GovernedLoopCoordinatorAcquisitionStatus.Duplicate, _snapshot));
             }
 
-            if (request.PriorEvidenceExpectation != GovernedLoopCoordinatorPriorEvidenceExpectation.Existing
+            if (request.PriorEvidenceExpectation is not (GovernedLoopCoordinatorPriorEvidenceExpectation.Existing
+                or GovernedLoopCoordinatorPriorEvidenceExpectation.TerminalSameOwner)
                 || !string.Equals(request.ExpectedOwnershipHash, _snapshot.Ownership.ContentHash, StringComparison.Ordinal)
                 || !string.Equals(request.ExpectedHeartbeatHash, _snapshot.LatestHeartbeat.ContentHash, StringComparison.Ordinal))
             {
@@ -147,19 +148,30 @@ internal sealed class RecordingCoordinatorEvidencePort : IGovernedLoopCoordinato
                     new GovernedLoopCoordinatorAcquisitionResult(GovernedLoopCoordinatorAcquisitionStatus.Conflict, _snapshot));
             }
 
-            if (request.ProposedOwnership.AcquiredAtUtc < _snapshot.LatestHeartbeat.LeaseExpiresAtUtc)
+            var terminalSameOwnerRestart = request.PriorEvidenceExpectation == GovernedLoopCoordinatorPriorEvidenceExpectation.TerminalSameOwner;
+            if (!terminalSameOwnerRestart
+                && request.ProposedOwnership.AcquiredAtUtc < _snapshot.LatestHeartbeat.LeaseExpiresAtUtc)
             {
                 return Task.FromResult<GovernedLoopCoordinatorAcquisitionResult?>(
                     new GovernedLoopCoordinatorAcquisitionResult(GovernedLoopCoordinatorAcquisitionStatus.LeaseNotExpired, _snapshot));
             }
 
-            if (!GovernedLoopSleepContractValidator.ValidateHandoff(
+            var transitionIsValid = terminalSameOwnerRestart
+                ? GovernedLoopSleepContractValidator.ValidateTerminalSameOwnerRestart(
+                    _snapshot.Ownership,
+                    _snapshot.LatestLifecycle,
+                    _snapshot.LatestHeartbeat,
+                    request.ProposedOwnership).IsValid
+                : GovernedLoopSleepContractValidator.ValidateHandoff(
                     _snapshot.Ownership,
                     _snapshot.LatestHeartbeat,
-                    request.ProposedOwnership).IsValid)
+                    request.ProposedOwnership).IsValid;
+            if (!transitionIsValid)
             {
                 return Task.FromResult<GovernedLoopCoordinatorAcquisitionResult?>(
-                    new GovernedLoopCoordinatorAcquisitionResult(GovernedLoopCoordinatorAcquisitionStatus.Corrupt));
+                    new GovernedLoopCoordinatorAcquisitionResult(terminalSameOwnerRestart
+                        ? GovernedLoopCoordinatorAcquisitionStatus.Conflict
+                        : GovernedLoopCoordinatorAcquisitionStatus.Corrupt));
             }
 
             return CompleteAcquisition(Acquire(request));

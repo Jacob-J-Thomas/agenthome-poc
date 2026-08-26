@@ -209,6 +209,50 @@ public static class GovernedLoopSleepContractValidator
         return Result(errors);
     }
 
+    /// <summary>
+    /// Validates a fenced immediate restart by the exact owner that durably drained its own coordinator to
+    /// <see cref="GovernedLoopCoordinatorStatus.Stopped"/>. This is intentionally narrower than a handoff: it never
+    /// permits a different owner to bypass the live heartbeat lease and it never restarts a failed lifecycle.
+    /// </summary>
+    public static GovernedLoopSleepValidationResult ValidateTerminalSameOwnerRestart(
+        GovernedLoopCoordinatorOwnership? current,
+        GovernedLoopCoordinatorLifecycle? currentLifecycle,
+        GovernedLoopCoordinatorHeartbeat? currentHeartbeat,
+        GovernedLoopCoordinatorOwnership? next)
+    {
+        var errors = new List<GovernedLoopSleepValidationError>();
+        ValidateOwnership(current, "$.current", errors);
+        ValidateLifecycle(currentLifecycle, "$.currentLifecycle", errors);
+        ValidateHeartbeat(currentHeartbeat, "$.currentHeartbeat", errors);
+        ValidateOwnership(next, "$.next", errors);
+        if (current is not null && currentLifecycle is not null && currentHeartbeat is not null && next is not null && errors.Count == 0)
+        {
+            if (!SameOwnership(current, currentLifecycle.Ownership))
+            {
+                Add(errors, GovernedLoopSleepValidationErrorCode.BindingMismatch, "$.currentLifecycle.ownership");
+            }
+
+            if (!SameOwnership(current, currentHeartbeat.Ownership))
+            {
+                Add(errors, GovernedLoopSleepValidationErrorCode.BindingMismatch, "$.currentHeartbeat.ownership");
+            }
+
+            if (currentLifecycle.Status != GovernedLoopCoordinatorStatus.Stopped
+                || currentLifecycle.TerminalAtUtc is null
+                || !string.Equals(current.CoordinatorId, next.CoordinatorId, StringComparison.Ordinal)
+                || !string.Equals(current.OwnerId, next.OwnerId, StringComparison.Ordinal)
+                || next.OwnershipEpoch != current.OwnershipEpoch + 1
+                || next.AcquiredAtUtc < current.AcquiredAtUtc
+                || next.AcquiredAtUtc < currentLifecycle.UpdatedAtUtc
+                || next.AcquiredAtUtc >= currentHeartbeat.LeaseExpiresAtUtc)
+            {
+                Add(errors, GovernedLoopSleepValidationErrorCode.IllegalTransition, "$.next");
+            }
+        }
+
+        return Result(errors);
+    }
+
     /// <summary>Validates one contiguous exact wake-evidence transition.</summary>
     public static GovernedLoopSleepValidationResult ValidateTransition(
         GovernedLoopWakeEvidence? current,

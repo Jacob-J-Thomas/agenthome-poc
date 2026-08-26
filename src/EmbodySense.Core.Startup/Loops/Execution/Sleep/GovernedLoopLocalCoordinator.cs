@@ -34,6 +34,7 @@ public sealed class GovernedLoopLocalCoordinator : IAsyncDisposable
     private readonly TimeProvider _timeProvider;
     private readonly IGovernedLoopLocalWorkRunner _work;
     private int _disposed;
+    private string? _confirmedTerminalOwnershipHash;
     private GovernedLoopCoordinatorSnapshot? _lastSnapshot;
     private GovernedLoopLocalCoordinatorSession? _session;
 
@@ -71,9 +72,18 @@ public sealed class GovernedLoopLocalCoordinator : IAsyncDisposable
         {
             if (_session is not null)
             {
-                return new GovernedLoopLocalCoordinatorStartResult(
-                    GovernedLoopLocalCoordinatorStartStatus.AlreadyRunning,
-                    _session.Snapshot);
+                var completed = await ReapCompletedSessionAsync().ConfigureAwait(false);
+                if (completed is not null)
+                {
+                    return completed;
+                }
+
+                if (_session is not null)
+                {
+                    return new GovernedLoopLocalCoordinatorStartResult(
+                        GovernedLoopLocalCoordinatorStartStatus.AlreadyRunning,
+                        _session.Snapshot);
+                }
             }
 
             var read = await ReadAsync(cancellationToken).ConfigureAwait(false);
@@ -114,6 +124,7 @@ public sealed class GovernedLoopLocalCoordinator : IAsyncDisposable
 
             var session = new GovernedLoopLocalCoordinatorSession(runningMutation.Snapshot, _workFamilies.Length);
             _session = session;
+            _confirmedTerminalOwnershipHash = null;
             _lastSnapshot = session.Snapshot;
             session.Completion = Task.Run(() => RunSessionAsync(session));
             return new GovernedLoopLocalCoordinatorStartResult(GovernedLoopLocalCoordinatorStartStatus.Started, session.Snapshot);
@@ -164,6 +175,10 @@ public sealed class GovernedLoopLocalCoordinator : IAsyncDisposable
             _ = await EnsureLifecycleAsync(session, GovernedLoopCoordinatorStatus.Stopping, terminal: false).ConfigureAwait(false);
             var outcome = await session.Completion.ConfigureAwait(false);
             _lastSnapshot = outcome.Snapshot;
+            _confirmedTerminalOwnershipHash = outcome.Status == GovernedLoopLocalCoordinatorStopStatus.Stopped
+                && outcome.Snapshot.LatestLifecycle.Status == GovernedLoopCoordinatorStatus.Stopped
+                ? outcome.Snapshot.Ownership.ContentHash
+                : null;
             _session = null;
             session.Dispose();
             return new GovernedLoopLocalCoordinatorStopResult(outcome.Status, outcome.Snapshot);
@@ -844,7 +859,22 @@ public sealed class GovernedLoopLocalCoordinator : IAsyncDisposable
         request = null;
         blocked = null;
         var current = read.Snapshot;
-        if (current is not null && acquiredAtUtc < current.LatestHeartbeat.LeaseExpiresAtUtc)
+        if (current?.LatestLifecycle.Status == GovernedLoopCoordinatorStatus.Failed)
+        {
+            blocked = new GovernedLoopLocalCoordinatorStartResult(
+                GovernedLoopLocalCoordinatorStartStatus.Failed,
+                current);
+            return false;
+        }
+
+        var terminalSameOwnerRestart = current is not null
+            && current.LatestLifecycle.Status == GovernedLoopCoordinatorStatus.Stopped
+            && string.Equals(current.Ownership.OwnerId, _options.OwnerId, StringComparison.Ordinal)
+            && string.Equals(current.Ownership.ContentHash, _confirmedTerminalOwnershipHash, StringComparison.Ordinal)
+            && acquiredAtUtc < current.LatestHeartbeat.LeaseExpiresAtUtc;
+        if (current is not null
+            && acquiredAtUtc < current.LatestHeartbeat.LeaseExpiresAtUtc
+            && !terminalSameOwnerRestart)
         {
             blocked = new GovernedLoopLocalCoordinatorStartResult(
                 GovernedLoopLocalCoordinatorStartStatus.OwnedByLivePeer,
@@ -883,22 +913,76 @@ public sealed class GovernedLoopLocalCoordinator : IAsyncDisposable
         request = new GovernedLoopCoordinatorAcquisitionRequest(
             current is null
                 ? GovernedLoopCoordinatorPriorEvidenceExpectation.NotFound
-                : GovernedLoopCoordinatorPriorEvidenceExpectation.Existing,
+                : terminalSameOwnerRestart
+                    ? GovernedLoopCoordinatorPriorEvidenceExpectation.TerminalSameOwner
+                    : GovernedLoopCoordinatorPriorEvidenceExpectation.Existing,
             current?.Ownership.ContentHash,
             current?.LatestHeartbeat.ContentHash,
             ownership,
             lifecycle,
             heartbeat);
 
-        if (!GovernedLoopCoordinatorEvidenceContract.IsValid(request)
-            || current is not null
-                && !GovernedLoopSleepContractValidator.ValidateHandoff(current.Ownership, current.LatestHeartbeat, ownership).IsValid)
+        var transitionIsValid = current is null || (terminalSameOwnerRestart
+            ? GovernedLoopSleepContractValidator.ValidateTerminalSameOwnerRestart(
+                current.Ownership,
+                current.LatestLifecycle,
+                current.LatestHeartbeat,
+                ownership).IsValid
+            : GovernedLoopSleepContractValidator.ValidateHandoff(current.Ownership, current.LatestHeartbeat, ownership).IsValid);
+        if (!GovernedLoopCoordinatorEvidenceContract.IsValid(request) || !transitionIsValid)
         {
             request = null;
             return false;
         }
 
         return true;
+    }
+
+    private async Task<GovernedLoopLocalCoordinatorStartResult?> ReapCompletedSessionAsync()
+    {
+        var session = _session;
+        if (session is null || !session.Completion.IsCompleted)
+        {
+            return null;
+        }
+
+        var outcome = await session.Completion.ConfigureAwait(false);
+        var read = await ReadAsync(CancellationToken.None).ConfigureAwait(false);
+        if (read.Status != GovernedLoopCoordinatorReadStatus.Found || read.Snapshot is null)
+        {
+            return new GovernedLoopLocalCoordinatorStartResult(
+                read.Status == GovernedLoopCoordinatorReadStatus.Corrupt
+                    ? GovernedLoopLocalCoordinatorStartStatus.Corrupt
+                    : GovernedLoopLocalCoordinatorStartStatus.Unavailable);
+        }
+
+        if (read.Snapshot != outcome.Snapshot)
+        {
+            return new GovernedLoopLocalCoordinatorStartResult(GovernedLoopLocalCoordinatorStartStatus.Corrupt, read.Snapshot);
+        }
+
+        if (outcome.Status == GovernedLoopLocalCoordinatorStopStatus.Failed
+            && read.Snapshot.LatestLifecycle.Status != GovernedLoopCoordinatorStatus.Failed)
+        {
+            return new GovernedLoopLocalCoordinatorStartResult(GovernedLoopLocalCoordinatorStartStatus.Corrupt, read.Snapshot);
+        }
+
+        _lastSnapshot = read.Snapshot;
+        _session = null;
+        session.Dispose();
+        return outcome.Status switch
+        {
+            GovernedLoopLocalCoordinatorStopStatus.Stopped => null,
+            GovernedLoopLocalCoordinatorStopStatus.Failed => new GovernedLoopLocalCoordinatorStartResult(
+                GovernedLoopLocalCoordinatorStartStatus.Failed,
+                read.Snapshot),
+            GovernedLoopLocalCoordinatorStopStatus.OwnershipLost => new GovernedLoopLocalCoordinatorStartResult(
+                GovernedLoopLocalCoordinatorStartStatus.OwnedByLivePeer,
+                read.Snapshot),
+            _ => new GovernedLoopLocalCoordinatorStartResult(
+                GovernedLoopLocalCoordinatorStartStatus.Unavailable,
+                read.Snapshot)
+        };
     }
 
     private GovernedLoopCoordinatorLifecycle CreateLifecycle(
