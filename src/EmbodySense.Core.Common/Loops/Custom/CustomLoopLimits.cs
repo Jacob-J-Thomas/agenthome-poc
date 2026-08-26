@@ -433,13 +433,15 @@ public static class CustomLoopLimits
     /// </summary>
     public const int MaxGovernedToolEvidenceReservationUtf8Bytes = MaxGovernedToolRequestEvidenceUtf8Bytes + MaxGovernedToolGovernanceEvidenceUtf8Bytes + MaxGovernedToolOutcomeEvidenceUtf8Bytes + MaxGovernedToolReturnEvidenceUtf8Bytes;
     /// <summary>
-    /// Maximum trace control reserve UTF-8 bytes.
+    /// Maximum trace control reserve UTF-8 bytes across every retained lifecycle/control slot.
     /// </summary>
-    public const int MaxTraceControlReserveUtf8Bytes = 512 * 1_024;
+    public const int MaxTraceControlReserveUtf8Bytes = MaxLifecycleControlEventsPerRun * MaxTraceControlEventUtf8Bytes;
     /// <summary>
-    /// Maximum trace control event UTF-8 bytes.
+    /// Maximum 9 KiB trace control event UTF-8 bytes, including its bounded schema-1 run-state projection.
+    /// Human Review admission retains an explicit null continuation field before approval publication, so this envelope includes
+    /// sufficient canonical JSON headroom for that required state field at maximum lifecycle-control detail.
     /// </summary>
-    public const int MaxTraceControlEventUtf8Bytes = 8 * 1_024;
+    public const int MaxTraceControlEventUtf8Bytes = 9 * 1_024;
     /// <summary>
     /// Maximum append-only retry-state event UTF-8 bytes.
     /// </summary>

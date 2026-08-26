@@ -3443,6 +3443,15 @@ public static class CustomLoopRunValidator
         {
             Add(errors, "human_review_reservation_decision_substitution", "humanReview.continuationReservation.decision", "Reservation must reference the exact independently validated accepted approval.");
         }
+        if (state.Continuation is not null)
+        {
+            if (state.ContinuationReservation is null
+                || state.AcceptedTerminalDecision?.Kind != HumanReviewDecisionKind.Approve
+                || !HumanReviewContinuationContractValidator.ValidateState(request, state.ContinuationReservation, state.Continuation).IsValid)
+            {
+                Add(errors, "invalid_human_review_continuation", "humanReview.continuation", "Continuation state requires the exact accepted approval reservation and a valid append-only continuation state machine.");
+            }
+        }
         ValidateHumanReviewReceiptEvidenceCausality(state, errors);
         ValidateHumanReviewLifecycleCausality(state, errors);
     }
@@ -3688,6 +3697,25 @@ public static class CustomLoopRunValidator
             Add(errors, "human_review_history_changed", "humanReview", "Previously authenticated Human Review state may only be extended.");
         }
 
+        var currentContinuation = current.HumanReview.Continuation;
+        var candidateContinuation = candidate.HumanReview.Continuation;
+        if (currentContinuation is not null && candidateContinuation is null)
+        {
+            Add(errors, "human_review_continuation_removed", "humanReview.continuation", "Published Human Review continuation state is immutable and cannot be removed.");
+        }
+        else if (candidateContinuation is not null)
+        {
+            var continuationTransition = HumanReviewContinuationStateTransitionValidator.ValidateTransition(
+                current.HumanReview.Request,
+                current.HumanReview.ContinuationReservation,
+                currentContinuation,
+                candidateContinuation);
+            if (!continuationTransition.IsValid)
+            {
+                Add(errors, "invalid_human_review_continuation_transition", "humanReview.continuation", "Continuation publication, claim, completion, retirement, and replay must use one exact append-only state transition.");
+            }
+        }
+
     }
 
     private static bool EventsEqual(CustomLoopRunEvent? left, CustomLoopRunEvent? right)
@@ -3864,7 +3892,8 @@ public static class CustomLoopRunValidator
             && left.OperationReceipts.Select(item => item?.ReceiptHash).SequenceEqual(right.OperationReceipts.Select(item => item?.ReceiptHash), StringComparer.Ordinal)
             && left.AcceptedDecisions.Select(item => item?.DecisionHash).SequenceEqual(right.AcceptedDecisions.Select(item => item?.DecisionHash), StringComparer.Ordinal)
             && string.Equals(left.AcceptedTerminalDecision?.DecisionHash, right.AcceptedTerminalDecision?.DecisionHash, StringComparison.Ordinal)
-            && string.Equals(left.ContinuationReservation?.ReservationHash, right.ContinuationReservation?.ReservationHash, StringComparison.Ordinal);
+            && string.Equals(left.ContinuationReservation?.ReservationHash, right.ContinuationReservation?.ReservationHash, StringComparison.Ordinal)
+            && string.Equals(left.Continuation?.StateHash, right.Continuation?.StateHash, StringComparison.Ordinal);
 
     private static bool HasHumanReviewPrefix(HumanReviewRunState? expectedPrefix, HumanReviewRunState? actual)
         => expectedPrefix is null
@@ -3879,7 +3908,14 @@ public static class CustomLoopRunValidator
             && expectedPrefix.OperationReceipts.Length <= actual.OperationReceipts.Length
             && expectedPrefix.OperationReceipts.Select((item, index) => string.Equals(item?.ReceiptHash, actual.OperationReceipts[index]?.ReceiptHash, StringComparison.Ordinal)).All(value => value)
             && expectedPrefix.AcceptedDecisions.Length <= actual.AcceptedDecisions.Length
-            && expectedPrefix.AcceptedDecisions.Select((item, index) => string.Equals(item?.DecisionHash, actual.AcceptedDecisions[index]?.DecisionHash, StringComparison.Ordinal)).All(value => value);
+            && expectedPrefix.AcceptedDecisions.Select((item, index) => string.Equals(item?.DecisionHash, actual.AcceptedDecisions[index]?.DecisionHash, StringComparison.Ordinal)).All(value => value)
+            && (expectedPrefix.Continuation is null
+                || actual.Continuation is not null
+                && HumanReviewContinuationStateTransitionValidator.ValidateTransition(
+                    expectedPrefix.Request,
+                    expectedPrefix.ContinuationReservation,
+                    expectedPrefix.Continuation,
+                    actual.Continuation).IsValid);
 
     private static bool HasWaitEvidencePrefix(
         IReadOnlyList<GovernedLoopWaitExecutionEvidence>? expectedPrefix,
