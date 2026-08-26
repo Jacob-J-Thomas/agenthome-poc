@@ -9,6 +9,20 @@ namespace EmbodySense.Core.Common.Tests.Loops.HumanInput.Checkpoints;
 public sealed class GovernedLoopHumanInputWaitingCheckpointContractTests
 {
     [Fact]
+    public void Exact_resolved_policy_scope_hash_and_request_window_are_checkpoint_bound()
+    {
+        var pending = GovernedLoopHumanInputWaitingCheckpointTestData.Pending();
+        var malformedPolicy = pending.ResolvedPolicy with { NodeId = "other-node" };
+        var malformed = GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(new GovernedLoopHumanInputWaitingCheckpoint(1, pending.Binding, pending.NodeConfiguration, malformedPolicy, pending.Request, pending.Posture, pending.Evidence, string.Empty));
+        var retimedRequest = HumanInputRequestHash.Apply(pending.Request with { Timing = new HumanInputTiming(pending.Request.Timing.RequestedAtUtc, pending.Request.Timing.ExpiresAtUtc.AddMinutes(-1)), RequestHash = string.Empty });
+        var retimed = GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(new GovernedLoopHumanInputWaitingCheckpoint(1, pending.Binding, pending.NodeConfiguration, pending.ResolvedPolicy, retimedRequest, pending.Posture, pending.Evidence, string.Empty));
+
+        Assert.True(GovernedLoopHumanInputWaitingCheckpointContractValidator.Validate(pending).IsValid);
+        Assert.Contains(GovernedLoopHumanInputWaitingCheckpointContractValidator.Validate(malformed).Errors, error => error.Code == "invalid_resolved_policy");
+        Assert.Contains(GovernedLoopHumanInputWaitingCheckpointContractValidator.Validate(retimed).Errors, error => error.Code == "request_policy_timing_mismatch");
+    }
+
+    [Fact]
     public void Every_closed_posture_is_valid_and_only_legal_single_boundary_transitions_are_admitted()
     {
         var pending = GovernedLoopHumanInputWaitingCheckpointTestData.Pending();
@@ -95,7 +109,7 @@ public sealed class GovernedLoopHumanInputWaitingCheckpointContractTests
     {
         var choices = new[] { new HumanInputChoice("choice-one", "Choice one"), new HumanInputChoice("choice-two", "Choice two") };
         var fields = new[] { new HumanInputStructuredFieldSchema("field-one", HumanInputStructuredFieldKind.Choice, true, null, choices) };
-        var configuration = new GovernedLoopHumanInputNodeConfiguration(1, "response-schema-one", "Collect one bounded preference.", "Choose one safe response.", new HumanInputResponseSchema(HumanInputResponseKind.Structured, null, null, fields, null), HumanInputPrivacyClass.Private, [new HumanInputEligibleRespondent("actor-one", "role-one", "route-one")], new HumanInputResponsePolicy(HumanInputResponsePolicyKind.FirstValid, null, null), "timeout-policy-one", "failure-policy-one");
+        var configuration = new GovernedLoopHumanInputNodeConfiguration(1, "response-schema-one", "Collect one bounded preference.", "Choose one safe response.", new HumanInputResponseSchema(HumanInputResponseKind.Structured, null, null, fields, null), HumanInputPrivacyClass.Private, [new HumanInputEligibleRespondent("actor-one", "role-one", "route-one")], new HumanInputResponsePolicy(HumanInputResponsePolicyKind.FirstValid, null, null), "timeout-policy-one@revision-one", "failure-policy-one@revision-one");
         var checkpoint = GovernedLoopHumanInputWaitingCheckpointTestData.Pending(configuration: configuration);
         var hash = checkpoint.CheckpointHash;
 
@@ -118,7 +132,7 @@ public sealed class GovernedLoopHumanInputWaitingCheckpointContractTests
         var answered = GovernedLoopHumanInputWaitingCheckpointTestData.Answered(pending);
         var secret = GovernedLoopHumanInputWaitingCheckpointTestData.Pending(configuration: GovernedLoopHumanInputWaitingCheckpointTestData.Configuration(prompt: "Paste api_key here."));
         var approval = GovernedLoopHumanInputWaitingCheckpointTestData.Pending(configuration: GovernedLoopHumanInputWaitingCheckpointTestData.Configuration(timeoutPolicyReference: "approval-policy-one"));
-        var unknown = GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(new GovernedLoopHumanInputWaitingCheckpoint(1, pending.Binding, pending.NodeConfiguration, pending.Request, GovernedLoopHumanInputWaitingCheckpointPosture.Unknown, pending.Evidence, string.Empty));
+        var unknown = GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(new GovernedLoopHumanInputWaitingCheckpoint(1, pending.Binding, pending.NodeConfiguration, pending.ResolvedPolicy, pending.Request, GovernedLoopHumanInputWaitingCheckpointPosture.Unknown, pending.Evidence, string.Empty));
         var stale = GovernedLoopHumanInputWaitingCheckpointTestData.Pending(binding: GovernedLoopHumanInputWaitingCheckpointTestData.Binding(generation: 2));
         var divergent = GovernedLoopHumanInputWaitingCheckpointTestData.Pending(binding: GovernedLoopHumanInputWaitingCheckpointTestData.Binding(frontierHash: GovernedLoopHumanInputWaitingCheckpointTestData.Hash('a')));
         var authorityForged = GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(answered.Evidence[1] with { AnswerSelection = answered.Evidence[1].AnswerSelection! with { SelectionId = "authority-grant-one" } });
@@ -135,7 +149,7 @@ public sealed class GovernedLoopHumanInputWaitingCheckpointContractTests
     public void Self_hashed_semantically_invalid_checkpoint_and_evidence_artifacts_never_classify_as_replay()
     {
         var pending = GovernedLoopHumanInputWaitingCheckpointTestData.Pending();
-        var invalidCheckpoint = GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(new GovernedLoopHumanInputWaitingCheckpoint(1, pending.Binding, pending.NodeConfiguration, pending.Request, GovernedLoopHumanInputWaitingCheckpointPosture.Unknown, pending.Evidence, string.Empty));
+        var invalidCheckpoint = GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(new GovernedLoopHumanInputWaitingCheckpoint(1, pending.Binding, pending.NodeConfiguration, pending.ResolvedPolicy, pending.Request, GovernedLoopHumanInputWaitingCheckpointPosture.Unknown, pending.Evidence, string.Empty));
         var invalidEvidence = GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(pending.Evidence[0] with { TerminalizationReceiptId = "terminal-receipt-one", TerminalizationReceiptHash = GovernedLoopHumanInputWaitingCheckpointTestData.Hash('a') });
 
         Assert.True(GovernedLoopHumanInputWaitingCheckpointContractHash.Matches(invalidCheckpoint));
@@ -165,7 +179,7 @@ public sealed class GovernedLoopHumanInputWaitingCheckpointContractTests
     {
         var superseded = GovernedLoopHumanInputWaitingCheckpointTestData.Superseded();
         var selfSupersedingEvidence = GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(superseded.Evidence[1] with { SupersedingCheckpointId = superseded.Binding.CheckpointId });
-        var selfSuperseded = GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(new GovernedLoopHumanInputWaitingCheckpoint(1, superseded.Binding, superseded.NodeConfiguration, superseded.Request, GovernedLoopHumanInputWaitingCheckpointPosture.Superseded, [superseded.Evidence[0], selfSupersedingEvidence], string.Empty));
+        var selfSuperseded = GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(new GovernedLoopHumanInputWaitingCheckpoint(1, superseded.Binding, superseded.NodeConfiguration, superseded.ResolvedPolicy, superseded.Request, GovernedLoopHumanInputWaitingCheckpointPosture.Superseded, [superseded.Evidence[0], selfSupersedingEvidence], string.Empty));
 
         Assert.True(GovernedLoopHumanInputWaitingCheckpointContractValidator.Validate(superseded).IsValid);
         Assert.Contains(GovernedLoopHumanInputWaitingCheckpointContractValidator.Validate(selfSuperseded).Errors, error => error.Code == "self_supersession");

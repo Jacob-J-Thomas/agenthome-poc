@@ -5,6 +5,8 @@ using EmbodySense.Core.Common.HumanInput.Responses.Models;
 using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.HumanInput.Checkpoints;
 using EmbodySense.Core.Common.Loops.HumanInput.Checkpoints.Models;
+using EmbodySense.Core.Common.Loops.HumanInput.Policies;
+using EmbodySense.Core.Common.Loops.HumanInput.Policies.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
 
@@ -40,7 +42,7 @@ internal static class GovernedLoopHumanInputWaitingCheckpointTestData
     internal static GovernedLoopHumanInputNodeConfiguration Configuration(
         string purpose = "Collect one bounded preference.",
         string prompt = "Choose one safe response.",
-        string timeoutPolicyReference = "timeout-policy-one")
+        string timeoutPolicyReference = "timeout-policy-one@revision-one")
         => new(
             1,
             "response-schema-one",
@@ -51,7 +53,7 @@ internal static class GovernedLoopHumanInputWaitingCheckpointTestData
             [new HumanInputEligibleRespondent("actor-one", "role-one", "route-one")],
             new HumanInputResponsePolicy(HumanInputResponsePolicyKind.FirstValid, null, null),
             timeoutPolicyReference,
-            "failure-policy-one");
+            "failure-policy-one@revision-one");
 
     internal static GovernedLoopHumanInputNodeConfiguration ConfigurationFor(HumanInputResponseKind kind)
     {
@@ -64,12 +66,13 @@ internal static class GovernedLoopHumanInputWaitingCheckpointTestData
             HumanInputResponseKind.Reference => new HumanInputResponseSchema(HumanInputResponseKind.Reference, null, null, null, new HumanInputReferencePolicy(HumanInputReferenceKind.Artifact, 128)),
             _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "A supported Human Input response kind is required.")
         };
-        return new GovernedLoopHumanInputNodeConfiguration(1, "response-schema-one", "Collect one bounded preference.", "Choose one safe response.", schema, HumanInputPrivacyClass.Private, [new HumanInputEligibleRespondent("actor-one", "role-one", "route-one")], new HumanInputResponsePolicy(HumanInputResponsePolicyKind.FirstValid, null, null), "timeout-policy-one", "failure-policy-one");
+        return new GovernedLoopHumanInputNodeConfiguration(1, "response-schema-one", "Collect one bounded preference.", "Choose one safe response.", schema, HumanInputPrivacyClass.Private, [new HumanInputEligibleRespondent("actor-one", "role-one", "route-one")], new HumanInputResponsePolicy(HumanInputResponsePolicyKind.FirstValid, null, null), "timeout-policy-one@revision-one", "failure-policy-one@revision-one");
     }
 
-    internal static HumanInputRequest Request(GovernedLoopHumanInputWaitingCheckpointBinding binding, GovernedLoopHumanInputNodeConfiguration? configuration = null)
+    internal static HumanInputRequest Request(GovernedLoopHumanInputWaitingCheckpointBinding binding, GovernedLoopHumanInputNodeConfiguration? configuration = null, HumanInputPolicyResolutionSnapshot? policy = null)
     {
         var config = configuration ?? Configuration();
+        var exactPolicy = policy ?? Policy(binding, config);
         return HumanInputRequestHash.Apply(new HumanInputRequest(
             1,
             "request-one",
@@ -80,7 +83,7 @@ internal static class GovernedLoopHumanInputWaitingCheckpointTestData
             config.ResponseSchema!,
             config.PrivacyClass,
             config.EligibleRespondents!.Cast<HumanInputEligibleRespondent>().ToArray(),
-            new HumanInputTiming(RequestedAtUtc, RequestedAtUtc.AddHours(1)),
+            new HumanInputTiming(exactPolicy.ResolvedAtUtc, exactPolicy.ExpiresAtUtc),
             config.ResponsePolicy!,
             new HumanInputContinuationBinding(HumanInputContinuationPolicyKind.BoundNodeAndCheckpointOnly, binding.NodeId, binding.CheckpointId),
             string.Empty));
@@ -93,9 +96,10 @@ internal static class GovernedLoopHumanInputWaitingCheckpointTestData
     {
         var exactBinding = binding ?? Binding();
         var exactConfiguration = configuration ?? Configuration();
-        var exactRequest = request ?? Request(exactBinding, exactConfiguration);
+        var exactPolicy = Policy(exactBinding, exactConfiguration);
+        var exactRequest = request ?? Request(exactBinding, exactConfiguration, exactPolicy);
         var published = Evidence(1, GovernedLoopHumanInputWaitingCheckpointEvidenceKind.Published, exactRequest.Timing.RequestedAtUtc, null, null, null, null, null, string.Empty);
-        return GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(new GovernedLoopHumanInputWaitingCheckpoint(1, exactBinding, exactConfiguration, exactRequest, GovernedLoopHumanInputWaitingCheckpointPosture.Pending, [published], string.Empty));
+        return GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(new GovernedLoopHumanInputWaitingCheckpoint(1, exactBinding, exactConfiguration, exactPolicy, exactRequest, GovernedLoopHumanInputWaitingCheckpointPosture.Pending, [published], string.Empty));
     }
 
     internal static GovernedLoopHumanInputWaitingCheckpoint Answered(GovernedLoopHumanInputWaitingCheckpoint? pending = null)
@@ -136,8 +140,19 @@ internal static class GovernedLoopHumanInputWaitingCheckpointTestData
     internal static HumanInputResponseSelectionReference Selection(HumanInputRequest request)
         => new(1, "selection-one", new HumanInputRequestReference(1, request.RequestId, request.RequestVersionId, request.RequestHash), Hash('a'));
 
+    internal static HumanInputPolicyResolutionSnapshot Policy(GovernedLoopHumanInputWaitingCheckpointBinding binding, GovernedLoopHumanInputNodeConfiguration configuration)
+    {
+        HumanInputPolicyReference.TryParse(configuration.TimeoutPolicyReference, out var timeoutReference);
+        HumanInputPolicyReference.TryParse(configuration.FailurePolicyReference, out var failureReference);
+        timeoutReference ??= new HumanInputPolicyReference("timeout-policy-one", "revision-one");
+        failureReference ??= new HumanInputPolicyReference("failure-policy-one", "revision-one");
+        var timeout = HumanInputPolicyArtifactHash.Apply(new HumanInputPolicyArtifact(1, timeoutReference.PolicyId, timeoutReference.RevisionId, HumanInputPolicyKind.ResponseWindow, binding.WorkspaceId, binding.Execution.Revision.GraphId, "actor-one", 3_600_000, HumanInputTerminalDisposition.Unknown, string.Empty));
+        var failure = HumanInputPolicyArtifactHash.Apply(new HumanInputPolicyArtifact(1, failureReference.PolicyId, failureReference.RevisionId, HumanInputPolicyKind.DeadlineDisposition, binding.WorkspaceId, binding.Execution.Revision.GraphId, "actor-one", null, HumanInputTerminalDisposition.Expired, string.Empty));
+        return HumanInputPolicyResolutionSnapshot.TryCreate(binding.WorkspaceId, binding.Execution.Revision.GraphId, binding.Execution.Revision.RevisionId, binding.NodeId, "actor-one", timeout, failure, RequestedAtUtc)!;
+    }
+
     private static GovernedLoopHumanInputWaitingCheckpoint Checkpoint(GovernedLoopHumanInputWaitingCheckpoint previous, GovernedLoopHumanInputWaitingCheckpointPosture posture, ImmutableArray<GovernedLoopHumanInputWaitingCheckpointEvidence> evidence)
-        => GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(new GovernedLoopHumanInputWaitingCheckpoint(1, previous.Binding, previous.NodeConfiguration, previous.Request, posture, evidence, string.Empty));
+        => GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(new GovernedLoopHumanInputWaitingCheckpoint(1, previous.Binding, previous.NodeConfiguration, previous.ResolvedPolicy, previous.Request, posture, evidence, string.Empty));
 
     private static GovernedLoopHumanInputWaitingCheckpointEvidence Evidence(
         long sequence,

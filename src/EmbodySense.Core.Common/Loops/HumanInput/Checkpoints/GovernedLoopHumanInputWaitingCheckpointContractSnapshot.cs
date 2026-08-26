@@ -24,7 +24,7 @@ public static class GovernedLoopHumanInputWaitingCheckpointContractSnapshot
 
         try
         {
-            snapshot = new GovernedLoopHumanInputWaitingCheckpoint(checkpoint.SchemaVersion, checkpoint.Binding, checkpoint.NodeConfiguration, checkpoint.Request, checkpoint.Posture, checkpoint.Evidence, checkpoint.CheckpointHash);
+            snapshot = new GovernedLoopHumanInputWaitingCheckpoint(checkpoint.SchemaVersion, checkpoint.Binding, checkpoint.NodeConfiguration, checkpoint.ResolvedPolicy, checkpoint.Request, checkpoint.Posture, checkpoint.Evidence, checkpoint.CheckpointHash);
         }
         catch (Exception exception) when (exception is InvalidOperationException or IndexOutOfRangeException or NullReferenceException)
         {

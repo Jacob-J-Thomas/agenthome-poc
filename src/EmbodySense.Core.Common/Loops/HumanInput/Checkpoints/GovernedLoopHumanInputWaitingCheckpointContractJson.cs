@@ -7,6 +7,8 @@ using EmbodySense.Core.Common.HumanInput.Models;
 using EmbodySense.Core.Common.HumanInput.Responses.Models;
 using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.HumanInput.Checkpoints.Models;
+using EmbodySense.Core.Common.Loops.HumanInput.Policies;
+using EmbodySense.Core.Common.Loops.HumanInput.Policies.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
 
@@ -22,6 +24,8 @@ public static class GovernedLoopHumanInputWaitingCheckpointContractJson
     private static readonly string[] _evidenceProperties = ["answerSelection", "evidenceHash", "kind", "occurredAtUtc", "previousEvidenceHash", "schemaVersion", "sequence", "supersedingCheckpointHash", "supersedingCheckpointId", "terminalizationReceiptHash", "terminalizationReceiptId"];
     private static readonly string[] _executionProperties = ["executionGeneration", "revision", "runId", "schemaVersion"];
     private static readonly string[] _policyProperties = ["kind", "orderedRoleIds", "requiredResponseCount"];
+    private static readonly string[] _resolvedPolicyProperties = ["actorId", "expiresAtUtc", "failurePolicy", "graphId", "graphRevisionId", "nodeId", "resolvedAtUtc", "resolutionHash", "schemaVersion", "terminalDisposition", "timeoutPolicy", "workspaceId"];
+    private static readonly string[] _resolvedPolicyArtifactProperties = ["authorityActorId", "contentHash", "graphId", "kind", "policyId", "responseWindowMilliseconds", "revisionId", "schemaVersion", "terminalDisposition", "workspaceId"];
     private static readonly string[] _publicationProperties = ["publicationOperationId", "revision", "schemaVersion", "validationEvidenceHash"];
     private static readonly string[] _referencePolicyProperties = ["kind", "maxReferenceCharacters"];
     private static readonly string[] _requestBindingProperties = ["checkpointId", "loopGraphId", "loopRevisionId", "nodeId", "runId", "workspaceId"];
@@ -31,7 +35,7 @@ public static class GovernedLoopHumanInputWaitingCheckpointContractJson
     private static readonly string[] _responseSchemaProperties = ["choices", "kind", "maxTextCharacters", "referencePolicy", "structuredFields"];
     private static readonly string[] _revisionProperties = ["executableHash", "graphId", "revisionId", "schemaVersion"];
     private static readonly string[] _selectionProperties = ["request", "schemaVersion", "selectionHash", "selectionId"];
-    private static readonly string[] _stateProperties = ["binding", "checkpointHash", "evidence", "nodeConfiguration", "posture", "request", "schemaVersion"];
+    private static readonly string[] _stateProperties = ["binding", "checkpointHash", "evidence", "nodeConfiguration", "posture", "request", "resolvedPolicy", "schemaVersion"];
     private static readonly string[] _structuredFieldProperties = ["choices", "fieldId", "kind", "maxTextCharacters", "required"];
     private static readonly string[] _timingProperties = ["expiresAtUtc", "requestedAtUtc"];
 
@@ -135,6 +139,8 @@ public static class GovernedLoopHumanInputWaitingCheckpointContractJson
         writer.WriteNumber("posture", (int)checkpoint.Posture);
         writer.WritePropertyName("request");
         WriteRequest(writer, checkpoint.Request);
+        writer.WritePropertyName("resolvedPolicy");
+        WriteResolvedPolicy(writer, checkpoint.ResolvedPolicy);
         writer.WriteNumber("schemaVersion", checkpoint.SchemaVersion);
         writer.WriteEndObject();
     }
@@ -235,6 +241,42 @@ public static class GovernedLoopHumanInputWaitingCheckpointContractJson
         WriteTiming(writer, request.Timing);
         writer.WritePropertyName("continuationBinding");
         WriteContinuationBinding(writer, request.ContinuationBinding);
+        writer.WriteEndObject();
+    }
+
+    private static void WriteResolvedPolicy(Utf8JsonWriter writer, HumanInputPolicyResolutionSnapshot policy)
+    {
+        writer.WriteStartObject();
+        writer.WriteString("actorId", policy.ActorId);
+        WriteTime(writer, "expiresAtUtc", policy.ExpiresAtUtc);
+        writer.WritePropertyName("failurePolicy");
+        WriteResolvedPolicyArtifact(writer, policy.FailurePolicy);
+        writer.WriteString("graphId", policy.GraphId);
+        writer.WriteString("graphRevisionId", policy.GraphRevisionId);
+        writer.WriteString("nodeId", policy.NodeId);
+        WriteTime(writer, "resolvedAtUtc", policy.ResolvedAtUtc);
+        writer.WriteString("resolutionHash", policy.ResolutionHash);
+        writer.WriteNumber("schemaVersion", policy.SchemaVersion);
+        writer.WriteNumber("terminalDisposition", (int)policy.TerminalDisposition);
+        writer.WritePropertyName("timeoutPolicy");
+        WriteResolvedPolicyArtifact(writer, policy.TimeoutPolicy);
+        writer.WriteString("workspaceId", policy.WorkspaceId);
+        writer.WriteEndObject();
+    }
+
+    private static void WriteResolvedPolicyArtifact(Utf8JsonWriter writer, HumanInputPolicyArtifact policy)
+    {
+        writer.WriteStartObject();
+        writer.WriteString("authorityActorId", policy.AuthorityActorId);
+        writer.WriteString("contentHash", policy.ContentHash);
+        writer.WriteString("graphId", policy.GraphId);
+        writer.WriteNumber("kind", (int)policy.Kind);
+        writer.WriteString("policyId", policy.PolicyId);
+        if (policy.ResponseWindowMilliseconds is { } window) writer.WriteNumber("responseWindowMilliseconds", window); else writer.WriteNull("responseWindowMilliseconds");
+        writer.WriteString("revisionId", policy.RevisionId);
+        writer.WriteNumber("schemaVersion", policy.SchemaVersion);
+        writer.WriteNumber("terminalDisposition", (int)policy.TerminalDisposition);
+        writer.WriteString("workspaceId", policy.WorkspaceId);
         writer.WriteEndObject();
     }
 
@@ -436,7 +478,19 @@ public static class GovernedLoopHumanInputWaitingCheckpointContractJson
     private static GovernedLoopHumanInputWaitingCheckpoint? ReadCheckpoint(JsonElement value, string path, List<GovernedLoopHumanInputWaitingCheckpointValidationError> errors)
     {
         if (!Shape(value, path, _stateProperties, errors)) return null;
-        return new GovernedLoopHumanInputWaitingCheckpoint(ReadInt(value, "schemaVersion", path, errors), ReadBinding(value.GetProperty("binding"), path + ".binding", errors)!, ReadConfiguration(value.GetProperty("nodeConfiguration"), path + ".nodeConfiguration", errors)!, ReadRequest(value.GetProperty("request"), path + ".request", errors)!, (GovernedLoopHumanInputWaitingCheckpointPosture)ReadInt(value, "posture", path, errors), ReadEvidence(value.GetProperty("evidence"), path + ".evidence", errors), ReadString(value, "checkpointHash", path, errors)!);
+        return new GovernedLoopHumanInputWaitingCheckpoint(ReadInt(value, "schemaVersion", path, errors), ReadBinding(value.GetProperty("binding"), path + ".binding", errors)!, ReadConfiguration(value.GetProperty("nodeConfiguration"), path + ".nodeConfiguration", errors)!, ReadResolvedPolicy(value.GetProperty("resolvedPolicy"), path + ".resolvedPolicy", errors)!, ReadRequest(value.GetProperty("request"), path + ".request", errors)!, (GovernedLoopHumanInputWaitingCheckpointPosture)ReadInt(value, "posture", path, errors), ReadEvidence(value.GetProperty("evidence"), path + ".evidence", errors), ReadString(value, "checkpointHash", path, errors)!);
+    }
+
+    private static HumanInputPolicyResolutionSnapshot? ReadResolvedPolicy(JsonElement value, string path, List<GovernedLoopHumanInputWaitingCheckpointValidationError> errors)
+    {
+        if (!Shape(value, path, _resolvedPolicyProperties, errors)) return null;
+        return new HumanInputPolicyResolutionSnapshot(ReadInt(value, "schemaVersion", path, errors), ReadString(value, "workspaceId", path, errors)!, ReadString(value, "graphId", path, errors)!, ReadString(value, "graphRevisionId", path, errors)!, ReadString(value, "nodeId", path, errors)!, ReadString(value, "actorId", path, errors)!, ReadResolvedPolicyArtifact(value.GetProperty("timeoutPolicy"), path + ".timeoutPolicy", errors)!, ReadResolvedPolicyArtifact(value.GetProperty("failurePolicy"), path + ".failurePolicy", errors)!, ReadTime(value, "resolvedAtUtc", path, errors), ReadTime(value, "expiresAtUtc", path, errors), (HumanInputTerminalDisposition)ReadInt(value, "terminalDisposition", path, errors), ReadString(value, "resolutionHash", path, errors)!);
+    }
+
+    private static HumanInputPolicyArtifact? ReadResolvedPolicyArtifact(JsonElement value, string path, List<GovernedLoopHumanInputWaitingCheckpointValidationError> errors)
+    {
+        if (!Shape(value, path, _resolvedPolicyArtifactProperties, errors)) return null;
+        return new HumanInputPolicyArtifact(ReadInt(value, "schemaVersion", path, errors), ReadString(value, "policyId", path, errors)!, ReadString(value, "revisionId", path, errors)!, (HumanInputPolicyKind)ReadInt(value, "kind", path, errors), ReadString(value, "workspaceId", path, errors)!, ReadString(value, "graphId", path, errors)!, ReadString(value, "authorityActorId", path, errors)!, ReadNullableLong(value, "responseWindowMilliseconds", path, errors), (HumanInputTerminalDisposition)ReadInt(value, "terminalDisposition", path, errors), ReadString(value, "contentHash", path, errors)!);
     }
 
     private static GovernedLoopHumanInputWaitingCheckpointBinding? ReadBinding(JsonElement value, string path, List<GovernedLoopHumanInputWaitingCheckpointValidationError> errors)
@@ -642,6 +696,19 @@ public static class GovernedLoopHumanInputWaitingCheckpointContractJson
     {
         var property = value.GetProperty(name);
         if (property.ValueKind != JsonValueKind.Number || !property.TryGetInt64(out var result)) { Add(errors, "invalid_json_type", path + "." + name, "A JSON integer is required."); return 0; }
+        return result;
+    }
+
+    private static long? ReadNullableLong(JsonElement value, string name, string path, List<GovernedLoopHumanInputWaitingCheckpointValidationError> errors)
+    {
+        var item = value.GetProperty(name);
+        if (item.ValueKind == JsonValueKind.Null) return null;
+        if (item.ValueKind != JsonValueKind.Number || !item.TryGetInt64(out var result))
+        {
+            Add(errors, "invalid_json_type", path + "." + name, "A JSON integer or null is required.");
+            return null;
+        }
+
         return result;
     }
 
