@@ -89,6 +89,7 @@ public sealed class AgentRuntimeFactory
     private readonly IGovernedModelPrimaryExecutionBoundaryObserver? _governedModelExecutionObserver;
     private readonly IReadOnlyList<ModelProfileRuntimeProvider> _additionalModelProfileProviders;
     private readonly CommandActionRuntimeProvider? _commandActionRuntimeProvider;
+    private readonly CustomLoopRunStoreProvider? _customLoopRunStoreProvider;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="AgentRuntimeFactory"/> type.
@@ -168,7 +169,8 @@ public sealed class AgentRuntimeFactory
             _governedModelExecutionObserver,
             _additionalModelProfileProviders,
             verifier,
-            _commandActionRuntimeProvider);
+            _commandActionRuntimeProvider,
+            _customLoopRunStoreProvider);
     }
 
     /// <summary>Returns an equivalent factory with one explicit server-owned structured command Action provider.</summary>
@@ -185,6 +187,27 @@ public sealed class AgentRuntimeFactory
             _governedModelExecutionObserver,
             _additionalModelProfileProviders,
             _authenticatedWakeVerifier,
+            provider,
+            _customLoopRunStoreProvider);
+    }
+
+    /// <summary>
+    /// Returns an equivalent factory whose runtimes borrow one inference-independent canonical custom-loop run store.
+    /// </summary>
+    /// <param name="provider">The workspace-host owner that outlives every runtime composed by the returned factory.</param>
+    /// <returns>A factory that borrows the provider's store and never transfers its disposal ownership to a runtime.</returns>
+    public AgentRuntimeFactory WithCustomLoopRunStoreProvider(CustomLoopRunStoreProvider provider)
+    {
+        ArgumentNullException.ThrowIfNull(provider);
+        return new AgentRuntimeFactory(
+            _approvalPrompt,
+            _conversationPublicationObserver,
+            _codexRuntimeStatus,
+            _capabilityTrustProvider,
+            _governedModelExecutionObserver,
+            _additionalModelProfileProviders,
+            _authenticatedWakeVerifier,
+            _commandActionRuntimeProvider,
             provider);
     }
 
@@ -196,7 +219,8 @@ public sealed class AgentRuntimeFactory
         IGovernedModelPrimaryExecutionBoundaryObserver? governedModelExecutionObserver = null,
         IReadOnlyList<ModelProfileRuntimeProvider>? additionalModelProfileProviders = null,
         IAgentRuntimeAuthenticatedWakeVerifier? authenticatedWakeVerifier = null,
-        CommandActionRuntimeProvider? commandActionRuntimeProvider = null)
+        CommandActionRuntimeProvider? commandActionRuntimeProvider = null,
+        CustomLoopRunStoreProvider? customLoopRunStoreProvider = null)
     {
         ArgumentNullException.ThrowIfNull(approvalPrompt);
         if (codexRuntimeStatus is not null && codexRuntimeStatus.Compatibility != CodexRuntimeCompatibility.Compatible)
@@ -224,6 +248,7 @@ public sealed class AgentRuntimeFactory
         }
         _additionalModelProfileProviders = Array.AsReadOnly(additionalProviders);
         _commandActionRuntimeProvider = commandActionRuntimeProvider;
+        _customLoopRunStoreProvider = customLoopRunStoreProvider;
     }
 
     /// <summary>
@@ -312,6 +337,7 @@ public sealed class AgentRuntimeFactory
         var paths = new WorkspacePaths(workingDirectory);
         var customExecutionGate = new CustomLoopWorkspaceExecutionGate(paths);
         CustomLoopRunStore? customRunStore = null;
+        var ownsCustomRunStore = _customLoopRunStoreProvider is null;
         GovernedLoopWaitRuntimeHost? governedWaitRuntimeHost = null;
         GovernedLoopSleepService? governedSleep = null;
         try
@@ -320,7 +346,7 @@ public sealed class AgentRuntimeFactory
             var permissionService = new ToolPermissionService(paths, permissionPolicy);
             var auditLog = new AuditLog(paths);
             var actor = ResolveActor(runtimeSurface);
-            customRunStore = new CustomLoopRunStore(paths);
+            customRunStore = _customLoopRunStoreProvider?.Borrow(paths) ?? new CustomLoopRunStore(paths);
             var recovery = new CustomLoopRecoveryService(customRunStore, auditLog);
             var recoveryOperationId = "recovery-" + Guid.NewGuid().ToString("N");
             var recoveryOwnership = customExecutionGate.TryAcquire(recoveryOperationId, new string('0', CustomLoopLimits.Sha256HexCharacters));
@@ -791,6 +817,7 @@ public sealed class AgentRuntimeFactory
                 inferenceClient,
                 loopRunner,
                 customRunStore,
+                ownsCustomRunStore,
                 customLoops,
                 loopAuthoring,
                 governedLoops,
@@ -819,7 +846,10 @@ public sealed class AgentRuntimeFactory
             {
                 try
                 {
-                    customRunStore?.Dispose();
+                    if (ownsCustomRunStore)
+                    {
+                        customRunStore?.Dispose();
+                    }
                 }
                 finally
                 {

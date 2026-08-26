@@ -31,7 +31,7 @@ public sealed class LoopAuthoringFacadeRunStoreOwnershipTests
     }
 
     [Fact]
-    public void Production_runtime_factory_is_the_only_loop_authoring_facade_composition_path()
+    public void Production_startup_provider_and_runtime_factory_are_the_only_loop_authoring_facade_composition_paths()
     {
         var sourceRoot = Path.Combine(FindRepositoryRoot(), "src");
         var constructions = Directory
@@ -39,12 +39,21 @@ public sealed class LoopAuthoringFacadeRunStoreOwnershipTests
             .SelectMany(path => FindLoopAuthoringFacadeConstructions(File.ReadAllText(path)).Select(creation => (Path: path, Creation: creation)))
             .ToArray();
 
-        var construction = Assert.Single(constructions);
-        Assert.Equal(Path.Combine("EmbodySense.Core.Startup", "Runtime", "AgentRuntimeFactory.cs"), Path.GetRelativePath(sourceRoot, construction.Path));
+        var paths = constructions
+            .Select(construction => Path.GetRelativePath(sourceRoot, construction.Path))
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Equal(
+            [
+                Path.Combine("EmbodySense.Core.Startup", "Loops", "CustomLoopRunStoreProvider.cs"),
+                Path.Combine("EmbodySense.Core.Startup", "Runtime", "AgentRuntimeFactory.cs")
+            ],
+            paths);
     }
 
     [Fact]
-    public void Production_runtime_factory_transfers_its_exact_canonical_store_to_authoring_and_runtime()
+    public void Production_runtime_factory_transfers_its_exact_configured_store_to_authoring_and_runtime()
     {
         var factorySource = File.ReadAllText(Path.Combine(
             FindRepositoryRoot(),
@@ -60,8 +69,6 @@ public sealed class LoopAuthoringFacadeRunStoreOwnershipTests
             "AgentRuntime.cs"));
         var factoryRoot = Parse(factorySource);
         var runtimeRoot = Parse(runtimeSource);
-        var canonicalStoreConstruction = Assert.Single(FindCustomLoopRunStoreConstructions(factoryRoot));
-        var canonicalStoreAssignment = Assert.IsType<AssignmentExpressionSyntax>(canonicalStoreConstruction.Parent);
         var authoringConstruction = Assert.Single(FindLoopAuthoringFacadeConstructions(factoryRoot));
         var authoringService = Assert.IsType<ObjectCreationExpressionSyntax>(authoringConstruction.ArgumentList!.Arguments[0].Expression);
         var authoringStoreArgument = Assert.Single(authoringService.ArgumentList!.Arguments, argument => argument.NameColon?.Name.Identifier.ValueText == "runStore");
@@ -73,15 +80,14 @@ public sealed class LoopAuthoringFacadeRunStoreOwnershipTests
             assignment.Left is IdentifierNameSyntax { Identifier.ValueText: "customRunStore" }
             && assignment.Right.RawKind == (int)SyntaxKind.NullLiteralExpression);
 
-        Assert.Equal("customRunStore", GetIdentifierValue(canonicalStoreAssignment.Left));
         Assert.Equal("CustomLoopAuthoringService", authoringService.Type.GetLastToken().ValueText);
-        Assert.Equal(GetIdentifierValue(canonicalStoreAssignment.Left), GetIdentifierValue(authoringStoreArgument.Expression));
-        Assert.Equal(GetIdentifierValue(canonicalStoreAssignment.Left), GetIdentifierValue(runtimeConstruction.ArgumentList!.Arguments[runtimeStoreParameterIndex].Expression));
+        Assert.Equal("customRunStore", GetIdentifierValue(authoringStoreArgument.Expression));
+        Assert.Equal("customRunStore", GetIdentifierValue(runtimeConstruction.ArgumentList!.Arguments[runtimeStoreParameterIndex].Expression));
         Assert.True(transfer.SpanStart > runtimeConstruction.SpanStart);
     }
 
     [Fact]
-    public void Production_runtime_is_the_single_disposal_owner_for_its_canonical_custom_loop_run_store()
+    public void Production_runtime_disposes_its_canonical_custom_loop_run_store_only_when_it_owns_the_store()
     {
         var source = File.ReadAllText(Path.Combine(
             FindRepositoryRoot(),
@@ -98,11 +104,81 @@ public sealed class LoopAuthoringFacadeRunStoreOwnershipTests
         var disposal = Assert.Single(FindCanonicalRunStoreDisposals(root));
         var disposeMethod = Assert.IsType<MethodDeclarationSyntax>(disposal.FirstAncestorOrSelf<MethodDeclarationSyntax>());
         var ownershipFence = Assert.Single(disposeMethod.DescendantNodes().OfType<IfStatementSyntax>(), IsIdempotentDisposalFence);
+        var storeOwnershipGuard = Assert.Single(disposeMethod.DescendantNodes().OfType<IfStatementSyntax>(), statement => statement.Condition is IdentifierNameSyntax { Identifier.ValueText: "_ownsCustomRunStore" });
 
         Assert.Equal("CustomLoopRunStore", constructorStoreParameter.Type!.GetLastToken().ValueText);
         Assert.True(fieldTransfer.SpanStart > runtimeConstructor.SpanStart);
         Assert.Equal("DisposeAsync", disposeMethod.Identifier.ValueText);
         Assert.True(ownershipFence.SpanStart < disposal.SpanStart);
+        Assert.True(storeOwnershipGuard.SpanStart < disposal.SpanStart);
+    }
+
+    [Fact]
+    public void Production_provider_owns_the_store_used_by_its_authoring_borrowers()
+    {
+        var source = File.ReadAllText(Path.Combine(
+            FindRepositoryRoot(),
+            "src",
+            "EmbodySense.Core.Startup",
+            "Loops",
+            "CustomLoopRunStoreProvider.cs"));
+        var root = Parse(source);
+        var storeConstruction = Assert.Single(FindCustomLoopRunStoreConstructions(root));
+        var storeAssignment = Assert.IsType<AssignmentExpressionSyntax>(storeConstruction.Parent);
+        var authoringConstruction = Assert.Single(FindLoopAuthoringFacadeConstructions(root));
+        var authoringStoreArgument = authoringConstruction.ArgumentList!.Arguments[1];
+        var borrowMethod = Assert.Single(root.DescendantNodes().OfType<MethodDeclarationSyntax>(), method => method.Identifier.ValueText == "Borrow");
+        var borrowedStore = Assert.Single(borrowMethod.DescendantNodes().OfType<ReturnStatementSyntax>());
+        var disposal = Assert.Single(root.DescendantNodes().OfType<InvocationExpressionSyntax>(), invocation => invocation.Expression is MemberAccessExpressionSyntax
+        {
+            Expression: IdentifierNameSyntax { Identifier.ValueText: "_runStore" },
+            Name: IdentifierNameSyntax { Identifier.ValueText: "Dispose" }
+        });
+        var disposeMethod = Assert.IsType<MethodDeclarationSyntax>(disposal.FirstAncestorOrSelf<MethodDeclarationSyntax>());
+        var ownershipFence = Assert.Single(disposeMethod.DescendantNodes().OfType<IfStatementSyntax>(), IsIdempotentDisposalFence);
+
+        Assert.Equal("_runStore", GetIdentifierValue(storeAssignment.Left));
+        Assert.Equal("_runStore", GetIdentifierValue(authoringStoreArgument.Expression));
+        Assert.Equal("_runStore", GetIdentifierValue(Assert.IsType<IdentifierNameSyntax>(borrowedStore.Expression!)));
+        Assert.Equal("DisposeAsync", disposeMethod.Identifier.ValueText);
+        Assert.True(ownershipFence.SpanStart < disposal.SpanStart);
+    }
+
+    [Fact]
+    public void Production_web_host_wires_one_provider_to_inference_independent_authoring_and_later_runtime_composition()
+    {
+        var source = File.ReadAllText(Path.Combine(
+            FindRepositoryRoot(),
+            "src",
+            "EmbodySense.Web",
+            "WebAgentRuntimeHost.cs"));
+        var root = Parse(source);
+        var providerConstruction = Assert.Single(FindObjectCreations(root, "CustomLoopRunStoreProvider"));
+        var providerAssignment = Assert.IsType<AssignmentExpressionSyntax>(providerConstruction.Parent);
+        var authoringCreation = Assert.Single(root.DescendantNodes().OfType<InvocationExpressionSyntax>(), invocation => invocation.Expression is MemberAccessExpressionSyntax
+        {
+            Expression: IdentifierNameSyntax { Identifier.ValueText: "_customLoopRunStoreProvider" },
+            Name: IdentifierNameSyntax { Identifier.ValueText: "CreateLoopAuthoringFacade" }
+        });
+        var runtimeProviderTransfer = Assert.Single(root.DescendantNodes().OfType<InvocationExpressionSyntax>(), invocation => invocation.Expression is MemberAccessExpressionSyntax
+        {
+            Name: IdentifierNameSyntax { Identifier.ValueText: "WithCustomLoopRunStoreProvider" }
+        } && invocation.ArgumentList.Arguments is [{ Expression: IdentifierNameSyntax { Identifier.ValueText: "_customLoopRunStoreProvider" } }]);
+        var providerDisposal = Assert.Single(root.DescendantNodes().OfType<InvocationExpressionSyntax>(), invocation => invocation.Expression is MemberAccessExpressionSyntax
+        {
+            Expression: IdentifierNameSyntax { Identifier.ValueText: "_customLoopRunStoreProvider" },
+            Name: IdentifierNameSyntax { Identifier.ValueText: "DisposeAsync" }
+        });
+        var hostDispose = Assert.IsType<MethodDeclarationSyntax>(providerDisposal.FirstAncestorOrSelf<MethodDeclarationSyntax>());
+        var runtimeDiscard = Assert.Single(hostDispose.DescendantNodes().OfType<InvocationExpressionSyntax>(), invocation => invocation.Expression is IdentifierNameSyntax { Identifier.ValueText: "DiscardRuntimeAsync" });
+        var authoringDrain = Assert.Single(hostDispose.DescendantNodes().OfType<InvocationExpressionSyntax>(), invocation => invocation.Expression is IdentifierNameSyntax { Identifier.ValueText: "WaitForAuthoringOperationsAsync" });
+
+        Assert.Equal("_customLoopRunStoreProvider", GetIdentifierValue(providerAssignment.Left));
+        Assert.Equal("CreateLoopAuthoringFacade", ((MemberAccessExpressionSyntax)authoringCreation.Expression).Name.Identifier.ValueText);
+        Assert.Equal("WithCustomLoopRunStoreProvider", ((MemberAccessExpressionSyntax)runtimeProviderTransfer.Expression).Name.Identifier.ValueText);
+        Assert.Equal("DisposeAsync", hostDispose.Identifier.ValueText);
+        Assert.True(runtimeDiscard.SpanStart < providerDisposal.SpanStart);
+        Assert.True(authoringDrain.SpanStart < providerDisposal.SpanStart);
     }
 
     [Fact]

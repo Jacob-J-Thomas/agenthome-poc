@@ -20,7 +20,8 @@ namespace EmbodySense.Web;
 /// custom-loop operations, durable run recovery, and shutdown.
 /// </summary>
 /// <remarks>
-/// Default-conversation turns are serialized. Custom-loop operations may share the retained runtime and
+/// Default-conversation turns are serialized. Authoring borrows an inference-independent canonical run store for the
+/// host lifetime, while custom-loop operations may share the retained runtime and
 /// cross SignalR disconnects, but approval ownership remains bound to the initiating connection. A cancelled
 /// conversation discards its runtime at the next safe boundary without disposing a runtime still used by a
 /// custom operation. Evidence reads recover interrupted runs before returning state. The application container
@@ -35,11 +36,14 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     private readonly string? _capabilityTrustRootPath;
     private readonly WorkspaceStatusReader _statusReader;
     private readonly WorkspaceConfigurationReader _configurationReader;
+    private readonly CustomLoopRunStoreProvider _customLoopRunStoreProvider;
+    private readonly LoopAuthoringFacade _loopAuthoring;
     private readonly LoopRunInspectionFacade _loopRuns;
     private readonly DefaultConversationRequestReconciliationReader _conversationRequests;
     private readonly IAgentRuntimeConversationPublicationObserver? _conversationPublicationObserver;
     private readonly Func<CodexRuntimeStatus, AgentRuntimeFactory>? _runtimeFactoryProvider;
     private readonly SemaphoreSlim _runtimeGate = new(1, 1);
+    private readonly SemaphoreSlim _authoringOperationGate = new(1, 1);
     private readonly SemaphoreSlim _turnGate = new(1, 1);
     private readonly SemaphoreSlim _workspaceInitializationGate = new(1, 1);
     private readonly object _codexRuntimeStatusGate = new();
@@ -49,7 +53,9 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     private CancellationTokenSource? _turnCancellation;
     private AgentRuntime? _runtime;
     private TaskCompletionSource<bool>? _runtimeDiscardCompletion;
+    private TaskCompletionSource<bool>? _authoringOperationDrainCompletion;
     private int _activeCustomRuntimeOperations;
+    private int _activeAuthoringOperations;
     private bool _discardRuntimeWhenCustomOperationsComplete;
     private bool _loopRecoveryCompleted;
     private bool _preserveCurrentConversationOnNextRuntimeCreation = true;
@@ -179,6 +185,8 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         _runtimeFactoryProvider = runtimeFactoryProvider;
         _statusReader = new WorkspaceStatusReader();
         _configurationReader = new WorkspaceConfigurationReader();
+        _customLoopRunStoreProvider = new CustomLoopRunStoreProvider(options.WorkingDirectory);
+        _loopAuthoring = _customLoopRunStoreProvider.CreateLoopAuthoringFacade();
         _loopRuns = new LoopRunInspectionFacade(options.WorkingDirectory, WorkspaceActors.Web, AgentRuntimeSurface.Web.Id);
         _conversationRequests = new DefaultConversationRequestReconciliationReader(options.WorkingDirectory);
         if (codexRuntimeStatus is not null)
@@ -208,15 +216,15 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     internal async Task<T> UseLoopAuthoringAsync<T>(Func<LoopAuthoringFacade, Task<T>> operation, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(operation);
-
-        var runtime = await BeginCustomRuntimeOperationAsync(cancellationToken);
+        EnsureWorkspaceInitialized("authoring custom loops");
+        await BeginAuthoringOperationAsync(cancellationToken);
         try
         {
-            return await operation(runtime.LoopAuthoring);
+            return await operation(_loopAuthoring);
         }
         finally
         {
-            await EndCustomRuntimeOperationAsync();
+            await EndAuthoringOperationAsync();
         }
     }
 
@@ -1004,9 +1012,12 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
 
         _hostLifetimeCancellation.Cancel();
         await DiscardRuntimeAsync(waitForCustomOperations: true);
+        await WaitForAuthoringOperationsAsync();
+        await _customLoopRunStoreProvider.DisposeAsync();
         await _loopRuns.DisposeAsync();
 
         _runtimeGate.Dispose();
+        _authoringOperationGate.Dispose();
         _turnGate.Dispose();
         _workspaceInitializationGate.Dispose();
         _hostLifetimeCancellation.Dispose();
@@ -1024,6 +1035,60 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         finally
         {
             _runtimeGate.Release();
+        }
+    }
+
+    private async Task BeginAuthoringOperationAsync(CancellationToken cancellationToken)
+    {
+        await _authoringOperationGate.WaitAsync(cancellationToken);
+        try
+        {
+            ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+            _activeAuthoringOperations++;
+        }
+        finally
+        {
+            _authoringOperationGate.Release();
+        }
+    }
+
+    private async Task EndAuthoringOperationAsync()
+    {
+        await _authoringOperationGate.WaitAsync(CancellationToken.None);
+        try
+        {
+            _activeAuthoringOperations--;
+            if (_activeAuthoringOperations == 0)
+            {
+                _authoringOperationDrainCompletion?.TrySetResult(true);
+            }
+        }
+        finally
+        {
+            _authoringOperationGate.Release();
+        }
+    }
+
+    private async Task WaitForAuthoringOperationsAsync()
+    {
+        Task? drainCompletion = null;
+        await _authoringOperationGate.WaitAsync(CancellationToken.None);
+        try
+        {
+            if (_activeAuthoringOperations > 0)
+            {
+                _authoringOperationDrainCompletion ??= new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                drainCompletion = _authoringOperationDrainCompletion.Task;
+            }
+        }
+        finally
+        {
+            _authoringOperationGate.Release();
+        }
+
+        if (drainCompletion is not null)
+        {
+            await drainCompletion;
         }
     }
 
@@ -1130,7 +1195,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
                 throw new CodexRuntimeUnavailableException(codexRuntimeStatus);
             }
 
-            var factory = _runtimeFactoryProvider?.Invoke(codexRuntimeStatus)
+            var factory = (_runtimeFactoryProvider?.Invoke(codexRuntimeStatus)
                 ?? (_capabilityTrustRootPath is null
                     ? _conversationPublicationObserver is null
                         ? new AgentRuntimeFactory(_approvalCoordinator, codexRuntimeStatus)
@@ -1139,7 +1204,8 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
                         _approvalCoordinator,
                         _capabilityTrustRootPath,
                         codexRuntimeStatus,
-                        _conversationPublicationObserver));
+                        _conversationPublicationObserver)))
+                .WithCustomLoopRunStoreProvider(_customLoopRunStoreProvider);
             var preserveCurrentConversation = _preserveCurrentConversationOnNextRuntimeCreation;
             _runtime = await factory.CreateAsync(
                 _configuredModel,

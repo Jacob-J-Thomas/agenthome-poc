@@ -36,9 +36,9 @@ namespace EmbodySense.Core.Startup.Runtime;
 /// Exposes one composed EmbodySense conversation runtime through the interface-safe Core.Startup boundary.
 /// </summary>
 /// <remarks>
-/// The runtime owns its inference client and canonical custom-loop run store, which its custom-loop and authoring facades borrow.
-/// Callers must dispose the instance to release the app-server process, cancellation host, workspace execution-gate, and run-store
-/// resources. Once the default loop accepts a model turn, cancellation,
+/// The runtime owns its inference client. Its canonical custom-loop run store is either owned directly or borrowed from a
+/// longer-lived workspace host, and its custom-loop and authoring facades borrow that same store. Callers must dispose the
+/// instance to release its app-server process, cancellation host, and workspace execution-gate resources. Once the default loop accepts a model turn, cancellation,
 /// provider transport, streamed-callback, audit, and persistence failures are normally projected through
 /// <see cref="AgentRuntimeTurnResult"/> rather than thrown. Input validation, command handling, and failures before loop admission
 /// can still propagate to the caller.
@@ -51,6 +51,7 @@ public sealed class AgentRuntime : IAsyncDisposable
     private readonly RuntimeCommandService _commandService;
     private readonly ConversationRuntimeState _conversationState;
     private readonly CustomLoopRunStore _customRunStore;
+    private readonly bool _ownsCustomRunStore;
     private readonly CustomLoopRuntimeFacade _customLoops;
     private readonly LoopAuthoringFacade _loopAuthoring;
     private readonly GovernedLoopRuntimeFacade _governedLoops;
@@ -73,6 +74,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         IAsyncDisposable inferenceClient,
         IDefaultConversationLoopRunner loopRunner,
         CustomLoopRunStore customRunStore,
+        bool ownsCustomRunStore,
         CustomLoopRuntimeFacade customLoops,
         LoopAuthoringFacade loopAuthoring,
         GovernedLoopRuntimeFacade governedLoops,
@@ -112,6 +114,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         _inferenceClient = inferenceClient;
         _loopRunner = loopRunner;
         _customRunStore = customRunStore;
+        _ownsCustomRunStore = ownsCustomRunStore;
         _customLoops = customLoops;
         _loopAuthoring = loopAuthoring;
         _governedLoops = governedLoops;
@@ -147,8 +150,11 @@ public sealed class AgentRuntime : IAsyncDisposable
     /// <summary>Gets the shared typed posture and lifecycle-control facade over this runtime's canonical stores.</summary>
     public GovernedLoopOperationalFacade GovernedLoopOperations => _governedLoopOperations;
 
-    /// <summary>Gets the authoring facade that borrows this runtime's canonical custom-loop run store.</summary>
-    /// <remarks>The returned facade remains valid only until this runtime is disposed and never owns its borrowed store.</remarks>
+    /// <summary>Gets the authoring facade backed by this runtime's canonical custom-loop run store.</summary>
+    /// <remarks>
+    /// The facade never owns its borrowed store. Callers retaining authoring past runtime disposal must use the longer-lived
+    /// <see cref="CustomLoopRunStoreProvider"/> facade that supplied the store, when runtime composition was configured with one.
+    /// </remarks>
     public LoopAuthoringFacade LoopAuthoring => _loopAuthoring;
 
     /// <summary>Gets the shared catalog, immutable graph history, and role-bound lifecycle authoring facade.</summary>
@@ -604,7 +610,10 @@ public sealed class AgentRuntime : IAsyncDisposable
                 {
                     try
                     {
-                        _customRunStore.Dispose();
+                        if (_ownsCustomRunStore)
+                        {
+                            _customRunStore.Dispose();
+                        }
                     }
                     finally
                     {

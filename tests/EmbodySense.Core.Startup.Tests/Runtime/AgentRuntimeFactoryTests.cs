@@ -99,10 +99,10 @@ public sealed class AgentRuntimeFactoryTests
         var attemptStartedPath = workspace.File("runtime-authoring-attempt-started.marker");
         var attemptReleasePath = workspace.File("runtime-authoring-attempt-release.marker");
         var executablePath = await CreateFakeCodexExecutableAsync(workspace, turnStartMarkerPath: attemptStartedPath, turnReleaseMarkerPath: attemptReleasePath);
-        var factory = AgentRuntimeFactory.ForFileCapabilityTrustRoot(
-            new RejectingApprovalPrompt(),
-            workspace.ServerStatePath,
-            CreateCompatibleRuntimeStatus(executablePath));
+        await using var runStoreProvider = new CustomLoopRunStoreProvider(workspace.RootPath);
+        var authoring = runStoreProvider.CreateLoopAuthoringFacade();
+        var factory = AgentRuntimeFactory.ForFileCapabilityTrustRoot(new RejectingApprovalPrompt(), workspace.ServerStatePath, CreateCompatibleRuntimeStatus(executablePath))
+            .WithCustomLoopRunStoreProvider(runStoreProvider);
         var runtime = await factory.CreateAsync(
             "test-model",
             workspace.RootPath,
@@ -113,7 +113,7 @@ public sealed class AgentRuntimeFactoryTests
 
         try
         {
-            var created = Assert.IsType<LoopDefinitionSnapshot>((await runtime.LoopAuthoring.CreateAsync("create-runtime-authoring-active-loop")).Definition);
+            var created = Assert.IsType<LoopDefinitionSnapshot>((await authoring.CreateAsync("create-runtime-authoring-active-loop")).Definition);
             var invocationInput = new LoopRunInvocationInput(
                 created.Id,
                 created.DefinitionVersion,
@@ -125,7 +125,7 @@ public sealed class AgentRuntimeFactoryTests
             await WaitForFileAsync(attemptStartedPath);
             var materialized = Assert.Single(await runtime.ListCustomLoopRunsAsync(), run => run.LoopId == created.Id);
             var exactRun = Assert.IsType<LoopRunSnapshot>(await runtime.GetCustomLoopRunAsync(materialized.Id));
-            var update = await runtime.LoopAuthoring.UpdateAsync(
+            var update = await authoring.UpdateAsync(
                 created.Id,
                 created.DefinitionVersion,
                 "update-runtime-authoring-active-loop",
@@ -136,7 +136,7 @@ public sealed class AgentRuntimeFactoryTests
                     created.InferenceSteps,
                     created.ToolAssignments,
                     created.ExitPolicy));
-            var delete = await runtime.LoopAuthoring.DeleteAsync(
+            var delete = await authoring.DeleteAsync(
                 created.Id,
                 created.DefinitionVersion,
                 "delete-runtime-authoring-active-loop");
@@ -155,6 +155,7 @@ public sealed class AgentRuntimeFactoryTests
 
             await runtime.DisposeAsync();
             await runtime.DisposeAsync();
+            Assert.Equal(created.Id, (await authoring.GetAsync(created.Id))!.Id);
         }
         finally
         {

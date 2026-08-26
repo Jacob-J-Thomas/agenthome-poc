@@ -48,8 +48,8 @@ public sealed class LoopAuthoringFacade
     /// <param name="actor">The nonblank actor attributed to authoring audit events.</param>
     /// <remarks>
     /// This facade borrows <paramref name="runStore"/> and never disposes it. Production callers obtain the
-    /// store from <see cref="Runtime.AgentRuntime"/> composition; isolated callers must retain and dispose their
-    /// own store after all authoring operations have completed.
+    /// store from <see cref="CustomLoopRunStoreProvider"/> or <see cref="Runtime.AgentRuntime"/> composition;
+    /// isolated callers must retain and dispose their own store after all authoring operations have completed.
     /// </remarks>
     public LoopAuthoringFacade(string workingDirectory, ICustomLoopRunStore runStore, string actor = WorkspaceActors.Web)
     {
