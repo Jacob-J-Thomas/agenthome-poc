@@ -231,7 +231,7 @@ public sealed class ScheduleRunOverlapAdapterTests
         return (run, target!);
     }
 
-    private static async Task<(CustomLoopRunRecord Run, TriggerLoopReference Target)> MaterializeGovernedRunAsync(
+    internal static async Task<(CustomLoopRunRecord Run, TriggerLoopReference Target)> MaterializeGovernedRunAsync(
         CustomLoopRunStore store)
     {
         var fixture = ConversationPublicationAuthorityTestFixture.Create(
