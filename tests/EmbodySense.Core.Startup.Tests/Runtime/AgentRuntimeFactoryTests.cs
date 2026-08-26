@@ -2038,7 +2038,7 @@ public sealed class AgentRuntimeFactoryTests
     private static async Task<CustomLoopRunRecord> AdmitLegacyRunAsync(TestWorkspace workspace, string operationId)
     {
         var paths = new WorkspacePaths(workspace.RootPath);
-        var authoring = new LoopAuthoringFacade(workspace.RootPath, WorkspaceActors.Cli);
+        var authoring = new LoopAuthoringFacade(workspace.RootPath, new CustomLoopRunStore(paths), WorkspaceActors.Cli);
         var created = Assert.IsType<LoopDefinitionSnapshot>((await authoring.CreateAsync("create-human-resume-restart")).Definition);
         var definitionStore = new CustomLoopDefinitionStore(paths);
         var definition = Assert.IsType<CustomLoopDefinition>(await definitionStore.GetAsync(created.Id));

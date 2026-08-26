@@ -71,7 +71,7 @@ public static class Program
     /// <param name="options">The validated workspace and runtime options captured by singleton services.</param>
     /// <remarks>
     /// JSON rejects unmapped members and numeric enum values. SignalR limits invocation payload size and
-    /// parallel calls. The runtime host, approval coordinator, authoring facade, and session token are
+    /// parallel calls. The runtime host, approval coordinator, and session token are
     /// process singletons and are disposed by the application container when applicable.
     /// </remarks>
     public static void ConfigureServices(IServiceCollection services, WebRunOptions options)
@@ -109,7 +109,6 @@ public static class Program
             WorkspaceInitializer.ForWeb(),
             provider.GetRequiredService<IAgentRuntimeConversationPublicationObserver>()));
         services.AddSingleton<IWebLoopRuntimeInvoker>(provider => provider.GetRequiredService<WebAgentRuntimeHost>());
-        services.AddSingleton(_ => new LoopAuthoringFacade(options.WorkingDirectory));
         services.AddSingleton<ILoopReceiptRetentionFacade>(_ => new LoopReceiptRetentionFacade(options.WorkingDirectory));
         services.AddSingleton<ICapabilityCatalogFacade>(_ => new CapabilityCatalogFacade(options.WorkingDirectory));
     }

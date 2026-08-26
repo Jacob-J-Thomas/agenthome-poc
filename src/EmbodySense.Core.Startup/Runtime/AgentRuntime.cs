@@ -13,6 +13,7 @@ using EmbodySense.Core.Application.Runtime.Models;
 using EmbodySense.Core.Application.Runtime.State;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Workspace;
+using EmbodySense.Core.Startup.Loops;
 using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Core.Startup.Loops.Execution.Sleep;
 using EmbodySense.Core.Startup.Loops.Execution.Sleep.Models;
@@ -20,6 +21,7 @@ using EmbodySense.Core.Startup.Runtime.Models;
 using EmbodySense.Core.Application.Triggers;
 using EmbodySense.Core.Application.Triggers.Models;
 using EmbodySense.Core.Application.Triggers.Schedules;
+using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Core.Persistence.Triggers;
 using EmbodySense.Core.Startup.Triggers;
 using EmbodySense.Core.Startup.Loops.Posture;
@@ -34,8 +36,9 @@ namespace EmbodySense.Core.Startup.Runtime;
 /// Exposes one composed EmbodySense conversation runtime through the interface-safe Core.Startup boundary.
 /// </summary>
 /// <remarks>
-/// The runtime owns its inference client and custom-loop facade. Callers must dispose the instance to release the app-server
-/// process, cancellation host, and workspace execution-gate resources. Once the default loop accepts a model turn, cancellation,
+/// The runtime owns its inference client and canonical custom-loop run store, which its custom-loop and authoring facades borrow.
+/// Callers must dispose the instance to release the app-server process, cancellation host, workspace execution-gate, and run-store
+/// resources. Once the default loop accepts a model turn, cancellation,
 /// provider transport, streamed-callback, audit, and persistence failures are normally projected through
 /// <see cref="AgentRuntimeTurnResult"/> rather than thrown. Input validation, command handling, and failures before loop admission
 /// can still propagate to the caller.
@@ -47,7 +50,9 @@ public sealed class AgentRuntime : IAsyncDisposable
     private readonly RuntimeSessionState _state = new();
     private readonly RuntimeCommandService _commandService;
     private readonly ConversationRuntimeState _conversationState;
+    private readonly CustomLoopRunStore _customRunStore;
     private readonly CustomLoopRuntimeFacade _customLoops;
+    private readonly LoopAuthoringFacade _loopAuthoring;
     private readonly GovernedLoopRuntimeFacade _governedLoops;
     private readonly IScheduleDeliveryProvenancePort _scheduleDeliveryProvenance;
     private readonly GovernedLoopOperationalFacade _governedLoopOperations;
@@ -57,6 +62,7 @@ public sealed class AgentRuntime : IAsyncDisposable
     private readonly DefaultConversationTurnReviewService _defaultConversationReviews;
     private readonly GovernedLoopWaitRuntimeHost? _governedWaitRuntimeHost;
     private readonly GovernedLoopSleepService? _governedSleep;
+    private int _disposed;
 
     internal AgentRuntime(
         WorkspacePaths paths,
@@ -66,7 +72,9 @@ public sealed class AgentRuntime : IAsyncDisposable
         ConversationRuntimeState conversationState,
         IAsyncDisposable inferenceClient,
         IDefaultConversationLoopRunner loopRunner,
+        CustomLoopRunStore customRunStore,
         CustomLoopRuntimeFacade customLoops,
+        LoopAuthoringFacade loopAuthoring,
         GovernedLoopRuntimeFacade governedLoops,
         IScheduleDeliveryProvenancePort scheduleDeliveryProvenance,
         GovernedLoopOperationalFacade governedLoopOperations,
@@ -85,7 +93,9 @@ public sealed class AgentRuntime : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(conversationState);
         ArgumentNullException.ThrowIfNull(inferenceClient);
         ArgumentNullException.ThrowIfNull(loopRunner);
+        ArgumentNullException.ThrowIfNull(customRunStore);
         ArgumentNullException.ThrowIfNull(customLoops);
+        ArgumentNullException.ThrowIfNull(loopAuthoring);
         ArgumentNullException.ThrowIfNull(governedLoops);
         ArgumentNullException.ThrowIfNull(governedLoopOperations);
         ArgumentNullException.ThrowIfNull(governedLoopGraphAuthoring);
@@ -101,7 +111,9 @@ public sealed class AgentRuntime : IAsyncDisposable
         _conversationState = conversationState;
         _inferenceClient = inferenceClient;
         _loopRunner = loopRunner;
+        _customRunStore = customRunStore;
         _customLoops = customLoops;
+        _loopAuthoring = loopAuthoring;
         _governedLoops = governedLoops;
         _scheduleDeliveryProvenance = scheduleDeliveryProvenance ?? throw new ArgumentNullException(nameof(scheduleDeliveryProvenance));
         _governedLoopOperations = governedLoopOperations ?? throw new ArgumentNullException(nameof(governedLoopOperations));
@@ -134,6 +146,10 @@ public sealed class AgentRuntime : IAsyncDisposable
 
     /// <summary>Gets the shared typed posture and lifecycle-control facade over this runtime's canonical stores.</summary>
     public GovernedLoopOperationalFacade GovernedLoopOperations => _governedLoopOperations;
+
+    /// <summary>Gets the authoring facade that borrows this runtime's canonical custom-loop run store.</summary>
+    /// <remarks>The returned facade remains valid only until this runtime is disposed and never owns its borrowed store.</remarks>
+    public LoopAuthoringFacade LoopAuthoring => _loopAuthoring;
 
     /// <summary>Gets the shared catalog, immutable graph history, and role-bound lifecycle authoring facade.</summary>
     public GovernedLoopGraphAuthoringFacade GovernedLoopGraphAuthoring => _governedLoopGraphAuthoring;
@@ -560,6 +576,11 @@ public sealed class AgentRuntime : IAsyncDisposable
     /// <returns>A task that represents the asynchronous operation.</returns>
     public async ValueTask DisposeAsync()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            return;
+        }
+
         try
         {
             if (_governedWaitRuntimeHost is not null)
@@ -569,9 +590,28 @@ public sealed class AgentRuntime : IAsyncDisposable
         }
         finally
         {
-            _governedLoops.Dispose();
-            await _customLoops.DisposeAsync();
-            await _inferenceClient.DisposeAsync();
+            try
+            {
+                _governedLoops.Dispose();
+            }
+            finally
+            {
+                try
+                {
+                    await _customLoops.DisposeAsync();
+                }
+                finally
+                {
+                    try
+                    {
+                        _customRunStore.Dispose();
+                    }
+                    finally
+                    {
+                        await _inferenceClient.DisposeAsync();
+                    }
+                }
+            }
         }
     }
 

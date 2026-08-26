@@ -33,7 +33,8 @@ public sealed class LoopApiControllerTests : IClassFixture<LoopApiControllerTest
     public async Task Loop_api_enforces_authentication_initialization_and_system_loop_lock()
     {
         using var workspace = new TestWorkspace();
-        await using var app = CreateApp(workspace.RootPath, out var options);
+        var codexPath = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
+        await using var app = CreateApp(workspace.RootPath, out var options, codexPath: codexPath);
         await app.StartAsync();
 
         try
@@ -143,7 +144,8 @@ public sealed class LoopApiControllerTests : IClassFixture<LoopApiControllerTest
     public async Task Loop_create_rejects_missing_or_null_first_save_definitions_as_invalid_requests()
     {
         using var workspace = new TestWorkspace();
-        await using var app = CreateApp(workspace.RootPath, out var options);
+        var codexPath = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
+        await using var app = CreateApp(workspace.RootPath, out var options, codexPath: codexPath);
         await app.StartAsync();
 
         try
@@ -253,7 +255,8 @@ public sealed class LoopApiControllerTests : IClassFixture<LoopApiControllerTest
     public async Task Loop_api_projects_crud_conflicts_and_hostile_text_as_json_data()
     {
         using var workspace = new TestWorkspace();
-        await using var app = CreateApp(workspace.RootPath, out var options);
+        var codexPath = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
+        await using var app = CreateApp(workspace.RootPath, out var options, codexPath: codexPath);
         await app.StartAsync();
 
         try
@@ -418,10 +421,12 @@ public sealed class LoopApiControllerTests : IClassFixture<LoopApiControllerTest
         return await client.SendAsync(request);
     }
 
-    private static WebApplication CreateApp(string rootPath, out WebRunOptions options, ILoopReceiptRetentionFacade? receiptRetention = null)
+    private static WebApplication CreateApp(string rootPath, out WebRunOptions options, ILoopReceiptRetentionFacade? receiptRetention = null, string? codexPath = null)
     {
         var port = GetFreePort();
-        var arguments = new[] { "--workdir", rootPath, "--port", port.ToString(), "--model", "gpt-test" };
+        string[] arguments = codexPath is null
+            ? ["--workdir", rootPath, "--port", port.ToString(), "--model", "gpt-test"]
+            : ["--workdir", rootPath, "--port", port.ToString(), "--model", "gpt-test", "--codex-path", codexPath];
         options = WebRunOptions.FromArguments(arguments);
         var builder = Program.CreateBuilder(arguments, options);
         if (receiptRetention is not null)

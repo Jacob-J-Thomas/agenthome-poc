@@ -13,6 +13,7 @@ using EmbodySense.Core.Application.Loops.EffectAuthorityUsage;
 using EmbodySense.Core.Application.Loops.Execution;
 using EmbodySense.Core.Application.Loops.Execution.Authority;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
+using EmbodySense.Core.Application.Loops.Authoring;
 using EmbodySense.Core.Application.Loops.Failures;
 using EmbodySense.Core.Application.Loops.GraphAuthoring;
 using EmbodySense.Core.Application.Loops.GraphValidation;
@@ -310,6 +311,7 @@ public sealed class AgentRuntimeFactory
         var effectiveOptions = options with { WorkingDirectory = workingDirectory, CodexExecutablePath = codexRuntimeStatus.ResolvedExecutablePath };
         var paths = new WorkspacePaths(workingDirectory);
         var customExecutionGate = new CustomLoopWorkspaceExecutionGate(paths);
+        CustomLoopRunStore? customRunStore = null;
         GovernedLoopWaitRuntimeHost? governedWaitRuntimeHost = null;
         GovernedLoopSleepService? governedSleep = null;
         try
@@ -318,7 +320,7 @@ public sealed class AgentRuntimeFactory
             var permissionService = new ToolPermissionService(paths, permissionPolicy);
             var auditLog = new AuditLog(paths);
             var actor = ResolveActor(runtimeSurface);
-            var customRunStore = new CustomLoopRunStore(paths);
+            customRunStore = new CustomLoopRunStore(paths);
             var recovery = new CustomLoopRecoveryService(customRunStore, auditLog);
             var recoveryOperationId = "recovery-" + Guid.NewGuid().ToString("N");
             var recoveryOwnership = customExecutionGate.TryAcquire(recoveryOperationId, new string('0', CustomLoopLimits.Sha256HexCharacters));
@@ -428,6 +430,7 @@ public sealed class AgentRuntimeFactory
             var loopRunner = new DefaultConversationLoopRunner(inferenceClient, conversationState, conversationMemory, defaultLoop, loopRunStore, runtimeSurface.SurfaceId, conversationTurnStore, capabilityAdmissionService: capabilityAdmission);
             var defaultConversationReviews = new DefaultConversationTurnReviewService(conversationTurnStore, inferenceClient, new FileConversationWorkspaceLease(paths));
             var customDefinitionStore = new CustomLoopDefinitionStore(paths, capabilityAuthority);
+            var loopAuthoring = new LoopAuthoringFacade(new CustomLoopAuthoringService(customDefinitionStore, auditLog, runStore: customRunStore), loopDefinitionStore, paths, actor);
             var customInvocationOperations = new CustomLoopInvocationOperationStore(paths);
             var customInvocationReceiptRetention = new CustomLoopInvocationReceiptRetentionService(customInvocationOperations, auditLog);
             var customInvocationReceiptWriter = new CustomLoopInvocationReceiptWriter(customInvocationOperations, customInvocationReceiptRetention);
@@ -779,7 +782,7 @@ public sealed class AgentRuntimeFactory
                 workspaceId,
                 customModelSnapshot,
                 governedRoleStore);
-            return new AgentRuntime(
+            var runtime = new AgentRuntime(
                 paths,
                 runtimeSurface,
                 conversationMemory,
@@ -787,7 +790,9 @@ public sealed class AgentRuntimeFactory
                 conversationState,
                 inferenceClient,
                 loopRunner,
+                customRunStore,
                 customLoops,
+                loopAuthoring,
                 governedLoops,
                 scheduleDeliveryProvenance,
                 operationalFacade,
@@ -798,6 +803,8 @@ public sealed class AgentRuntimeFactory
                 codexRuntimeStatus,
                 governedWaitRuntimeHost,
                 governedSleep);
+            customRunStore = null;
+            return runtime;
         }
         catch
         {
@@ -810,7 +817,14 @@ public sealed class AgentRuntimeFactory
             }
             finally
             {
-                await customExecutionGate.DisposeAsync();
+                try
+                {
+                    customRunStore?.Dispose();
+                }
+                finally
+                {
+                    await customExecutionGate.DisposeAsync();
+                }
             }
 
             throw;

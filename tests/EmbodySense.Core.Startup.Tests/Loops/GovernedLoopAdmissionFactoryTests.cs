@@ -34,6 +34,7 @@ using EmbodySense.Core.Common.Loops.Revisions;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Capabilities;
+using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Core.Persistence.Loops.Admission;
 using EmbodySense.Core.Startup.Capabilities;
 using EmbodySense.Core.Startup.Inference.Profiles;
@@ -56,7 +57,7 @@ public sealed class GovernedLoopAdmissionFactoryTests
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
-        var catalog = await new LoopAuthoringFacade(workspace.RootPath).GetCatalogAsync();
+        var catalog = await new LoopAuthoringFacade(workspace.RootPath, new CustomLoopRunStore(paths)).GetCatalogAsync();
 
         using var facade = GovernedLoopAdmissionFactory.Create(
             paths,

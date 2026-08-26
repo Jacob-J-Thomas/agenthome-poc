@@ -1,6 +1,7 @@
 using EmbodySense.Core.Startup.Loops.Execution.Models;
 using EmbodySense.Core.Startup.Configuration.Models;
 using EmbodySense.Core.Startup.Configuration;
+using EmbodySense.Core.Startup.Loops;
 using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Core.Startup.Loops.Posture;
 using EmbodySense.Core.Startup.Loops.GraphAuthoring.Models;
@@ -202,6 +203,21 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     public LoopRunModelSnapshot GetCustomLoopModel()
     {
         return new LoopRunModelSnapshot("OpenAiCodex", _configuredModel);
+    }
+
+    internal async Task<T> UseLoopAuthoringAsync<T>(Func<LoopAuthoringFacade, Task<T>> operation, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+
+        var runtime = await BeginCustomRuntimeOperationAsync(cancellationToken);
+        try
+        {
+            return await operation(runtime.LoopAuthoring);
+        }
+        finally
+        {
+            await EndCustomRuntimeOperationAsync();
+        }
     }
 
     internal async Task<(string Status, object Payload)> ReadGovernedLoopOperationalPostureAsync(

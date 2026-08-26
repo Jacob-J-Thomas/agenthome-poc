@@ -1248,7 +1248,7 @@ public sealed class WebAgentRuntimeHostTests
 
     private static async Task<LoopDefinitionSnapshot> CreateInvocationLoopAsync(TestWorkspace workspace, IReadOnlyList<LoopToolAssignment>? toolAssignments = null)
     {
-        var facade = new LoopAuthoringFacade(workspace.RootPath);
+        var facade = new LoopAuthoringFacade(workspace.RootPath, new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath)));
         var created = Assert.IsType<LoopDefinitionSnapshot>((await facade.CreateAsync("create-host-dispose-loop")).Definition);
         var input = new LoopDefinitionInput(
             "Host disposal loop",

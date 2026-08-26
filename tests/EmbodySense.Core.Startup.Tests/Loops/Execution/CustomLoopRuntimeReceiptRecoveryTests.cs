@@ -388,7 +388,7 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
 
     private static async Task<LoopDefinitionSnapshot> CreateInvocationLoopAsync(TestWorkspace workspace)
     {
-        var facade = new LoopAuthoringFacade(workspace.RootPath, WorkspaceActors.Cli);
+        var facade = new LoopAuthoringFacade(workspace.RootPath, new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath)), WorkspaceActors.Cli);
         var created = Assert.IsType<LoopDefinitionSnapshot>((await facade.CreateAsync("create-receipt-recovery-loop")).Definition);
         var input = new LoopDefinitionInput(
             "Receipt recovery loop",

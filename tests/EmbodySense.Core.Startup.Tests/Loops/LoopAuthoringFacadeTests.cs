@@ -1,15 +1,21 @@
 using EmbodySense.Core.Startup.Loops.Models;
 using System.Text.Json.Nodes;
 using EmbodySense.Core.Common.Loops;
+using EmbodySense.Core.Common.Loops.Custom;
+using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Models;
+using EmbodySense.Core.Common.Loops.Models.Custom;
+using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Startup.Loops;
+using EmbodySense.Core.Startup.Tests.Triggers.Schedules;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Application.ContextualRoles;
 using EmbodySense.Core.Application.ContextualRoles.Models;
+using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Persistence.ContextualRoles;
 using EmbodySense.Tests.Support;
@@ -24,7 +30,7 @@ public sealed class LoopAuthoringFacadeTests
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
-        var facade = new LoopAuthoringFacade(workspace.RootPath);
+        var facade = CreateFacade(workspace);
 
         var initialCatalog = await facade.GetCatalogAsync();
         var firstSaveInput = initialCatalog.DraftTemplate.Definition with { DisplayName = "Explicit facade loop", Description = "First durable version." };
@@ -104,7 +110,7 @@ public sealed class LoopAuthoringFacadeTests
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
-        var projection = (await new LoopAuthoringFacade(workspace.RootPath).GetCatalogAsync()).SystemDefault;
+        var projection = (await CreateFacade(workspace).GetCatalogAsync()).SystemDefault;
         var canonical = LoopDefinition.CreateDefaultConversation();
 
         Assert.Equal(canonical.SchemaVersion, projection.SchemaVersion);
@@ -174,7 +180,7 @@ public sealed class LoopAuthoringFacadeTests
         };
         await new LoopDefinitionStore(paths).SaveAsync(canonical with { Graph = noncanonicalGraph });
 
-        var projection = (await new LoopAuthoringFacade(workspace.RootPath).GetCatalogAsync()).SystemDefault;
+        var projection = (await CreateFacade(workspace).GetCatalogAsync()).SystemDefault;
 
         Assert.Equal(SystemLoopExecutionSemantics.Unknown, projection.ExecutionContract.GraphSemantics);
         Assert.All(projection.Graph.Nodes, node => Assert.Equal(SystemLoopExecutionSemantics.Unknown, node.ExecutionSemantics));
@@ -188,7 +194,7 @@ public sealed class LoopAuthoringFacadeTests
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
-        var facade = new LoopAuthoringFacade(workspace.RootPath, "startup-test");
+        var facade = CreateFacade(workspace, "startup-test");
 
         var invalidCreate = await facade.CreateAsync("INVALID OPERATION");
         var missingUpdate = await facade.UpdateAsync("missing-loop", 1, "update-missing-loop", CreateInput(null, "Valid text"));
@@ -207,7 +213,7 @@ public sealed class LoopAuthoringFacadeTests
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         File.Delete(new WorkspacePaths(workspace.RootPath).DefaultConversationLoopDefinitionPath);
-        var facade = new LoopAuthoringFacade(workspace.RootPath);
+        var facade = CreateFacade(workspace);
 
         var catalogException = await Assert.ThrowsAsync<InvalidOperationException>(() => facade.GetCatalogAsync());
         var mutationException = await Assert.ThrowsAsync<InvalidOperationException>(() => facade.CreateAsync("blocked-create"));
@@ -225,7 +231,7 @@ public sealed class LoopAuthoringFacadeTests
         var root = JsonNode.Parse(await File.ReadAllTextAsync(path))!.AsObject();
         root["id"] = "substituted-authority";
         await File.WriteAllTextAsync(path, root.ToJsonString());
-        var facade = new LoopAuthoringFacade(workspace.RootPath);
+        var facade = CreateFacade(workspace);
 
         var catalogException = await Assert.ThrowsAsync<InvalidOperationException>(() => facade.GetCatalogAsync());
         var mutationException = await Assert.ThrowsAsync<InvalidOperationException>(() => facade.CreateAsync("blocked-create"));
@@ -242,7 +248,7 @@ public sealed class LoopAuthoringFacadeTests
         var paths = new WorkspacePaths(workspace.RootPath);
         Directory.Delete(Path.Combine(paths.AgentPath, "contextual-roles"), recursive: true);
 
-        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => new LoopAuthoringFacade(workspace.RootPath).GetCatalogAsync());
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => CreateFacade(workspace).GetCatalogAsync());
 
         Assert.Contains("exact active default contextual-role lifecycle", exception.Message, StringComparison.Ordinal);
         Assert.True(File.Exists(paths.RolePath));
@@ -271,7 +277,7 @@ public sealed class LoopAuthoringFacadeTests
             Assert.Equal(ContextualRoleRevisionMutationStatus.Accepted, (await store.MutateAsync(request)).Status);
         }
 
-        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => new LoopAuthoringFacade(workspace.RootPath).CreateAsync("blocked-create"));
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => CreateFacade(workspace).CreateAsync("blocked-create"));
 
         Assert.Contains("exact active default contextual-role lifecycle", exception.Message, StringComparison.Ordinal);
     }
@@ -291,7 +297,7 @@ public sealed class LoopAuthoringFacadeTests
         }
 
         await File.WriteAllTextAsync(paths.RolePath, "   \n");
-        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => new LoopAuthoringFacade(workspace.RootPath).GetCatalogAsync());
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => CreateFacade(workspace).GetCatalogAsync());
 
         Assert.Contains("instruction source is unavailable or substituted", exception.Message, StringComparison.Ordinal);
         using var confirmedStore = new ContextualRoleRevisionStore(paths, workspaceId);
@@ -311,7 +317,7 @@ public sealed class LoopAuthoringFacadeTests
         root["integrityHash"] = new string('0', 64);
         await File.WriteAllTextAsync(revisionPath, root.ToJsonString());
 
-        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => new LoopAuthoringFacade(workspace.RootPath).GetCatalogAsync());
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => CreateFacade(workspace).GetCatalogAsync());
 
         Assert.Contains("failed closed", exception.Message, StringComparison.Ordinal);
     }
@@ -329,7 +335,7 @@ public sealed class LoopAuthoringFacadeTests
                 "role",
                 ContextualRoleInstructionClassification.RoleInstruction));
 
-        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => new LoopAuthoringFacade(workspace.RootPath).GetCatalogAsync());
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => CreateFacade(workspace).GetCatalogAsync());
 
         Assert.Contains("exact published default contextual-role revision", exception.Message, StringComparison.Ordinal);
     }
@@ -347,7 +353,7 @@ public sealed class LoopAuthoringFacadeTests
                 "substituted-role",
                 ContextualRoleInstructionClassification.RoleInstruction));
 
-        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => new LoopAuthoringFacade(workspace.RootPath).GetCatalogAsync());
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => CreateFacade(workspace).GetCatalogAsync());
 
         Assert.Contains("exact published default contextual-role revision", exception.Message, StringComparison.Ordinal);
     }
@@ -357,7 +363,7 @@ public sealed class LoopAuthoringFacadeTests
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
-        var facade = new LoopAuthoringFacade(workspace.RootPath);
+        var facade = CreateFacade(workspace);
         var created = Assert.IsType<LoopDefinitionSnapshot>((await facade.CreateAsync("create-null-shapes")).Definition);
         var valid = CreateInput(created, "Valid text");
         var contextWithMissingInput = new LoopContextPolicy(null!, new LoopContextOutputPolicy(true, false));
@@ -389,7 +395,7 @@ public sealed class LoopAuthoringFacadeTests
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
-        var facade = new LoopAuthoringFacade(workspace.RootPath);
+        var facade = CreateFacade(workspace);
         var created = Assert.IsType<LoopDefinitionSnapshot>((await facade.CreateAsync("create-first-loop")).Definition);
         var versionTwoInput = CreateInput(created, "Version two");
         var versionTwo = Assert.IsType<LoopDefinitionSnapshot>((await facade.UpdateAsync(created.Id, 1, "shared-update-operation", versionTwoInput)).Definition);
@@ -397,7 +403,7 @@ public sealed class LoopAuthoringFacadeTests
         var versionThree = Assert.IsType<LoopDefinitionSnapshot>((await facade.UpdateAsync(created.Id, 2, "second-update-operation", versionThreeInput)).Definition);
         var secondLoop = Assert.IsType<LoopDefinitionSnapshot>((await facade.CreateAsync("create-second-loop")).Definition);
 
-        var restarted = new LoopAuthoringFacade(workspace.RootPath);
+        var restarted = CreateFacade(workspace);
         var replay = await restarted.UpdateAsync(created.Id, 1, "shared-update-operation", versionTwoInput);
         var changedRequest = await restarted.UpdateAsync(created.Id, 1, "shared-update-operation", versionTwoInput with { Description = "Different content" });
         var crossKind = await restarted.DeleteAsync(created.Id, versionThree.DefinitionVersion, "shared-update-operation");
@@ -412,6 +418,47 @@ public sealed class LoopAuthoringFacadeTests
         Assert.Equal(secondLoop.ContentHash, (await restarted.GetAsync(secondLoop.Id))!.ContentHash);
     }
 
+    [Fact]
+    public async Task Delete_observes_a_just_committed_nonterminal_run_through_the_exact_borrowed_store_without_disposing_it()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var runStore = new TrackingCustomLoopRunStore(new CustomLoopRunStore(paths));
+
+        try
+        {
+            var facade = new LoopAuthoringFacade(workspace.RootPath, runStore);
+            var created = Assert.IsType<LoopDefinitionSnapshot>((await facade.CreateAsync("create-active-loop")).Definition);
+            var definition = Assert.IsType<CustomLoopDefinition>(await new CustomLoopDefinitionStore(paths).GetAsync(created.Id));
+            var run = CreateAdmittedRun(definition);
+
+            Assert.Equal(CustomLoopRunStoreStatus.Created, (await runStore.CreateAsync(run)).Status);
+            Assert.Equal(1, runStore.CreateCallCount);
+            Assert.Equal(0, runStore.GetNonterminalByLoopCallCount);
+
+            var blocked = await facade.DeleteAsync(created.Id, created.DefinitionVersion, "delete-active-loop");
+
+            Assert.Equal("ActiveRunExists", blocked.Status);
+            Assert.Equal(1, runStore.GetNonterminalByLoopCallCount);
+            Assert.Equal(created.Id, runStore.LastNonterminalLoopId);
+            Assert.False(runStore.IsDisposed);
+            Assert.Equal(0, runStore.DisposeCount);
+            Assert.Equal(0, runStore.InnerDisposeCount);
+            var retained = await runStore.GetNonterminalByLoopAsync(created.Id);
+            Assert.NotNull(retained);
+            Assert.Equal(run.Id, retained.Id);
+        }
+        finally
+        {
+            runStore.Dispose();
+        }
+
+        Assert.True(runStore.IsDisposed);
+        Assert.Equal(1, runStore.DisposeCount);
+        Assert.Equal(1, runStore.InnerDisposeCount);
+    }
+
     private static LoopDefinitionInput CreateInput(LoopDefinitionSnapshot? definition, string text)
     {
         var context = new LoopContextPolicy(
@@ -424,6 +471,46 @@ public sealed class LoopAuthoringFacadeTests
             [new LoopInferenceStep(definition?.InferenceSteps.Single().Id, "Inspect", text, new LoopNodeContextPolicy(LoopContextPolicyMode.Custom, context))],
             [LoopToolAssignment.List, LoopToolAssignment.Read, LoopToolAssignment.Search],
             new LoopExitPolicy(2, text, new LoopNodeContextPolicy(LoopContextPolicyMode.Custom, context)));
+    }
+
+    private static CustomLoopRunRecord CreateAdmittedRun(CustomLoopDefinition definition)
+    {
+        var now = DateTimeOffset.UtcNow;
+        CustomLoopRunEvent[] events = [new(1, "admitted-active-loop", now, CustomLoopRunEventKind.Admitted, null, null, null, "Run admitted.", [], null, null, null, null, null, null, null, null, null, null)];
+        var run = new CustomLoopRunRecord(
+            CustomLoopRunRecord.CurrentSchemaVersion,
+            "run-active-loop",
+            definition.Id,
+            1,
+            CustomLoopRunStatus.Admitted,
+            now,
+            now,
+            null,
+            "web",
+            new CustomLoopModelSnapshot("provider", "model"),
+            "admit-active-loop",
+            WorkspaceActors.Web,
+            string.Empty,
+            definition,
+            "prompt",
+            null,
+            CustomLoopContextSnapshot.CreateEmpty(now),
+            CustomLoopExecutionClock.NotStarted(),
+            CustomLoopRunCheckpoint.Start(),
+            events,
+            null,
+            null,
+            null)
+        {
+            CapabilityAdmission = TestCapabilityAdmissionFactory.Create(definition.CapabilityRequirements, now)
+        };
+        return CustomLoopAdmissionRequestHash.Apply(run);
+    }
+
+    private static LoopAuthoringFacade CreateFacade(TestWorkspace workspace, string actor = WorkspaceActors.Web)
+    {
+        var paths = new WorkspacePaths(workspace.RootPath);
+        return new LoopAuthoringFacade(workspace.RootPath, new CustomLoopRunStore(paths), actor);
     }
 
     private static async Task PersistSystemDefinitionAndRoleAsync(
