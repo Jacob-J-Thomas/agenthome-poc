@@ -52,7 +52,8 @@ public sealed class CustomLoopRunStore :
     private const string MutationLockFileName = ".custom-loop-runs.lock";
     private const string DiscoveryIndexFileName = ".custom-loop-run-index.json";
     private const string DiscoveryIndexPendingFileName = ".custom-loop-run-index.pending";
-    private const int DiscoveryIndexWindowsReplaceTemporaryNonceLength = 5;
+    private const int MinimumDiscoveryIndexWindowsReplaceTemporaryNonceLength = 5;
+    private const int MaximumDiscoveryIndexWindowsReplaceTemporaryNonceLength = 6;
     private const string ScheduleAdmissionRetirementFileName = ".schedule-admission-retirements.json";
     private const int MaximumScheduleAdmissionInterruptedWriteArtifacts = 32;
     private const int MaximumArtifactReadReconciliationAttempts = 3;
@@ -3827,7 +3828,8 @@ public sealed class CustomLoopRunStore :
 
     private static bool IsDiscoveryIndexWindowsReplaceTemporaryArtifactName(string fileName)
     {
-        // #512: ReplaceFileW emits this short-lived sibling only while atomically replacing the derived discovery index.
+        // https://github.com/Jacob-J-Thomas/agenthome-poc/issues/584 records the six-hex Windows Verify artifact;
+        // #512's five-hex fixture establishes the lower bound. Accept only those two observed widths.
         var prefix = DiscoveryIndexFileName + "~RF";
         if (!fileName.StartsWith(prefix, StringComparison.Ordinal) || !fileName.EndsWith(".TMP", StringComparison.Ordinal))
         {
@@ -3836,7 +3838,8 @@ public sealed class CustomLoopRunStore :
 
         var nonceStart = prefix.Length;
         var nonceLength = fileName.Length - nonceStart - ".TMP".Length;
-        if (nonceLength != DiscoveryIndexWindowsReplaceTemporaryNonceLength)
+        if (nonceLength < MinimumDiscoveryIndexWindowsReplaceTemporaryNonceLength
+            || nonceLength > MaximumDiscoveryIndexWindowsReplaceTemporaryNonceLength)
         {
             return false;
         }
