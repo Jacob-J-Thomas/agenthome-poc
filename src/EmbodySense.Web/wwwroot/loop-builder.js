@@ -31,6 +31,7 @@ let workspaceInitializationGeneration = 0;
 let workspaceInitializationPhase = "idle";
 let workspaceInitializationMessage = "";
 let workspaceAuthoringHydrated = false;
+let workspaceAuthoringHydrationGeneration = 0;
 let dirty = false;
 let currentView = "builder";
 let retentionPosture = null;
@@ -360,6 +361,11 @@ async function rehydrateSession({
   signal = null,
   workspaceRoot = null,
 } = {}) {
+  if (!loopBuilderSessionAvailable && !signal?.aborted) {
+    if (loopBuilderSessionAbortController.signal.aborted)
+      loopBuilderSessionAbortController = new AbortController();
+    loopBuilderSessionAvailable = true;
+  }
   renderLoopApprovals(approvals);
   if (!loopBuilderEventsBound) return { refreshed: false, skipped: true };
   if (loopBuilderRefresh) {
@@ -399,10 +405,11 @@ async function refreshWorkspaceCore(
   { propagateFailure = false, signal = null, suppressRecovery = false } = {},
 ) {
   try {
-    setWorkspaceAuthoringHydrated(false);
+    const hydrationGeneration = setWorkspaceAuthoringHydrated(false);
     const requestOptions = { signal, suppressRecovery };
     const status = await requestJson("/api/status", requestOptions);
-    if (signal?.aborted) return false;
+    if (!ownsWorkspaceAuthoringHydration(hydrationGeneration, signal))
+      return false;
     governedGraphWorkspace.configureWorkspace(status.workspaceRoot);
     configurePendingOperationalControlJournal(status.workspaceRoot);
     workspaceStatusSnapshot = status;
@@ -449,7 +456,8 @@ async function refreshWorkspaceCore(
       );
       requestedLoopDeepLink = null;
     }
-    if (signal?.aborted) return false;
+    if (!ownsWorkspaceAuthoringHydration(hydrationGeneration, signal))
+      return false;
     const runsLoaded = await loadRuns({ propagateFailure, requestOptions });
     if (runsLoaded !== true) {
       if (runsLoaded === null)
@@ -459,7 +467,22 @@ async function refreshWorkspaceCore(
         );
       return false;
     }
-    if (currentView === "graph") await governedGraphWorkspace.refresh();
+    if (currentView === "graph") {
+      const graphHydrated = await governedGraphWorkspace.refresh({ signal });
+      if (
+        graphHydrated !== true ||
+        !ownsWorkspaceAuthoringHydration(hydrationGeneration, signal) ||
+        currentView !== "graph"
+      ) {
+        showBanner(
+          "Authoritative governed-graph hydration did not complete. Graph authoring remains locked; retry hydration.",
+          "notice",
+        );
+        return false;
+      }
+    }
+    if (!ownsWorkspaceAuthoringHydration(hydrationGeneration, signal))
+      return false;
     setWorkspaceAuthoringHydrated(true);
     renderAll();
     renderWorkspaceInitialization();
@@ -1661,8 +1684,21 @@ function renderAll() {
 
 function setWorkspaceAuthoringHydrated(hydrated) {
   workspaceAuthoringHydrated = Boolean(hydrated);
+  if (!workspaceAuthoringHydrated) {
+    workspaceAuthoringHydrationGeneration++;
+    governedGraphWorkspace.markHydrationStale();
+  }
   governedGraphWorkspace.setInteractive(workspaceAuthoringHydrated);
   renderTabs();
+  return workspaceAuthoringHydrationGeneration;
+}
+
+function ownsWorkspaceAuthoringHydration(hydrationGeneration, signal) {
+  return (
+    workspaceAuthoringHydrationGeneration === hydrationGeneration &&
+    loopBuilderSessionAvailable &&
+    !signal?.aborted
+  );
 }
 
 function renderTabs() {

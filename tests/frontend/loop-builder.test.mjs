@@ -3465,6 +3465,398 @@ test("an active governed graph locks through reconnect failure and preserves its
   assert.equal(app.elements.governedGraphId.value, "reconnect-local-graph");
 });
 
+test("final governed graph hydration unlocks only after its authoritative catalog and detail reads succeed", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const catalogReady = createDeferred();
+  const detailReady = createDeferred();
+  let holdFinalHydration = false;
+  let catalogStarted;
+  let detailStarted;
+  server.on("GET", "/api/governed-graphs/catalog", async () => {
+    if (holdFinalHydration) {
+      catalogStarted?.();
+      await catalogReady.promise;
+    }
+    return { status: 200, body: createGovernedGraphCatalog() };
+  });
+  server.on(
+    "GET",
+    "/api/governed-graphs/detail?graphId=published-graph",
+    async () => {
+      if (holdFinalHydration) {
+        detailStarted?.();
+        await detailReady.promise;
+      }
+      const lifecycle = governedGraphLifecycle(
+        "published",
+        holdFinalHydration ? 6 : 4,
+      );
+      return {
+        status: 200,
+        body: governedGraphRead(
+          lifecycle,
+          governedGraphArtifact(lifecycle, "Authoritative graph"),
+        ),
+      };
+    },
+  );
+  const app = await loadLoopBuilder({ server });
+  await openPublishedGovernedGraphAsync(app);
+  holdFinalHydration = true;
+  const catalogRequestStarted = new Promise((resolve) => {
+    catalogStarted = resolve;
+  });
+  const detailRequestStarted = new Promise((resolve) => {
+    detailStarted = resolve;
+  });
+
+  const refreshed = app.context.refreshWorkspace();
+  await catalogRequestStarted;
+
+  assert.equal(
+    vm.runInContext("workspaceAuthoringHydrated", app.context),
+    false,
+  );
+  assert.equal(app.elements.governedGraphView.inert, true);
+  assert.equal(app.elements.governedGraphNewButton.disabled, true);
+
+  catalogReady.resolve();
+  await detailRequestStarted;
+
+  assert.equal(
+    vm.runInContext("workspaceAuthoringHydrated", app.context),
+    false,
+  );
+  assert.equal(app.elements.governedGraphView.inert, true);
+  assert.equal(app.elements.governedGraphNewButton.disabled, true);
+
+  detailReady.resolve();
+  assert.equal(await refreshed, true);
+  assert.equal(
+    vm.runInContext("workspaceAuthoringHydrated", app.context),
+    true,
+  );
+  assert.equal(app.elements.governedGraphView.inert, false);
+  assert.equal(app.elements.governedGraphNewButton.disabled, false);
+  assert.match(app.elements.governedGraphLifecycle.textContent, /lifecycle v6/);
+});
+
+test("an unavailable final governed graph catalog preserves a dirty draft but keeps mutation controls locked", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  let catalogUnavailable = false;
+  server.on("GET", "/api/governed-graphs/catalog", () =>
+    catalogUnavailable
+      ? { status: 503, body: { detail: "Graph catalog is unavailable." } }
+      : { status: 200, body: createGovernedGraphCatalog() },
+  );
+  const app = await loadLoopBuilder({ server });
+  await app.elements.governedGraphTab.click();
+  app.elements.governedGraphId.value = "catalog-outage-draft";
+  app.elements.governedGraphRevisionId.value = "revision-1";
+  app.elements.governedGraphDisplayName.value = "Catalog outage draft";
+  app.elements.governedGraphPurpose.value =
+    "Remain local while authoritative graph catalog evidence is unavailable.";
+  await app.elements.governedGraphNewButton.click();
+  const detailReadsBefore = server.calls.filter((call) =>
+    call.url.startsWith("/api/governed-graphs/detail"),
+  ).length;
+
+  catalogUnavailable = true;
+  assert.equal(await app.context.refreshWorkspace(), false);
+
+  assert.equal(
+    vm.runInContext("workspaceAuthoringHydrated", app.context),
+    false,
+  );
+  assert.equal(app.elements.governedGraphView.inert, true);
+  assert.equal(app.elements.governedGraphId.value, "catalog-outage-draft");
+  assert.equal(
+    app.elements.governedGraphLifecycle.textContent,
+    "Local draft · not durable",
+  );
+  assert.equal(app.elements.governedGraphSaveButton.disabled, true);
+  assert.equal(app.elements.governedGraphNewButton.disabled, true);
+  assert.equal(
+    server.calls.filter((call) =>
+      call.url.startsWith("/api/governed-graphs/detail"),
+    ).length,
+    detailReadsBefore,
+  );
+});
+
+test("an unavailable final governed graph detail preserves a dirty durable draft but keeps it locked", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  let detailUnavailable = false;
+  server.on("GET", "/api/governed-graphs/catalog", () => ({
+    status: 200,
+    body: createGovernedGraphCatalog(),
+  }));
+  server.on(
+    "GET",
+    "/api/governed-graphs/detail?graphId=published-graph",
+    () => {
+      if (detailUnavailable)
+        return {
+          status: 503,
+          body: { detail: "Graph detail is unavailable." },
+        };
+      const lifecycle = governedGraphLifecycle("published", 4);
+      return {
+        status: 200,
+        body: governedGraphRead(
+          lifecycle,
+          governedGraphArtifact(lifecycle, "Published graph"),
+        ),
+      };
+    },
+  );
+  const app = await loadLoopBuilder({ server });
+  await openPublishedGovernedGraphAsync(app);
+  app.elements.governedGraphPurpose.value =
+    "Keep this local edit while final durable graph evidence is unavailable.";
+  await app.elements.governedGraphPurpose.input();
+
+  detailUnavailable = true;
+  assert.equal(await app.context.refreshWorkspace(), false);
+
+  assert.equal(
+    vm.runInContext("workspaceAuthoringHydrated", app.context),
+    false,
+  );
+  assert.equal(app.elements.governedGraphView.inert, true);
+  assert.equal(app.elements.governedGraphNewButton.disabled, true);
+  assert.equal(app.elements.governedGraphSaveButton.disabled, true);
+  assert.equal(
+    app.elements.governedGraphPurpose.value,
+    "Keep this local edit while final durable graph evidence is unavailable.",
+  );
+});
+
+test("suspending during final governed graph hydration cannot reopen stale dirty mutations", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const catalogReady = createDeferred();
+  let holdFinalCatalog = false;
+  let catalogStarted;
+  server.on("GET", "/api/governed-graphs/catalog", async () => {
+    if (holdFinalCatalog) {
+      catalogStarted?.();
+      await catalogReady.promise;
+    }
+    return { status: 200, body: createGovernedGraphCatalog() };
+  });
+  const app = await loadLoopBuilder({ server });
+  await app.elements.governedGraphTab.click();
+  app.elements.governedGraphId.value = "suspended-final-draft";
+  app.elements.governedGraphRevisionId.value = "revision-1";
+  app.elements.governedGraphDisplayName.value = "Suspended final draft";
+  app.elements.governedGraphPurpose.value =
+    "Remain local after final authoritative graph hydration is suspended.";
+  await app.elements.governedGraphNewButton.click();
+  holdFinalCatalog = true;
+  const catalogRequestStarted = new Promise((resolve) => {
+    catalogStarted = resolve;
+  });
+
+  const refreshed = app.context.refreshWorkspace();
+  await catalogRequestStarted;
+  app.window.embodySenseLoopBuilder.suspendSession();
+
+  assert.equal(await refreshed, false);
+  assert.equal(
+    vm.runInContext("workspaceAuthoringHydrated", app.context),
+    false,
+  );
+  assert.equal(app.elements.governedGraphView.inert, true);
+  assert.equal(app.elements.governedGraphSaveButton.disabled, true);
+  assert.equal(app.elements.governedGraphId.value, "suspended-final-draft");
+
+  catalogReady.resolve();
+  await flushAsyncWork();
+
+  assert.equal(
+    vm.runInContext("workspaceAuthoringHydrated", app.context),
+    false,
+  );
+  assert.equal(app.elements.governedGraphView.inert, true);
+  assert.equal(app.elements.governedGraphSaveButton.disabled, true);
+});
+
+test("external cancellation during final governed graph hydration cannot re-enable authoring", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  server.on("GET", "/api/governed-graphs/catalog", () => ({
+    status: 200,
+    body: createGovernedGraphCatalog(),
+  }));
+  server.on(
+    "GET",
+    "/api/governed-graphs/detail?graphId=published-graph",
+    () => {
+      const lifecycle = governedGraphLifecycle("published", 4);
+      return {
+        status: 200,
+        body: governedGraphRead(
+          lifecycle,
+          governedGraphArtifact(lifecycle, "Published graph"),
+        ),
+      };
+    },
+  );
+  const app = await loadLoopBuilder({ server });
+  await openPublishedGovernedGraphAsync(app);
+  const catalogReady = createDeferred();
+  let catalogStarted;
+  server.on("GET", "/api/governed-graphs/catalog", async () => {
+    catalogStarted?.();
+    await catalogReady.promise;
+    return { status: 200, body: createGovernedGraphCatalog() };
+  });
+  const catalogRequestStarted = new Promise((resolve) => {
+    catalogStarted = resolve;
+  });
+  const controller = new AbortController();
+
+  const recovery = app.window.embodySenseLoopBuilder.rehydrateSession({
+    approvals: [],
+    signal: controller.signal,
+    workspaceRoot: "C:/workspace",
+  });
+  await catalogRequestStarted;
+  controller.abort(new Error("The external session refresh was cancelled."));
+
+  assert.equal((await recovery).refreshed, false);
+  assert.equal(
+    vm.runInContext("workspaceAuthoringHydrated", app.context),
+    false,
+  );
+  assert.equal(app.elements.governedGraphView.inert, true);
+  assert.equal(app.elements.governedGraphNewButton.disabled, true);
+
+  catalogReady.resolve();
+  await flushAsyncWork();
+
+  assert.equal(
+    vm.runInContext("workspaceAuthoringHydrated", app.context),
+    false,
+  );
+  assert.equal(app.elements.governedGraphView.inert, true);
+  assert.equal(app.elements.governedGraphNewButton.disabled, true);
+});
+
+test("returning to graph after reconnect refreshes stale catalog, role, lifecycle, and invocation preparation", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const catalogReady = createDeferred();
+  const detailReady = createDeferred();
+  let holdReentryHydration = false;
+  let catalogStarted;
+  let detailStarted;
+  server.on("GET", "/api/governed-graphs/catalog", async () => {
+    if (holdReentryHydration) {
+      catalogStarted?.();
+      await catalogReady.promise;
+    }
+    return { status: 200, body: createGovernedGraphCatalog() };
+  });
+  server.on(
+    "GET",
+    "/api/governed-graphs/detail?graphId=published-graph",
+    async () => {
+      if (holdReentryHydration) {
+        detailStarted?.();
+        await detailReady.promise;
+      }
+      const lifecycle = governedGraphLifecycle(
+        "published",
+        holdReentryHydration ? 6 : 4,
+      );
+      return {
+        status: 200,
+        body: governedGraphRead(
+          lifecycle,
+          governedGraphArtifact(lifecycle, "Fresh reconnect graph"),
+        ),
+      };
+    },
+  );
+  server.on("POST", "/api/governed-graphs/invocation-preparation", () => ({
+    status: 200,
+    body: {
+      status: "confirmation-required",
+      eligibleGrants: [],
+      preview: { semanticHash: "c".repeat(64) },
+      detail: "Stale invocation preparation.",
+    },
+  }));
+  const app = await loadLoopBuilder({ server });
+  await openPublishedGovernedGraphAsync(app);
+  app.elements.governedGraphInvocationPrompt.value =
+    "Prepare a governed invocation before reconnecting.";
+  await app.elements.governedGraphInvocationPrompt.input();
+  await app.elements.governedGraphPrepareInvokeButton.click();
+  assert.match(
+    app.elements.governedGraphInvocationStatus.textContent,
+    /Stale invocation preparation/,
+  );
+
+  app.window.embodySenseLoopBuilder.suspendSession();
+  await app.elements.builderTab.click();
+  assert.equal(vm.runInContext("currentView", app.context), "builder");
+  assert.equal(
+    app.elements.governedGraphLifecycle.textContent,
+    "No graph loaded",
+  );
+  assert.doesNotMatch(app.elements.governedGraphRole.textContent, /Researcher/);
+  assert.doesNotMatch(
+    app.elements.governedGraphInvocationStatus.textContent,
+    /Stale invocation preparation/,
+  );
+
+  app.window.embodySenseLoopBuilder.resumeSession();
+  assert.equal(
+    (
+      await app.window.embodySenseLoopBuilder.rehydrateSession({
+        approvals: [],
+        workspaceRoot: "C:/workspace",
+      })
+    ).refreshed,
+    true,
+  );
+  assert.equal(vm.runInContext("currentView", app.context), "builder");
+
+  holdReentryHydration = true;
+  const catalogRequestStarted = new Promise((resolve) => {
+    catalogStarted = resolve;
+  });
+  const detailRequestStarted = new Promise((resolve) => {
+    detailStarted = resolve;
+  });
+  const activation = app.elements.governedGraphTab.click();
+  await catalogRequestStarted;
+
+  assert.equal(app.elements.governedGraphView.inert, true);
+  assert.equal(app.elements.governedGraphNewButton.disabled, true);
+  assert.equal(
+    app.elements.governedGraphLifecycle.textContent,
+    "No graph loaded",
+  );
+  assert.doesNotMatch(app.elements.governedGraphRole.textContent, /Researcher/);
+  assert.doesNotMatch(
+    app.elements.governedGraphInvocationStatus.textContent,
+    /Stale invocation preparation/,
+  );
+
+  catalogReady.resolve();
+  await detailRequestStarted;
+  assert.equal(app.elements.governedGraphView.inert, true);
+  assert.equal(app.elements.governedGraphNewButton.disabled, true);
+
+  detailReady.resolve();
+  await activation;
+
+  assert.equal(app.elements.governedGraphView.inert, false);
+  assert.equal(app.elements.governedGraphNewButton.disabled, false);
+  assert.match(app.elements.governedGraphLifecycle.textContent, /lifecycle v6/);
+});
+
 test("session rehydration waits for its authoritative refresh when another refresh is active", async () => {
   const server = new FakeFetchServer(createCatalog());
   let statusReads = 0;

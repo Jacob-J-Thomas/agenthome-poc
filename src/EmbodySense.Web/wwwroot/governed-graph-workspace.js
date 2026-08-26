@@ -67,10 +67,12 @@ export function createGovernedGraphWorkspace({
   let catalog = null;
   let aggregate = null;
   let graph = null;
+  let durableGraphSelection = null;
   let selectedNodeId = null;
   let errors = [];
   let outcome = "";
   let active = false;
+  let authoritativeHydrationStale = true;
   let interactionEnabled = false;
   let inFlight = false;
   let dirty = false;
@@ -117,8 +119,10 @@ export function createGovernedGraphWorkspace({
       aggregate = null;
       catalog = null;
       graph = null;
+      durableGraphSelection = null;
       selectedNodeId = null;
       errors = [];
+      authoritativeHydrationStale = true;
       outcome = "";
       dirty = false;
       routingPreview = null;
@@ -135,8 +139,9 @@ export function createGovernedGraphWorkspace({
     async activate() {
       active = true;
       const activationSelection = restoreSelection();
-      if (!catalog) await refreshCatalog();
       if (pendingMutation) restorePendingCandidate();
+      if (authoritativeHydrationStale || !catalog)
+        return await refresh({ expectedGraphId: activationSelection });
       render();
       // Issue #470: https://github.com/Jacob-J-Thomas/agenthome-poc/issues/470 — only the exact pre-activation selection owns auto-hydration after this await.
       if (
@@ -147,7 +152,8 @@ export function createGovernedGraphWorkspace({
         !graph &&
         !pendingMutation
       )
-        await readGraph(true);
+        return await readGraph(true);
+      return true;
     },
     deactivate() {
       active = false;
@@ -156,25 +162,59 @@ export function createGovernedGraphWorkspace({
       interactionEnabled = Boolean(enabled);
       render();
     },
-    async refresh() {
-      if (!active) return;
-      // Follow-up: https://github.com/Jacob-J-Thomas/agenthome-poc/issues/470 tracks making restored graph selection hydration conclusive across session reloads.
-      await refreshCatalog();
-      if (pendingMutation) {
-        outcome =
-          "The exact unresolved graph mutation was restored. Retry it before refreshing durable graph evidence.";
-        render();
-      } else if (elements.graphId.value && !dirty) await readGraph(true);
-      else if (dirty) {
-        outcome =
-          "Authoritative catalog refreshed. Unsaved graph edits remain local until you explicitly reload durable evidence.";
-        render();
+    markHydrationStale() {
+      authoritativeHydrationStale = true;
+      invalidateGraphRead({ retainPending: true });
+      routingPreviewGeneration++;
+      routingPreview = null;
+      retryPolicyPreview = null;
+      catalog = null;
+      aggregate = null;
+      if (!dirty) {
+        graph = null;
+        selectedNodeId = null;
       }
+      render();
     },
+    refresh,
     isDirty() {
       return dirty || Boolean(pendingMutation);
     },
   });
+
+  async function refresh({ signal = null, expectedGraphId } = {}) {
+    if (!active || signal?.aborted) return false;
+    const catalogHydrated = await refreshCatalog({ signal });
+    if (!catalogHydrated || signal?.aborted || !active) return false;
+    if (pendingMutation) {
+      outcome =
+        "The exact unresolved graph mutation was restored after reconnect. Retry it before refreshing durable graph evidence.";
+      authoritativeHydrationStale = false;
+      render();
+      return true;
+    }
+    const graphId = elements.graphId.value.trim();
+    if (
+      !graphId ||
+      (dirty && durableGraphSelection !== graphId) ||
+      (expectedGraphId !== undefined && graphId !== expectedGraphId)
+    ) {
+      if (dirty)
+        outcome =
+          "Authoritative catalog refreshed. Unsaved graph edits remain local until you explicitly reload durable evidence.";
+      authoritativeHydrationStale = false;
+      render();
+      return true;
+    }
+    const graphHydrated = await readGraph(true, {
+      preserveDraft: dirty,
+      signal,
+    });
+    if (!graphHydrated || signal?.aborted || !active) return false;
+    authoritativeHydrationStale = false;
+    render();
+    return true;
+  }
 
   function bindEvents() {
     elements.newButton.addEventListener("click", startNew);
@@ -197,6 +237,8 @@ export function createGovernedGraphWorkspace({
       renderInvocation();
     });
     elements.graphId.addEventListener("input", () => {
+      if (durableGraphSelection !== elements.graphId.value.trim())
+        durableGraphSelection = null;
       invalidateGraphRead({
         retainPending:
           pendingInvocation?.graphId === elements.graphId.value.trim(),
@@ -248,16 +290,23 @@ export function createGovernedGraphWorkspace({
     elements.connectionTo.addEventListener("change", renderConnections);
   }
 
-  async function refreshCatalog() {
+  async function refreshCatalog({ signal = null } = {}) {
     inFlight = true;
     outcome = "Loading the authoritative executable-node and role catalog…";
     render();
     try {
-      catalog = await requestJson("/api/governed-graphs/catalog");
+      const nextCatalog = await requestJson("/api/governed-graphs/catalog", {
+        signal,
+      });
+      if (signal?.aborted) return false;
+      catalog = nextCatalog;
       outcome = "Authoritative catalog loaded.";
+      return true;
     } catch (error) {
+      if (signal?.aborted) return false;
       catalog = null;
       outcome = `Graph catalog unavailable: ${error.message}`;
+      return false;
     } finally {
       inFlight = false;
       render();
@@ -283,6 +332,7 @@ export function createGovernedGraphWorkspace({
       displayName: elements.displayName.value.trim(),
       defaultModelRoutingPolicy: selectedGraphRoutingPolicy(),
     });
+    durableGraphSelection = null;
     invalidateGraphRead();
     aggregate = null;
     selectedNodeId = null;
@@ -294,18 +344,21 @@ export function createGovernedGraphWorkspace({
     render();
   }
 
-  async function readGraph(silent) {
+  async function readGraph(
+    silent,
+    { preserveDraft = false, signal = null } = {},
+  ) {
     if (pendingMutation) {
       outcome =
         "Retry the exact unresolved graph mutation before replacing it with durable evidence.";
       render();
-      return;
+      return false;
     }
     const graphId = elements.graphId.value.trim();
     if (!graphId) {
       outcome = "Enter a canonical graph ID before loading.";
       render();
-      return;
+      return false;
     }
     if (
       !silent &&
@@ -314,7 +367,7 @@ export function createGovernedGraphWorkspace({
         "Discard unsaved governed graph edits and reload durable evidence?",
       )
     )
-      return;
+      return false;
     invalidateInvocation({
       retainPending: pendingInvocation?.graphId === graphId,
     });
@@ -324,8 +377,16 @@ export function createGovernedGraphWorkspace({
     try {
       const read = await requestJson(
         `/api/governed-graphs/detail?graphId=${encodeURIComponent(graphId)}`,
+        { signal },
       );
-      if (!ownsGraphRead(readGeneration, graphId)) return;
+      if (signal?.aborted || !ownsGraphRead(readGeneration, graphId))
+        return false;
+      durableGraphSelection = graphId;
+      if (preserveDraft) {
+        outcome =
+          "Authoritative graph evidence refreshed. Unsaved graph edits remain local until you explicitly reload durable evidence.";
+        return true;
+      }
       // Issue #491: https://github.com/Jacob-J-Thomas/agenthome-poc/issues/491 — only the current detail request may replace locally owned graph state.
       aggregate = read;
       graph = candidateFromGraph(currentGraph(read));
@@ -335,16 +396,30 @@ export function createGovernedGraphWorkspace({
       outcome = `Loaded durable ${read.lifecycle?.status ?? "unknown"} lifecycle version ${read.lifecycle?.lifecycleVersion ?? 0}.`;
       syncFieldsFromGraph();
       rememberSelection();
+      return true;
     } catch (error) {
-      if (!ownsGraphRead(readGeneration, graphId)) return;
+      if (signal?.aborted || !ownsGraphRead(readGeneration, graphId))
+        return false;
+      if (preserveDraft) {
+        if (error.status === 404) {
+          durableGraphSelection = null;
+          outcome =
+            "Authoritative graph evidence confirms no durable graph has this ID. Unsaved graph edits remain local.";
+          return true;
+        }
+        outcome = `Graph read unavailable: ${error.message}`;
+        return false;
+      }
       aggregate = null;
       graph = null;
+      if (error.status === 404) durableGraphSelection = null;
       selectedNodeId = null;
       errors = error.payload?.errors ?? [];
       outcome =
         error.status === 404
           ? "No durable governed graph has this ID. Start a new local draft to create it."
           : `Graph read unavailable: ${error.message}`;
+      return error.status === 404;
     } finally {
       if (activeGraphReadGeneration === readGeneration) {
         activeGraphReadGeneration = null;
@@ -356,12 +431,16 @@ export function createGovernedGraphWorkspace({
   }
 
   async function refreshDurable() {
-    await refreshCatalog();
+    const catalogHydrated = await refreshCatalog();
+    if (!catalogHydrated) return false;
     if (pendingMutation) {
       outcome =
         "The catalog was refreshed, but the exact unresolved mutation must be retried before a durable graph reload.";
       render();
-    } else if (elements.graphId.value.trim()) await readGraph(false);
+      return true;
+    }
+    if (elements.graphId.value.trim()) return await readGraph(false);
+    return true;
   }
 
   function publishedInvocationSelector() {
@@ -591,6 +670,8 @@ export function createGovernedGraphWorkspace({
       clearPendingMutation();
       aggregate = response.current;
       graph = candidateFromGraph(currentGraph(response.current)) ?? graph;
+      durableGraphSelection =
+        response.current?.lifecycle?.graphId ?? input.graphId;
       selectedNodeId = selectHydratedNodeId(graph?.nodes, selectedNodeId);
       syncFieldsFromGraph();
       rememberSelection();
@@ -619,6 +700,7 @@ export function createGovernedGraphWorkspace({
   function applyCurrentAggregate(current) {
     aggregate = current;
     graph = candidateFromGraph(currentGraph(current));
+    durableGraphSelection = current?.lifecycle?.graphId ?? null;
     selectedNodeId = graph?.nodes?.some((item) => item.id === selectedNodeId)
       ? selectedNodeId
       : (graph?.nodes?.[0]?.id ?? null);
@@ -874,9 +956,10 @@ export function createGovernedGraphWorkspace({
   }
 
   function renderStatusOnly() {
-    elements.notice.textContent = interactionEnabled
-      ? outcome
-      : "Governed graph authoring is locked until authoritative Loops hydration completes.";
+    elements.notice.textContent =
+      interactionEnabled && !authoritativeHydrationStale
+        ? outcome
+        : "Governed graph authoring is locked until authoritative Loops and graph hydration complete.";
     elements.notice.className = `governed-graph-notice${errors.length ? " warning" : ""}`;
     const pendingDraft = ["create-draft", "replace-draft"].includes(
       pendingMutation?.kind,
@@ -1028,7 +1111,7 @@ export function createGovernedGraphWorkspace({
   }
 
   function renderInteractionState() {
-    const locked = !interactionEnabled;
+    const locked = !interactionEnabled || authoritativeHydrationStale;
     elements.view.inert = locked;
     elements.view.setAttribute("aria-busy", String(locked || inFlight));
     if (!locked) return;
