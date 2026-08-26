@@ -889,12 +889,15 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
         // update reaches the store, which must retain capacity for its checkpoint, wake,
         // dispatch, and later retry-safe completion successors instead of accepting a suffix
         // that cannot finish canonically.
-        var exception = await Assert.ThrowsAsync<FormatException>(() => CreateCheckpointedRetryStagesAsync(
+        var stages = await CreateCheckpointedRetryStagesAsync(
             new WorkspacePaths(workspace.RootPath),
             "retry-capacity-near-limit",
-            admissionContextBlocks: padding));
+            admissionContextBlocks: padding,
+            permitCapacityRefusal: true);
 
-        Assert.Contains("lacks atomically reserved capacity", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(CustomLoopRunStoreStatus.LimitExceeded, stages.LatestStoreStatus);
+        var stored = Assert.IsType<CustomLoopRunRecord>(await new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath)).GetAsync(stages.Context.Run.Id));
+        Assert.Equal(3, stored.LifecycleVersion);
     }
 
     [Fact]
@@ -1404,7 +1407,8 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
         WorkspacePaths paths,
         string identity,
         string? attachmentDetail = null,
-        CustomLoopContextBlock[]? admissionContextBlocks = null)
+        CustomLoopContextBlock[]? admissionContextBlocks = null,
+        bool permitCapacityRefusal = false)
     {
         var context = CreateContext(RetryGraph(), identity: identity, admissionContextBlocks: admissionContextBlocks);
         var store = new CustomLoopRunStore(paths);
@@ -1518,7 +1522,13 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
                 RetryLifecycleEvent(7, failure.TimestampUtc, "Ordered execution entered Waiting for one exact bounded retry."),
             ],
         };
-        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(scheduledRun, 3)).Status);
+        var scheduledUpdateStatus = (await store.UpdateAsync(scheduledRun, 3)).Status;
+        if (scheduledUpdateStatus == CustomLoopRunStoreStatus.LimitExceeded && permitCapacityRefusal)
+        {
+            return new RetryCapacityStages(store, context, activation, scheduledRun, scheduledRun, scheduled, eligibleAtUtc, scheduledUpdateStatus);
+        }
+
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, scheduledUpdateStatus);
 
         var waitingActivation = waitingFrontier.Payload.Nodes[activation.ActivationOrdinal];
         var attachedAtUtc = failure.TimestampUtc.AddTicks(1);
@@ -1563,8 +1573,9 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
             UpdatedAtUtc = attachedAtUtc,
             Events = [.. scheduledRun.Events, RetryStateEvent(8, attached) with { Detail = attachmentDetail ?? "Canonical retry-state transition." }],
         };
-        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(checkpointed, 4)).Status);
-        return new RetryCapacityStages(store, context, activation, scheduledRun, checkpointed, attached, eligibleAtUtc);
+        var checkpointedUpdateStatus = (await store.UpdateAsync(checkpointed, 4)).Status;
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, checkpointedUpdateStatus);
+        return new RetryCapacityStages(store, context, activation, scheduledRun, checkpointed, attached, eligibleAtUtc, checkpointedUpdateStatus);
     }
 
     private static WaitRunStages CreateWaitStages()
@@ -2879,7 +2890,8 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
         CustomLoopRunRecord ScheduledRun,
         CustomLoopRunRecord Checkpointed,
         GovernedLoopRetryState Attached,
-        DateTimeOffset EligibleAtUtc);
+        DateTimeOffset EligibleAtUtc,
+        CustomLoopRunStoreStatus LatestStoreStatus);
 
     internal sealed record SequentialContext(
         CustomLoopRunRecord Run,

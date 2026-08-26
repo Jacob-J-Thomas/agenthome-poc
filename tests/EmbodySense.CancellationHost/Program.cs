@@ -66,6 +66,11 @@ if (args is ["human-review-continuation-publication-process-loss", var humanRevi
     return await HumanReviewContinuationPublicationProcessLossHost.RunAsync(humanReviewContinuationPublicationWorkspaceRoot, humanReviewContinuationPublicationRunId, humanReviewContinuationPublicationBoundary);
 }
 
+if (args is ["human-review-continuation-transition-process-loss", var humanReviewContinuationTransitionWorkspaceRoot, var humanReviewContinuationTransitionRunId, var humanReviewContinuationTransition, var humanReviewContinuationTransitionBoundary])
+{
+    return await HumanReviewContinuationTransitionProcessLossHost.RunAsync(humanReviewContinuationTransitionWorkspaceRoot, humanReviewContinuationTransitionRunId, humanReviewContinuationTransition, humanReviewContinuationTransitionBoundary);
+}
+
 if (args is ["codex-runtime-probe", var probeConfigurationPath, .. var probeArguments])
 {
     return await CodexRuntimeProbeHost.RunAsync(probeConfigurationPath, probeArguments);
