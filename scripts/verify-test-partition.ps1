@@ -118,11 +118,11 @@ function Test-FullyQualifiedNameFilter {
     }
 
     $included = $includeMatches.Count -eq 0 -or @($includeMatches | Where-Object {
-        if ($_.Operator -ceq "=") { $FullyQualifiedName -ceq $_.Value }
+        if ($_.Operator -ceq "=") { [string]::Equals($FullyQualifiedName, $_.Value, [StringComparison]::OrdinalIgnoreCase) }
         else { $FullyQualifiedName.Contains($_.Value, [StringComparison]::OrdinalIgnoreCase) }
     }).Count -gt 0
     $excluded = @($excludeMatches | Where-Object {
-        if ($_.Operator -ceq "!=") { $FullyQualifiedName -ceq $_.Value }
+        if ($_.Operator -ceq "!=") { [string]::Equals($FullyQualifiedName, $_.Value, [StringComparison]::OrdinalIgnoreCase) }
         else { $FullyQualifiedName.Contains($_.Value, [StringComparison]::OrdinalIgnoreCase) }
     }).Count -gt 0
     return $included -and -not $excluded

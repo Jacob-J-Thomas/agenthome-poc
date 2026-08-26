@@ -158,6 +158,23 @@ try {
     Assert-True -Condition (@($exactExcludeInventory.tests | Where-Object { $_.lane -ceq "exact-remainder" -and $_.fullyQualifiedName -ceq "Suite.B" }).Count -eq 1) -Message "Exact inequality must retain only the complementary whole fully-qualified name."
 
     Write-LaneDefinitions -Path $laneDefinitionsPath -Lanes @(
+        (New-LaneDefinition -Name "exact-case-a" -Filter "((FullyQualifiedName=suite.a))&(VerificationTier!=Stress)"),
+        (New-LaneDefinition -Name "exact-case-b" -Filter "((FullyQualifiedName=suite.b))&(VerificationTier!=Stress)"))
+    $exactCaseInsensitiveInclude = Invoke-Script -ScriptPath $partitionScriptPath -Arguments $partitionArguments
+    Assert-True -Condition ($exactCaseInsensitiveInclude.ExitCode -eq 0) -Message "Exact VSTest equality must retain ordinal case-insensitive matching. Actual: $($exactCaseInsensitiveInclude.Output)"
+    $exactCaseInsensitiveIncludeInventory = Get-Content -LiteralPath $expectedPath -Raw | ConvertFrom-Json
+    Assert-True -Condition (@($exactCaseInsensitiveIncludeInventory.tests | Where-Object { $_.lane -ceq "exact-case-a" -and $_.fullyQualifiedName -ceq "Suite.A" }).Count -eq 1) -Message "Casing variance in exact equality must select Suite.A."
+    Assert-True -Condition (@($exactCaseInsensitiveIncludeInventory.tests | Where-Object { $_.lane -ceq "exact-case-b" -and $_.fullyQualifiedName -ceq "Suite.B" }).Count -eq 1) -Message "Casing variance in exact equality must select Suite.B."
+
+    Write-LaneDefinitions -Path $laneDefinitionsPath -Lanes @(
+        (New-LaneDefinition -Name "exact-case-a" -Filter "((FullyQualifiedName=suite.a))&(VerificationTier!=Stress)"),
+        (New-LaneDefinition -Name "exact-case-remainder" -Filter "(FullyQualifiedName!=suite.a)&(VerificationTier!=Stress)"))
+    $exactCaseInsensitiveExclude = Invoke-Script -ScriptPath $partitionScriptPath -Arguments $partitionArguments
+    Assert-True -Condition ($exactCaseInsensitiveExclude.ExitCode -eq 0) -Message "Exact VSTest inequality must retain ordinal case-insensitive matching. Actual: $($exactCaseInsensitiveExclude.Output)"
+    $exactCaseInsensitiveExcludeInventory = Get-Content -LiteralPath $expectedPath -Raw | ConvertFrom-Json
+    Assert-True -Condition (@($exactCaseInsensitiveExcludeInventory.tests | Where-Object { $_.lane -ceq "exact-case-remainder" -and $_.fullyQualifiedName -ceq "Suite.B" }).Count -eq 1) -Message "Casing variance in exact inequality must retain only Suite.B."
+
+    Write-LaneDefinitions -Path $laneDefinitionsPath -Lanes @(
         (New-LaneDefinition -Name "renamed" -Filter "((FullyQualifiedName=Suite.A.Renamed))&(VerificationTier!=Stress)"),
         (New-LaneDefinition -Name "exact-b" -Filter "((FullyQualifiedName=Suite.B))&(VerificationTier!=Stress)"))
     $renameDrift = Invoke-Script -ScriptPath $partitionScriptPath -Arguments $partitionArguments
