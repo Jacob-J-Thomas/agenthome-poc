@@ -16,7 +16,7 @@ param(
     [ValidateRange(1, 8)]
     [int]$MaximumTestWorkers = [Math]::Min(8, [Math]::Max(1, [int][Math]::Floor([Environment]::ProcessorCount * 1.5))),
 
-    [ValidateRange(1, 1200)]
+    [ValidateRange(1, 1500)]
     [int]$DeadlineSeconds = 600
 )
 
@@ -37,6 +37,7 @@ $runningOnWindows = [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([
 
 . (Join-Path $PSScriptRoot "verification-phase.ps1")
 . (Join-Path $PSScriptRoot "verification-deadline.ps1")
+. (Join-Path $PSScriptRoot "verification-watchdog-policy.ps1")
 
 function Assert-VerificationWatchdogReceiptInput {
     param([string]$Path, [string]$Description)
@@ -55,6 +56,7 @@ if (-not $Qualification -and (-not [string]::IsNullOrWhiteSpace($BaseCommit) -or
 if ($Qualification -and $VerificationComponent -ne "Full") {
     throw "A non-Full verification component is valid only for promotion verification."
 }
+Assert-VerificationWatchdogDeadlineContract -Qualification $Qualification -VerificationComponent $VerificationComponent -DeadlineSeconds $DeadlineSeconds
 
 $arguments = @("-NoProfile")
 if ($runningOnWindows) {

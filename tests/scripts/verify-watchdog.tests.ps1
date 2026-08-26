@@ -3,6 +3,7 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $deadlineScriptPath = Join-Path $repoRoot "scripts\verification-deadline.ps1"
+$watchdogPolicyScriptPath = Join-Path $repoRoot "scripts\verification-watchdog-policy.ps1"
 $qualificationPlanScriptPath = Join-Path $repoRoot "scripts\qualification-plan.ps1"
 $qualificationScheduleScriptPath = Join-Path $repoRoot "scripts\qualification-schedule.ps1"
 $qualificationScriptPath = Join-Path $repoRoot "scripts\qualify.ps1"
@@ -36,6 +37,7 @@ function Assert-Contains {
 }
 
 . $deadlineScriptPath
+. $watchdogPolicyScriptPath
 . $qualificationPlanScriptPath
 . $qualificationScheduleScriptPath
 
@@ -732,11 +734,35 @@ Assert-Equal -Actual $exactDeadline.Code -Expected "passed" -Message "Successful
 $overDeadline = Get-VerificationDeadlineDisposition -ElapsedTicks ($deadlineTicks + 1) -DeadlineTicks $deadlineTicks -ProcessExited $true -ExitCode 0 -CompletionMarkerCount 1 -ChildTimedOut $false -CancellationRequested $false
 Assert-Equal -Actual $overDeadline.Code -Expected "deadline-exceeded" -Message "One tick over 600 seconds must fail."
 
-$promotionDeadlineTicks = [TimeSpan]::FromSeconds(1200).Ticks
+$promotionDeadlineTicks = [TimeSpan]::FromSeconds(1500).Ticks
 $exactPromotionDeadline = Get-VerificationDeadlineDisposition -ElapsedTicks $promotionDeadlineTicks -DeadlineTicks $promotionDeadlineTicks -ProcessExited $true -ExitCode 0 -CompletionMarkerCount 1 -ChildTimedOut $false -CancellationRequested $false
-Assert-True -Condition $exactPromotionDeadline.Succeeded -Message "Exactly 1200 seconds must remain inside the explicit promotion deadline."
+Assert-True -Condition $exactPromotionDeadline.Succeeded -Message "Exactly 1500 seconds must remain inside the explicit promotion deadline."
 $overPromotionDeadline = Get-VerificationDeadlineDisposition -ElapsedTicks ($promotionDeadlineTicks + 1) -DeadlineTicks $promotionDeadlineTicks -ProcessExited $true -ExitCode 0 -CompletionMarkerCount 1 -ChildTimedOut $false -CancellationRequested $false
 Assert-Equal -Actual $overPromotionDeadline.Code -Expected "deadline-exceeded" -Message "One tick over the bounded promotion deadline must fail."
+
+Assert-VerificationWatchdogDeadlineContract -Qualification $true -VerificationComponent "Full" -DeadlineSeconds 480
+Assert-VerificationWatchdogDeadlineContract -Qualification $true -VerificationComponent "full" -DeadlineSeconds 480
+Assert-VerificationWatchdogDeadlineContract -Qualification $false -VerificationComponent "StaticContracts" -DeadlineSeconds 600
+Assert-VerificationWatchdogDeadlineContract -Qualification $false -VerificationComponent "staticcontracts" -DeadlineSeconds 600
+Assert-VerificationWatchdogDeadlineContract -Qualification $false -VerificationComponent "Solution" -DeadlineSeconds 1500
+Assert-VerificationWatchdogDeadlineContract -Qualification $false -VerificationComponent "sOlUtIoN" -DeadlineSeconds 1500
+Assert-VerificationWatchdogDeadlineContract -Qualification $false -VerificationComponent "Full" -DeadlineSeconds 600
+Assert-VerificationWatchdogDeadlineContract -Qualification $false -VerificationComponent "Full" -DeadlineSeconds 1200
+foreach ($invalidDeadlineCase in @(
+    [pscustomobject]@{ Qualification = $true; Component = "Full"; DeadlineSeconds = 481; Expected = "Qualification requires the exact 480-second watchdog deadline" }
+    [pscustomobject]@{ Qualification = $false; Component = "StaticContracts"; DeadlineSeconds = 601; Expected = "Promotion component 'StaticContracts' requires the exact 600-second watchdog deadline" }
+    [pscustomobject]@{ Qualification = $false; Component = "Solution"; DeadlineSeconds = 1501; Expected = "Promotion component 'Solution' requires the exact 1500-second watchdog deadline" }
+    [pscustomobject]@{ Qualification = $false; Component = "Full"; DeadlineSeconds = 1201; Expected = "Full verification requires a watchdog deadline between 1 and 1200 seconds" }
+    [pscustomobject]@{ Qualification = $false; Component = "Full"; DeadlineSeconds = 1500; Expected = "Full verification requires a watchdog deadline between 1 and 1200 seconds" }
+)) {
+    try {
+        Assert-VerificationWatchdogDeadlineContract -Qualification $invalidDeadlineCase.Qualification -VerificationComponent $invalidDeadlineCase.Component -DeadlineSeconds $invalidDeadlineCase.DeadlineSeconds
+        throw "Expected $($invalidDeadlineCase.Component) deadline contract failure."
+    }
+    catch {
+        Assert-Contains -Actual $_.Exception.Message -Expected $invalidDeadlineCase.Expected -Message "A $($invalidDeadlineCase.Component) watchdog deadline above its mode-specific bound must fail closed."
+    }
+}
 
 $childTimeout = Get-VerificationDeadlineDisposition -ElapsedTicks 1 -DeadlineTicks $deadlineTicks -ProcessExited $true -ExitCode 1 -CompletionMarkerCount 0 -ChildTimedOut $true -CancellationRequested $false
 Assert-Equal -Actual $childTimeout.Code -Expected "child-timeout" -Message "A child phase timeout must be retained as its own failure."
@@ -757,6 +783,7 @@ $failedChild = Get-VerificationDeadlineDisposition -ElapsedTicks 1 -DeadlineTick
 Assert-Equal -Actual $failedChild.Code -Expected "child-failed" -Message "A nonzero verifier exit must fail despite a marker."
 
 $watchdogScript = Get-Content -LiteralPath $watchdogScriptPath -Raw
+$watchdogPolicyScript = Get-Content -LiteralPath $watchdogPolicyScriptPath -Raw
 $qualificationPlanScript = Get-Content -LiteralPath $qualificationPlanScriptPath -Raw
 $qualificationScript = Get-Content -LiteralPath $qualificationScriptPath -Raw
 $verifyScript = Get-Content -LiteralPath $verifyScriptPath -Raw
@@ -764,7 +791,9 @@ $workflow = Get-Content -LiteralPath $verifyWorkflowPath -Raw
 $qualificationWorkflow = (Get-Content -LiteralPath $qualificationWorkflowPath -Raw).Replace("`r`n", "`n")
 $trustedLocalQualificationWorkflow = (Get-Content -LiteralPath $trustedLocalQualificationWorkflowPath -Raw).Replace("`r`n", "`n")
 Assert-True -Condition ($watchdogScript.IndexOf('[int]$DeadlineSeconds = 600', [StringComparison]::Ordinal) -ge 0) -Message "The external watchdog must default to exactly 600 seconds."
-Assert-True -Condition ($watchdogScript.IndexOf('[ValidateRange(1, 1200)]', [StringComparison]::Ordinal) -ge 0) -Message "No accepted watchdog override may exceed the bounded 1200-second promotion window."
+Assert-True -Condition ($watchdogScript.IndexOf('[ValidateRange(1, 1500)]', [StringComparison]::Ordinal) -ge 0) -Message "No accepted watchdog override may exceed the bounded 1500-second promotion window."
+Assert-True -Condition ($watchdogScript.IndexOf('Assert-VerificationWatchdogDeadlineContract -Qualification $Qualification -VerificationComponent $VerificationComponent -DeadlineSeconds $DeadlineSeconds', [StringComparison]::Ordinal) -ge 0) -Message "The watchdog must bind its exact mode-specific deadline before starting a verifier process."
+Assert-True -Condition ($watchdogPolicyScript.IndexOf('$script:VerificationFullWatchdogMaximumDeadlineSeconds = 1200', [StringComparison]::Ordinal) -ge 0) -Message "Local Full verification must retain its prior 1200-second maximum while Solution owns the 1500-second budget."
 Assert-True -Condition ($watchdogScript.IndexOf('[switch]$Qualification', [StringComparison]::Ordinal) -ge 0) -Message "The watchdog must expose the bounded qualification child explicitly."
 Assert-True -Condition ($watchdogScript.IndexOf('[ValidateSet("Full", "Solution", "StaticContracts")]', [StringComparison]::Ordinal) -ge 0) -Message "The watchdog must expose explicit component modes for the hosted fan-out."
 Assert-True -Condition ($watchdogScript.IndexOf('"StaticContracts" { "static-contracts"; break }', [StringComparison]::Ordinal) -ge 0) -Message "The watchdog must map the static component to the exact hyphenated verifier marker identity."
@@ -815,7 +844,7 @@ Assert-True -Condition ($qualificationScript.IndexOf('@("prettier", "--check", "
 Assert-True -Condition ($watchdogScript.IndexOf('Test-VerificationDeadlineExceeded -ElapsedTicks $stopwatch.Elapsed.Ticks -DeadlineTicks $deadlineTicks', [StringComparison]::Ordinal) -ge 0) -Message "The running watchdog must use the tested inclusive deadline decision."
 Assert-True -Condition ($watchdogScript.IndexOf('Stop-VerificationProcessTree $process', [StringComparison]::Ordinal) -ge 0) -Message "The watchdog must terminate the full verifier process tree."
 Assert-True -Condition ($verifyScript.IndexOf('VERIFY_COMPLETE schema_version=1 status=passed', [StringComparison]::Ordinal) -ge 0) -Message "The verifier must emit an exact terminal marker only after successful completion."
-Assert-True -Condition ($workflow.IndexOf('./scripts/verify-with-watchdog.ps1 -Configuration Release -DeadlineSeconds 1200 -VerificationComponent Solution', [StringComparison]::Ordinal) -ge 0) -Message "Solution promotion must invoke the external watchdog with its explicit twenty-minute certification bound."
+Assert-True -Condition ($workflow.IndexOf('./scripts/verify-with-watchdog.ps1 -Configuration Release -DeadlineSeconds 1500 -VerificationComponent Solution', [StringComparison]::Ordinal) -ge 0) -Message "Solution promotion must invoke the external watchdog with its explicit twenty-five-minute certification bound."
 Assert-True -Condition ($workflow.IndexOf('./scripts/verify-with-watchdog.ps1 -Configuration Release -DeadlineSeconds 600 -VerificationComponent StaticContracts', [StringComparison]::Ordinal) -ge 0) -Message "Static promotion must invoke the external watchdog with its bounded ten-minute certification bound."
 Assert-True -Condition ($workflow.IndexOf('-SkipCoverage', [StringComparison]::Ordinal) -lt 0) -Message "Promotion verification must retain coverage collection and thresholds."
 Assert-True -Condition ($workflow.IndexOf("github.event.pull_request.draft == false", [StringComparison]::Ordinal) -ge 0) -Message "Promotion verification must run only for a merge-candidate pull request or main."

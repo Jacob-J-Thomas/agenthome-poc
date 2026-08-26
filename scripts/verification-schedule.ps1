@@ -3,24 +3,33 @@ Set-StrictMode -Version Latest
 $script:VerificationRequiredGateResourceCapacity = 12
 $script:VerificationRequiredGateMaximumProcessHeavyWorkers = 2
 $script:VerificationRequiredGateMaximumCpuBoundWorkers = 1
+$script:VerificationRequiredGateMinimumTimeoutHeadroomSeconds = 120
+$script:VerificationRequiredGateDefaultTestTimeoutSeconds = 600
+$script:VerificationRequiredGateExtendedTestTimeoutSeconds = 720
+$script:VerificationRequiredGateExtendedTimeoutNames = @(
+    "tests-EmbodySense.Core.Persistence.Tests-all"
+    "tests-EmbodySense.Core.Startup.Tests-remainder"
+)
+$script:VerificationSolutionWatchdogDeadlineSeconds = 1500
 $script:VerificationRequiredGateScheduleProfiles = @(
     # One VSTest process per assembly lets the test runner schedule isolated classes itself and
     # removes repeated deployment, discovery, instrumentation, and report-write overhead.
     # https://github.com/Jacob-J-Thomas/agenthome-poc/issues/422: reserve the complete four-core runner for the two dominant assemblies so a third process cannot starve both coverage lanes.
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-all"; EstimatedDurationSeconds = 300; Weight = 6; ResourceClass = "ProcessHeavy" }
-    # Issue 536 measured the general Startup remainder and the nested-process fixtures separately.
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Startup.Tests-remainder"; EstimatedDurationSeconds = 560; Weight = 6; ResourceClass = "ProcessHeavy" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Startup.Tests-nested-process"; EstimatedDurationSeconds = 180; Weight = 12; ResourceClass = "ProcessHeavy" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Web.Tests-all"; EstimatedDurationSeconds = 210; Weight = 3; ResourceClass = "ProcessHeavy" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.IntegrationTests-all"; EstimatedDurationSeconds = 180; Weight = 3; ResourceClass = "ProcessHeavy" }
-    [pscustomobject]@{ Name = "format-naming-style"; EstimatedDurationSeconds = 65; Weight = 2; ResourceClass = "CpuBound" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Application.Tests-all"; EstimatedDurationSeconds = 50; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "format-whitespace"; EstimatedDurationSeconds = 35; Weight = 2; ResourceClass = "CpuBound" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Common.Tests-all"; EstimatedDurationSeconds = 25; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Clients.Tests-all"; EstimatedDurationSeconds = 20; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.E2ETests-all"; EstimatedDurationSeconds = 20; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "tests-EmbodySense.Cli.Command.Tests-all"; EstimatedDurationSeconds = 15; Weight = 1; ResourceClass = "Ordinary" }
-    [pscustomobject]@{ Name = "git-diff-check"; EstimatedDurationSeconds = 5; Weight = 1; ResourceClass = "Ordinary" }
+    # https://github.com/Jacob-J-Thomas/agenthome-poc/issues/610: the measured Windows all-Persistence lane reached 600.239 seconds at 7,850 cases.
+    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-all"; EstimatedDurationSeconds = 600; TimeoutSeconds = 720; Weight = 6; ResourceClass = "ProcessHeavy" }
+    # https://github.com/Jacob-J-Thomas/agenthome-poc/issues/610: retain more than 180 seconds above the 538.106-second Startup remainder measurement.
+    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Startup.Tests-remainder"; EstimatedDurationSeconds = 560; TimeoutSeconds = 720; Weight = 6; ResourceClass = "ProcessHeavy" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Startup.Tests-nested-process"; EstimatedDurationSeconds = 180; TimeoutSeconds = 600; Weight = 12; ResourceClass = "ProcessHeavy" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.Web.Tests-all"; EstimatedDurationSeconds = 210; TimeoutSeconds = 600; Weight = 3; ResourceClass = "ProcessHeavy" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.IntegrationTests-all"; EstimatedDurationSeconds = 180; TimeoutSeconds = 600; Weight = 3; ResourceClass = "ProcessHeavy" }
+    [pscustomobject]@{ Name = "format-naming-style"; EstimatedDurationSeconds = 65; TimeoutSeconds = 240; Weight = 2; ResourceClass = "CpuBound" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Application.Tests-all"; EstimatedDurationSeconds = 50; TimeoutSeconds = 600; Weight = 1; ResourceClass = "Ordinary" }
+    [pscustomobject]@{ Name = "format-whitespace"; EstimatedDurationSeconds = 35; TimeoutSeconds = 240; Weight = 2; ResourceClass = "CpuBound" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Common.Tests-all"; EstimatedDurationSeconds = 25; TimeoutSeconds = 600; Weight = 1; ResourceClass = "Ordinary" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Clients.Tests-all"; EstimatedDurationSeconds = 20; TimeoutSeconds = 600; Weight = 1; ResourceClass = "Ordinary" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.E2ETests-all"; EstimatedDurationSeconds = 20; TimeoutSeconds = 600; Weight = 1; ResourceClass = "Ordinary" }
+    [pscustomobject]@{ Name = "tests-EmbodySense.Cli.Command.Tests-all"; EstimatedDurationSeconds = 15; TimeoutSeconds = 600; Weight = 1; ResourceClass = "Ordinary" }
+    [pscustomobject]@{ Name = "git-diff-check"; EstimatedDurationSeconds = 5; TimeoutSeconds = 60; Weight = 1; ResourceClass = "Ordinary" }
 )
 
 function Get-VerificationRequiredGateResourceCapacity {
@@ -33,6 +42,14 @@ function Get-VerificationRequiredGateMaximumProcessHeavyWorkers {
 
 function Get-VerificationRequiredGateMaximumCpuBoundWorkers {
     return $script:VerificationRequiredGateMaximumCpuBoundWorkers
+}
+
+function Get-VerificationRequiredGateMinimumTimeoutHeadroomSeconds {
+    return $script:VerificationRequiredGateMinimumTimeoutHeadroomSeconds
+}
+
+function Get-VerificationSolutionWatchdogDeadlineSeconds {
+    return $script:VerificationSolutionWatchdogDeadlineSeconds
 }
 
 function Get-VerificationPreflightCoverageContractWeight {
@@ -129,6 +146,7 @@ function Get-VerificationRequiredGateScheduleProfiles {
         [pscustomobject]@{
             Name = $_.Name
             EstimatedDurationSeconds = $_.EstimatedDurationSeconds
+            TimeoutSeconds = $_.TimeoutSeconds
             Weight = $_.Weight
             ResourceClass = $_.ResourceClass
         }
@@ -151,6 +169,15 @@ function Get-VerificationRequiredGateScheduleProfile {
     if ($profile.EstimatedDurationSeconds -lt 1) {
         throw "Required verification gate '$Name' has an invalid duration estimate."
     }
+    if ($profile.Name.StartsWith("tests-", [StringComparison]::Ordinal) -and $profile.TimeoutSeconds -lt ($profile.EstimatedDurationSeconds + $script:VerificationRequiredGateMinimumTimeoutHeadroomSeconds)) {
+        throw "Required verification gate '$Name' must retain at least $script:VerificationRequiredGateMinimumTimeoutHeadroomSeconds seconds of timeout headroom above its checked-in duration estimate."
+    }
+    if ($profile.Name.StartsWith("tests-", [StringComparison]::Ordinal)) {
+        $maximumTimeoutSeconds = if ($script:VerificationRequiredGateExtendedTimeoutNames -ccontains $profile.Name) { $script:VerificationRequiredGateExtendedTestTimeoutSeconds } else { $script:VerificationRequiredGateDefaultTestTimeoutSeconds }
+        if ($profile.TimeoutSeconds -gt $maximumTimeoutSeconds) {
+            throw "Required verification gate '$Name' exceeds its checked-in bounded child-timeout policy of $maximumTimeoutSeconds seconds."
+        }
+    }
     if ($profile.Weight -lt 1 -or $profile.Weight -gt $script:VerificationRequiredGateResourceCapacity) {
         throw "Required verification gate '$Name' has weight $($profile.Weight), outside logical capacity $script:VerificationRequiredGateResourceCapacity."
     }
@@ -168,6 +195,7 @@ function Get-VerificationRequiredGateScheduleProfile {
     return [pscustomobject]@{
         Name = $profile.Name
         EstimatedDurationSeconds = $profile.EstimatedDurationSeconds
+        TimeoutSeconds = $profile.TimeoutSeconds
         Weight = $profile.Weight
         ResourceClass = $profile.ResourceClass
     }
@@ -200,8 +228,8 @@ function Assert-VerificationRequiredGateSchedule {
 
     foreach ($phase in $Phases) {
         $profile = Get-VerificationRequiredGateScheduleProfile -Name $phase.Name
-        if ($phase.EstimatedDurationSeconds -ne $profile.EstimatedDurationSeconds -or $phase.Weight -ne $profile.Weight -or $phase.ResourceClass -cne $profile.ResourceClass) {
-            throw "Required verification gate '$($phase.Name)' does not match its checked-in duration and resource profile."
+        if ($phase.EstimatedDurationSeconds -ne $profile.EstimatedDurationSeconds -or $phase.TimeoutSeconds -ne $profile.TimeoutSeconds -or $phase.Weight -ne $profile.Weight -or $phase.ResourceClass -cne $profile.ResourceClass) {
+            throw "Required verification gate '$($phase.Name)' does not match its checked-in duration, timeout, and resource profile."
         }
     }
 }
