@@ -10,6 +10,7 @@ public static class HumanReviewContinuationContractValidator
     public static HumanReviewContractValidationResult ValidateWake(HumanReviewRequest? request, HumanReviewContinuationReservation? reservation, HumanReviewContinuationWake? wake)
     {
         var errors = Start(request, reservation);
+        if (errors.Count != 0) return Result(errors);
         if (wake is null) { Add(errors, "wake_required", "$", "A continuation wake is required."); return Result(errors); }
         ValidateSchema(wake.SchemaVersion, "$.schemaVersion", errors);
         ValidateId(wake.WakeId, "$.wakeId", errors);
@@ -17,7 +18,8 @@ public static class HumanReviewContinuationContractValidator
         ExactDecision(reservation, wake.Decision, "$.decision", errors);
         ExactReservation(reservation, wake.Reservation, "$.reservation", errors);
         Hash(wake.BindingHash, "$.bindingHash", errors);
-        if (request is not null && !string.Equals(wake.BindingHash, request.Binding.BindingHash, StringComparison.Ordinal)) Add(errors, "wake_binding_mismatch", "$.bindingHash", "Wake binding must exactly match the immutable reviewed frontier binding.");
+        if (request?.Binding is not { } binding) Add(errors, "binding_required", "$.binding", "An exact Human Review binding is required.");
+        else if (!string.Equals(wake.BindingHash, binding.BindingHash, StringComparison.Ordinal)) Add(errors, "wake_binding_mismatch", "$.bindingHash", "Wake binding must exactly match the immutable reviewed frontier binding.");
         Generation(wake.ExpectedGeneration, "$.expectedGeneration", errors);
         if (!Utc(wake.PublishedAtUtc) || !Utc(wake.ExpiresAtUtc) || wake.PublishedAtUtc < reservation?.ReservedAtUtc || wake.ExpiresAtUtc <= wake.PublishedAtUtc) Add(errors, "invalid_wake_window", "$.expiresAtUtc", "Wake publication and expiry must be trusted UTC, ordered, and not predate reservation.");
         Provenance(wake.Provenance, wake.PublishedAtUtc, "$.provenance", errors);
@@ -46,10 +48,17 @@ public static class HumanReviewContinuationContractValidator
         return Result(errors);
     }
 
-    /// <summary>Validates a terminal completion against the exact wake, reservation, and active claim without releasing work.</summary>
-    public static HumanReviewContractValidationResult ValidateCompletion(HumanReviewContinuationWake? wake, HumanReviewContinuationReservation? reservation, HumanReviewContinuationClaim? claim, HumanReviewContinuationCompletion? completion)
+    /// <summary>Validates a terminal completion against the exact reviewed request, wake, reservation, and active claim without releasing work.</summary>
+    /// <param name="request">The exact valid reviewed request that determines the only permitted release boundary.</param>
+    /// <param name="wake">The exact published continuation wake.</param>
+    /// <param name="reservation">The exact approved continuation reservation.</param>
+    /// <param name="claim">The exact active continuation claim.</param>
+    /// <param name="completion">The untrusted completion candidate.</param>
+    /// <returns>All deterministic completion-boundary errors.</returns>
+    public static HumanReviewContractValidationResult ValidateCompletion(HumanReviewRequest? request, HumanReviewContinuationWake? wake, HumanReviewContinuationReservation? reservation, HumanReviewContinuationClaim? claim, HumanReviewContinuationCompletion? completion)
     {
-        var errors = new List<HumanReviewContractValidationError>();
+        var errors = Start(request, reservation);
+        if (errors.Count != 0) return Result(errors);
         if (wake is null || reservation is null || claim is null) { Add(errors, "completion_context_required", "$", "Exact wake, reservation, and claim context is required."); return Result(errors); }
         if (completion is null) { Add(errors, "completion_required", "$", "A continuation completion is required."); return Result(errors); }
         ValidateSchema(completion.SchemaVersion, "$.schemaVersion", errors);
@@ -58,7 +67,7 @@ public static class HumanReviewContinuationContractValidator
         ExactClaim(claim, completion.Claim, "$.claim", errors);
         ExactReservation(reservation, completion.Reservation, "$.reservation", errors);
         ExactGeneration(wake.ExpectedGeneration, completion.ExpectedGeneration, "$.expectedGeneration", errors);
-        errors.AddRange(ValidateReleaseReceipt(wake, reservation, claim, completion.ReleaseReceipt).Errors);
+        errors.AddRange(ValidateReleaseReceipt(request, wake, reservation, claim, completion.ReleaseReceipt).Errors);
         if (completion.ReleaseReceipt is not null && string.Equals(completion.CompletionId, completion.ReleaseReceipt.ReleaseOperationId, StringComparison.Ordinal)) Add(errors, "completion_release_operation_reused", "$.releaseReceipt.releaseOperationId", "Completion identity must not substitute for the preexisting stable release operation identity.");
         if (!Utc(completion.CompletedAtUtc) || completion.CompletedAtUtc < claim.ClaimedAtUtc || completion.CompletedAtUtc > claim.LeaseExpiresAtUtc) Add(errors, "invalid_completion_time", "$.completedAtUtc", "Completion must occur at trusted UTC inside the exact active claim lease.");
         Evidence(completion.Evidence, "$.evidence", errors);
@@ -68,10 +77,17 @@ public static class HumanReviewContinuationContractValidator
         return Result(errors);
     }
 
-    /// <summary>Validates a preexisting governed-release receipt bound to one exact wake, claim, reservation, and generation without treating it as current authority.</summary>
-    public static HumanReviewContractValidationResult ValidateReleaseReceipt(HumanReviewContinuationWake? wake, HumanReviewContinuationReservation? reservation, HumanReviewContinuationClaim? claim, HumanReviewContinuationReleaseReceipt? receipt)
+    /// <summary>Validates a preexisting governed-release receipt bound to the exact reviewed request, wake, claim, reservation, and generation without treating it as current authority.</summary>
+    /// <param name="request">The exact valid reviewed request that determines the only permitted release boundary.</param>
+    /// <param name="wake">The exact published continuation wake.</param>
+    /// <param name="reservation">The exact approved continuation reservation.</param>
+    /// <param name="claim">The exact active continuation claim.</param>
+    /// <param name="receipt">The untrusted stable release receipt.</param>
+    /// <returns>All deterministic release-receipt-boundary errors.</returns>
+    public static HumanReviewContractValidationResult ValidateReleaseReceipt(HumanReviewRequest? request, HumanReviewContinuationWake? wake, HumanReviewContinuationReservation? reservation, HumanReviewContinuationClaim? claim, HumanReviewContinuationReleaseReceipt? receipt)
     {
-        var errors = new List<HumanReviewContractValidationError>();
+        var errors = Start(request, reservation);
+        if (errors.Count != 0) return Result(errors);
         if (wake is null || reservation is null || claim is null) { Add(errors, "release_receipt_context_required", "$", "Exact wake, reservation, and claim context is required."); return Result(errors); }
         if (receipt is null) { Add(errors, "release_receipt_required", "$", "A stable governed-release receipt is required before completion."); return Result(errors); }
         ValidateSchema(receipt.SchemaVersion, "$.schemaVersion", errors);
@@ -81,6 +97,7 @@ public static class HumanReviewContinuationContractValidator
         ExactReservation(reservation, receipt.Reservation, "$.reservation", errors);
         ExactGeneration(wake.ExpectedGeneration, receipt.ExpectedGeneration, "$.expectedGeneration", errors);
         if (!Enum.IsDefined(receipt.Kind) || receipt.Kind == HumanReviewContinuationReleaseKind.Unknown) Add(errors, "unsupported_release_kind", "$.kind", "Release kind must be a supported closed schema-1 value.");
+        else if (request is null || receipt.Kind != ExpectedReleaseKind(request)) Add(errors, "release_kind_purpose_mismatch", "$.kind", "Release kind must exactly match the reviewed request purpose and approval boundary.");
         if (!Enum.IsDefined(receipt.Disposition) || receipt.Disposition != HumanReviewContinuationReleaseDisposition.Released) Add(errors, "unsupported_release_disposition", "$.disposition", "Only a conclusive released disposition can support completion.");
         Hash(receipt.ResultHash, "$.resultHash", errors);
         Hash(receipt.FrontierReceiptHash, "$.frontierReceiptHash", errors);
@@ -115,6 +132,7 @@ public static class HumanReviewContinuationContractValidator
     public static HumanReviewContractValidationResult ValidateState(HumanReviewRequest? request, HumanReviewContinuationReservation? reservation, HumanReviewContinuationState? state)
     {
         var errors = Start(request, reservation);
+        if (errors.Count != 0) return Result(errors);
         if (state is null) { Add(errors, "state_required", "$", "Continuation state is required."); return Result(errors); }
         ValidateSchema(state.SchemaVersion, "$.schemaVersion", errors);
         var wake = state.Wake;
@@ -147,7 +165,7 @@ public static class HumanReviewContinuationContractValidator
         if (state.Completion is not null)
         {
             if (state.Claims.IsDefaultOrEmpty) Add(errors, "completion_without_claim", "$.completion", "Completion requires one exact active claim.");
-            else errors.AddRange(ValidateCompletion(wake, reservation, state.Claims[^1], state.Completion).Errors);
+            else errors.AddRange(ValidateCompletion(request, wake, reservation, state.Claims[^1], state.Completion).Errors);
         }
         if (state.Retirement is not null) errors.AddRange(ValidateRetirement(wake, reservation, state.Retirement).Errors);
         Hash(state.StateHash, "$.stateHash", errors);
@@ -158,7 +176,9 @@ public static class HumanReviewContinuationContractValidator
     private static List<HumanReviewContractValidationError> Start(HumanReviewRequest? request, HumanReviewContinuationReservation? reservation)
     {
         var errors = new List<HumanReviewContractValidationError>();
-        errors.AddRange(HumanReviewContractValidator.ValidateRequest(request).Errors);
+        var requestValidation = HumanReviewContractValidator.ValidateRequest(request);
+        errors.AddRange(requestValidation.Errors);
+        if (!requestValidation.IsValid) return errors;
         errors.AddRange(HumanReviewContractValidator.ValidateContinuationReservation(request, reservation).Errors);
         return errors;
     }
@@ -173,6 +193,7 @@ public static class HumanReviewContinuationContractValidator
     private static void ExactReservation(HumanReviewContinuationReservation? reservation, HumanReviewContinuationReservationReference? value, string path, List<HumanReviewContractValidationError> errors) { if (value is null) { Add(errors, "reservation_reference_required", path, "An exact continuation reservation reference is required."); return; } ValidateId(value.ReservationId, path + ".reservationId", errors); Hash(value.ReservationHash, path + ".reservationHash", errors); if (reservation is not null && (value.ReservationId != reservation.ReservationId || value.ReservationHash != reservation.ReservationHash)) Add(errors, "reservation_reference_mismatch", path, "Reservation reference must exactly match the one approved continuation reservation."); }
     private static void ExactWake(HumanReviewContinuationWake wake, HumanReviewContinuationWakeReference? value, string path, List<HumanReviewContractValidationError> errors) { if (value is null || value.WakeId != wake.WakeId || value.WakeHash != wake.WakeHash) Add(errors, "wake_reference_mismatch", path, "Wake reference must exactly match the immutable published wake."); }
     private static void ExactClaim(HumanReviewContinuationClaim claim, HumanReviewContinuationClaimReference? value, string path, List<HumanReviewContractValidationError> errors) { if (value is null || value.ClaimId != claim.ClaimId || value.ClaimHash != claim.ClaimHash) Add(errors, "claim_reference_mismatch", path, "Claim reference must exactly match the active claim."); }
+    private static HumanReviewContinuationReleaseKind ExpectedReleaseKind(HumanReviewRequest request) => request.Purpose switch { HumanReviewPurpose.Continuation => HumanReviewContinuationReleaseKind.Continuation, HumanReviewPurpose.PreDispatchEffect => HumanReviewContinuationReleaseKind.PreDispatchEffect, _ => HumanReviewContinuationReleaseKind.Unknown };
     private static void Evidence(ImmutableArray<HumanReviewRedactedPreview> value, string path, List<HumanReviewContractValidationError> errors) { if (value.IsDefault || value.Length > HumanReviewContractLimits.MaxContinuationEvidence) { Add(errors, "invalid_evidence_count", path, "Evidence must be defined and bounded."); return; } var previous = HumanReviewPreviewKind.Unknown; for (var index = 0; index < value.Length; index++) { var preview = value[index]; if (preview is null || !Enum.IsDefined(preview.Kind) || preview.Kind == HumanReviewPreviewKind.Unknown || preview.Kind <= previous || !HumanReviewSafeText.IsValid(preview.Label, HumanReviewContractLimits.MaxPreviewLabelCharacters, true) || !HumanReviewSafeText.IsValid(preview.Detail, HumanReviewContractLimits.MaxPreviewDetailCharacters, true) || !HumanReviewContractHash.MatchesPreview(preview)) Add(errors, "invalid_evidence", $"{path}[{index}]", "Evidence must be canonical ordered bounded redacted previews."); previous = preview?.Kind ?? previous; } }
     private static void Provenance(HumanReviewProvenance? value, DateTimeOffset time, string path, List<HumanReviewContractValidationError> errors) { if (value is null || value.Kind != HumanReviewProvenanceKind.Coordinator || value.ObservedAtUtc != time || !HumanReviewIdentifier.IsValid(value.SourceId) || !HumanReviewIdentifier.IsValid(value.CorrelationId) || !HumanReviewContractHash.MatchesProvenance(value)) Add(errors, "invalid_continuation_provenance", path, "Continuation provenance must be canonical coordinator provenance at the exact artifact time."); }
     private static void Add(List<HumanReviewContractValidationError> errors, string code, string path, string message) => errors.Add(new HumanReviewContractValidationError(code, path, message));

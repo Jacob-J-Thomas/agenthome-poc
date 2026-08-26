@@ -18,9 +18,87 @@ public sealed class HumanReviewContinuationContractTests
 
         Assert.True(HumanReviewContinuationContractValidator.ValidateWake(request, reservation, wake).IsValid);
         Assert.True(HumanReviewContinuationContractValidator.ValidateClaim(wake, reservation, claim).IsValid);
-        Assert.True(HumanReviewContinuationContractValidator.ValidateCompletion(wake, reservation, claim, completion).IsValid);
+        Assert.True(HumanReviewContinuationContractValidator.ValidateCompletion(request, wake, reservation, claim, completion).IsValid);
         Assert.True(HumanReviewContinuationContractValidator.ValidateState(request, reservation, state).IsValid);
         Assert.True(HumanReviewContinuationContractHash.MatchesState(state));
+    }
+
+    [Fact]
+    public void Completion_release_receipt_kind_is_bound_to_the_exact_reviewed_purpose()
+    {
+        var continuationRequest = HumanReviewTestData.Request();
+        var continuationReservation = Reservation(continuationRequest);
+        var continuationWake = Wake(continuationRequest, continuationReservation);
+        var continuationClaim = Claim(continuationWake, continuationReservation);
+        var continuationCompletion = Completion(continuationRequest, continuationWake, continuationReservation, continuationClaim);
+        var continuationState = HumanReviewContinuationContractHash.ApplyState(new HumanReviewContinuationState(1, continuationWake, [continuationClaim], continuationCompletion, null, string.Empty));
+        var continuationMismatchedReceipt = HumanReviewContinuationContractHash.ApplyReleaseReceipt(continuationCompletion.ReleaseReceipt with { Kind = HumanReviewContinuationReleaseKind.PreDispatchEffect, EffectReceiptHash = HumanReviewTestData.Hash('c'), ReleaseReceiptHash = string.Empty });
+        var continuationMismatchedCompletion = HumanReviewContinuationContractHash.ApplyCompletion(continuationCompletion with { ReleaseReceipt = continuationMismatchedReceipt, CompletionHash = string.Empty });
+        var continuationMismatchedState = HumanReviewContinuationContractHash.ApplyState(continuationState with { Completion = continuationMismatchedCompletion, StateHash = string.Empty });
+
+        Assert.True(HumanReviewContinuationContractValidator.ValidateCompletion(continuationRequest, continuationWake, continuationReservation, continuationClaim, continuationCompletion).IsValid);
+        Assert.True(HumanReviewContinuationContractValidator.ValidateState(continuationRequest, continuationReservation, continuationState).IsValid);
+        Assert.True(HumanReviewContinuationContractHash.MatchesReleaseReceipt(continuationCompletion.ReleaseReceipt));
+        Assert.True(HumanReviewContinuationContractHash.MatchesCompletion(continuationCompletion));
+        Assert.True(HumanReviewContinuationContractSnapshot.TryCaptureState(continuationRequest, continuationReservation, continuationState, out var continuationSnapshot, out _));
+        Assert.Equal(HumanReviewContinuationReplayDisposition.ExactReplay, HumanReviewContinuationReplayClassifier.ClassifyState(continuationState, continuationSnapshot));
+        Assert.True(HumanReviewContinuationContractHash.MatchesReleaseReceipt(continuationMismatchedReceipt));
+        Assert.True(HumanReviewContinuationContractHash.MatchesCompletion(continuationMismatchedCompletion));
+        Assert.Contains(HumanReviewContinuationContractValidator.ValidateCompletion(continuationRequest, continuationWake, continuationReservation, continuationClaim, continuationMismatchedCompletion).Errors, error => error.Code == "release_kind_purpose_mismatch");
+        Assert.Contains(HumanReviewContinuationContractValidator.ValidateState(continuationRequest, continuationReservation, continuationMismatchedState).Errors, error => error.Code == "release_kind_purpose_mismatch");
+
+        var effectRequest = HumanReviewTestData.Request(HumanReviewPurpose.PreDispatchEffect);
+        var effectReservation = Reservation(effectRequest);
+        var effectWake = Wake(effectRequest, effectReservation);
+        var effectClaim = Claim(effectWake, effectReservation);
+        var effectCompletion = Completion(effectRequest, effectWake, effectReservation, effectClaim);
+        var effectState = HumanReviewContinuationContractHash.ApplyState(new HumanReviewContinuationState(1, effectWake, [effectClaim], effectCompletion, null, string.Empty));
+        var effectMismatchedReceipt = HumanReviewContinuationContractHash.ApplyReleaseReceipt(effectCompletion.ReleaseReceipt with { Kind = HumanReviewContinuationReleaseKind.Continuation, EffectReceiptHash = null, ReleaseReceiptHash = string.Empty });
+        var effectMismatchedCompletion = HumanReviewContinuationContractHash.ApplyCompletion(effectCompletion with { ReleaseReceipt = effectMismatchedReceipt, CompletionHash = string.Empty });
+        var effectMismatchedState = HumanReviewContinuationContractHash.ApplyState(effectState with { Completion = effectMismatchedCompletion, StateHash = string.Empty });
+
+        Assert.True(HumanReviewContinuationContractValidator.ValidateCompletion(effectRequest, effectWake, effectReservation, effectClaim, effectCompletion).IsValid);
+        Assert.True(HumanReviewContinuationContractValidator.ValidateState(effectRequest, effectReservation, effectState).IsValid);
+        Assert.True(HumanReviewContinuationContractHash.MatchesReleaseReceipt(effectCompletion.ReleaseReceipt));
+        Assert.True(HumanReviewContinuationContractHash.MatchesCompletion(effectCompletion));
+        Assert.True(HumanReviewContinuationContractSnapshot.TryCaptureState(effectRequest, effectReservation, effectState, out var effectSnapshot, out _));
+        Assert.Equal(HumanReviewContinuationReplayDisposition.ExactReplay, HumanReviewContinuationReplayClassifier.ClassifyState(effectState, effectSnapshot));
+        Assert.True(HumanReviewContinuationContractHash.MatchesReleaseReceipt(effectMismatchedReceipt));
+        Assert.True(HumanReviewContinuationContractHash.MatchesCompletion(effectMismatchedCompletion));
+        Assert.Contains(HumanReviewContinuationContractValidator.ValidateCompletion(effectRequest, effectWake, effectReservation, effectClaim, effectMismatchedCompletion).Errors, error => error.Code == "release_kind_purpose_mismatch");
+        Assert.Contains(HumanReviewContinuationContractValidator.ValidateState(effectRequest, effectReservation, effectMismatchedState).Errors, error => error.Code == "release_kind_purpose_mismatch");
+    }
+
+    [Fact]
+    public void Malformed_request_without_binding_fails_closed_across_continuation_boundaries()
+    {
+        var request = HumanReviewTestData.Request();
+        var malformedRequest = request with { Binding = null! };
+        var reservation = Reservation(request);
+        var wake = Wake(request, reservation);
+        var claim = Claim(wake, reservation);
+        var completion = Completion(wake, reservation, claim);
+        var state = HumanReviewContinuationContractHash.ApplyState(new HumanReviewContinuationState(1, wake, [claim], completion, null, string.Empty));
+        Assert.True(HumanReviewContinuationContractJson.TrySerializeState(request, reservation, state, out var json, out _));
+
+        var wakeValidation = HumanReviewContinuationContractValidator.ValidateWake(malformedRequest, reservation, wake);
+        var stateValidation = HumanReviewContinuationContractValidator.ValidateState(malformedRequest, reservation, state);
+        var completionValidation = HumanReviewContinuationContractValidator.ValidateCompletion(malformedRequest, wake, reservation, claim, completion);
+        var receiptValidation = HumanReviewContinuationContractValidator.ValidateReleaseReceipt(malformedRequest, wake, reservation, claim, completion.ReleaseReceipt);
+        Assert.False(HumanReviewContinuationContractSnapshot.TryCaptureState(malformedRequest, reservation, state, out var snapshot, out var snapshotValidation));
+        Assert.False(HumanReviewContinuationContractJson.TrySerializeState(malformedRequest, reservation, state, out var rejectedJson, out var serializationValidation));
+        Assert.False(HumanReviewContinuationContractJson.TryDeserializeState(malformedRequest, reservation, json, out var restored, out var restorationValidation));
+
+        Assert.Null(snapshot);
+        Assert.Null(rejectedJson);
+        Assert.Null(restored);
+        Assert.Contains(wakeValidation.Errors, error => error.Code == "binding_required");
+        Assert.Contains(stateValidation.Errors, error => error.Code == "binding_required");
+        Assert.Contains(completionValidation.Errors, error => error.Code == "binding_required");
+        Assert.Contains(receiptValidation.Errors, error => error.Code == "binding_required");
+        Assert.Contains(snapshotValidation.Errors, error => error.Code == "binding_required");
+        Assert.Contains(serializationValidation.Errors, error => error.Code == "binding_required");
+        Assert.Contains(restorationValidation.Errors, error => error.Code == "binding_required");
     }
 
     [Fact]
@@ -43,9 +121,9 @@ public sealed class HumanReviewContinuationContractTests
         Assert.False(HumanReviewContinuationContractValidator.ValidateClaim(wake, reservation, HumanReviewContinuationContractHash.ApplyClaim(claim with { LeaseExpiresAtUtc = claim.ClaimedAtUtc.Add(HumanReviewContractLimits.MaxContinuationClaimLease).AddTicks(1), ClaimHash = string.Empty })).IsValid);
         Assert.False(HumanReviewContinuationContractValidator.ValidateRetirement(wake, reservation, HumanReviewContinuationContractHash.ApplyRetirement(retirement with { Outcome = (HumanReviewContinuationOutcome)99, RetirementHash = string.Empty })).IsValid);
         Assert.False(HumanReviewContinuationContractValidator.ValidateRetirement(wake, reservation, HumanReviewContinuationContractHash.ApplyRetirement(retirement with { Outcome = HumanReviewContinuationOutcome.Completed, RetirementHash = string.Empty })).IsValid);
-        Assert.Contains(HumanReviewContinuationContractValidator.ValidateCompletion(wake, reservation, claim, completion with { ReleaseReceipt = null! }).Errors, error => error.Code == "release_receipt_required");
-        Assert.Contains(HumanReviewContinuationContractValidator.ValidateCompletion(wake, reservation, claim, HumanReviewContinuationContractHash.ApplyCompletion(completion with { ReleaseReceipt = HumanReviewContinuationContractHash.ApplyReleaseReceipt(completion.ReleaseReceipt with { Disposition = HumanReviewContinuationReleaseDisposition.Ambiguous, ReleaseReceiptHash = string.Empty }), CompletionHash = string.Empty })).Errors, error => error.Code == "unsupported_release_disposition");
-        Assert.Contains(HumanReviewContinuationContractValidator.ValidateCompletion(wake, reservation, claim, HumanReviewContinuationContractHash.ApplyCompletion(completion with { ReleaseReceipt = HumanReviewContinuationContractHash.ApplyReleaseReceipt(completion.ReleaseReceipt with { Kind = HumanReviewContinuationReleaseKind.PreDispatchEffect, EffectReceiptHash = null, ReleaseReceiptHash = string.Empty }), CompletionHash = string.Empty })).Errors, error => error.Code == "effect_receipt_required");
+        Assert.Contains(HumanReviewContinuationContractValidator.ValidateCompletion(request, wake, reservation, claim, completion with { ReleaseReceipt = null! }).Errors, error => error.Code == "release_receipt_required");
+        Assert.Contains(HumanReviewContinuationContractValidator.ValidateCompletion(request, wake, reservation, claim, HumanReviewContinuationContractHash.ApplyCompletion(completion with { ReleaseReceipt = HumanReviewContinuationContractHash.ApplyReleaseReceipt(completion.ReleaseReceipt with { Disposition = HumanReviewContinuationReleaseDisposition.Ambiguous, ReleaseReceiptHash = string.Empty }), CompletionHash = string.Empty })).Errors, error => error.Code == "unsupported_release_disposition");
+        Assert.Contains(HumanReviewContinuationContractValidator.ValidateCompletion(request, wake, reservation, claim, HumanReviewContinuationContractHash.ApplyCompletion(completion with { ReleaseReceipt = HumanReviewContinuationContractHash.ApplyReleaseReceipt(completion.ReleaseReceipt with { Kind = HumanReviewContinuationReleaseKind.PreDispatchEffect, EffectReceiptHash = null, ReleaseReceiptHash = string.Empty }), CompletionHash = string.Empty })).Errors, error => error.Code == "effect_receipt_required");
         Assert.Contains(HumanReviewContinuationContractValidator.ValidateState(request, reservation, tooManyClaims).Errors, error => error.Code == "invalid_claim_count");
     }
 
@@ -70,7 +148,7 @@ public sealed class HumanReviewContinuationContractTests
         Assert.Contains(HumanReviewContinuationContractValidator.ValidateState(request, reservation, equalBoundary).Errors, error => error.Code == "claim_takeover_before_expiry");
         var validValidation = HumanReviewContinuationContractValidator.ValidateState(request, reservation, valid);
         Assert.True(validValidation.IsValid, string.Join("; ", validValidation.Errors.Select(error => error.Code)));
-        Assert.False(HumanReviewContinuationContractValidator.ValidateCompletion(wake, reservation, first, Completion(wake, reservation, takeover)).IsValid);
+        Assert.False(HumanReviewContinuationContractValidator.ValidateCompletion(request, wake, reservation, first, Completion(wake, reservation, takeover)).IsValid);
     }
 
     [Fact]
@@ -303,8 +381,20 @@ public sealed class HumanReviewContinuationContractTests
 
     private static HumanReviewContinuationCompletion Completion(HumanReviewContinuationWake wake, HumanReviewContinuationReservation reservation, HumanReviewContinuationClaim claim)
     {
+        return Completion(HumanReviewPurpose.Continuation, wake, reservation, claim);
+    }
+
+    private static HumanReviewContinuationCompletion Completion(HumanReviewRequest request, HumanReviewContinuationWake wake, HumanReviewContinuationReservation reservation, HumanReviewContinuationClaim claim)
+    {
+        return Completion(request.Purpose, wake, reservation, claim);
+    }
+
+    private static HumanReviewContinuationCompletion Completion(HumanReviewPurpose purpose, HumanReviewContinuationWake wake, HumanReviewContinuationReservation reservation, HumanReviewContinuationClaim claim)
+    {
         var time = claim.ClaimedAtUtc.AddMinutes(1);
-        var receipt = HumanReviewContinuationContractHash.ApplyReleaseReceipt(new HumanReviewContinuationReleaseReceipt(1, "release-one", new HumanReviewContinuationWakeReference(wake.WakeId, wake.WakeHash), new HumanReviewContinuationClaimReference(claim.ClaimId, claim.ClaimHash), new HumanReviewContinuationReservationReference(reservation.ReservationId, reservation.ReservationHash), wake.ExpectedGeneration, HumanReviewContinuationReleaseKind.Continuation, HumanReviewContinuationReleaseDisposition.Released, HumanReviewTestData.Hash('a'), HumanReviewTestData.Hash('b'), null, string.Empty));
+        var kind = purpose == HumanReviewPurpose.PreDispatchEffect ? HumanReviewContinuationReleaseKind.PreDispatchEffect : HumanReviewContinuationReleaseKind.Continuation;
+        var effectReceiptHash = kind == HumanReviewContinuationReleaseKind.PreDispatchEffect ? HumanReviewTestData.Hash('c') : null;
+        var receipt = HumanReviewContinuationContractHash.ApplyReleaseReceipt(new HumanReviewContinuationReleaseReceipt(1, "release-one", new HumanReviewContinuationWakeReference(wake.WakeId, wake.WakeHash), new HumanReviewContinuationClaimReference(claim.ClaimId, claim.ClaimHash), new HumanReviewContinuationReservationReference(reservation.ReservationId, reservation.ReservationHash), wake.ExpectedGeneration, kind, HumanReviewContinuationReleaseDisposition.Released, HumanReviewTestData.Hash('a'), HumanReviewTestData.Hash('b'), effectReceiptHash, string.Empty));
         return HumanReviewContinuationContractHash.ApplyCompletion(new HumanReviewContinuationCompletion(1, "completion-one", new HumanReviewContinuationWakeReference(wake.WakeId, wake.WakeHash), new HumanReviewContinuationClaimReference(claim.ClaimId, claim.ClaimHash), new HumanReviewContinuationReservationReference(reservation.ReservationId, reservation.ReservationHash), wake.ExpectedGeneration, receipt, time, ImmutableArray<HumanReviewRedactedPreview>.Empty, Provenance("completion", time), string.Empty));
     }
 
