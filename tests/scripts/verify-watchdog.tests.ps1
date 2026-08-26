@@ -741,8 +741,11 @@ $overPromotionDeadline = Get-VerificationDeadlineDisposition -ElapsedTicks ($pro
 Assert-Equal -Actual $overPromotionDeadline.Code -Expected "deadline-exceeded" -Message "One tick over the bounded promotion deadline must fail."
 
 Assert-VerificationWatchdogDeadlineContract -Qualification $true -VerificationComponent "Full" -DeadlineSeconds 480
+Assert-VerificationWatchdogDeadlineContract -Qualification $true -VerificationComponent "full" -DeadlineSeconds 480
 Assert-VerificationWatchdogDeadlineContract -Qualification $false -VerificationComponent "StaticContracts" -DeadlineSeconds 600
+Assert-VerificationWatchdogDeadlineContract -Qualification $false -VerificationComponent "staticcontracts" -DeadlineSeconds 600
 Assert-VerificationWatchdogDeadlineContract -Qualification $false -VerificationComponent "Solution" -DeadlineSeconds 1500
+Assert-VerificationWatchdogDeadlineContract -Qualification $false -VerificationComponent "sOlUtIoN" -DeadlineSeconds 1500
 Assert-VerificationWatchdogDeadlineContract -Qualification $false -VerificationComponent "Full" -DeadlineSeconds 600
 Assert-VerificationWatchdogDeadlineContract -Qualification $false -VerificationComponent "Full" -DeadlineSeconds 1200
 foreach ($invalidDeadlineCase in @(

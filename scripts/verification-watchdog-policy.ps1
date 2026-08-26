@@ -19,7 +19,7 @@ function Assert-VerificationWatchdogDeadlineContract {
     )
 
     if ($Qualification) {
-        if ($VerificationComponent -cne "Full") {
+        if ($VerificationComponent -ine "Full") {
             throw "Qualification requires the Full verification component."
         }
         if ($DeadlineSeconds -ne $script:VerificationQualificationWatchdogDeadlineSeconds) {
