@@ -142,6 +142,7 @@ Assert-True -Condition ($testProjects.Count -eq 9) -Message "The canonical proje
 $startupProject = Get-Item -LiteralPath (Join-Path $repoRoot "tests\EmbodySense.Core.Startup.Tests\EmbodySense.Core.Startup.Tests.csproj")
 $startupLanes = @(Get-VerificationTestProjectLanes -TestProject $startupProject)
 $nestedProcessFullyQualifiedNames = @(
+    "EmbodySense.Core.Startup.Tests.Runtime.AgentRuntimeFactoryNestedProcessTests.CreateAsync_exposes_authoring_that_observes_the_runtime_materialized_nonterminal_run_until_runtime_disposal",
     "EmbodySense.Core.Startup.Tests.Loops.Execution.GovernedLoopRuntimeTestsModels.Model_attempt_crash_windows_are_durable_and_never_redispatch_across_external_restart",
     "EmbodySense.Core.Startup.Tests.Loops.Execution.GovernedLoopRuntimeTestsWait.Production_runtime_parks_and_wakes_a_canonical_wait_after_restart",
     "EmbodySense.Core.Startup.Tests.Loops.Execution.GovernedLoopRuntimeTestsWait.Explicit_background_request_activates_once_after_late_workspace_host_reacquisition"

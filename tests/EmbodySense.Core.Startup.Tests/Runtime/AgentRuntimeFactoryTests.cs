@@ -91,8 +91,7 @@ namespace EmbodySense.Core.Startup.Tests.Runtime;
 
 public sealed class AgentRuntimeFactoryTests
 {
-    [Fact]
-    public async Task CreateAsync_exposes_authoring_that_observes_the_runtime_materialized_nonterminal_run_until_runtime_disposal()
+    internal static async Task CreateAsync_exposes_authoring_that_observes_the_runtime_materialized_nonterminal_run_until_runtime_disposal()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
@@ -122,7 +121,7 @@ public sealed class AgentRuntimeFactoryTests
                 "hold this runtime-owned custom-loop run");
             invocation = runtime.InvokeCustomLoopAsync(invocationInput);
 
-            await WaitForFileAsync(attemptStartedPath);
+            await WaitForHeldAttemptAsync(attemptStartedPath, invocation);
             var materialized = Assert.Single(await runtime.ListCustomLoopRunsAsync(), run => run.LoopId == created.Id);
             var exactRun = Assert.IsType<LoopRunSnapshot>(await runtime.GetCustomLoopRunAsync(materialized.Id));
             var update = await authoring.UpdateAsync(
@@ -152,6 +151,7 @@ public sealed class AgentRuntimeFactoryTests
             var completed = await invocation;
             Assert.Equal("Completed", completed.ExecutionStatus);
             Assert.Equal("Completed", completed.Run!.Status);
+            Assert.False(File.Exists(attemptReleasePath));
 
             await runtime.DisposeAsync();
             await runtime.DisposeAsync();
@@ -2568,15 +2568,47 @@ public sealed class AgentRuntimeFactoryTests
         return commandPath;
     }
 
-    private static async Task WaitForFileAsync(string path)
+    private static async Task WaitForHeldAttemptAsync(string path, Task<LoopRunInvocationResponse> invocation)
     {
         var deadline = DateTime.UtcNow.AddSeconds(30);
+
         while (!File.Exists(path) && DateTime.UtcNow < deadline)
         {
-            await Task.Delay(50);
+            var delay = Task.Delay(50);
+            if (await Task.WhenAny(delay, invocation) == invocation)
+            {
+                await ThrowInvocationCompletionBeforeHeldAttemptAsync(invocation);
+            }
         }
 
-        Assert.True(File.Exists(path), "The fake Codex provider did not reach the held custom-loop attempt.");
+        if (File.Exists(path))
+        {
+            return;
+        }
+
+        if (invocation.IsCompleted)
+        {
+            await ThrowInvocationCompletionBeforeHeldAttemptAsync(invocation);
+        }
+
+        throw new Xunit.Sdk.XunitException("The fake Codex provider did not reach the held custom-loop attempt before the existing test deadline while the invocation was still active.");
+    }
+
+    private static async Task ThrowInvocationCompletionBeforeHeldAttemptAsync(Task<LoopRunInvocationResponse> invocation)
+    {
+        try
+        {
+            var completed = await invocation;
+            throw new Xunit.Sdk.XunitException($"The held custom-loop invocation completed before the fake Codex provider reached its entry marker. AdmissionStatus={completed.AdmissionStatus}; ExecutionStatus={completed.ExecutionStatus}; WasDispatched={completed.WasDispatched}; RunStatus={completed.Run?.Status}; Detail={completed.Detail}");
+        }
+        catch (Xunit.Sdk.XunitException)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            throw new Xunit.Sdk.XunitException($"The held custom-loop invocation faulted before the fake Codex provider reached its entry marker. Fault={exception.GetType().Name}; Detail={exception.Message}");
+        }
     }
 
     private static async Task<AgentRuntime> CreateRuntimeAsync(

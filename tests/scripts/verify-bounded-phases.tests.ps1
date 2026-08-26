@@ -30,6 +30,7 @@ $admissionStoreTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistenc
 $persistenceEnvironmentCollectionPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Verification\ProcessEnvironmentCollection.cs"
 $persistenceCapabilityCatalogTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Capabilities\FileCapabilityCatalogTrustProviderTests.cs"
 $startupRuntimeCollectionPath = Join-Path $repoRoot "tests\EmbodySense.Core.Startup.Tests\Loops\Execution\LoopRuntimeIntegrationCollection.cs"
+$startupNestedProcessTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Startup.Tests\Runtime\AgentRuntimeFactoryNestedProcessTests.cs"
 $powerShellExecutable = (Get-Process -Id $PID).Path
 $functionalChildTimeoutSeconds = 30
 $assertionCount = 0
@@ -173,6 +174,7 @@ $admissionStoreTest = Get-Content -LiteralPath $admissionStoreTestPath -Raw
 $persistenceEnvironmentCollection = Get-Content -LiteralPath $persistenceEnvironmentCollectionPath -Raw
 $persistenceCapabilityCatalogTest = Get-Content -LiteralPath $persistenceCapabilityCatalogTestPath -Raw
 $startupRuntimeCollection = Get-Content -LiteralPath $startupRuntimeCollectionPath -Raw
+$startupNestedProcessTest = Get-Content -LiteralPath $startupNestedProcessTestPath -Raw
 
 Assert-Contains -Actual $verifyScript -Expected '[ValidateSet("PullRequest", "Stress")]' -Message "The verifier must expose only the two owned tiers."
 Assert-Contains -Actual $verifyScript -Expected '[string]$Configuration = "Release"' -Message "The canonical verifier must default to Release."
@@ -254,6 +256,7 @@ foreach ($startupRuntimeWrapper in @(
     $startupRuntimeWrapperSource = Get-Content -LiteralPath (Join-Path $repoRoot "tests\EmbodySense.Core.Startup.Tests\Loops\Execution\$startupRuntimeWrapper") -Raw
     Assert-Contains -Actual $startupRuntimeWrapperSource -Expected '[Collection(LoopRuntimeIntegrationCollection.Name)]' -Message "Startup runtime wrapper '$startupRuntimeWrapper' must serialize shared file-backed runtime state."
 }
+Assert-Contains -Actual $startupNestedProcessTest -Expected '[Collection(LoopRuntimeIntegrationCollection.Name)]' -Message "The held runtime-authoring nested-process test must serialize with the restart fixtures."
 Assert-Contains -Actual $persistenceEnvironmentCollection -Expected '[CollectionDefinition(Name, DisableParallelization = true)]' -Message "Persistence process-environment mutation must remain exclusive of all assembly tests."
 Assert-Contains -Actual $persistenceCapabilityCatalogTest -Expected '[Collection(Verification.ProcessEnvironmentCollection.Name)]' -Message "Capability-catalog trust-root mutation must retain process-environment serialization."
 Assert-Contains -Actual $admissionStoreTest -Expected '[Collection(Verification.ProcessEnvironmentCollection.Name)]' -Message "Coverage child-directory mutation must retain process-environment serialization."
