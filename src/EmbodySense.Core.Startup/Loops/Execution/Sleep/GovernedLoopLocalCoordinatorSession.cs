@@ -1,4 +1,5 @@
 using EmbodySense.Core.Application.Loops.Sleep.Models;
+using EmbodySense.Core.Common.Loops.Execution.Sleep.Models;
 using EmbodySense.Core.Startup.Loops.Execution.Sleep.Models;
 
 namespace EmbodySense.Core.Startup.Loops.Execution.Sleep;
@@ -9,6 +10,7 @@ internal sealed class GovernedLoopLocalCoordinatorSession : IDisposable
         GovernedLoopCoordinatorSnapshot snapshot,
         int workFamilyCount)
     {
+        LocalOwnership = snapshot.Ownership;
         Snapshot = snapshot;
         BackpressureRecorded = new bool[workFamilyCount + 1];
     }
@@ -23,6 +25,10 @@ internal sealed class GovernedLoopLocalCoordinatorSession : IDisposable
     internal long CycleNumber { get; set; }
 
     internal CancellationTokenSource HeartbeatStop { get; } = new();
+
+    internal GovernedLoopCoordinatorOwnership LocalOwnership { get; }
+
+    internal int OwnershipLossParked;
 
     internal GovernedLoopCoordinatorSnapshot Snapshot { get; set; }
 

@@ -8,6 +8,9 @@ public sealed class GovernedLoopRuntimeTestsSchedules
     [Fact]
     public Task Public_schedule_queues_and_executes_the_exact_canonical_graph_once_across_restart() => GovernedLoopRuntimeTests.Public_schedule_queues_and_executes_the_exact_canonical_graph_once_across_restart();
 
+    [Fact]
+    public Task Public_background_dispose_parks_a_hostile_local_provider_after_peer_handoff() => GovernedLoopRuntimeTests.Public_background_dispose_parks_a_hostile_local_provider_after_peer_handoff();
+
     [Theory]
     [InlineData(ScheduleOverlapPolicy.Skip, ScheduleRunAdmissionDisposition.OverlapSkipped, ScheduleRunAdmissionDisposition.OverlapSkipped)]
     [InlineData(ScheduleOverlapPolicy.DeferOne, ScheduleRunAdmissionDisposition.OverlapDeferred, ScheduleRunAdmissionDisposition.DeferredOneSuppressed)]

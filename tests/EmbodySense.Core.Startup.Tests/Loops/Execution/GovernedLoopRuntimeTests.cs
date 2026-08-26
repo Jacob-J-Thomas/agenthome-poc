@@ -90,6 +90,7 @@ using EmbodySense.Core.Startup.Triggers.Schedules;
 using EmbodySense.Core.Startup.Triggers.Schedules.Models;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Core.Startup.Tests.Triggers;
+using EmbodySense.Core.Startup.Tests.Loops.Execution.Sleep;
 using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Startup.Tests.Loops.Execution;
@@ -845,6 +846,95 @@ internal static class GovernedLoopRuntimeTests
             Assert.Equal("Empty", empty.SelectionStatus);
             Assert.Null(empty.Entry);
             Assert.Equal(1, fixture.ProviderAttempts);
+        }
+    }
+
+    internal static async Task Public_background_dispose_parks_a_hostile_local_provider_after_peer_handoff()
+    {
+        using var fixture = await GovernedRuntimeFixture.CreateAsync(scheduleTrigger: true, pauseProvider: true);
+        var ownershipLoss = new SignalingCoordinatorBoundaryObserver();
+        var scheduledAtUtc = DateTimeOffset.UtcNow.AddMinutes(-2).ToUniversalTime();
+        var scenario = ScheduleScenario.Create(fixture, scheduledAtUtc, "Hold the canonical background provider across peer ownership loss.");
+        var workerNow = scheduledAtUtc.AddMinutes(2);
+        using (var schedule = ScheduleRuntimeFactory.Create(
+                   fixture.Paths,
+                   scenario,
+                   scenario,
+                   scenario,
+                   new FixedTriggerTimeProvider(workerNow)))
+        {
+            Assert.Equal(ScheduleRuntimeCreateStatus.Created, (await schedule.CreateAsync(scenario.Definition)).Status);
+            Assert.Equal(ScheduleEvaluationStatus.Queued, (await schedule.EvaluateOnceAsync(scenario.Definition.ScheduleId)).Status);
+        }
+
+        var coordinatorStore = new GovernedLoopCoordinatorEvidenceStore(fixture.Paths);
+        await using var runtime = await fixture.CreateRuntimeAsync(governedLoopCoordinatorBoundaryObserver: ownershipLoss);
+        var activation = await runtime.StartGovernedLoopLocalBackgroundWithStatusAsync();
+        Assert.Equal(AgentRuntimeGovernedLoopBackgroundStartStatus.Started, activation.Status);
+        await fixture.WaitForProviderAsync();
+
+        GovernedLoopCoordinatorAcquisitionResult? handoff = null;
+        for (var attempt = 0; attempt < 10 && handoff?.Status != GovernedLoopCoordinatorAcquisitionStatus.Acquired; attempt++)
+        {
+            var current = Assert.IsType<GovernedLoopCoordinatorSnapshot>((await coordinatorStore.ReadAsync("local-background"))?.Snapshot);
+            var acquiredAtUtc = current.LatestHeartbeat.LeaseExpiresAtUtc;
+            var peerOwnership = GovernedLoopSleepContractHash.Apply(new GovernedLoopCoordinatorOwnership(
+                GovernedLoopCoordinatorOwnership.CurrentSchemaVersion,
+                current.Ownership.CoordinatorId,
+                "peer-owner",
+                current.Ownership.OwnershipEpoch + 1,
+                acquiredAtUtc,
+                string.Empty));
+            var peerStarting = GovernedLoopSleepContractHash.Apply(new GovernedLoopCoordinatorLifecycle(
+                GovernedLoopCoordinatorLifecycle.CurrentSchemaVersion,
+                1,
+                peerOwnership,
+                GovernedLoopCoordinatorStatus.Starting,
+                acquiredAtUtc,
+                null,
+                string.Empty));
+            var peerHeartbeat = GovernedLoopSleepContractHash.Apply(new GovernedLoopCoordinatorHeartbeat(
+                GovernedLoopCoordinatorHeartbeat.CurrentSchemaVersion,
+                1,
+                peerOwnership,
+                acquiredAtUtc,
+                acquiredAtUtc.AddSeconds(30),
+                string.Empty));
+            handoff = await coordinatorStore.TryAcquireAsync(new GovernedLoopCoordinatorAcquisitionRequest(
+                GovernedLoopCoordinatorPriorEvidenceExpectation.Existing,
+                current.Ownership.ContentHash,
+                current.LatestHeartbeat.ContentHash,
+                peerOwnership,
+                peerStarting,
+                peerHeartbeat));
+        }
+
+        Assert.Equal(GovernedLoopCoordinatorAcquisitionStatus.Acquired, handoff?.Status);
+        try
+        {
+            await ownershipLoss.OwnershipLost.WaitAsync(TimeSpan.FromSeconds(5));
+            var observed = await coordinatorStore.ReadAsync("local-background");
+            Assert.Equal(handoff!.Snapshot!.Ownership, observed?.Snapshot?.Ownership);
+            Assert.Equal(handoff.Snapshot.LatestLifecycle, observed?.Snapshot?.LatestLifecycle);
+            Assert.Equal(handoff.Snapshot.LatestHeartbeat, observed?.Snapshot?.LatestHeartbeat);
+            Assert.Equal(handoff.Snapshot.LatestFailureSequence, observed?.Snapshot?.LatestFailureSequence);
+            Assert.Equal(handoff.Snapshot.LatestFailureHash, observed?.Snapshot?.LatestFailureHash);
+
+            await runtime.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(1));
+            await Task.Delay(TimeSpan.FromSeconds(1));
+            var durable = await coordinatorStore.ReadAsync("local-background");
+
+            Assert.Equal(GovernedLoopCoordinatorReadStatus.Found, durable?.Status);
+            Assert.Equal("peer-owner", durable?.Snapshot?.Ownership.OwnerId);
+            Assert.Equal(GovernedLoopCoordinatorStatus.Starting, durable?.Snapshot?.LatestLifecycle.Status);
+            Assert.Equal(handoff!.Snapshot!.Ownership, durable?.Snapshot?.Ownership);
+            Assert.Equal(handoff.Snapshot.LatestHeartbeat, durable?.Snapshot?.LatestHeartbeat);
+            Assert.Equal(handoff.Snapshot.LatestFailureSequence, durable?.Snapshot?.LatestFailureSequence);
+            Assert.Equal(handoff.Snapshot.LatestFailureHash, durable?.Snapshot?.LatestFailureHash);
+        }
+        finally
+        {
+            fixture.ReleaseProvider();
         }
     }
 
@@ -2988,20 +3078,28 @@ internal static class GovernedLoopRuntimeTests
 
         public Task<AgentRuntime> CreateRuntimeAsync(
             bool preserveCurrentConversation = false,
-            IGovernedModelPrimaryExecutionBoundaryObserver? governedModelExecutionObserver = null)
-            => AgentRuntimeFactory.ForFileCapabilityTrustRoot(
-                    new RejectingApprovalPrompt(),
-                    _workspace.ServerStatePath,
-                    CompatibleRuntimeStatus(),
-                    governedModelExecutionObserver: governedModelExecutionObserver,
-                    additionalModelProfileProviders: _additionalModelProfileProvider is null ? null : [_additionalModelProfileProvider])
-                .CreateAsync(
-                    "test-model",
-                    _workspace.RootPath,
-                    _codexPath,
-                    "read-only",
-                    AgentRuntimeSurface.Cli,
-                    preserveCurrentConversation);
+            IGovernedModelPrimaryExecutionBoundaryObserver? governedModelExecutionObserver = null,
+            IGovernedLoopLocalCoordinatorBoundaryObserver? governedLoopCoordinatorBoundaryObserver = null)
+        {
+            var factory = AgentRuntimeFactory.ForFileCapabilityTrustRoot(
+                new RejectingApprovalPrompt(),
+                _workspace.ServerStatePath,
+                CompatibleRuntimeStatus(),
+                governedModelExecutionObserver: governedModelExecutionObserver,
+                additionalModelProfileProviders: _additionalModelProfileProvider is null ? null : [_additionalModelProfileProvider]);
+            if (governedLoopCoordinatorBoundaryObserver is not null)
+            {
+                factory = factory.WithGovernedLoopLocalCoordinatorBoundaryObserver(governedLoopCoordinatorBoundaryObserver);
+            }
+
+            return factory.CreateAsync(
+                "test-model",
+                _workspace.RootPath,
+                _codexPath,
+                "read-only",
+                AgentRuntimeSurface.Cli,
+                preserveCurrentConversation);
+        }
 
         public async Task WaitForProviderAsync()
         {
@@ -3328,7 +3426,7 @@ internal static class GovernedLoopRuntimeTests
                     throw new LlmInferenceTerminalFailureException("Planned governed provider failure.");
                 }
 
-                await control.WaitForReleaseAsync(cancellationToken);
+                await control.WaitForReleaseAsync();
                 const string Output = "governed response: exactly one bounded output token";
                 if (responseChunkHandler is not null)
                 {
@@ -3466,7 +3564,7 @@ internal static class GovernedLoopRuntimeTests
                 return next;
             }
 
-            public async Task WaitForReleaseAsync(CancellationToken cancellationToken)
+            public async Task WaitForReleaseAsync()
             {
                 if (!pauseProvider || File.Exists(Path.Combine(workspacePath, ReleaseFileName)))
                 {
@@ -3489,7 +3587,7 @@ internal static class GovernedLoopRuntimeTests
                 File.WriteAllText(Path.Combine(workspacePath, StartedFileName), "started");
                 while (!File.Exists(Path.Combine(workspacePath, ReleaseFileName)))
                 {
-                    await Task.Delay(20, cancellationToken);
+                    await Task.Delay(20);
                 }
             }
 

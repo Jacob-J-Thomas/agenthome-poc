@@ -350,6 +350,100 @@ public sealed class GovernedLoopLocalCoordinatorTests
     }
 
     [Fact]
+    public async Task Durably_failed_uncompleted_session_never_reports_ready_already_running_posture()
+    {
+        var evidence = new RecordingCoordinatorEvidencePort();
+        var blockingEvidence = new BlockingCoordinatorEvidencePort(evidence)
+        {
+            BlockFailureBeforeCommit = false,
+            BlockFailedLifecycleAfterCommit = true
+        };
+        var work = new ScriptedLocalWorkRunner
+        {
+            Handler = static (_, _) => Task.FromResult<GovernedLoopLocalWorkResult?>(null)
+        };
+        await using var coordinator = Coordinator(blockingEvidence, work, Clock(), "owner-a");
+
+        try
+        {
+            Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Started, (await coordinator.StartAsync()).Status);
+            await blockingEvidence.FailedLifecyclePersisted.WaitAsync(TimeSpan.FromSeconds(5));
+            var durable = evidence.Snapshot;
+            var duringFailure = await coordinator.StartAsync();
+
+            Assert.Equal(GovernedLoopCoordinatorStatus.Failed, durable!.LatestLifecycle.Status);
+            Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Failed, duringFailure.Status);
+            Assert.Equal(durable, duringFailure.Snapshot);
+            Assert.Single(evidence.Failures);
+        }
+        finally
+        {
+            blockingEvidence.ReleaseFailedLifecycle();
+        }
+
+        Assert.Equal(GovernedLoopLocalCoordinatorStopStatus.Failed, (await coordinator.StopAsync()).Status);
+    }
+
+    [Fact]
+    public async Task Backpressured_work_after_foreign_heartbeat_never_mutates_peer_evidence()
+    {
+        var workEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var workRelease = new TaskCompletionSource<GovernedLoopLocalWorkResult?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var evidence = new RecordingCoordinatorEvidencePort();
+        var observer = new SignalingCoordinatorBoundaryObserver();
+        var work = new ScriptedLocalWorkRunner
+        {
+            Handler = (_, _) =>
+            {
+                workEntered.TrySetResult();
+                return workRelease.Task;
+            }
+        };
+        await using var coordinator = Coordinator(
+            evidence,
+            work,
+            Clock(),
+            "owner-a",
+            heartbeat: TimeSpan.FromMilliseconds(10),
+            lease: TimeSpan.FromMinutes(1),
+            boundaryObserver: observer);
+
+        try
+        {
+            Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Started, (await coordinator.StartAsync()).Status);
+            await workEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var peer = evidence.ReplaceWithPeerOwnership("peer-owner");
+            var lifecycleCount = evidence.Lifecycles.Count;
+            var heartbeatCount = evidence.Heartbeats.Count;
+            var failureCount = evidence.Failures.Count;
+
+            await observer.OwnershipLost.WaitAsync(TimeSpan.FromSeconds(5));
+            workRelease.TrySetResult(new GovernedLoopLocalWorkResult(
+                GovernedLoopLocalWorkResultStatus.Backpressured,
+                "bounded-pressure"));
+            await observer.ForeignSessionMutationSuppressed.WaitAsync(TimeSpan.FromSeconds(5));
+            var stopped = await coordinator.StopAsync();
+            var durable = evidence.Snapshot;
+
+            Assert.Equal(GovernedLoopLocalCoordinatorStopStatus.OwnershipLost, stopped.Status);
+            Assert.Equal(peer.Ownership, durable!.Ownership);
+            Assert.Equal(peer.LatestLifecycle, durable.LatestLifecycle);
+            Assert.Equal(peer.LatestHeartbeat, durable.LatestHeartbeat);
+            Assert.Equal(peer.LatestFailureSequence, durable.LatestFailureSequence);
+            Assert.Equal(peer.LatestFailureHash, durable.LatestFailureHash);
+            Assert.Equal(lifecycleCount, evidence.Lifecycles.Count);
+            Assert.Equal(heartbeatCount, evidence.Heartbeats.Count);
+            Assert.Equal(failureCount, evidence.Failures.Count);
+        }
+        finally
+        {
+            workRelease.TrySetResult(new GovernedLoopLocalWorkResult(
+                GovernedLoopLocalWorkResultStatus.Backpressured,
+                "bounded-pressure"));
+        }
+    }
+
+    [Fact]
     public async Task Heartbeat_store_failure_cancels_acquisition_and_fails_without_stopped_fabrication()
     {
         var evidence = new RecordingCoordinatorEvidencePort { ThrowOnHeartbeat = true };

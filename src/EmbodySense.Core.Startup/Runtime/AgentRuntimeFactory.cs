@@ -91,6 +91,7 @@ public sealed class AgentRuntimeFactory
     private readonly ICapabilityCatalogTrustProvider _capabilityTrustProvider;
     private readonly IAgentRuntimeAuthenticatedWakeVerifier? _authenticatedWakeVerifier;
     private readonly IGovernedModelPrimaryExecutionBoundaryObserver? _governedModelExecutionObserver;
+    private readonly IGovernedLoopLocalCoordinatorBoundaryObserver? _governedLoopLocalCoordinatorBoundaryObserver;
     private readonly IReadOnlyList<ModelProfileRuntimeProvider> _additionalModelProfileProviders;
     private readonly CommandActionRuntimeProvider? _commandActionRuntimeProvider;
     private readonly CustomLoopRunStoreProvider? _customLoopRunStoreProvider;
@@ -174,7 +175,8 @@ public sealed class AgentRuntimeFactory
             _additionalModelProfileProviders,
             verifier,
             _commandActionRuntimeProvider,
-            _customLoopRunStoreProvider);
+            _customLoopRunStoreProvider,
+            _governedLoopLocalCoordinatorBoundaryObserver);
     }
 
     /// <summary>Returns an equivalent factory with one explicit server-owned structured command Action provider.</summary>
@@ -192,7 +194,8 @@ public sealed class AgentRuntimeFactory
             _additionalModelProfileProviders,
             _authenticatedWakeVerifier,
             provider,
-            _customLoopRunStoreProvider);
+            _customLoopRunStoreProvider,
+            _governedLoopLocalCoordinatorBoundaryObserver);
     }
 
     /// <summary>
@@ -212,7 +215,29 @@ public sealed class AgentRuntimeFactory
             _additionalModelProfileProviders,
             _authenticatedWakeVerifier,
             _commandActionRuntimeProvider,
-            provider);
+            provider,
+            _governedLoopLocalCoordinatorBoundaryObserver);
+    }
+
+    /// <summary>Returns an equivalent factory with one diagnostic observer for local coordinator heartbeat boundaries.</summary>
+    /// <remarks>The observer cannot grant ownership, delay durable mutations, or alter runtime control flow.</remarks>
+    /// <param name="observer">The non-authoritative observer composed into the canonical local coordinator.</param>
+    /// <returns>A factory preserving the existing runtime composition with the supplied diagnostic observer.</returns>
+    public AgentRuntimeFactory WithGovernedLoopLocalCoordinatorBoundaryObserver(
+        IGovernedLoopLocalCoordinatorBoundaryObserver observer)
+    {
+        ArgumentNullException.ThrowIfNull(observer);
+        return new AgentRuntimeFactory(
+            _approvalPrompt,
+            _conversationPublicationObserver,
+            _codexRuntimeStatus,
+            _capabilityTrustProvider,
+            _governedModelExecutionObserver,
+            _additionalModelProfileProviders,
+            _authenticatedWakeVerifier,
+            _commandActionRuntimeProvider,
+            _customLoopRunStoreProvider,
+            observer);
     }
 
     internal AgentRuntimeFactory(
@@ -224,7 +249,8 @@ public sealed class AgentRuntimeFactory
         IReadOnlyList<ModelProfileRuntimeProvider>? additionalModelProfileProviders = null,
         IAgentRuntimeAuthenticatedWakeVerifier? authenticatedWakeVerifier = null,
         CommandActionRuntimeProvider? commandActionRuntimeProvider = null,
-        CustomLoopRunStoreProvider? customLoopRunStoreProvider = null)
+        CustomLoopRunStoreProvider? customLoopRunStoreProvider = null,
+        IGovernedLoopLocalCoordinatorBoundaryObserver? governedLoopLocalCoordinatorBoundaryObserver = null)
     {
         ArgumentNullException.ThrowIfNull(approvalPrompt);
         if (codexRuntimeStatus is not null && codexRuntimeStatus.Compatibility != CodexRuntimeCompatibility.Compatible)
@@ -243,6 +269,7 @@ public sealed class AgentRuntimeFactory
         _capabilityTrustProvider = capabilityTrustProvider ?? FileCapabilityCatalogTrustProvider.CreateDefault();
         _authenticatedWakeVerifier = authenticatedWakeVerifier;
         _governedModelExecutionObserver = governedModelExecutionObserver;
+        _governedLoopLocalCoordinatorBoundaryObserver = governedLoopLocalCoordinatorBoundaryObserver;
         var additionalProviders = (additionalModelProfileProviders ?? [])
             .Take(33)
             .ToArray();
@@ -668,7 +695,8 @@ public sealed class AgentRuntimeFactory
                 coordinatorEvidenceStore,
                 governedWait,
                 governedRetry,
-                operationalClock);
+                operationalClock,
+                _governedLoopLocalCoordinatorBoundaryObserver);
             var governedMaterializer = new GovernedLoopSequentialRunMaterializer(
                 customRunStore,
                 auditLog,

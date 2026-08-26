@@ -72,6 +72,12 @@ public sealed class GovernedLoopLocalCoordinator : IAsyncDisposable
         {
             if (_session is not null)
             {
+                var retainedTerminal = await InspectUncompletedTerminalSessionAsync().ConfigureAwait(false);
+                if (retainedTerminal is not null)
+                {
+                    return retainedTerminal;
+                }
+
                 var completed = await ReapCompletedSessionAsync().ConfigureAwait(false);
                 if (completed is not null)
                 {
@@ -146,6 +152,25 @@ public sealed class GovernedLoopLocalCoordinator : IAsyncDisposable
         return await StopCoreAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    internal async Task<GovernedLoopLocalCoordinatorStopResult> ParkAfterOwnershipLossAsync()
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        await _operationGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+        try
+        {
+            var session = _session;
+            return session is null
+                ? new GovernedLoopLocalCoordinatorStopResult(
+                    GovernedLoopLocalCoordinatorStopStatus.AlreadyStopped,
+                    _lastSnapshot)
+                : await ParkSessionAfterOwnershipLossAsync(session).ConfigureAwait(false);
+        }
+        finally
+        {
+            _operationGate.Release();
+        }
+    }
+
     /// <inheritdoc />
     public async ValueTask DisposeAsync()
     {
@@ -170,6 +195,11 @@ public sealed class GovernedLoopLocalCoordinator : IAsyncDisposable
                     _lastSnapshot);
             }
 
+            if (!IsLocalSessionOwnership(session))
+            {
+                return await ParkSessionAfterOwnershipLossAsync(session).ConfigureAwait(false);
+            }
+
             Interlocked.Exchange(ref session.StopRequested, 1);
             session.AdmissionStop.Cancel();
             _ = await EnsureLifecycleAsync(session, GovernedLoopCoordinatorStatus.Stopping, terminal: false).ConfigureAwait(false);
@@ -187,6 +217,23 @@ public sealed class GovernedLoopLocalCoordinator : IAsyncDisposable
         {
             _operationGate.Release();
         }
+    }
+
+    private async Task<GovernedLoopLocalCoordinatorStopResult> ParkSessionAfterOwnershipLossAsync(
+        GovernedLoopLocalCoordinatorSession session)
+    {
+        Interlocked.Exchange(ref session.OwnershipLossParked, 1);
+        Interlocked.Exchange(ref session.StopRequested, 1);
+        session.AdmissionStop.Cancel();
+        session.HeartbeatStop.Cancel();
+        var outcome = await session.Completion.ConfigureAwait(false);
+        _lastSnapshot = outcome.Snapshot;
+        _confirmedTerminalOwnershipHash = null;
+        _session = null;
+        session.Dispose();
+        return new GovernedLoopLocalCoordinatorStopResult(
+            GovernedLoopLocalCoordinatorStopStatus.OwnershipLost,
+            outcome.Snapshot);
     }
 
     private async Task<GovernedLoopLocalCoordinatorSessionOutcome> RunSessionAsync(GovernedLoopLocalCoordinatorSession session)
@@ -214,6 +261,13 @@ public sealed class GovernedLoopLocalCoordinator : IAsyncDisposable
             }
 
             var fatal = heartbeatExit.IsFatal ? heartbeatExit : workExit.IsFatal ? workExit : null;
+            if (IsOwnershipLossParked(session))
+            {
+                return new GovernedLoopLocalCoordinatorSessionOutcome(
+                    GovernedLoopLocalCoordinatorStopStatus.OwnershipLost,
+                    session.Snapshot);
+            }
+
             if (fatal is not null)
             {
                 return await PersistFailureAsync(session, fatal).ConfigureAwait(false);
@@ -232,6 +286,13 @@ public sealed class GovernedLoopLocalCoordinator : IAsyncDisposable
         {
             session.AdmissionStop.Cancel();
             session.HeartbeatStop.Cancel();
+            if (IsOwnershipLossParked(session))
+            {
+                return new GovernedLoopLocalCoordinatorSessionOutcome(
+                    GovernedLoopLocalCoordinatorStopStatus.OwnershipLost,
+                    session.Snapshot);
+            }
+
             return await PersistFailureAsync(
                 session,
                 GovernedLoopLocalCoordinatorRunExit.Fatal(GovernedLoopCoordinatorFailureKind.Unexpected, "coordinator-loop-faulted")).ConfigureAwait(false);
@@ -465,6 +526,10 @@ public sealed class GovernedLoopLocalCoordinator : IAsyncDisposable
                 {
                     session.Snapshot = result.Snapshot;
                     _lastSnapshot = result.Snapshot;
+                    if (result.Status == GovernedLoopCoordinatorHeartbeatMutationStatus.OwnershipLost)
+                    {
+                        ObserveOwnershipLost();
+                    }
                 }
 
                 return result.Status switch
@@ -530,6 +595,12 @@ public sealed class GovernedLoopLocalCoordinator : IAsyncDisposable
         try
         {
             var current = session.Snapshot;
+            if (!CanMutateSessionEvidence(session))
+            {
+                ObserveForeignSessionMutationSuppressed();
+                return GovernedLoopLocalCoordinatorMutationOutcome.OwnershipLost(current);
+            }
+
             if (current.LatestLifecycle.Status == status)
             {
                 return GovernedLoopLocalCoordinatorMutationOutcome.Success(current);
@@ -646,6 +717,12 @@ public sealed class GovernedLoopLocalCoordinator : IAsyncDisposable
         try
         {
             var current = session.Snapshot;
+            if (!CanMutateSessionEvidence(session))
+            {
+                ObserveForeignSessionMutationSuppressed();
+                return GovernedLoopLocalCoordinatorMutationOutcome.OwnershipLost(current);
+            }
+
             if (!TryGetUtcNow(out var occurredAtUtc)
                 || current.LatestFailureSequence >= GovernedLoopSleepContractLimits.MaxVersion)
             {
@@ -938,6 +1015,36 @@ public sealed class GovernedLoopLocalCoordinator : IAsyncDisposable
         return true;
     }
 
+    private async Task<GovernedLoopLocalCoordinatorStartResult?> InspectUncompletedTerminalSessionAsync()
+    {
+        var session = _session;
+        if (session is null
+            || session.Completion.IsCompleted)
+        {
+            return null;
+        }
+
+        var read = await ReadAsync(CancellationToken.None).ConfigureAwait(false);
+        if (read.Status != GovernedLoopCoordinatorReadStatus.Found || read.Snapshot is null)
+        {
+            return new GovernedLoopLocalCoordinatorStartResult(
+                read.Status == GovernedLoopCoordinatorReadStatus.Corrupt
+                    ? GovernedLoopLocalCoordinatorStartStatus.Corrupt
+                    : GovernedLoopLocalCoordinatorStartStatus.Unavailable);
+        }
+
+        return read.Snapshot.LatestLifecycle.Status switch
+        {
+            GovernedLoopCoordinatorStatus.Failed => new GovernedLoopLocalCoordinatorStartResult(
+                GovernedLoopLocalCoordinatorStartStatus.Failed,
+                read.Snapshot),
+            GovernedLoopCoordinatorStatus.Stopped => new GovernedLoopLocalCoordinatorStartResult(
+                GovernedLoopLocalCoordinatorStartStatus.Unavailable,
+                read.Snapshot),
+            _ => null
+        };
+    }
+
     private async Task<GovernedLoopLocalCoordinatorStartResult?> ReapCompletedSessionAsync()
     {
         var session = _session;
@@ -1037,6 +1144,30 @@ public sealed class GovernedLoopLocalCoordinator : IAsyncDisposable
         }
     }
 
+    private void ObserveOwnershipLost()
+    {
+        try
+        {
+            _boundaryObserver?.OnOwnershipLost();
+        }
+        catch (Exception)
+        {
+            // Observation cannot grant authority or change durable coordinator behavior.
+        }
+    }
+
+    private void ObserveForeignSessionMutationSuppressed()
+    {
+        try
+        {
+            _boundaryObserver?.OnForeignSessionMutationSuppressed();
+        }
+        catch (Exception)
+        {
+            // Observation cannot grant authority or change durable coordinator behavior.
+        }
+    }
+
     private static bool TryAdd(DateTimeOffset value, TimeSpan duration, out DateTimeOffset result)
     {
         try
@@ -1100,6 +1231,15 @@ public sealed class GovernedLoopLocalCoordinator : IAsyncDisposable
         GovernedLoopCoordinatorHeartbeat heartbeat)
         => snapshot?.LatestHeartbeat == heartbeat
             && snapshot.Ownership == heartbeat.Ownership;
+
+    private static bool IsLocalSessionOwnership(GovernedLoopLocalCoordinatorSession session)
+        => session.Snapshot.Ownership == session.LocalOwnership;
+
+    private static bool IsOwnershipLossParked(GovernedLoopLocalCoordinatorSession session)
+        => Volatile.Read(ref session.OwnershipLossParked) != 0;
+
+    private static bool CanMutateSessionEvidence(GovernedLoopLocalCoordinatorSession session)
+        => !IsOwnershipLossParked(session) && IsLocalSessionOwnership(session);
 
     private static GovernedLoopLocalCoordinatorStartStatus Map(GovernedLoopCoordinatorAcquisitionStatus status)
         => status switch

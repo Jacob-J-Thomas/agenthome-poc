@@ -36,6 +36,7 @@ internal sealed class GovernedLoopBackgroundRuntimeHost : ICustomLoopExecutionAc
     private readonly TimeProvider _timeProvider;
     private readonly GovernedLoopWaitExecutionService _wait;
     private readonly GovernedLoopRetryExecutionService _retry;
+    private readonly IGovernedLoopLocalCoordinatorBoundaryObserver? _coordinatorBoundaryObserver;
     private GovernedLoopLocalCoordinator? _coordinator;
     private Task<GovernedLoopLocalCoordinatorStopResult>? _stopTask;
     private AgentRuntimeGovernedLoopBackgroundStopResult? _completedStopResult;
@@ -50,12 +51,14 @@ internal sealed class GovernedLoopBackgroundRuntimeHost : ICustomLoopExecutionAc
         GovernedLoopCoordinatorEvidenceStore coordinatorEvidenceStore,
         GovernedLoopWaitExecutionService wait,
         GovernedLoopRetryExecutionService retry,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        IGovernedLoopLocalCoordinatorBoundaryObserver? coordinatorBoundaryObserver = null)
     {
         _coordinatorEvidenceStore = coordinatorEvidenceStore ?? throw new ArgumentNullException(nameof(coordinatorEvidenceStore));
         _wait = wait ?? throw new ArgumentNullException(nameof(wait));
         _retry = retry ?? throw new ArgumentNullException(nameof(retry));
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _coordinatorBoundaryObserver = coordinatorBoundaryObserver;
     }
 
     internal void BindBackgroundWork(IGovernedLoopLocalWorkRunner work)
@@ -79,7 +82,8 @@ internal sealed class GovernedLoopBackgroundRuntimeHost : ICustomLoopExecutionAc
                 _heartbeatInterval,
                 _ownershipLeaseDuration,
                 MaximumItemsPerFamilyPerCycle),
-            _timeProvider);
+            _timeProvider,
+            _coordinatorBoundaryObserver);
     }
 
     public async Task<CustomLoopExecutionActivationResult> ActivateAsync(
@@ -156,6 +160,7 @@ internal sealed class GovernedLoopBackgroundRuntimeHost : ICustomLoopExecutionAc
             if (current.Ownership == AgentRuntimeGovernedLoopBackgroundOwnership.LivePeer)
             {
                 Volatile.Write(ref _activationRequested, 0);
+                _stopTask ??= coordinator.ParkAfterOwnershipLossAsync();
                 return new AgentRuntimeGovernedLoopBackgroundStopResult(
                     AgentRuntimeGovernedLoopBackgroundStopStatus.OwnedByLivePeer,
                     current.Readiness,

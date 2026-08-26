@@ -527,6 +527,42 @@ internal sealed class RecordingCoordinatorEvidencePort : IGovernedLoopCoordinato
         }
     }
 
+    internal GovernedLoopCoordinatorSnapshot ReplaceWithPeerOwnership(string ownerId)
+    {
+        lock (_gate)
+        {
+            var current = _snapshot ?? throw new InvalidOperationException("No coordinator evidence exists.");
+            var acquiredAtUtc = current.LatestHeartbeat.LeaseExpiresAtUtc;
+            var ownership = GovernedLoopSleepContractHash.Apply(new GovernedLoopCoordinatorOwnership(
+                GovernedLoopCoordinatorOwnership.CurrentSchemaVersion,
+                current.Ownership.CoordinatorId,
+                ownerId,
+                current.Ownership.OwnershipEpoch + 1,
+                acquiredAtUtc,
+                string.Empty));
+            var lifecycle = GovernedLoopSleepContractHash.Apply(new GovernedLoopCoordinatorLifecycle(
+                GovernedLoopCoordinatorLifecycle.CurrentSchemaVersion,
+                1,
+                ownership,
+                GovernedLoopCoordinatorStatus.Starting,
+                acquiredAtUtc,
+                null,
+                string.Empty));
+            var heartbeat = GovernedLoopSleepContractHash.Apply(new GovernedLoopCoordinatorHeartbeat(
+                GovernedLoopCoordinatorHeartbeat.CurrentSchemaVersion,
+                1,
+                ownership,
+                acquiredAtUtc,
+                acquiredAtUtc.AddMinutes(1),
+                string.Empty));
+            _latestFailure = null;
+            _snapshot = new GovernedLoopCoordinatorSnapshot(ownership, lifecycle, heartbeat, 0, null);
+            Lifecycles.Add(lifecycle);
+            Heartbeats.Add(heartbeat);
+            return _snapshot;
+        }
+    }
+
     private bool IsExact(GovernedLoopCoordinatorAcquisitionRequest request)
         => _snapshot!.Ownership == request.ProposedOwnership
             && _snapshot.LatestLifecycle == request.StartingLifecycle
