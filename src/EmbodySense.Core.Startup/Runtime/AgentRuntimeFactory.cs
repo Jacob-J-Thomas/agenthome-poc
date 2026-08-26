@@ -13,6 +13,7 @@ using EmbodySense.Core.Application.Loops.EffectAuthorityUsage;
 using EmbodySense.Core.Application.Loops.Execution;
 using EmbodySense.Core.Application.Loops.Execution.Authority;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
+using EmbodySense.Core.Application.Loops.Authoring;
 using EmbodySense.Core.Application.Loops.Failures;
 using EmbodySense.Core.Application.Loops.GraphAuthoring;
 using EmbodySense.Core.Application.Loops.GraphValidation;
@@ -88,6 +89,7 @@ public sealed class AgentRuntimeFactory
     private readonly IGovernedModelPrimaryExecutionBoundaryObserver? _governedModelExecutionObserver;
     private readonly IReadOnlyList<ModelProfileRuntimeProvider> _additionalModelProfileProviders;
     private readonly CommandActionRuntimeProvider? _commandActionRuntimeProvider;
+    private readonly CustomLoopRunStoreProvider? _customLoopRunStoreProvider;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="AgentRuntimeFactory"/> type.
@@ -167,7 +169,8 @@ public sealed class AgentRuntimeFactory
             _governedModelExecutionObserver,
             _additionalModelProfileProviders,
             verifier,
-            _commandActionRuntimeProvider);
+            _commandActionRuntimeProvider,
+            _customLoopRunStoreProvider);
     }
 
     /// <summary>Returns an equivalent factory with one explicit server-owned structured command Action provider.</summary>
@@ -184,6 +187,27 @@ public sealed class AgentRuntimeFactory
             _governedModelExecutionObserver,
             _additionalModelProfileProviders,
             _authenticatedWakeVerifier,
+            provider,
+            _customLoopRunStoreProvider);
+    }
+
+    /// <summary>
+    /// Returns an equivalent factory whose runtimes borrow one inference-independent canonical custom-loop run store.
+    /// </summary>
+    /// <param name="provider">The workspace-host owner that outlives every runtime composed by the returned factory.</param>
+    /// <returns>A factory that borrows the provider's store and never transfers its disposal ownership to a runtime.</returns>
+    public AgentRuntimeFactory WithCustomLoopRunStoreProvider(CustomLoopRunStoreProvider provider)
+    {
+        ArgumentNullException.ThrowIfNull(provider);
+        return new AgentRuntimeFactory(
+            _approvalPrompt,
+            _conversationPublicationObserver,
+            _codexRuntimeStatus,
+            _capabilityTrustProvider,
+            _governedModelExecutionObserver,
+            _additionalModelProfileProviders,
+            _authenticatedWakeVerifier,
+            _commandActionRuntimeProvider,
             provider);
     }
 
@@ -195,7 +219,8 @@ public sealed class AgentRuntimeFactory
         IGovernedModelPrimaryExecutionBoundaryObserver? governedModelExecutionObserver = null,
         IReadOnlyList<ModelProfileRuntimeProvider>? additionalModelProfileProviders = null,
         IAgentRuntimeAuthenticatedWakeVerifier? authenticatedWakeVerifier = null,
-        CommandActionRuntimeProvider? commandActionRuntimeProvider = null)
+        CommandActionRuntimeProvider? commandActionRuntimeProvider = null,
+        CustomLoopRunStoreProvider? customLoopRunStoreProvider = null)
     {
         ArgumentNullException.ThrowIfNull(approvalPrompt);
         if (codexRuntimeStatus is not null && codexRuntimeStatus.Compatibility != CodexRuntimeCompatibility.Compatible)
@@ -223,6 +248,7 @@ public sealed class AgentRuntimeFactory
         }
         _additionalModelProfileProviders = Array.AsReadOnly(additionalProviders);
         _commandActionRuntimeProvider = commandActionRuntimeProvider;
+        _customLoopRunStoreProvider = customLoopRunStoreProvider;
     }
 
     /// <summary>
@@ -310,6 +336,8 @@ public sealed class AgentRuntimeFactory
         var effectiveOptions = options with { WorkingDirectory = workingDirectory, CodexExecutablePath = codexRuntimeStatus.ResolvedExecutablePath };
         var paths = new WorkspacePaths(workingDirectory);
         var customExecutionGate = new CustomLoopWorkspaceExecutionGate(paths);
+        CustomLoopRunStore? customRunStore = null;
+        var ownsCustomRunStore = _customLoopRunStoreProvider is null;
         GovernedLoopWaitRuntimeHost? governedWaitRuntimeHost = null;
         GovernedLoopSleepService? governedSleep = null;
         try
@@ -318,7 +346,7 @@ public sealed class AgentRuntimeFactory
             var permissionService = new ToolPermissionService(paths, permissionPolicy);
             var auditLog = new AuditLog(paths);
             var actor = ResolveActor(runtimeSurface);
-            var customRunStore = new CustomLoopRunStore(paths);
+            customRunStore = _customLoopRunStoreProvider?.Borrow(paths) ?? new CustomLoopRunStore(paths);
             var recovery = new CustomLoopRecoveryService(customRunStore, auditLog);
             var recoveryOperationId = "recovery-" + Guid.NewGuid().ToString("N");
             var recoveryOwnership = customExecutionGate.TryAcquire(recoveryOperationId, new string('0', CustomLoopLimits.Sha256HexCharacters));
@@ -428,6 +456,7 @@ public sealed class AgentRuntimeFactory
             var loopRunner = new DefaultConversationLoopRunner(inferenceClient, conversationState, conversationMemory, defaultLoop, loopRunStore, runtimeSurface.SurfaceId, conversationTurnStore, capabilityAdmissionService: capabilityAdmission);
             var defaultConversationReviews = new DefaultConversationTurnReviewService(conversationTurnStore, inferenceClient, new FileConversationWorkspaceLease(paths));
             var customDefinitionStore = new CustomLoopDefinitionStore(paths, capabilityAuthority);
+            var loopAuthoring = new LoopAuthoringFacade(new CustomLoopAuthoringService(customDefinitionStore, auditLog, runStore: customRunStore), loopDefinitionStore, paths, actor);
             var customInvocationOperations = new CustomLoopInvocationOperationStore(paths);
             var customInvocationReceiptRetention = new CustomLoopInvocationReceiptRetentionService(customInvocationOperations, auditLog);
             var customInvocationReceiptWriter = new CustomLoopInvocationReceiptWriter(customInvocationOperations, customInvocationReceiptRetention);
@@ -779,7 +808,7 @@ public sealed class AgentRuntimeFactory
                 workspaceId,
                 customModelSnapshot,
                 governedRoleStore);
-            return new AgentRuntime(
+            var runtime = new AgentRuntime(
                 paths,
                 runtimeSurface,
                 conversationMemory,
@@ -787,7 +816,10 @@ public sealed class AgentRuntimeFactory
                 conversationState,
                 inferenceClient,
                 loopRunner,
+                customRunStore,
+                ownsCustomRunStore,
                 customLoops,
+                loopAuthoring,
                 governedLoops,
                 scheduleDeliveryProvenance,
                 operationalFacade,
@@ -798,6 +830,8 @@ public sealed class AgentRuntimeFactory
                 codexRuntimeStatus,
                 governedWaitRuntimeHost,
                 governedSleep);
+            customRunStore = null;
+            return runtime;
         }
         catch
         {
@@ -810,7 +844,17 @@ public sealed class AgentRuntimeFactory
             }
             finally
             {
-                await customExecutionGate.DisposeAsync();
+                try
+                {
+                    if (ownsCustomRunStore)
+                    {
+                        customRunStore?.Dispose();
+                    }
+                }
+                finally
+                {
+                    await customExecutionGate.DisposeAsync();
+                }
             }
 
             throw;

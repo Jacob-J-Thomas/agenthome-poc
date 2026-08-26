@@ -66,7 +66,7 @@ public sealed class ProgramTests
         var hubOptions = provider.GetRequiredService<IOptions<HubOptions<WebSessionHub>>>().Value;
         Assert.Equal(2, hubOptions.MaximumParallelInvocationsPerClient);
         Assert.Equal(LoopRunTransportLimits.MaxSignalRInvocationMessageUtf8Bytes, hubOptions.MaximumReceiveMessageSize);
-        Assert.NotNull(provider.GetRequiredService<LoopAuthoringFacade>());
+        Assert.Null(provider.GetService<LoopAuthoringFacade>());
         Assert.NotNull(provider.GetRequiredService<ICapabilityCatalogFacade>());
     }
 

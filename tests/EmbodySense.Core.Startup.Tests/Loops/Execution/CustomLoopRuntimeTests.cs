@@ -612,7 +612,7 @@ internal static class CustomLoopRuntimeTests
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
-        var facade = new LoopAuthoringFacade(workspace.RootPath, WorkspaceActors.Cli);
+        var facade = new LoopAuthoringFacade(workspace.RootPath, new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath)), WorkspaceActors.Cli);
         var created = Assert.IsType<LoopDefinitionSnapshot>((await facade.CreateAsync("create-runtime-sequential-publication")).Definition);
         var publishInference = new LoopNodeContextPolicy(LoopContextPolicyMode.Custom, new LoopContextPolicy(created.ContextDefaults.Inference.ContextIn, new LoopContextOutputPolicy(true, true)));
         var publishExit = new LoopNodeContextPolicy(LoopContextPolicyMode.Custom, new LoopContextPolicy(created.ContextDefaults.Exit.ContextIn, new LoopContextOutputPolicy(false, true)));
@@ -654,7 +654,7 @@ internal static class CustomLoopRuntimeTests
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
-        var facade = new LoopAuthoringFacade(workspace.RootPath, WorkspaceActors.Cli);
+        var facade = new LoopAuthoringFacade(workspace.RootPath, new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath)), WorkspaceActors.Cli);
         var created = Assert.IsType<LoopDefinitionSnapshot>((await facade.CreateAsync("create-runtime-publication-observer")).Definition);
         var publishInference = new LoopNodeContextPolicy(LoopContextPolicyMode.Custom, new LoopContextPolicy(created.ContextDefaults.Inference.ContextIn, new LoopContextOutputPolicy(true, true)));
         var noPublishExit = new LoopNodeContextPolicy(LoopContextPolicyMode.Custom, new LoopContextPolicy(created.ContextDefaults.Exit.ContextIn, new LoopContextOutputPolicy(false, false)));
@@ -1045,7 +1045,7 @@ internal static class CustomLoopRuntimeTests
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
-        var facade = new LoopAuthoringFacade(workspace.RootPath, WorkspaceActors.Cli);
+        var facade = new LoopAuthoringFacade(workspace.RootPath, new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath)), WorkspaceActors.Cli);
         var created = Assert.IsType<LoopDefinitionSnapshot>((await facade.CreateAsync("create-runtime-restart-conversation")).Definition);
         var input = new LoopDefinitionInput(
             "Restart conversation loop",
@@ -1173,7 +1173,7 @@ internal static class CustomLoopRuntimeTests
 
     private static async Task<LoopDefinitionSnapshot> CreateInvocationLoopAsync(TestWorkspace workspace, bool includeInvokingConversation, string createOperationId, string updateOperationId)
     {
-        var facade = new LoopAuthoringFacade(workspace.RootPath, WorkspaceActors.Cli);
+        var facade = new LoopAuthoringFacade(workspace.RootPath, new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath)), WorkspaceActors.Cli);
         var created = Assert.IsType<LoopDefinitionSnapshot>((await facade.CreateAsync(createOperationId)).Definition);
         var input = new LoopDefinitionInput(
             "Runtime test loop",

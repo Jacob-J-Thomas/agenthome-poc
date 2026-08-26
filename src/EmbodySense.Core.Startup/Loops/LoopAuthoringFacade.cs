@@ -1,6 +1,7 @@
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops;
 using EmbodySense.Core.Startup.Loops.Models;
+using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Execution;
 using EmbodySense.Core.Application.Loops.Authoring.Models;
 using EmbodySense.Core.Application.Loops.Authoring;
@@ -24,7 +25,7 @@ using ApplicationNodeContext = EmbodySense.Core.Common.Loops.Custom.CustomLoopNo
 namespace EmbodySense.Core.Startup.Loops;
 
 /// <summary>
-/// Exposes custom-loop authoring through Core.Startup without leaking application or persistence types.
+/// Exposes custom-loop authoring through Core.Startup.
 /// </summary>
 /// <remarks>
 /// The persisted default-conversation definition is the authority source for role identity and
@@ -40,39 +41,40 @@ public sealed class LoopAuthoringFacade
     private readonly string _actor;
 
     /// <summary>
-    /// Creates a Web-attributed authoring facade over the supplied workspace.
+    /// Creates an authoring facade over the supplied workspace, actor, and canonical run store.
     /// </summary>
     /// <param name="workingDirectory">The workspace root, normalized to an absolute path.</param>
-    public LoopAuthoringFacade(string workingDirectory) : this(workingDirectory, WorkspaceActors.Web)
-    {
-    }
-
-    /// <summary>
-    /// Creates an authoring facade over the supplied workspace and audit actor.
-    /// </summary>
-    /// <param name="workingDirectory">The workspace root, normalized to an absolute path.</param>
+    /// <param name="runStore">The caller-owned canonical run store used to protect definitions with nonterminal runs.</param>
     /// <param name="actor">The nonblank actor attributed to authoring audit events.</param>
-    public LoopAuthoringFacade(string workingDirectory, string actor)
+    /// <remarks>
+    /// This facade borrows <paramref name="runStore"/> and never disposes it. Production callers obtain the
+    /// store from <see cref="CustomLoopRunStoreProvider"/> or <see cref="Runtime.AgentRuntime"/> composition;
+    /// isolated callers must retain and dispose their own store after all authoring operations have completed.
+    /// </remarks>
+    public LoopAuthoringFacade(string workingDirectory, ICustomLoopRunStore runStore, string actor = WorkspaceActors.Web)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(workingDirectory);
+        ArgumentNullException.ThrowIfNull(runStore);
         ArgumentException.ThrowIfNullOrWhiteSpace(actor);
 
         var paths = new WorkspacePaths(workingDirectory);
         var store = new CustomLoopDefinitionStore(paths);
-        _service = new CustomLoopAuthoringService(store, new AuditLog(paths), runStore: new CustomLoopRunStore(paths));
+        _service = new CustomLoopAuthoringService(store, new AuditLog(paths), runStore: runStore);
         _systemDefinitionStore = new LoopDefinitionStore(paths);
         _paths = paths;
         _actor = actor;
     }
 
-    internal LoopAuthoringFacade(CustomLoopAuthoringService service, LoopDefinitionStore systemDefinitionStore, string actor)
+    internal LoopAuthoringFacade(CustomLoopAuthoringService service, LoopDefinitionStore systemDefinitionStore, WorkspacePaths paths, string actor)
     {
         ArgumentNullException.ThrowIfNull(service);
         ArgumentNullException.ThrowIfNull(systemDefinitionStore);
+        ArgumentNullException.ThrowIfNull(paths);
         ArgumentException.ThrowIfNullOrWhiteSpace(actor);
 
         _service = service;
         _systemDefinitionStore = systemDefinitionStore;
+        _paths = paths;
         _actor = actor;
     }
 

@@ -9,6 +9,8 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using EmbodySense.Core.Startup.Loops;
+using EmbodySense.Core.Startup.Configuration.Models;
+using EmbodySense.Core.Startup.Runtime.Models;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Tests.Support;
 using EmbodySense.Web.Models;
@@ -33,7 +35,8 @@ public sealed class LoopApiControllerTests : IClassFixture<LoopApiControllerTest
     public async Task Loop_api_enforces_authentication_initialization_and_system_loop_lock()
     {
         using var workspace = new TestWorkspace();
-        await using var app = CreateApp(workspace.RootPath, out var options);
+        var codexPath = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
+        await using var app = CreateApp(workspace.RootPath, out var options, codexPath: codexPath);
         await app.StartAsync();
 
         try
@@ -143,7 +146,8 @@ public sealed class LoopApiControllerTests : IClassFixture<LoopApiControllerTest
     public async Task Loop_create_rejects_missing_or_null_first_save_definitions_as_invalid_requests()
     {
         using var workspace = new TestWorkspace();
-        await using var app = CreateApp(workspace.RootPath, out var options);
+        var codexPath = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
+        await using var app = CreateApp(workspace.RootPath, out var options, codexPath: codexPath);
         await app.StartAsync();
 
         try
@@ -171,6 +175,50 @@ public sealed class LoopApiControllerTests : IClassFixture<LoopApiControllerTest
             }
 
             Assert.Empty(catalog.CustomDefinitions);
+        }
+        finally
+        {
+            await app.StopAsync();
+        }
+    }
+
+    [Fact]
+    public async Task Loop_authoring_catalog_and_crud_remain_available_when_the_configured_codex_executable_is_absent()
+    {
+        using var workspace = new TestWorkspace();
+        var missingCodexPath = workspace.File("missing-codex");
+        await using var app = CreateApp(workspace.RootPath, out var options, codexPath: missingCodexPath);
+        await app.StartAsync();
+
+        try
+        {
+            await AssertInferenceIndependentAuthoringCrudAsync(app, options);
+        }
+        finally
+        {
+            await app.StopAsync();
+        }
+    }
+
+    [Fact]
+    public async Task Loop_authoring_catalog_and_crud_remain_available_when_the_configured_model_is_incompatible()
+    {
+        using var workspace = new TestWorkspace();
+        var codexPath = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "different-model");
+        await using var app = CreateApp(workspace.RootPath, out var options, codexPath: codexPath);
+        await app.StartAsync();
+
+        try
+        {
+            using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
+            var token = app.Services.GetRequiredService<WebSessionSecurity>().Token;
+            var configuration = await SendAsync(client, HttpMethod.Get, "/api/configuration", token);
+            var snapshot = await configuration.Content.ReadFromJsonAsync<WorkspaceConfigurationSnapshot>(_jsonOptions);
+
+            Assert.Equal(HttpStatusCode.OK, configuration.StatusCode);
+            Assert.Equal(CodexRuntimeCompatibility.ModelUnavailable, snapshot!.Runtime.CodexRuntime!.Compatibility);
+
+            await AssertInferenceIndependentAuthoringCrudAsync(app, options);
         }
         finally
         {
@@ -253,7 +301,8 @@ public sealed class LoopApiControllerTests : IClassFixture<LoopApiControllerTest
     public async Task Loop_api_projects_crud_conflicts_and_hostile_text_as_json_data()
     {
         using var workspace = new TestWorkspace();
-        await using var app = CreateApp(workspace.RootPath, out var options);
+        var codexPath = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
+        await using var app = CreateApp(workspace.RootPath, out var options, codexPath: codexPath);
         await app.StartAsync();
 
         try
@@ -386,6 +435,36 @@ public sealed class LoopApiControllerTests : IClassFixture<LoopApiControllerTest
         };
     }
 
+    private static async Task AssertInferenceIndependentAuthoringCrudAsync(WebApplication app, WebRunOptions options)
+    {
+        using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
+        var token = app.Services.GetRequiredService<WebSessionSecurity>().Token;
+        var initialized = await SendAsync(client, HttpMethod.Post, "/api/workspace/init", token, new { });
+        var catalogResponse = await SendAsync(client, HttpMethod.Get, "/api/loops", token);
+        var catalog = await catalogResponse.Content.ReadFromJsonAsync<LoopAuthoringCatalog>(_jsonOptions);
+        var definition = Assert.IsType<LoopDefinitionInput>(catalog!.DraftTemplate.Definition with
+        {
+            DisplayName = "Inference-independent loop",
+            Description = "Authoring must not create a Codex runtime."
+        });
+        var create = await SendAsync(client, HttpMethod.Post, "/api/loops", token, new { operationId = "create-inference-independent-loop", definition });
+        var created = await create.Content.ReadFromJsonAsync<LoopAuthoringResponse>(_jsonOptions);
+        var createdDefinition = Assert.IsType<LoopDefinitionSnapshot>(created!.Definition);
+        var update = await SendAsync(client, HttpMethod.Put, $"/api/loops/{createdDefinition.Id}", token, CreateUpdateBody(createdDefinition, "update-inference-independent-loop", "Updated without Codex."));
+        var updated = await update.Content.ReadFromJsonAsync<LoopAuthoringResponse>(_jsonOptions);
+        var updatedDefinition = Assert.IsType<LoopDefinitionSnapshot>(updated!.Definition);
+        var delete = await SendAsync(client, HttpMethod.Delete, $"/api/loops/{createdDefinition.Id}", token, new { expectedDefinitionVersion = updatedDefinition.DefinitionVersion, operationId = "delete-inference-independent-loop" });
+
+        Assert.Equal(HttpStatusCode.OK, initialized.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, catalogResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.Created, create.StatusCode);
+        Assert.Equal("Created", created.Status);
+        Assert.Equal(HttpStatusCode.OK, update.StatusCode);
+        Assert.Equal("Updated", updated.Status);
+        Assert.Equal(HttpStatusCode.OK, delete.StatusCode);
+        Assert.Equal("Deleted", (await delete.Content.ReadFromJsonAsync<LoopAuthoringResponse>(_jsonOptions))!.Status);
+    }
+
     private static LoopDefinitionInput CreateFirstSaveDefinition()
     {
         var inherited = new LoopNodeContextPolicy(LoopContextPolicyMode.Inherit, null);
@@ -418,10 +497,12 @@ public sealed class LoopApiControllerTests : IClassFixture<LoopApiControllerTest
         return await client.SendAsync(request);
     }
 
-    private static WebApplication CreateApp(string rootPath, out WebRunOptions options, ILoopReceiptRetentionFacade? receiptRetention = null)
+    private static WebApplication CreateApp(string rootPath, out WebRunOptions options, ILoopReceiptRetentionFacade? receiptRetention = null, string? codexPath = null)
     {
         var port = GetFreePort();
-        var arguments = new[] { "--workdir", rootPath, "--port", port.ToString(), "--model", "gpt-test" };
+        string[] arguments = codexPath is null
+            ? ["--workdir", rootPath, "--port", port.ToString(), "--model", "gpt-test"]
+            : ["--workdir", rootPath, "--port", port.ToString(), "--model", "gpt-test", "--codex-path", codexPath];
         options = WebRunOptions.FromArguments(arguments);
         var builder = Program.CreateBuilder(arguments, options);
         if (receiptRetention is not null)

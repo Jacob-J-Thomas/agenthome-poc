@@ -493,7 +493,7 @@ public sealed class LoopRunApiControllerTests
 
     private static async Task<LoopDefinitionSnapshot> CreateInvocationLoopAsync(TestWorkspace workspace)
     {
-        var facade = new LoopAuthoringFacade(workspace.RootPath);
+        var facade = new LoopAuthoringFacade(workspace.RootPath, new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath)));
         var created = Assert.IsType<LoopDefinitionSnapshot>((await facade.CreateAsync("create-web-run-api")).Definition);
         var input = new LoopDefinitionInput(
             "Web runtime loop",

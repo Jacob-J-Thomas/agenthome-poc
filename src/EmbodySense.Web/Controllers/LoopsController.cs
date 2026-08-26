@@ -20,23 +20,19 @@ namespace EmbodySense.Web.Controllers;
 [Route("api/loops")]
 public sealed class LoopsController : ControllerBase
 {
-    private readonly LoopAuthoringFacade _loops;
     private readonly ILoopReceiptRetentionFacade _receiptRetention;
     private readonly WebAgentRuntimeHost _host;
 
     /// <summary>
     /// Initializes the loop-authoring controller.
     /// </summary>
-    /// <param name="loops">The reusable authoring facade for durable definitions.</param>
     /// <param name="receiptRetention">The Startup-only facade that owns receipt posture and governed cleanup attribution.</param>
     /// <param name="host">The Web host used for workspace and runtime-model status.</param>
-    public LoopsController(LoopAuthoringFacade loops, ILoopReceiptRetentionFacade receiptRetention, WebAgentRuntimeHost host)
+    public LoopsController(ILoopReceiptRetentionFacade receiptRetention, WebAgentRuntimeHost host)
     {
-        ArgumentNullException.ThrowIfNull(loops);
         ArgumentNullException.ThrowIfNull(receiptRetention);
         ArgumentNullException.ThrowIfNull(host);
 
-        _loops = loops;
         _receiptRetention = receiptRetention;
         _host = host;
     }
@@ -54,7 +50,7 @@ public sealed class LoopsController : ControllerBase
             return Conflict(new { error = "workspace_not_initialized", detail = "Initialize the workspace before managing loops." });
         }
 
-        var catalog = await _loops.GetCatalogAsync(cancellationToken);
+        var catalog = await _host.UseLoopAuthoringAsync(loops => loops.GetCatalogAsync(cancellationToken), cancellationToken);
         return Ok(catalog with { RuntimeModel = _host.GetCustomLoopModel() });
     }
 
@@ -71,7 +67,7 @@ public sealed class LoopsController : ControllerBase
             return Conflict(new { error = "workspace_not_initialized", detail = "Initialize the workspace before managing loops." });
         }
 
-        return Ok((await _loops.GetCatalogAsync(cancellationToken)).SystemDefault);
+        return Ok((await _host.UseLoopAuthoringAsync(loops => loops.GetCatalogAsync(cancellationToken), cancellationToken)).SystemDefault);
     }
 
     /// <summary>
@@ -93,7 +89,7 @@ public sealed class LoopsController : ControllerBase
 
         try
         {
-            var definition = await _loops.GetAsync(loopId, cancellationToken);
+            var definition = await _host.UseLoopAuthoringAsync(loops => loops.GetAsync(loopId, cancellationToken), cancellationToken);
             return definition is null ? NotFound() : Ok(definition);
         }
         catch (ArgumentException)
@@ -130,7 +126,7 @@ public sealed class LoopsController : ControllerBase
                 "The first-save definition is required."));
         }
 
-        var response = await _loops.CreateAsync(request.OperationId, request.Definition, cancellationToken);
+        var response = await _host.UseLoopAuthoringAsync(loops => loops.CreateAsync(request.OperationId, request.Definition, cancellationToken), cancellationToken);
         return response.Status == "Created"
             ? CreatedAtAction(nameof(Get), new { loopId = response.Definition!.Id }, response)
             : Project(response);
@@ -159,7 +155,7 @@ public sealed class LoopsController : ControllerBase
             return Conflict(new { error = "system_loop_locked", detail = "The default conversation loop is read-only." });
         }
 
-        return Project(await _loops.UpdateAsync(loopId, request.ExpectedDefinitionVersion, request.OperationId, request.Definition, cancellationToken));
+        return Project(await _host.UseLoopAuthoringAsync(loops => loops.UpdateAsync(loopId, request.ExpectedDefinitionVersion, request.OperationId, request.Definition, cancellationToken), cancellationToken));
     }
 
     /// <summary>
@@ -185,7 +181,7 @@ public sealed class LoopsController : ControllerBase
             return Conflict(new { error = "system_loop_locked", detail = "The default conversation loop is read-only." });
         }
 
-        return Project(await _loops.DeleteAsync(loopId, request.ExpectedDefinitionVersion, request.OperationId, cancellationToken));
+        return Project(await _host.UseLoopAuthoringAsync(loops => loops.DeleteAsync(loopId, request.ExpectedDefinitionVersion, request.OperationId, cancellationToken), cancellationToken));
     }
 
     /// <summary>
