@@ -39,14 +39,14 @@ function New-TestComponent {
     $marker = "$(($phaseNames | ForEach-Object { "VERIFY_PHASE_COMPLETE name=$_ elapsed_seconds=1 completed_at_utc=2026-01-01T00:00:00.0000000+00:00`n" }) -join '')VERIFY_COMPLETE schema_version=1 component=$Component status=passed elapsed_seconds=1`n"
     [IO.File]::WriteAllText((Join-Path $resultsRoot "watchdog.log"), $marker, [Text.UTF8Encoding]::new($false))
     if ($Component -ceq "solution") {
-        $lanes = @(1..9 | ForEach-Object { [ordered]@{ name = "lane-$_"; projectName = "Project$_"; filter = "(VerificationTier!=Stress)" } })
+        $lanes = @(1..10 | ForEach-Object { [ordered]@{ name = "lane-$_"; projectName = "Project$_"; filter = "(VerificationTier!=Stress)" } })
         Write-TestJson -Path (Join-Path $resultsRoot "required-test-lanes.json") -Value ([ordered]@{ schemaVersion = 1; lanes = $lanes })
-        Write-TestJson -Path (Join-Path $resultsRoot "required-test-partition.json") -Value ([ordered]@{ schemaVersion = 1; canonicalInventoryCount = 9; laneDefinitionCount = 9; canonicalTestCount = 1; laneTestCount = 1; emptyLanes = @(); missing = @(); unexpected = @(); overlap = @(); duplicateCanonical = @(); duplicateExecutionIds = @() })
+        Write-TestJson -Path (Join-Path $resultsRoot "required-test-partition.json") -Value ([ordered]@{ schemaVersion = 1; canonicalInventoryCount = 9; laneDefinitionCount = 10; canonicalTestCount = 1; laneTestCount = 1; emptyLanes = @(); missing = @(); unexpected = @(); overlap = @(); duplicateCanonical = @(); duplicateExecutionIds = @() })
         Write-TestJson -Path (Join-Path $resultsRoot "required-execution-tests.json") -Value ([ordered]@{ schemaVersion = 1; totalTests = 1; tests = @([ordered]@{ id = "00000000-0000-0000-0000-000000000001" }) })
         Write-TestJson -Path (Join-Path $resultsRoot "required-test-report.json") -Value ([ordered]@{ schemaVersion = 1; expectedCount = 1; executedCount = 2; uniqueExecutedCount = 1; missing = @(); unexpected = @(); crossReportOverlap = @(); duplicateExecutionId = @(); nonPassing = @() })
-        Write-TestJson -Path (Join-Path $resultsRoot "coverage-manifest.json") -Value ([ordered]@{ schemaVersion = 1; laneReportCount = 9; childReportCount = 0; aliasReportCount = 0; reports = @(1..9 | ForEach-Object { [ordered]@{ id = $_ } }); aliases = @() })
+        Write-TestJson -Path (Join-Path $resultsRoot "coverage-manifest.json") -Value ([ordered]@{ schemaVersion = 1; laneReportCount = 10; childReportCount = 0; aliasReportCount = 0; reports = @(1..10 | ForEach-Object { [ordered]@{ id = $_ } }); aliases = @() })
         Write-TestJson -Path (Join-Path $resultsRoot "coverage-summary.json") -Value ([ordered]@{ schemaVersion = 1; threshold = 0.9; reports = @([ordered]@{ path = "coverage" }); packages = @([ordered]@{ package = "Core" }); failures = @() })
-        foreach ($index in 1..9) {
+        foreach ($index in 1..10) {
             [IO.File]::WriteAllText((Join-Path $resultsRoot "lane-$index.trx"), "trx", [Text.UTF8Encoding]::new($false))
         }
     }
@@ -60,7 +60,7 @@ function New-TestComponent {
         }
     }
 
-    $evidence = [ordered]@{ schemaVersion = 1; component = $Component; repositoryHead = "head"; githubRunId = "run"; githubRunAttempt = "attempt"; laneCount = if ($Component -ceq "solution") { 9 } else { 0 }; inventoryComplete = ($Component -ceq "solution"); coverageComplete = ($Component -ceq "solution"); staticContractCount = if ($Component -ceq "static-contracts") { 8 } else { 0 }; frontendComplete = ($Component -ceq "static-contracts"); formatComplete = ($Component -ceq "static-contracts"); diffComplete = ($Component -ceq "static-contracts"); manifestSha256 = "" }
+    $evidence = [ordered]@{ schemaVersion = 1; component = $Component; repositoryHead = "head"; githubRunId = "run"; githubRunAttempt = "attempt"; laneCount = if ($Component -ceq "solution") { 10 } else { 0 }; inventoryComplete = ($Component -ceq "solution"); coverageComplete = ($Component -ceq "solution"); staticContractCount = if ($Component -ceq "static-contracts") { 8 } else { 0 }; frontendComplete = ($Component -ceq "static-contracts"); formatComplete = ($Component -ceq "static-contracts"); diffComplete = ($Component -ceq "static-contracts"); manifestSha256 = "" }
     $evidencePath = Join-Path $resultsRoot "verification-component-evidence.json"
     Write-TestJson -Path $evidencePath -Value $evidence
     $manifestPath = Join-Path $resultsRoot "verification-component-manifest.json"
@@ -70,6 +70,24 @@ function New-TestComponent {
     $evidence.manifestSha256 = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
     Write-TestJson -Path $evidencePath -Value $evidence
     $watchdogEvidence = [ordered]@{ schemaVersion = 1; component = $Component; mode = "promotion"; repositoryHead = "head"; githubRunId = "run"; githubRunAttempt = "attempt"; deadlineSeconds = if ($Component -ceq "solution") { 1200 } else { 600 }; elapsedSeconds = 1; exitCode = 0; completionMarkerCount = 1; status = "passed"; watchdogLogSha256 = (Get-FileHash -LiteralPath (Join-Path $resultsRoot "watchdog.log") -Algorithm SHA256).Hash.ToLowerInvariant(); componentEvidenceSha256 = (Get-FileHash -LiteralPath $evidencePath -Algorithm SHA256).Hash.ToLowerInvariant(); componentManifestSha256 = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant() }
+    Write-TestJson -Path $watchdogEvidencePath -Value $watchdogEvidence
+}
+
+function Update-TestComponentEvidence {
+    param([string]$Root)
+
+    $resultsRoot = Join-Path $Root "VerificationResults"
+    $evidencePath = Join-Path $resultsRoot "verification-component-evidence.json"
+    $manifestPath = Join-Path $resultsRoot "verification-component-manifest.json"
+    $watchdogEvidencePath = Join-Path $resultsRoot "verification-watchdog-evidence.json"
+    $manifest = [ordered]@{ schemaVersion = 1; files = @(Get-ChildItem -LiteralPath $resultsRoot -Recurse -File | Where-Object { $_.FullName -ne $evidencePath -and $_.FullName -ne $manifestPath -and $_.FullName -ne $watchdogEvidencePath -and $_.Name -ne "watchdog.log" } | ForEach-Object { [ordered]@{ path = [IO.Path]::GetRelativePath($resultsRoot, $_.FullName).Replace([IO.Path]::DirectorySeparatorChar, "/"); length = $_.Length; sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() } }) }
+    Write-TestJson -Path $manifestPath -Value $manifest
+    $evidence = Get-Content -LiteralPath $evidencePath -Raw | ConvertFrom-Json
+    $evidence.manifestSha256 = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Write-TestJson -Path $evidencePath -Value $evidence
+    $watchdogEvidence = Get-Content -LiteralPath $watchdogEvidencePath -Raw | ConvertFrom-Json
+    $watchdogEvidence.componentEvidenceSha256 = (Get-FileHash -LiteralPath $evidencePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $watchdogEvidence.componentManifestSha256 = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
     Write-TestJson -Path $watchdogEvidencePath -Value $watchdogEvidence
 }
 
@@ -130,6 +148,18 @@ try {
     $solutionEvidence.manifestSha256 = (Get-FileHash -LiteralPath $solutionManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
     Write-TestJson -Path $solutionEvidencePath -Value $solutionEvidence
     Assert-Throws -Message "manifest omission" -Action { Invoke-VerificationPromotionFanIn -SolutionArtifactRoot $solutionRoot -StaticArtifactRoot $staticRoot -ExpectedHead "head" -ExpectedRunId "run" -ExpectedRunAttempt "attempt" -SolutionResult "success" -StaticResult "success" }
+    New-TestComponent -Root $solutionRoot -Component "solution"
+    $staleLaneEvidence = Get-Content -LiteralPath (Join-Path $solutionRoot "VerificationResults\verification-component-evidence.json") -Raw | ConvertFrom-Json
+    $staleLaneEvidence.laneCount = 9
+    Write-TestJson -Path (Join-Path $solutionRoot "VerificationResults\verification-component-evidence.json") -Value $staleLaneEvidence
+    Update-TestComponentEvidence -Root $solutionRoot
+    Assert-Throws -Message "stale nine-lane evidence" -Action { Invoke-VerificationPromotionFanIn -SolutionArtifactRoot $solutionRoot -StaticArtifactRoot $staticRoot -ExpectedHead "head" -ExpectedRunId "run" -ExpectedRunAttempt "attempt" -SolutionResult "success" -StaticResult "success" }
+    New-TestComponent -Root $solutionRoot -Component "solution"
+    $malformedLaneDefinitions = Get-Content -LiteralPath (Join-Path $solutionRoot "VerificationResults\required-test-lanes.json") -Raw | ConvertFrom-Json
+    $malformedLaneDefinitions.lanes = @($malformedLaneDefinitions.lanes) + [pscustomobject]@{ name = "lane-11"; projectName = "Project11"; filter = "(VerificationTier!=Stress)" }
+    Write-TestJson -Path (Join-Path $solutionRoot "VerificationResults\required-test-lanes.json") -Value $malformedLaneDefinitions
+    Update-TestComponentEvidence -Root $solutionRoot
+    Assert-Throws -Message "malformed eleven-lane evidence" -Action { Invoke-VerificationPromotionFanIn -SolutionArtifactRoot $solutionRoot -StaticArtifactRoot $staticRoot -ExpectedHead "head" -ExpectedRunId "run" -ExpectedRunAttempt "attempt" -SolutionResult "success" -StaticResult "success" }
     New-TestComponent -Root $solutionRoot -Component "solution"
     Add-Content -LiteralPath (Join-Path $solutionRoot "VerificationResults\lane-1.trx") -Value "tampered"
     Assert-Throws -Message "manifest tamper" -Action { Invoke-VerificationPromotionFanIn -SolutionArtifactRoot $solutionRoot -StaticArtifactRoot $staticRoot -ExpectedHead "head" -ExpectedRunId "run" -ExpectedRunAttempt "attempt" -SolutionResult "success" -StaticResult "success" }
