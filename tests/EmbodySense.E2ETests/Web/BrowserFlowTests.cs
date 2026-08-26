@@ -562,7 +562,7 @@ public sealed class BrowserFlowTests
         {
             await browser.WaitForExpressionAsync("document.getElementById('workspaceStatus').textContent.includes('Initialized')");
             await ClickAsync(browser, "#loopsNav");
-            await browser.WaitForExpressionAsync("!document.getElementById('loopsView').hidden && document.getElementById('loopList').textContent.includes('System loop')");
+            await browser.WaitForExpressionAsync("!document.getElementById('loopsView').hidden && document.getElementById('loopList').textContent.includes('System loop') && !document.getElementById('governedGraphTab').disabled");
             await ClickAsync(browser, "#governedGraphTab");
             await browser.WaitForExpressionAsync("document.getElementById('governedGraphCatalog').textContent.includes('Command Action · command/browser-json-echo v1')");
             Assert.True(await browser.EvaluateBooleanAsync("[...document.querySelectorAll('#governedGraphCatalog button')].some((button) => button.textContent.includes('command/browser-json-echo') && !button.disabled)"));
@@ -643,7 +643,7 @@ public sealed class BrowserFlowTests
         {
             await browser.WaitForExpressionAsync("document.getElementById('workspaceStatus').textContent.includes('Initialized')");
             await ClickAsync(browser, "#loopsNav");
-            await browser.WaitForExpressionAsync("!document.getElementById('loopsView').hidden && document.getElementById('loopList').textContent.includes('System loop')");
+            await browser.WaitForExpressionAsync("!document.getElementById('loopsView').hidden && document.getElementById('loopList').textContent.includes('System loop') && !document.getElementById('governedGraphTab').disabled");
             await ClickAsync(browser, "#governedGraphTab");
             await browser.WaitForExpressionAsync("document.getElementById('governedGraphCatalog').textContent.includes('manual-trigger') && document.getElementById('governedGraphCatalog').textContent.includes('schema-conformance') && document.getElementById('governedGraphCatalog').textContent.includes('exact-text-condition') && document.getElementById('governedGraphCatalog').textContent.includes('fail-terminal')");
             await browser.WaitForExpressionAsync($"document.getElementById('governedGraphModelProfile').textContent.includes('gpt-test') && [...document.getElementById('governedGraphModelProfile').options].some((option) => option.value === '{BrowserProfileId}' && !option.disabled)");
@@ -766,7 +766,7 @@ public sealed class BrowserFlowTests
             await browser.WaitForExpressionAsync("document.getElementById('workspaceStatus').textContent.includes('Initialized')");
             await browser.EvaluateAsync("window.__modelProfileXss = false");
             await ClickAsync(browser, "#loopsNav");
-            await browser.WaitForExpressionAsync("!document.getElementById('loopsView').hidden && document.getElementById('loopList').textContent.includes('System loop')");
+            await browser.WaitForExpressionAsync("!document.getElementById('loopsView').hidden && document.getElementById('loopList').textContent.includes('System loop') && !document.getElementById('governedGraphTab').disabled");
             await ClickAsync(browser, "#governedGraphTab");
             await browser.WaitForExpressionAsync("document.getElementById('governedGraphModelProfile').textContent.includes('gpt-secondary') && document.getElementById('governedGraphModelProfile').textContent.includes('gpt-tertiary') && document.getElementById('governedGraphModelProfile').textContent.includes('gpt-unavailable')");
             Assert.True(await browser.EvaluateBooleanAsync("[...document.querySelectorAll('#governedGraphModelProfile option')].some((option) => option.value === 'org.example/model-profile/unavailable' && option.disabled && option.textContent.toLowerCase().includes('unavailable'))"));
@@ -1177,6 +1177,7 @@ public sealed class BrowserFlowTests
     {
         if (await browser.EvaluateBooleanAsync("document.getElementById('governedGraphView').hidden"))
         {
+            await browser.WaitForExpressionAsync("!document.getElementById('governedGraphTab').disabled");
             await ClickAsync(browser, "#governedGraphTab");
             await browser.WaitForExpressionAsync("!document.getElementById('governedGraphView').hidden && document.getElementById('governedGraphLifecycle').textContent.includes('Published')");
         }

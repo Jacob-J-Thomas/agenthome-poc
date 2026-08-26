@@ -71,6 +71,7 @@ export function createGovernedGraphWorkspace({
   let errors = [];
   let outcome = "";
   let active = false;
+  let interactionEnabled = false;
   let inFlight = false;
   let dirty = false;
   let storageScope = null;
@@ -150,6 +151,10 @@ export function createGovernedGraphWorkspace({
     },
     deactivate() {
       active = false;
+    },
+    setInteractive(enabled) {
+      interactionEnabled = Boolean(enabled);
+      render();
     },
     async refresh() {
       if (!active) return;
@@ -865,10 +870,13 @@ export function createGovernedGraphWorkspace({
     renderErrors();
     renderStatusOnly();
     renderInvocation();
+    renderInteractionState();
   }
 
   function renderStatusOnly() {
-    elements.notice.textContent = outcome;
+    elements.notice.textContent = interactionEnabled
+      ? outcome
+      : "Governed graph authoring is locked until authoritative Loops hydration completes.";
     elements.notice.className = `governed-graph-notice${errors.length ? " warning" : ""}`;
     const pendingDraft = ["create-draft", "replace-draft"].includes(
       pendingMutation?.kind,
@@ -962,12 +970,14 @@ export function createGovernedGraphWorkspace({
     if (!selector) {
       elements.invocationStatus.textContent =
         "Publish the exact current draft with no unsaved changes before preparing a Manual Trigger invocation.";
+      renderInteractionState();
       return;
     }
     if (!preparation) {
       elements.invocationStatus.textContent =
         invocationOutcome ||
         "Prepare current server authority before invoking. The browser cannot submit actor, workspace, role, profile, publication, eligibility, or effective-authority data.";
+      renderInteractionState();
       return;
     }
     elements.invocationStatus.textContent = [
@@ -1014,6 +1024,68 @@ export function createGovernedGraphWorkspace({
           ),
         );
     }
+    renderInteractionState();
+  }
+
+  function renderInteractionState() {
+    const locked = !interactionEnabled;
+    elements.view.inert = locked;
+    elements.view.setAttribute("aria-busy", String(locked || inFlight));
+    if (!locked) return;
+
+    const controls = elements.view.querySelectorAll?.(
+      "button, input, select, textarea",
+    );
+    if (controls) {
+      for (const control of controls) control.disabled = true;
+      return;
+    }
+
+    for (const control of graphWorkspaceControls()) control.disabled = true;
+  }
+
+  function graphWorkspaceControls() {
+    const controls = new Set();
+    const visit = (element) => {
+      if (!element || controls.has(element)) return;
+      if (["BUTTON", "INPUT", "SELECT", "TEXTAREA"].includes(element.tagName))
+        controls.add(element);
+      for (const child of element.children ?? []) visit(child);
+    };
+    for (const element of [
+      elements.addBindingButton,
+      elements.addControlButton,
+      elements.bindingChoice,
+      elements.canvas,
+      elements.archiveButton,
+      elements.catalog,
+      elements.connectionFrom,
+      elements.connectionTo,
+      elements.controlCondition,
+      elements.displayName,
+      elements.disableButton,
+      elements.fallbackOrder,
+      elements.fallbackProfiles,
+      elements.graphId,
+      elements.grantChoices,
+      elements.grantSelection,
+      elements.inspector,
+      elements.invocationPrompt,
+      elements.loadButton,
+      elements.modelProfile,
+      elements.modelRoutingMode,
+      elements.newButton,
+      elements.prepareInvokeButton,
+      elements.confirmInvokeButton,
+      elements.publishButton,
+      elements.purpose,
+      elements.refreshButton,
+      elements.revisionId,
+      elements.role,
+      elements.saveButton,
+    ])
+      visit(element);
+    return controls;
   }
 
   function visibleGrantSelection(choice) {
@@ -2219,6 +2291,7 @@ function bindElements(document) {
     revisionId: document.getElementById("governedGraphRevisionId"),
     role: document.getElementById("governedGraphRole"),
     saveButton: document.getElementById("governedGraphSaveButton"),
+    view: document.getElementById("governedGraphView"),
   };
 }
 

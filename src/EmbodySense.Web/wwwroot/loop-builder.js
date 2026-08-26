@@ -241,6 +241,8 @@ const governedGraphWorkspace = createGovernedGraphWorkspace({
   invokePublishedGraph: invokePublishedGovernedGraph,
 });
 
+setWorkspaceAuthoringHydrated(false);
+
 async function invokePublishedGovernedGraph(request) {
   const response = await (
     await getHub()
@@ -259,7 +261,10 @@ async function invokePublishedGovernedGraph(request) {
 
 function activate() {
   loopBuilderSurfaceActive = true;
-  if (!loopBuilderSessionAvailable) return Promise.resolve(false);
+  if (!loopBuilderSessionAvailable) {
+    setWorkspaceAuthoringHydrated(false);
+    return Promise.resolve(false);
+  }
   if (loopBuilderRefresh) return loopBuilderRefresh;
   if (loopBuilderActivated) {
     scheduleSelectedRunRefresh();
@@ -279,6 +284,7 @@ function deactivate() {
 }
 
 function beginLoopBuilderRefresh(operation, externalSignal = null) {
+  setWorkspaceAuthoringHydrated(false);
   const abortController = new AbortController();
   loopBuilderRefreshAbortController = abortController;
   const relayAbort = () => abortController.abort(externalSignal.reason);
@@ -331,6 +337,7 @@ async function startLoopBuilder(signal) {
     return await refreshWorkspaceCore(Boolean(catalog), false, { signal });
   } catch (error) {
     showBanner(`Loop builder unavailable: ${error.message}`);
+    setWorkspaceAuthoringHydrated(false);
     setInteractive(false);
     return false;
   }
@@ -370,6 +377,7 @@ async function rehydrateSession({
     showBanner(
       "The host workspace changed. This unsaved loop draft remains loaded and was not applied to the new workspace.",
     );
+    setWorkspaceAuthoringHydrated(false);
     setInteractive(false);
     return { requiresManualAction: true };
   }
@@ -391,8 +399,7 @@ async function refreshWorkspaceCore(
   { propagateFailure = false, signal = null, suppressRecovery = false } = {},
 ) {
   try {
-    workspaceAuthoringHydrated = false;
-    renderTabs();
+    setWorkspaceAuthoringHydrated(false);
     const requestOptions = { signal, suppressRecovery };
     const status = await requestJson("/api/status", requestOptions);
     if (signal?.aborted) return false;
@@ -425,7 +432,7 @@ async function refreshWorkspaceCore(
       ? "Initialized"
       : "Needs initialization";
     if (!status.initialized) {
-      workspaceAuthoringHydrated = false;
+      setWorkspaceAuthoringHydrated(false);
       showBanner(
         "Complete workspace initialization before creating loops.",
         "notice",
@@ -444,14 +451,22 @@ async function refreshWorkspaceCore(
     }
     if (signal?.aborted) return false;
     const runsLoaded = await loadRuns({ propagateFailure, requestOptions });
-    if (runsLoaded === false) return false;
+    if (runsLoaded !== true) {
+      if (runsLoaded === null)
+        showBanner(
+          "Authoritative run hydration was superseded before it completed. Retry Loops hydration before authoring.",
+          "notice",
+        );
+      return false;
+    }
     if (currentView === "graph") await governedGraphWorkspace.refresh();
-    workspaceAuthoringHydrated = true;
+    setWorkspaceAuthoringHydrated(true);
     renderAll();
     renderWorkspaceInitialization();
     return true;
   } catch (error) {
     showBanner(`Loop builder unavailable: ${error.message}`);
+    setWorkspaceAuthoringHydrated(false);
     setInteractive(false);
     if (propagateFailure) throw error;
     return false;
@@ -1644,6 +1659,12 @@ function renderAll() {
   scheduleSelectedRunRefresh();
 }
 
+function setWorkspaceAuthoringHydrated(hydrated) {
+  workspaceAuthoringHydrated = Boolean(hydrated);
+  governedGraphWorkspace.setInteractive(workspaceAuthoringHydrated);
+  renderTabs();
+}
+
 function renderTabs() {
   const builderActive = currentView === "builder" && !historicalLoopId;
   const graphActive = currentView === "graph";
@@ -1652,10 +1673,10 @@ function renderTabs() {
     (currentView === "builder" && Boolean(historicalLoopId));
   const retentionActive = currentView === "retention";
   elements.builderTab.disabled = mutationInFlight || Boolean(historicalLoopId);
-  elements.governedGraphTab.disabled =
-    !workspaceAuthoringHydrated ||
-    mutationInFlight ||
-    Boolean(historicalLoopId);
+  const graphAuthoringLocked = !workspaceAuthoringHydrated;
+  const graphTabLocked =
+    graphAuthoringLocked || mutationInFlight || Boolean(historicalLoopId);
+  elements.governedGraphTab.disabled = graphTabLocked && !graphActive;
   elements.runsTab.disabled = mutationInFlight || isNewLoopDraft();
   elements.retentionTab.disabled = mutationInFlight || retentionCleanupInFlight;
   elements.builderTab.classList.toggle("active", builderActive);
@@ -1664,6 +1685,10 @@ function renderTabs() {
   elements.retentionTab.classList.toggle("active", retentionActive);
   elements.builderTab.setAttribute("aria-selected", String(builderActive));
   elements.governedGraphTab.setAttribute("aria-selected", String(graphActive));
+  elements.governedGraphTab.setAttribute(
+    "aria-disabled",
+    String(graphTabLocked),
+  );
   elements.runsTab.setAttribute("aria-selected", String(runsActive));
   elements.retentionTab.setAttribute("aria-selected", String(retentionActive));
   elements.builderTab.tabIndex = builderActive ? 0 : -1;
@@ -6928,6 +6953,7 @@ function waitForLoopBuilderOperation(operation, signal) {
 
 function suspendSession() {
   loopBuilderSessionAvailable = false;
+  setWorkspaceAuthoringHydrated(false);
   if (workspaceInitializationInFlight) {
     workspaceInitializationGeneration++;
     workspaceInitializationInFlight = false;
@@ -7335,6 +7361,7 @@ function setBusy(busy, label) {
     region.inert = busy;
     region.setAttribute("aria-busy", String(busy));
   }
+  governedGraphWorkspace.setInteractive(!busy && workspaceAuthoringHydrated);
   if (busy) {
     renderAll();
     elements.saveState.textContent = label;
@@ -7346,6 +7373,7 @@ function setBusy(busy, label) {
 }
 
 function setInteractive(enabled) {
+  if (!enabled) setWorkspaceAuthoringHydrated(false);
   for (const button of [
     elements.createLoopButton,
     elements.saveButton,
@@ -7353,9 +7381,6 @@ function setInteractive(enabled) {
     elements.reloadButton,
     elements.addStepButton,
     elements.invokeButton,
-    elements.builderTab,
-    elements.runsTab,
-    elements.retentionTab,
     elements.refreshRetentionButton,
     elements.selectedNodeButton,
     elements.loopSettingsButton,
@@ -7368,6 +7393,10 @@ function setInteractive(enabled) {
   elements.name.disabled = !enabled;
   elements.description.disabled = !enabled;
   elements.loopSearch.disabled = !enabled;
+  governedGraphWorkspace.setInteractive(
+    Boolean(enabled) && workspaceAuthoringHydrated,
+  );
+  renderTabs();
 }
 
 function showResponseError(error) {

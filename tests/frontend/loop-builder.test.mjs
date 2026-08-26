@@ -30,6 +30,13 @@ const loopsHtml = fs.readFileSync(
 const operationalPostureUrl =
   "/api/loop-operations/posture?maximumQueueEntries=50&maximumSchedules=50&maximumWakes=50&maximumRuns=50";
 
+test("the static governed graph affordance starts disabled before script hydration", () => {
+  assert.match(
+    loopsHtml,
+    /<button\s+id="governedGraphTab"[\s\S]*?\bdisabled\b[\s\S]*?>/,
+  );
+});
+
 test("catalog loading is authenticated and projects the system loop as read-only", async () => {
   const app = await loadLoopBuilder();
 
@@ -214,12 +221,16 @@ test("governed graph authoring waits for conclusive Loops hydration", async () =
 
   assert.equal(app.elements.loopList.textContent.includes("System loop"), true);
   assert.equal(app.elements.governedGraphTab.disabled, true);
+  assert.equal(app.elements.governedGraphNewButton.disabled, true);
+  assert.equal(app.elements.governedGraphId.disabled, true);
+  assert.equal(app.elements.governedGraphView.inert, true);
   assert.equal(app.elements.loopInitializationPanel.hidden, false);
   assert.match(
     app.elements.loopInitializationStatus.textContent,
     /authoritative role, catalog, and run state/i,
   );
-  await app.elements.governedGraphTab.click();
+  const blockedGraphClick = app.elements.governedGraphTab.click();
+  await blockedGraphClick;
   assert.equal(
     server.calls.some((call) => call.url === "/api/governed-graphs/catalog"),
     false,
@@ -230,7 +241,9 @@ test("governed graph authoring waits for conclusive Loops hydration", async () =
 
   assert.equal(app.elements.governedGraphTab.disabled, false);
   assert.equal(app.elements.loopInitializationPanel.hidden, true);
-  await app.elements.governedGraphTab.click();
+  const firstAuthoringClick = app.elements.governedGraphTab.click();
+  await firstAuthoringClick;
+  assert.equal(app.elements.governedGraphView.hidden, false);
   assert.match(
     app.elements.governedGraphLifecycle.textContent,
     /Published · lifecycle v4/,
@@ -3291,6 +3304,9 @@ test("a loop route loaded during session recovery waits for promotion before act
     app.server.calls.filter((call) => call.url === "/api/loops").length,
     0,
   );
+  assert.equal(app.elements.governedGraphTab.disabled, true);
+  assert.equal(app.elements.governedGraphNewButton.disabled, true);
+  assert.equal(app.elements.governedGraphView.inert, true);
 
   app.window.embodySenseLoopBuilder.resumeSession();
   await flushAsyncWork();
@@ -3353,6 +3369,100 @@ test("session rehydration reloads authoritative loop evidence without overwritin
     server.calls.filter((call) => call.url.startsWith("/api/loop-runs"))
       .length > runRequests,
   );
+});
+
+test("an active governed graph locks through reconnect failure and preserves its local draft", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  server.on("GET", "/api/governed-graphs/catalog", () => ({
+    status: 200,
+    body: createGovernedGraphCatalog(),
+  }));
+  const app = await loadLoopBuilder({ server });
+
+  await app.elements.governedGraphTab.click();
+  app.elements.governedGraphId.value = "reconnect-local-graph";
+  app.elements.governedGraphRevisionId.value = "revision-1";
+  app.elements.governedGraphDisplayName.value = "Reconnect local graph";
+  app.elements.governedGraphPurpose.value =
+    "Retain the draft while authoritative state reconnects.";
+  await app.elements.governedGraphNewButton.click();
+  const catalogButtons = findByTag(app.elements.governedGraphCatalog, "button");
+  assert.ok(catalogButtons.length > 0);
+  assert.equal(vm.runInContext("currentView", app.context), "graph");
+
+  app.window.embodySenseLoopBuilder.suspendSession();
+
+  assert.equal(vm.runInContext("currentView", app.context), "graph");
+  assert.equal(app.elements.governedGraphTab.tabIndex, 0);
+  assert.equal(app.elements.governedGraphTab.disabled, false);
+  assert.equal(
+    app.elements.governedGraphTab.attributes.get("aria-disabled"),
+    "true",
+  );
+  assert.equal(app.elements.governedGraphView.hidden, false);
+  assert.equal(app.elements.governedGraphView.inert, true);
+  assert.equal(app.elements.governedGraphNewButton.disabled, true);
+  assert.equal(app.elements.governedGraphId.disabled, true);
+  const suspendedCatalogButtons = findByTag(
+    app.elements.governedGraphCatalog,
+    "button",
+  );
+  assert.equal(
+    suspendedCatalogButtons.every((button) => button.disabled),
+    true,
+  );
+
+  app.window.embodySenseLoopBuilder.resumeSession();
+  server.on("GET", "/api/status", () => ({
+    status: 503,
+    body: { detail: "The authoritative status service is unavailable." },
+  }));
+
+  await assert.rejects(
+    app.window.embodySenseLoopBuilder.rehydrateSession({
+      approvals: [],
+      workspaceRoot: "C:/workspace",
+    }),
+    (error) => error.status === 503,
+  );
+
+  assert.equal(app.elements.governedGraphTab.disabled, false);
+  assert.equal(
+    app.elements.governedGraphTab.attributes.get("aria-disabled"),
+    "true",
+  );
+  assert.equal(app.elements.governedGraphView.inert, true);
+  assert.equal(app.elements.governedGraphNewButton.disabled, true);
+  assert.equal(app.elements.governedGraphId.disabled, true);
+  const failedCatalogButtons = findByTag(
+    app.elements.governedGraphCatalog,
+    "button",
+  );
+  assert.equal(
+    failedCatalogButtons.every((button) => button.disabled),
+    true,
+  );
+
+  server.on("GET", "/api/status", () => ({
+    status: 200,
+    body: { workspaceRoot: "C:/workspace", initialized: true },
+  }));
+  const outcome = await app.window.embodySenseLoopBuilder.rehydrateSession({
+    approvals: [],
+    workspaceRoot: "C:/workspace",
+  });
+
+  assert.equal(outcome.refreshed, true);
+  assert.equal(app.elements.governedGraphTab.disabled, false);
+  assert.equal(
+    app.elements.governedGraphTab.attributes.get("aria-disabled"),
+    "false",
+  );
+  assert.equal(
+    app.elements.governedGraphLifecycle.textContent,
+    "Local draft · not durable",
+  );
+  assert.equal(app.elements.governedGraphId.value, "reconnect-local-graph");
 });
 
 test("session rehydration waits for its authoritative refresh when another refresh is active", async () => {
@@ -3628,21 +3738,25 @@ test("Retry joins a still-draining refresh chain instead of starting a competing
   );
 });
 
-test("selecting another loop during first evidence hydration does not fail activation", async () => {
+test("a discarded first run hydration keeps governed graph authoring locked until retry", async () => {
   const server = new FakeFetchServer(createCatalog());
   let releaseWorkspaceRuns;
-  server.on(
-    "GET",
-    "/api/loop-runs?maximumCount=50",
-    () =>
-      new Promise((resolve) => {
-        releaseWorkspaceRuns = () =>
-          resolve({
-            status: 200,
-            body: { items: [], continuationCursor: null },
-          });
-      }),
-  );
+  let runHydrationRequests = 0;
+  server.on("GET", "/api/loop-runs?maximumCount=50", () => {
+    if (++runHydrationRequests > 1)
+      return { status: 200, body: { items: [], continuationCursor: null } };
+    return new Promise((resolve) => {
+      releaseWorkspaceRuns = () =>
+        resolve({
+          status: 200,
+          body: { items: [], continuationCursor: null },
+        });
+    });
+  });
+  server.on("GET", "/api/governed-graphs/catalog", () => ({
+    status: 200,
+    body: createGovernedGraphCatalog(),
+  }));
   const app = await loadLoopBuilder({ server, loopsViewHidden: true });
   const activation = app.window.embodySenseLoopBuilder.activate();
   for (let attempt = 0; attempt < 20 && !releaseWorkspaceRuns; attempt++)
@@ -3652,12 +3766,19 @@ test("selecting another loop during first evidence hydration does not fail activ
   releaseWorkspaceRuns();
   await activation;
 
-  assert.equal(vm.runInContext("loopBuilderActivated", app.context), true);
+  assert.equal(vm.runInContext("loopBuilderActivated", app.context), false);
   assert.equal(app.elements.loopName.value, "Research pass");
-  assert.doesNotMatch(
-    app.elements.validationBanner.textContent,
-    /Retry|unavailable/i,
-  );
+  assert.equal(app.elements.governedGraphTab.disabled, true);
+  assert.equal(app.elements.governedGraphNewButton.disabled, true);
+  assert.match(app.elements.validationBanner.textContent, /superseded|Retry/i);
+
+  await app.window.embodySenseLoopBuilder.activate();
+
+  assert.equal(vm.runInContext("loopBuilderActivated", app.context), true);
+  assert.equal(app.elements.governedGraphTab.disabled, false);
+  assert.equal(app.elements.governedGraphNewButton.disabled, true);
+  await app.elements.governedGraphTab.click();
+  assert.equal(app.elements.governedGraphNewButton.disabled, false);
 });
 
 test("server-controlled loop text is rendered as text and cannot create executable markup", async () => {
