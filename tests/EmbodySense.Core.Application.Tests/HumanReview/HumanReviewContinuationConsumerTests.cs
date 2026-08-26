@@ -371,49 +371,4 @@ public sealed class HumanReviewContinuationConsumerTests
     private static string Hash(char value) => new(value, 64);
 
     private sealed record ApprovedCandidateFixture(CustomLoopRunRecord Run, HumanReviewContinuationClaim Claim, HumanReviewContinuationCandidate Candidate, GovernedLoopEffectAttempt? EffectAttempt);
-
-    private sealed class RecordingAuthoritySource(params HumanReviewContinuationAuthorityReadStatus[] statuses) : IHumanReviewContinuationAuthoritySource
-    {
-        private readonly Queue<HumanReviewContinuationAuthorityReadStatus> _statuses = new(statuses);
-
-        public int ReadCount { get; private set; }
-
-        public Task<HumanReviewContinuationAuthorityReadResult> ReadAsync(HumanReviewContinuationAuthorityQuery query, CancellationToken cancellationToken = default)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            ReadCount++;
-            return Task.FromResult(new HumanReviewContinuationAuthorityReadResult(_statuses.Count == 0 ? HumanReviewContinuationAuthorityReadStatus.Unavailable : _statuses.Dequeue()));
-        }
-    }
-
-    private sealed class RecordingEffectEvidenceSource(params HumanReviewCurrentEffectAttemptEvidenceReadResult[] results) : IHumanReviewCurrentEffectAttemptEvidenceSource
-    {
-        private readonly Queue<HumanReviewCurrentEffectAttemptEvidenceReadResult> _results = new(results);
-
-        public int ReadCount { get; private set; }
-
-        public List<HumanReviewCurrentEffectAttemptEvidenceQuery> Queries { get; } = [];
-
-        public Task<HumanReviewCurrentEffectAttemptEvidenceReadResult> ReadAsync(HumanReviewCurrentEffectAttemptEvidenceQuery query, CancellationToken cancellationToken = default)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            ReadCount++;
-            Queries.Add(query);
-            return Task.FromResult(_results.Count == 0 ? new HumanReviewCurrentEffectAttemptEvidenceReadResult(HumanReviewCurrentEffectAttemptEvidenceReadStatus.Unavailable) : _results.Dequeue());
-        }
-    }
-
-    private sealed class RecordingEffectCertaintySource(params GovernedLoopEffectCertaintySnapshotResult[] results) : IGovernedLoopEffectCertaintySnapshotSource
-    {
-        private readonly Queue<GovernedLoopEffectCertaintySnapshotResult> _results = new(results);
-
-        public int ReadCount { get; private set; }
-
-        public Task<GovernedLoopEffectCertaintySnapshotResult> ReadAsync(GovernedLoopEffectCertaintySnapshotQuery query, CancellationToken cancellationToken = default)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            ReadCount++;
-            return Task.FromResult(_results.Count == 0 ? new GovernedLoopEffectCertaintySnapshotResult(GovernedLoopEffectCertaintySnapshotStatus.Unavailable) : _results.Dequeue());
-        }
-    }
 }
