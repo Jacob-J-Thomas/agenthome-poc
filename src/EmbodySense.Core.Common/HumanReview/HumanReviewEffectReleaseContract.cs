@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Capabilities.Models;
+using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.HumanReview.Models;
 using EmbodySense.Core.Common.Loops.Execution.Effects;
 using EmbodySense.Core.Common.Loops.Execution.Effects.Models;
@@ -191,7 +192,7 @@ public static class HumanReviewEffectReleaseContract
             throw new ArgumentException("The review binding and effect attempt must name the exact same run, revision, node, and attempt coordinates.", nameof(binding));
         }
         var identity = new HumanReviewEffectAttemptIdentity(
-            1, binding.RunId, binding.GraphId, binding.RevisionId, binding.RevisionHash, attempt.Binding.ExecutionGeneration, binding.FrontierId, binding.FrontierVersion, binding.FrontierHash,
+            1, binding.WorkspaceId, binding.RunId, binding.GraphId, binding.RevisionId, binding.RevisionHash, attempt.Binding.ExecutionGeneration, binding.FrontierId, binding.FrontierVersion, binding.FrontierHash,
             binding.NodeId, binding.ActivationOrdinal, binding.VisitOrdinal, binding.Attempt, attempt.Payload.EffectId, attempt.Payload.OperationId,
             attempt.Payload.EffectGeneration, attempt.ActuatorOperationId, attempt.Capability.Id.Value, attempt.Capability.Version.Value, attempt.Capability.Hash.Value,
             attempt.Implementation.ProviderId.Value, attempt.Implementation.ImplementationId, attempt.Payload.IntentHash, string.Empty);
@@ -236,6 +237,7 @@ public static class HumanReviewEffectReleaseContract
     private static string? ValidateIdentity(HumanReviewEffectAttemptIdentity identity, bool requireHash)
     {
         if (identity.SchemaVersion != 1
+            || !ContextualRoleWorkspaceId.IsValid(identity.WorkspaceId)
             || !Id(identity.RunId) || !Id(identity.GraphId) || !Id(identity.RevisionId) || !Id(identity.FrontierId) || !Id(identity.NodeId) || !Id(identity.EffectId)
             || !Id(identity.OperationId) || !Path(identity.ActuatorOperationId, GovernedLoopEffectAttemptContractLimits.MaxOperationIdCharacters)
             || !CapabilityId.TryParse(identity.CapabilityId, out _, out _) || !CapabilityVersion.TryParse(identity.CapabilityVersion, out _, out _)
@@ -316,7 +318,7 @@ public static class HumanReviewEffectReleaseContract
 
     private static void AppendIdentity(StringBuilder builder, HumanReviewEffectAttemptIdentity identity, bool includeHash)
     {
-        Append(builder, identity.SchemaVersion); Append(builder, identity.RunId); Append(builder, identity.GraphId); Append(builder, identity.RevisionId); Append(builder, identity.RevisionHash); Append(builder, identity.ExecutionGeneration);
+        Append(builder, identity.SchemaVersion); Append(builder, identity.WorkspaceId); Append(builder, identity.RunId); Append(builder, identity.GraphId); Append(builder, identity.RevisionId); Append(builder, identity.RevisionHash); Append(builder, identity.ExecutionGeneration);
         Append(builder, identity.FrontierId); Append(builder, identity.FrontierVersion); Append(builder, identity.FrontierHash); Append(builder, identity.NodeId); Append(builder, identity.ActivationOrdinal); Append(builder, identity.VisitOrdinal); Append(builder, identity.NodeAttempt);
         Append(builder, identity.EffectId); Append(builder, identity.OperationId); Append(builder, identity.EffectGeneration); Append(builder, identity.ActuatorOperationId); Append(builder, identity.CapabilityId); Append(builder, identity.CapabilityVersion); Append(builder, identity.CapabilityDescriptorHash); Append(builder, identity.ProviderId); Append(builder, identity.ImplementationId); Append(builder, identity.IntentHash);
         if (includeHash) Append(builder, identity.IdentityHash);

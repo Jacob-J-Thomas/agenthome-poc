@@ -2,6 +2,7 @@ namespace EmbodySense.Core.Common.HumanReview.Models;
 
 /// <summary>Binds a Human Review reservation to one exact canonical actuator-effect attempt without retaining effect input or payload values.</summary>
 /// <param name="SchemaVersion">The identity schema version, which must be 1.</param>
+/// <param name="WorkspaceId">The exact canonical workspace scope whose authority the effect attempt names.</param>
 /// <param name="RunId">The exact durable run identity.</param>
 /// <param name="GraphId">The exact governed-loop graph identity.</param>
 /// <param name="RevisionId">The exact immutable revision identity.</param>
@@ -27,6 +28,7 @@ namespace EmbodySense.Core.Common.HumanReview.Models;
 /// <param name="IdentityHash">The canonical hash of every prior identity field.</param>
 public sealed record HumanReviewEffectAttemptIdentity(
     int SchemaVersion,
+    string WorkspaceId,
     string RunId,
     string GraphId,
     string RevisionId,

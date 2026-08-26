@@ -21,6 +21,7 @@ public sealed class HumanReviewEffectReleaseContractTests
         Assert.Equal(attempt.Payload.OperationId, snapshot.Identity.OperationId);
         Assert.Equal(attempt.Payload.EffectGeneration, snapshot.Identity.EffectGeneration);
         Assert.Equal(attempt.Binding.ExecutionGeneration, snapshot.Identity.ExecutionGeneration);
+        Assert.Equal(HumanReviewTestData.WorkspaceId, snapshot.Identity.WorkspaceId);
         Assert.Equal(attempt.InputFingerprint, snapshot.Preparation.InputFingerprint);
         Assert.True(HumanReviewEffectReleaseContract.TryCapture(snapshot, out var captured, out var reason), reason);
         Assert.Equal(snapshot, captured);
@@ -81,6 +82,34 @@ public sealed class HumanReviewEffectReleaseContractTests
         Assert.Equal("effect-certainty-snapshot-binding-invalid", HumanReviewEffectReleaseContract.Validate(invalidVisit));
         Assert.False(HumanReviewEffectReleaseContract.TryCapture(invalidVisit, out _, out var invalidVisitReason));
         Assert.Equal("effect-certainty-snapshot-binding-invalid", invalidVisitReason);
+    }
+
+    [Fact]
+    public void Workspace_scope_is_hashed_and_malformed_workspace_identity_fails_closed()
+    {
+        var snapshot = CreateSnapshot(GovernedLoopEffectAttemptContractTests.Prepare());
+        var otherWorkspaceIdentity = snapshot.Identity with { WorkspaceId = "workspace-sha256:" + Hash('b'), IdentityHash = string.Empty };
+        otherWorkspaceIdentity = otherWorkspaceIdentity with { IdentityHash = HumanReviewEffectReleaseContract.ComputeIdentity(otherWorkspaceIdentity) };
+        var otherWorkspaceSnapshot = snapshot with { Identity = otherWorkspaceIdentity, SnapshotHash = string.Empty };
+        otherWorkspaceSnapshot = otherWorkspaceSnapshot with { SnapshotHash = HumanReviewEffectReleaseContract.ComputeSnapshot(otherWorkspaceSnapshot) };
+        var malformedWorkspaceIdentity = snapshot.Identity with { WorkspaceId = "workspace-one", IdentityHash = string.Empty };
+        malformedWorkspaceIdentity = malformedWorkspaceIdentity with { IdentityHash = HumanReviewEffectReleaseContract.ComputeIdentity(malformedWorkspaceIdentity) };
+        var malformedWorkspaceSnapshot = snapshot with { Identity = malformedWorkspaceIdentity, SnapshotHash = string.Empty };
+        malformedWorkspaceSnapshot = malformedWorkspaceSnapshot with { SnapshotHash = HumanReviewEffectReleaseContract.ComputeSnapshot(malformedWorkspaceSnapshot) };
+        var missingWorkspaceIdentity = snapshot.Identity with { WorkspaceId = null!, IdentityHash = string.Empty };
+        missingWorkspaceIdentity = missingWorkspaceIdentity with { IdentityHash = HumanReviewEffectReleaseContract.ComputeIdentity(missingWorkspaceIdentity) };
+        var missingWorkspaceSnapshot = snapshot with { Identity = missingWorkspaceIdentity, SnapshotHash = string.Empty };
+        missingWorkspaceSnapshot = missingWorkspaceSnapshot with { SnapshotHash = HumanReviewEffectReleaseContract.ComputeSnapshot(missingWorkspaceSnapshot) };
+
+        Assert.NotEqual(snapshot.Identity.IdentityHash, otherWorkspaceIdentity.IdentityHash);
+        Assert.Null(HumanReviewEffectReleaseContract.Validate(otherWorkspaceSnapshot));
+        Assert.Equal(HumanReviewEffectSnapshotReplayDisposition.New, HumanReviewEffectReleaseContract.ClassifyReplay(snapshot, otherWorkspaceSnapshot));
+        Assert.Equal("effect-certainty-snapshot-binding-invalid", HumanReviewEffectReleaseContract.Validate(malformedWorkspaceSnapshot));
+        Assert.False(HumanReviewEffectReleaseContract.TryCapture(malformedWorkspaceSnapshot, out _, out var malformedWorkspaceReason));
+        Assert.Equal("effect-certainty-snapshot-binding-invalid", malformedWorkspaceReason);
+        Assert.Equal("effect-certainty-snapshot-binding-invalid", HumanReviewEffectReleaseContract.Validate(missingWorkspaceSnapshot));
+        Assert.False(HumanReviewEffectReleaseContract.TryCapture(missingWorkspaceSnapshot, out _, out var missingWorkspaceReason));
+        Assert.Equal("effect-certainty-snapshot-binding-invalid", missingWorkspaceReason);
     }
 
     [Fact]
