@@ -66,15 +66,21 @@ public sealed class HumanReviewContinuationRunStore
         if (current is null) return Result(HumanReviewContinuationMutationStatus.NotFound);
         if (!TryGetApprovedReview(current, runId, out var review) || review.Continuation is not { } continuation) return Result(HumanReviewContinuationMutationStatus.Invalid);
 
-        var retained = continuation.Claims.FirstOrDefault(item => string.Equals(item?.ClaimId, claim.ClaimId, StringComparison.Ordinal));
-        if (retained is not null)
+        if (continuation.Completion is not null || continuation.Retirement is not null)
         {
-            return HumanReviewContinuationReplayClassifier.ClassifyClaim(retained, claim) == HumanReviewContinuationReplayDisposition.ExactReplay
+            return Result(HumanReviewContinuationMutationStatus.Conflict, current);
+        }
+
+        var active = continuation.Claims.IsDefaultOrEmpty ? null : continuation.Claims[^1];
+        if (active is not null && string.Equals(active.ClaimId, claim.ClaimId, StringComparison.Ordinal))
+        {
+            return HumanReviewContinuationReplayClassifier.ClassifyClaim(active, claim) == HumanReviewContinuationReplayDisposition.ExactReplay
                 ? Result(HumanReviewContinuationMutationStatus.Replayed, current)
                 : Result(HumanReviewContinuationMutationStatus.Conflict, current);
         }
 
-        if (current.LifecycleVersion != expectedLifecycleVersion || continuation.Completion is not null || continuation.Retirement is not null) return Result(HumanReviewContinuationMutationStatus.Conflict, current);
+        if (continuation.Claims.Any(item => string.Equals(item?.ClaimId, claim.ClaimId, StringComparison.Ordinal))) return Result(HumanReviewContinuationMutationStatus.Conflict, current);
+        if (current.LifecycleVersion != expectedLifecycleVersion) return Result(HumanReviewContinuationMutationStatus.Conflict, current);
         var successor = HumanReviewContinuationContractHash.ApplyState(continuation with { Claims = [.. continuation.Claims, claim], StateHash = string.Empty });
         if (!IsClaimSuccessor(review, continuation, successor)) return Result(HumanReviewContinuationMutationStatus.Invalid, current);
         return await UpdateAsync(current, review with { Continuation = successor }, claim.ClaimedAtUtc, cancellationToken).ConfigureAwait(false);
@@ -131,6 +137,12 @@ public sealed class HumanReviewContinuationRunStore
         if (current is null) return Result(HumanReviewContinuationMutationStatus.NotFound);
         if (!TryGetApprovedReview(current, runId, out var review) || review.Continuation is not { } continuation) return Result(HumanReviewContinuationMutationStatus.Invalid);
 
+        if (continuation.Claims.IsDefaultOrEmpty
+            || !Equals(new HumanReviewContinuationClaimReference(continuation.Claims[^1].ClaimId, continuation.Claims[^1].ClaimHash), claim))
+        {
+            return Result(HumanReviewContinuationMutationStatus.Conflict, current);
+        }
+
         if (continuation.Retirement is not null)
         {
             return HumanReviewContinuationReplayClassifier.ClassifyRetirement(continuation.Retirement, retirement) == HumanReviewContinuationReplayDisposition.ExactReplay
@@ -139,9 +151,7 @@ public sealed class HumanReviewContinuationRunStore
         }
 
         if (current.LifecycleVersion != expectedLifecycleVersion
-            || continuation.Completion is not null
-            || continuation.Claims.IsDefaultOrEmpty
-            || !Equals(new HumanReviewContinuationClaimReference(continuation.Claims[^1].ClaimId, continuation.Claims[^1].ClaimHash), claim))
+            || continuation.Completion is not null)
         {
             return Result(HumanReviewContinuationMutationStatus.Conflict, current);
         }

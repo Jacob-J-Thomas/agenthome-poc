@@ -50,6 +50,7 @@ public sealed class HumanReviewContinuationRunStoreTests
             Assert.Equal(HumanReviewContinuationMutationStatus.Committed, takeover.Status);
 
             var takenOver = Assert.IsType<CustomLoopRunRecord>(takeover.Run);
+            Assert.Equal(HumanReviewContinuationMutationStatus.Conflict, (await continuations.ClaimAsync(takenOver.Id, takenOver.LifecycleVersion, first)).Status);
             var staleCompletion = Completion(review.Request, wake, reservation, first, first.ClaimedAtUtc.AddSeconds(1), "completion-stale");
             var stale = await continuations.CompleteAsync(takenOver.Id, takenOver.LifecycleVersion, staleCompletion);
             Assert.Equal(HumanReviewContinuationMutationStatus.Conflict, stale.Status);
@@ -58,6 +59,7 @@ public sealed class HumanReviewContinuationRunStoreTests
             var completed = await continuations.CompleteAsync(takenOver.Id, takenOver.LifecycleVersion, completion);
             Assert.Equal(HumanReviewContinuationMutationStatus.Committed, completed.Status);
             Assert.Equal(completion.CompletionHash, completed.Run?.HumanReview?.Continuation?.Completion?.CompletionHash);
+            Assert.Equal(HumanReviewContinuationMutationStatus.Conflict, (await continuations.ClaimAsync(completed.Run!.Id, completed.Run.LifecycleVersion, second)).Status);
 
             var replay = await continuations.CompleteAsync(takenOver.Id, takenOver.LifecycleVersion, completion);
             Assert.Equal(HumanReviewContinuationMutationStatus.Replayed, replay.Status);
@@ -115,6 +117,12 @@ public sealed class HumanReviewContinuationRunStoreTests
             claimed.Run.LifecycleVersion,
             new HumanReviewContinuationClaimReference(claim.ClaimId, claim.ClaimHash),
             retirement)).Status);
+        Assert.Equal(HumanReviewContinuationMutationStatus.Conflict, (await continuations.RetireAsync(
+            retired.Run!.Id,
+            retired.Run.LifecycleVersion,
+            new HumanReviewContinuationClaimReference("claim-retirement-unknown", Hash('d')),
+            retirement)).Status);
+        Assert.Equal(HumanReviewContinuationMutationStatus.Conflict, (await continuations.ClaimAsync(retired.Run!.Id, retired.Run.LifecycleVersion, claim)).Status);
 
         var completion = Completion(review.Request, wake, reservation, claim, claim.ClaimedAtUtc.AddSeconds(1), "completion-after-retirement");
         Assert.Equal(HumanReviewContinuationMutationStatus.Conflict, (await continuations.CompleteAsync(claimed.Run.Id, claimed.Run.LifecycleVersion, completion)).Status);
