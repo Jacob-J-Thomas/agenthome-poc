@@ -209,6 +209,380 @@ public sealed class CustomLoopFrontierStoreTests
     }
 
     [Fact]
+    public async Task Real_store_approval_dispose_restart_and_stale_exact_replay_do_not_duplicate_the_blocked_review_records()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var admitted = await PersistHumanReviewAdmissionAsync(paths, "decision-real-replay");
+        var command = new HumanReviewDecisionCommand(admitted.Id, admitted.LifecycleVersion, "real-approve-one", HumanReviewDecisionKind.Approve, null);
+        HumanReviewDecisionServiceResult accepted;
+
+        using (var store = new CustomLoopRunStore(paths))
+        {
+            accepted = await new HumanReviewDecisionService(
+                store,
+                new HumanReviewDecisionStoreTestAuthorizer(),
+                new HumanReviewDecisionStoreTestClock(admitted.UpdatedAtUtc.AddMinutes(1)))
+                .DecideAsync(command);
+        }
+
+        Assert.Equal(HumanReviewDecisionServiceStatus.Accepted, accepted.Status);
+        var acceptedReceipt = Assert.IsType<HumanReviewDecisionOperationReceipt>(accepted.Receipt);
+        var artifactPath = Path.Combine(paths.CustomLoopRunsPath, admitted.LoopId, admitted.Id + ".json");
+        var acceptedBytes = await File.ReadAllBytesAsync(artifactPath);
+        HumanReviewDecisionServiceResult replay;
+
+        using (var restarted = new CustomLoopRunStore(paths))
+        {
+            var mutableRead = Assert.IsType<CustomLoopRunRecord>(await restarted.GetAsync(admitted.Id));
+            mutableRead.Events[^1] = mutableRead.Events[^1] with { Detail = "mutated returned event" };
+            var mutableReceipts = ImmutableCollectionsMarshal.AsArray(mutableRead.HumanReview!.OperationReceipts)!;
+            mutableReceipts[0] = mutableReceipts[0] with { ReceiptHash = HumanReviewHash('9') };
+            replay = await new HumanReviewDecisionService(
+                restarted,
+                new HumanReviewDecisionStoreTestAuthorizer(),
+                new HumanReviewDecisionStoreTestClock(mutableRead.UpdatedAtUtc.AddMinutes(1)))
+                .DecideAsync(command with { ExpectedLifecycleVersion = command.ExpectedLifecycleVersion - 1 });
+        }
+
+        Assert.Equal(HumanReviewDecisionServiceStatus.Replayed, replay.Status);
+        Assert.NotSame(accepted.Receipt, replay.Receipt);
+        Assert.Equal(acceptedReceipt.ReceiptHash, replay.Receipt?.ReceiptHash);
+        Assert.Equal(acceptedBytes, await File.ReadAllBytesAsync(artifactPath));
+        using var verified = new CustomLoopRunStore(paths);
+        var persisted = Assert.IsType<CustomLoopRunRecord>(await verified.GetAsync(admitted.Id));
+        var state = Assert.IsType<HumanReviewRunState>(persisted.HumanReview);
+        Assert.True(CustomLoopRunValidator.Validate(persisted).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(persisted).Errors));
+        Assert.Equal(CustomLoopRunStatus.Paused, persisted.Status);
+        Assert.Equal(GovernedLoopFrontierStatus.ReviewBlocked, persisted.Frontier!.Payload.Status);
+        Assert.Single(state.OperationReceipts);
+        Assert.Single(state.AcceptedDecisions);
+        Assert.Equal(HumanReviewDecisionKind.Approve, state.AcceptedTerminalDecision?.Kind);
+        Assert.NotNull(state.ContinuationReservation);
+        Assert.Equal(admitted.HumanReview!.Evidence.Length + 2, state.Evidence.Length);
+        Assert.Equal(admitted.Events.Length + 2, persisted.Events.Length);
+    }
+
+    [Theory]
+    [InlineData(CustomLoopRunPublicationBoundary.StagedFileFlushed)]
+    [InlineData(CustomLoopRunPublicationBoundary.CanonicalRenamed)]
+    [InlineData(CustomLoopRunPublicationBoundary.ParentDirectoryFlushed)]
+    [InlineData(CustomLoopRunPublicationBoundary.TargetProven)]
+    public async Task External_process_loss_at_each_real_decision_publication_boundary_preserves_one_replayable_predecessor_or_successor(CustomLoopRunPublicationBoundary boundary)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var admitted = await PersistHumanReviewAdmissionAsync(paths, "decision-process-loss");
+        var admittedState = Assert.IsType<HumanReviewRunState>(admitted.HumanReview);
+        var artifactPath = Path.Combine(paths.CustomLoopRunsPath, admitted.LoopId, admitted.Id + ".json");
+        var predecessorBytes = await File.ReadAllBytesAsync(artifactPath);
+        var command = new HumanReviewDecisionCommand(admitted.Id, admitted.LifecycleVersion, "process-loss-approve", HumanReviewDecisionKind.Approve, null);
+        using var process = CancellationHostProcess.Start("human-review-decision-process-loss", workspace.RootPath, admitted.Id, boundary.ToString());
+        var outputTask = process.StandardOutput.ReadToEndAsync();
+        var errorTask = process.StandardError.ReadToEndAsync();
+        try
+        {
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
+        }
+        finally
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync();
+            }
+        }
+
+        Assert.NotEqual(0, process.ExitCode);
+        Assert.Contains("test host process crashed", await errorTask, StringComparison.OrdinalIgnoreCase);
+        _ = await outputTask;
+        HumanReviewDecisionServiceResult reconciled;
+        HumanReviewDecisionServiceResult replay;
+        using (var restarted = new CustomLoopRunStore(paths))
+        {
+            var recovered = Assert.IsType<CustomLoopRunRecord>(await restarted.GetAsync(admitted.Id));
+            Assert.True(CustomLoopRunValidator.Validate(recovered).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(recovered).Errors));
+            if (recovered.HumanReview!.OperationReceipts.IsEmpty)
+            {
+                Assert.Equal(predecessorBytes, await File.ReadAllBytesAsync(artifactPath));
+            }
+            else
+            {
+                Assert.Single(recovered.HumanReview.OperationReceipts);
+                Assert.Single(recovered.HumanReview.AcceptedDecisions);
+                Assert.NotNull(recovered.HumanReview.ContinuationReservation);
+                Assert.Equal(admittedState.Evidence.Length + 2, recovered.HumanReview.Evidence.Length);
+                Assert.Equal(admitted.Events.Length + 2, recovered.Events.Length);
+            }
+
+            reconciled = await new HumanReviewDecisionService(
+                restarted,
+                new HumanReviewDecisionStoreTestAuthorizer(),
+                new HumanReviewDecisionStoreTestClock(recovered.UpdatedAtUtc.AddMinutes(1)))
+                .DecideAsync(command);
+            var current = Assert.IsType<CustomLoopRunRecord>(await restarted.GetAsync(admitted.Id));
+            replay = await new HumanReviewDecisionService(
+                restarted,
+                new HumanReviewDecisionStoreTestAuthorizer(),
+                new HumanReviewDecisionStoreTestClock(current.UpdatedAtUtc.AddMinutes(1)))
+                .DecideAsync(command with { ExpectedLifecycleVersion = command.ExpectedLifecycleVersion - 1 });
+        }
+
+        Assert.Contains(reconciled.Status, new[] { HumanReviewDecisionServiceStatus.Accepted, HumanReviewDecisionServiceStatus.Replayed });
+        Assert.Equal(HumanReviewDecisionServiceStatus.Replayed, replay.Status);
+        using var verified = new CustomLoopRunStore(paths);
+        var persisted = Assert.IsType<CustomLoopRunRecord>(await verified.GetAsync(admitted.Id));
+        var state = Assert.IsType<HumanReviewRunState>(persisted.HumanReview);
+        Assert.True(CustomLoopRunValidator.Validate(persisted).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(persisted).Errors));
+        Assert.Equal(CustomLoopRunStatus.Paused, persisted.Status);
+        Assert.Equal(GovernedLoopFrontierStatus.ReviewBlocked, persisted.Frontier!.Payload.Status);
+        Assert.Single(state.OperationReceipts);
+        Assert.Single(state.AcceptedDecisions);
+        Assert.Single(state.Evidence, item => item.Kind == HumanReviewEvidenceKind.DecisionAccepted);
+        Assert.Single(state.Evidence, item => item.Kind == HumanReviewEvidenceKind.ContinuationReserved);
+        Assert.Single(persisted.Events, item => item.Kind == CustomLoopRunEventKind.HumanReviewDecisionOperationRecorded);
+        Assert.Single(persisted.Events, item => item.Kind == CustomLoopRunEventKind.HumanReviewContinuationReserved);
+        Assert.NotNull(state.ContinuationReservation);
+    }
+
+    [Fact]
+    public async Task Two_external_decision_processes_synchronized_after_get_async_persist_one_terminal_winner_and_one_conflict_audit()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var admitted = await PersistHumanReviewAdmissionAsync(paths, "decision-race");
+        var releasePath = workspace.File("human-review-decision-race-release");
+        var approvalReadyPath = workspace.File("human-review-decision-race-approval-ready");
+        var rejectionReadyPath = workspace.File("human-review-decision-race-rejection-ready");
+        var approvalResultPath = workspace.File("human-review-decision-race-approval-result");
+        var rejectionResultPath = workspace.File("human-review-decision-race-rejection-result");
+        using var approval = CancellationHostProcess.Start("human-review-decision-race", workspace.RootPath, admitted.Id, "approval", "Approve", approvalReadyPath, releasePath, approvalResultPath);
+        using var rejection = CancellationHostProcess.Start("human-review-decision-race", workspace.RootPath, admitted.Id, "rejection", "Reject", rejectionReadyPath, releasePath, rejectionResultPath);
+        var approvalOutput = approval.StandardOutput.ReadToEndAsync();
+        var approvalError = approval.StandardError.ReadToEndAsync();
+        var rejectionOutput = rejection.StandardOutput.ReadToEndAsync();
+        var rejectionError = rejection.StandardError.ReadToEndAsync();
+        try
+        {
+            await WaitForFileAsync(approvalReadyPath, TimeSpan.FromSeconds(30));
+            await WaitForFileAsync(rejectionReadyPath, TimeSpan.FromSeconds(30));
+            await File.WriteAllTextAsync(releasePath, "release");
+            await Task.WhenAll(approval.WaitForExitAsync(), rejection.WaitForExitAsync()).WaitAsync(TimeSpan.FromSeconds(30));
+        }
+        finally
+        {
+            if (!approval.HasExited)
+            {
+                approval.Kill(entireProcessTree: true);
+                await approval.WaitForExitAsync();
+            }
+
+            if (!rejection.HasExited)
+            {
+                rejection.Kill(entireProcessTree: true);
+                await rejection.WaitForExitAsync();
+            }
+        }
+
+        Assert.Equal(0, approval.ExitCode);
+        Assert.Equal(0, rejection.ExitCode);
+        var results = new Dictionary<HumanReviewDecisionKind, string>
+        {
+            [HumanReviewDecisionKind.Approve] = await File.ReadAllTextAsync(approvalResultPath),
+            [HumanReviewDecisionKind.Reject] = await File.ReadAllTextAsync(rejectionResultPath),
+        };
+        Assert.Equal(1, results.Values.Count(result => result == "Accepted|Accepted"));
+        Assert.Equal(1, results.Values.Count(result => result == "Conflict|Conflict"));
+        _ = await approvalOutput;
+        _ = await approvalError;
+        _ = await rejectionOutput;
+        _ = await rejectionError;
+        var winningKind = results.Single(item => item.Value == "Accepted|Accepted").Key;
+        var artifactPath = Path.Combine(paths.CustomLoopRunsPath, admitted.LoopId, admitted.Id + ".json");
+        var persistedBytes = await File.ReadAllBytesAsync(artifactPath);
+
+        using (var restarted = new CustomLoopRunStore(paths))
+        {
+            var persisted = Assert.IsType<CustomLoopRunRecord>(await restarted.GetAsync(admitted.Id));
+            var state = Assert.IsType<HumanReviewRunState>(persisted.HumanReview);
+            Assert.True(CustomLoopRunValidator.Validate(persisted).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(persisted).Errors));
+            Assert.Equal(CustomLoopRunStatus.Paused, persisted.Status);
+            Assert.Equal(GovernedLoopFrontierStatus.ReviewBlocked, persisted.Frontier!.Payload.Status);
+            Assert.Equal(winningKind, state.AcceptedTerminalDecision?.Kind);
+            Assert.Equal(2, state.OperationReceipts.Length);
+            Assert.Equal(1, state.OperationReceipts.Count(item => item.Disposition == HumanReviewDecisionOperationDisposition.Accepted));
+            Assert.Equal(1, state.OperationReceipts.Count(item => item.Disposition == HumanReviewDecisionOperationDisposition.Conflict));
+            Assert.Single(state.AcceptedDecisions);
+            Assert.Equal(winningKind == HumanReviewDecisionKind.Approve, state.ContinuationReservation is not null);
+            Assert.Equal(winningKind == HumanReviewDecisionKind.Approve ? 2 : 1, state.Evidence.Count(item => item.Kind is HumanReviewEvidenceKind.DecisionAccepted or HumanReviewEvidenceKind.ContinuationReserved));
+            Assert.Single(state.Evidence, item => item.Kind == HumanReviewEvidenceKind.DecisionConflict);
+            Assert.Equal(winningKind == HumanReviewDecisionKind.Approve ? 3 : 2, persisted.Events.Count(item => item.Kind is CustomLoopRunEventKind.HumanReviewDecisionOperationRecorded or CustomLoopRunEventKind.HumanReviewContinuationReserved));
+            var replay = await new HumanReviewDecisionService(
+                restarted,
+                new HumanReviewDecisionStoreTestAuthorizer(),
+                new HumanReviewDecisionStoreTestClock(persisted.UpdatedAtUtc.AddMinutes(1)))
+                .DecideAsync(new HumanReviewDecisionCommand(admitted.Id, admitted.LifecycleVersion - 1, winningKind == HumanReviewDecisionKind.Approve ? "race-approval" : "race-rejection", winningKind, null));
+            Assert.Equal(HumanReviewDecisionServiceStatus.Replayed, replay.Status);
+        }
+
+        Assert.Equal(persistedBytes, await File.ReadAllBytesAsync(artifactPath));
+    }
+
+    [Fact]
+    public async Task Real_store_unauthenticated_and_wrong_role_calls_preserve_authority_and_record_only_the_authenticated_denial()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var admitted = await PersistHumanReviewAdmissionAsync(paths, "decision-denied");
+        var artifactPath = Path.Combine(paths.CustomLoopRunsPath, admitted.LoopId, admitted.Id + ".json");
+        var predecessorBytes = await File.ReadAllBytesAsync(artifactPath);
+        var command = new HumanReviewDecisionCommand(admitted.Id, admitted.LifecycleVersion, "unauthenticated-one", HumanReviewDecisionKind.Reject, null);
+
+        using (var store = new CustomLoopRunStore(paths))
+        {
+            var unauthenticated = await new HumanReviewDecisionService(
+                store,
+                new HumanReviewDecisionStoreTestAuthorizer { IsAuthorized = false, ActorId = null, ReviewerRoleId = null, ScopeIds = default, CorrelationId = null },
+                new HumanReviewDecisionStoreTestClock(admitted.UpdatedAtUtc.AddMinutes(1)))
+                .DecideAsync(command);
+            Assert.Equal(HumanReviewDecisionServiceStatus.Denied, unauthenticated.Status);
+            Assert.Null(unauthenticated.Receipt);
+        }
+
+        Assert.Equal(predecessorBytes, await File.ReadAllBytesAsync(artifactPath));
+        using (var store = new CustomLoopRunStore(paths))
+        {
+            var denied = await new HumanReviewDecisionService(
+                store,
+                new HumanReviewDecisionStoreTestAuthorizer { ReviewerRoleId = "wrong-reviewer-role" },
+                new HumanReviewDecisionStoreTestClock(admitted.UpdatedAtUtc.AddMinutes(1)))
+                .DecideAsync(command with { DecisionOperationId = "wrong-role-one" });
+            Assert.Equal(HumanReviewDecisionServiceStatus.Denied, denied.Status);
+            Assert.Equal(HumanReviewDecisionOperationDisposition.Denied, denied.Receipt?.Disposition);
+        }
+
+        using var restarted = new CustomLoopRunStore(paths);
+        var persisted = Assert.IsType<CustomLoopRunRecord>(await restarted.GetAsync(admitted.Id));
+        var state = Assert.IsType<HumanReviewRunState>(persisted.HumanReview);
+        Assert.True(CustomLoopRunValidator.Validate(persisted).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(persisted).Errors));
+        Assert.Equal(CustomLoopRunStatus.Paused, persisted.Status);
+        Assert.Equal(GovernedLoopFrontierStatus.ReviewBlocked, persisted.Frontier!.Payload.Status);
+        Assert.Single(state.OperationReceipts);
+        Assert.Equal(HumanReviewDecisionOperationDisposition.Denied, state.OperationReceipts[0].Disposition);
+        Assert.Empty(state.AcceptedDecisions);
+        Assert.Null(state.ContinuationReservation);
+        Assert.Single(state.Evidence, item => item.Kind == HumanReviewEvidenceKind.DecisionDenied);
+        Assert.Single(persisted.Events, item => item.Kind == CustomLoopRunEventKind.HumanReviewDecisionOperationRecorded);
+    }
+
+    [Fact]
+    public async Task Real_store_expiry_is_inclusive_and_a_stale_predecessor_or_divergent_reuse_never_releases_the_frontier()
+    {
+        using var expiryWorkspace = new TestWorkspace();
+        var expiryPaths = new WorkspacePaths(expiryWorkspace.RootPath);
+        var expiring = await PersistHumanReviewAdmissionAsync(expiryPaths, "decision-expiry");
+        var expiryState = Assert.IsType<HumanReviewRunState>(expiring.HumanReview);
+        using (var store = new CustomLoopRunStore(expiryPaths))
+        {
+            var expired = await new HumanReviewDecisionService(
+                store,
+                new HumanReviewDecisionStoreTestAuthorizer(),
+                new HumanReviewDecisionStoreTestClock(expiryState.Request.Timing.ExpiresAtUtc))
+                .DecideAsync(new HumanReviewDecisionCommand(expiring.Id, expiring.LifecycleVersion, "expiry-inclusive-one", HumanReviewDecisionKind.Reject, null));
+            Assert.Equal(HumanReviewDecisionServiceStatus.Expired, expired.Status);
+            Assert.Equal(HumanReviewDecisionOperationDisposition.Expired, expired.Receipt?.Disposition);
+        }
+
+        using (var restarted = new CustomLoopRunStore(expiryPaths))
+        {
+            var persisted = Assert.IsType<CustomLoopRunRecord>(await restarted.GetAsync(expiring.Id));
+            var state = Assert.IsType<HumanReviewRunState>(persisted.HumanReview);
+            Assert.Equal(CustomLoopRunStatus.Paused, persisted.Status);
+            Assert.Equal(GovernedLoopFrontierStatus.ReviewBlocked, persisted.Frontier!.Payload.Status);
+            Assert.Equal(HumanReviewLifecycleStatus.Expired, state.Lifecycle.Status);
+            Assert.Empty(state.AcceptedDecisions);
+            Assert.Null(state.ContinuationReservation);
+        }
+
+        using var staleWorkspace = new TestWorkspace();
+        var stalePaths = new WorkspacePaths(staleWorkspace.RootPath);
+        var admitted = await PersistHumanReviewAdmissionAsync(stalePaths, "decision-stale");
+        var staleCommand = new HumanReviewDecisionCommand(admitted.Id, admitted.LifecycleVersion - 1, "stale-operation-one", HumanReviewDecisionKind.Approve, null);
+        using (var store = new CustomLoopRunStore(stalePaths))
+        {
+            var service = new HumanReviewDecisionService(
+                store,
+                new HumanReviewDecisionStoreTestAuthorizer(),
+                new HumanReviewDecisionStoreTestClock(admitted.UpdatedAtUtc.AddMinutes(1)));
+            var stale = await service.DecideAsync(staleCommand);
+            var divergent = await service.DecideAsync(staleCommand with { Kind = HumanReviewDecisionKind.Reject });
+            Assert.Equal(HumanReviewDecisionServiceStatus.Conflict, stale.Status);
+            Assert.Equal(HumanReviewDecisionOperationDisposition.Conflict, stale.Receipt?.Disposition);
+            Assert.Equal(HumanReviewDecisionServiceStatus.Conflict, divergent.Status);
+            Assert.Null(divergent.Receipt);
+        }
+
+        using var staleRestarted = new CustomLoopRunStore(stalePaths);
+        var stalePersisted = Assert.IsType<CustomLoopRunRecord>(await staleRestarted.GetAsync(admitted.Id));
+        var staleState = Assert.IsType<HumanReviewRunState>(stalePersisted.HumanReview);
+        Assert.True(CustomLoopRunValidator.Validate(stalePersisted).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(stalePersisted).Errors));
+        Assert.Equal(CustomLoopRunStatus.Paused, stalePersisted.Status);
+        Assert.Equal(GovernedLoopFrontierStatus.ReviewBlocked, stalePersisted.Frontier!.Payload.Status);
+        Assert.Single(staleState.OperationReceipts);
+        Assert.Equal(HumanReviewDecisionOperationDisposition.Conflict, staleState.OperationReceipts[0].Disposition);
+        Assert.Empty(staleState.AcceptedDecisions);
+        Assert.Null(staleState.ContinuationReservation);
+    }
+
+    [Fact]
+    public async Task Real_store_decision_quota_and_corrupt_canonical_records_fail_closed_without_rewrite()
+    {
+        using var quotaWorkspace = new TestWorkspace();
+        var quotaPaths = new WorkspacePaths(quotaWorkspace.RootPath);
+        var admitted = await PersistHumanReviewAdmissionAsync(quotaPaths, "decision-quota");
+        var full = CreateDecisionState(admitted, [.. Enumerable.Repeat(HumanReviewDecisionScenario.Denied, HumanReviewContractLimits.MaxDecisionOperationReceipts)]);
+        using (var store = new CustomLoopRunStore(quotaPaths))
+        {
+            Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(full, admitted.LifecycleVersion)).Status);
+        }
+
+        var quotaArtifactPath = Path.Combine(quotaPaths.CustomLoopRunsPath, admitted.LoopId, admitted.Id + ".json");
+        var quotaBytes = await File.ReadAllBytesAsync(quotaArtifactPath);
+        using (var store = new CustomLoopRunStore(quotaPaths))
+        {
+            var exhausted = await new HumanReviewDecisionService(
+                store,
+                new HumanReviewDecisionStoreTestAuthorizer(),
+                new HumanReviewDecisionStoreTestClock(full.UpdatedAtUtc.AddMinutes(1)))
+                .DecideAsync(new HumanReviewDecisionCommand(full.Id, full.LifecycleVersion, "quota-overflow-one", HumanReviewDecisionKind.Reject, null));
+            Assert.Equal(HumanReviewDecisionServiceStatus.LimitExceeded, exhausted.Status);
+            Assert.Null(exhausted.Receipt);
+        }
+
+        Assert.Equal(quotaBytes, await File.ReadAllBytesAsync(quotaArtifactPath));
+        using var corruptionWorkspace = new TestWorkspace();
+        var corruptionPaths = new WorkspacePaths(corruptionWorkspace.RootPath);
+        var corrupted = await PersistHumanReviewAdmissionAsync(corruptionPaths, "decision-corruption");
+        var corruptArtifactPath = Path.Combine(corruptionPaths.CustomLoopRunsPath, corrupted.LoopId, corrupted.Id + ".json");
+        var root = JsonNode.Parse(await File.ReadAllTextAsync(corruptArtifactPath))!.AsObject();
+        root["run"]!["humanReview"]!["operationReceipts"] = null;
+        await File.WriteAllTextAsync(corruptArtifactPath, root.ToJsonString() + "\n");
+        var corruptBytes = await File.ReadAllBytesAsync(corruptArtifactPath);
+        using (var store = new CustomLoopRunStore(corruptionPaths))
+        {
+            var unavailable = await new HumanReviewDecisionService(
+                store,
+                new HumanReviewDecisionStoreTestAuthorizer(),
+                new HumanReviewDecisionStoreTestClock(corrupted.UpdatedAtUtc.AddMinutes(1)))
+                .DecideAsync(new HumanReviewDecisionCommand(corrupted.Id, corrupted.LifecycleVersion, "corruption-one", HumanReviewDecisionKind.Reject, null));
+            Assert.Equal(HumanReviewDecisionServiceStatus.Unavailable, unavailable.Status);
+            Assert.Null(unavailable.Receipt);
+        }
+
+        Assert.Equal(corruptBytes, await File.ReadAllBytesAsync(corruptArtifactPath));
+    }
+
+    [Fact]
     public async Task Human_review_admission_rejects_a_valid_request_that_exceeds_reserved_trace_capacity_without_partial_state()
     {
         using var workspace = new TestWorkspace();
