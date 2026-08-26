@@ -29,6 +29,7 @@ function Get-VerificationTestProjectLanes {
 
     if ($TestProject.Name -eq "EmbodySense.Core.Startup.Tests.csproj") {
         $nestedProcessFullyQualifiedNames = @(
+            "EmbodySense.Core.Startup.Tests.Runtime.AgentRuntimeFactoryTests.CreateAsync_exposes_authoring_that_observes_the_runtime_materialized_nonterminal_run_until_runtime_disposal",
             "EmbodySense.Core.Startup.Tests.Loops.Execution.GovernedLoopRuntimeTestsModels.Model_attempt_crash_windows_are_durable_and_never_redispatch_across_external_restart",
             "EmbodySense.Core.Startup.Tests.Loops.Execution.GovernedLoopRuntimeTestsWait.Production_runtime_parks_and_wakes_a_canonical_wait_after_restart",
             "EmbodySense.Core.Startup.Tests.Loops.Execution.GovernedLoopRuntimeTestsWait.Explicit_background_request_activates_once_after_late_workspace_host_reacquisition"
