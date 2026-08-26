@@ -268,6 +268,144 @@ public sealed class GovernedLoopGraphRevisionStoreTests
     }
 
     [Fact]
+    public async Task Every_supported_human_input_schema_and_policy_variant_round_trips_through_canonical_persistence()
+    {
+        var variants = new[]
+        {
+            new
+            {
+                Name = "text-first-valid",
+                Configuration = HumanInputConfiguration(
+                    "text",
+                    HumanInputPrivacyClass.Private,
+                    new HumanInputResponseSchema(HumanInputResponseKind.Text, 64, null, null, null),
+                    new HumanInputResponsePolicy(HumanInputResponsePolicyKind.FirstValid, null, null)),
+            },
+            new
+            {
+                Name = "choice-quorum",
+                Configuration = HumanInputConfiguration(
+                    "text",
+                    HumanInputPrivacyClass.Private,
+                    new HumanInputResponseSchema(HumanInputResponseKind.Choice, null, [new HumanInputChoice("no", "No"), new HumanInputChoice("yes", "Yes")], null, null),
+                    new HumanInputResponsePolicy(HumanInputResponsePolicyKind.Quorum, 2, null)),
+            },
+            new
+            {
+                Name = "confirmation-named-roles",
+                Configuration = HumanInputConfiguration(
+                    "boolean",
+                    HumanInputPrivacyClass.Sensitive,
+                    new HumanInputResponseSchema(HumanInputResponseKind.Confirmation, null, null, null, null),
+                    new HumanInputResponsePolicy(HumanInputResponsePolicyKind.NamedRoles, null, ["role-one", "role-two"])),
+            },
+            new
+            {
+                Name = "structured-merge",
+                Configuration = HumanInputConfiguration(
+                    "object",
+                    HumanInputPrivacyClass.Private,
+                    new HumanInputResponseSchema(
+                        HumanInputResponseKind.Structured,
+                        null,
+                        null,
+                        [
+                            new HumanInputStructuredFieldSchema("text-field", HumanInputStructuredFieldKind.Text, true, 64, null),
+                            new HumanInputStructuredFieldSchema("choice-field", HumanInputStructuredFieldKind.Choice, false, null, [new HumanInputChoice("one", "One"), new HumanInputChoice("two", "Two")]),
+                        ],
+                        null),
+                    new HumanInputResponsePolicy(HumanInputResponsePolicyKind.Merge, 2, ["role-one", "role-two"])),
+            },
+            new
+            {
+                Name = "reference-artifact-manual-selection",
+                Configuration = HumanInputConfiguration(
+                    "text",
+                    HumanInputPrivacyClass.Private,
+                    new HumanInputResponseSchema(HumanInputResponseKind.Reference, null, null, null, new HumanInputReferencePolicy(HumanInputReferenceKind.Artifact, 128)),
+                    new HumanInputResponsePolicy(HumanInputResponsePolicyKind.ManualSelection, null, ["role-one"])),
+            },
+            new
+            {
+                Name = "reference-inline-first-valid",
+                Configuration = HumanInputConfiguration(
+                    "text",
+                    HumanInputPrivacyClass.Sensitive,
+                    new HumanInputResponseSchema(HumanInputResponseKind.Reference, null, null, null, new HumanInputReferencePolicy(HumanInputReferenceKind.Reference, 128)),
+                    new HumanInputResponsePolicy(HumanInputResponsePolicyKind.FirstValid, null, null)),
+            },
+        };
+
+        foreach (var variant in variants)
+        {
+            using var workspace = new TestWorkspace();
+            var paths = new WorkspacePaths(workspace.RootPath);
+            var trust = new TestCapabilityLifecycleTrustProvider();
+            Assert.True(GovernedLoopHumanInputNodeConfigurationValidator.IsValid(variant.Configuration), variant.Name);
+            var graph = GraphWithEveryClosedEnum(variant.Configuration, requireBooleanNonNullable: true);
+            var mutation = CreateDraft(graph, "create-" + variant.Name, HashA, HashB, 0, _time);
+
+            var committed = await Store(paths, trust).CommitAsync(mutation);
+            var restarted = await Store(paths, trust).ReadArtifactAsync(graph.RevisionReference);
+            var restored = Assert.Single(restarted.Artifact!.Graph.Nodes, node => node.Descriptor.Kind == GovernedLoopNodeKind.HumanInput).HumanInputConfiguration!;
+
+            Assert.Equal(GovernedLoopRevisionStoreCommitStatus.Committed, committed.Status);
+            Assert.Equal(GovernedLoopRevisionStoreReadStatus.Ready, restarted.Status);
+            AssertEquivalentHumanInputConfiguration(variant.Configuration, restored);
+            using var payload = JsonDocument.Parse(await File.ReadAllBytesAsync(ArtifactPath(paths, graph)));
+            var persisted = Assert.Single(payload.RootElement.GetProperty("executableGraph").GetProperty("nodes").EnumerateArray(), node => node.GetProperty("kind").GetString() == "human-input").GetProperty("humanInputConfiguration");
+            Assert.Equal(variant.Configuration.ResponseSchema!.Kind.ToString().ToLowerInvariant(), persisted.GetProperty("responseSchema").GetProperty("kind").GetString());
+            Assert.Equal(variant.Configuration.PrivacyClass.ToString().ToLowerInvariant(), persisted.GetProperty("privacyClass").GetString());
+            Assert.Equal(variant.Configuration.ResponsePolicy!.Kind.ToString().ToLowerInvariant().Replace("manualselection", "manual-selection", StringComparison.Ordinal).Replace("firstvalid", "first-valid", StringComparison.Ordinal).Replace("namedroles", "named-roles", StringComparison.Ordinal), persisted.GetProperty("responsePolicy").GetProperty("kind").GetString());
+        }
+    }
+
+    private static void AssertEquivalentHumanInputConfiguration(
+        GovernedLoopHumanInputNodeConfiguration expected,
+        GovernedLoopHumanInputNodeConfiguration actual)
+    {
+        Assert.Equal(expected.SchemaVersion, actual.SchemaVersion);
+        Assert.Equal(expected.RequestSchemaReference, actual.RequestSchemaReference);
+        Assert.Equal(expected.Purpose, actual.Purpose);
+        Assert.Equal(expected.Prompt, actual.Prompt);
+        Assert.Equal(expected.PrivacyClass, actual.PrivacyClass);
+        Assert.Equal(expected.TimeoutPolicyReference, actual.TimeoutPolicyReference);
+        Assert.Equal(expected.FailurePolicyReference, actual.FailurePolicyReference);
+        Assert.Equal(expected.EligibleRespondents!.Select(respondent => (respondent!.RespondentId, respondent.RespondentRoleId, respondent.RoutingReference)), actual.EligibleRespondents!.Select(respondent => (respondent!.RespondentId, respondent.RespondentRoleId, respondent.RoutingReference)));
+        Assert.Equal(expected.ResponsePolicy!.Kind, actual.ResponsePolicy!.Kind);
+        Assert.Equal(expected.ResponsePolicy.RequiredResponseCount, actual.ResponsePolicy.RequiredResponseCount);
+        Assert.Equal(expected.ResponsePolicy.OrderedRoleIds?.ToArray(), actual.ResponsePolicy.OrderedRoleIds?.ToArray());
+        Assert.Equal(expected.ResponseSchema!.Kind, actual.ResponseSchema!.Kind);
+        Assert.Equal(expected.ResponseSchema.MaxTextCharacters, actual.ResponseSchema.MaxTextCharacters);
+        Assert.Equal(expected.ResponseSchema.Choices?.Length, actual.ResponseSchema.Choices?.Length);
+        if (expected.ResponseSchema.Choices is not null)
+        {
+            Assert.Equal(expected.ResponseSchema.Choices.Select(choice => (choice!.ChoiceId, choice.DisplayText)), actual.ResponseSchema.Choices!.Select(choice => (choice!.ChoiceId, choice.DisplayText)));
+        }
+        Assert.Equal(expected.ResponseSchema.StructuredFields?.Length, actual.ResponseSchema.StructuredFields?.Length);
+        if (expected.ResponseSchema.StructuredFields is not null)
+        {
+            Assert.Equal(expected.ResponseSchema.StructuredFields.Length, actual.ResponseSchema.StructuredFields!.Length);
+            for (var index = 0; index < expected.ResponseSchema.StructuredFields.Length; index++)
+            {
+                var expectedField = expected.ResponseSchema.StructuredFields[index]!;
+                var actualField = actual.ResponseSchema.StructuredFields[index]!;
+                Assert.Equal(expectedField.FieldId, actualField.FieldId);
+                Assert.Equal(expectedField.Kind, actualField.Kind);
+                Assert.Equal(expectedField.Required, actualField.Required);
+                Assert.Equal(expectedField.MaxTextCharacters, actualField.MaxTextCharacters);
+                Assert.Equal(expectedField.Choices?.Length, actualField.Choices?.Length);
+                if (expectedField.Choices is not null)
+                {
+                    Assert.Equal(expectedField.Choices.Select(choice => (choice!.ChoiceId, choice.DisplayText)), actualField.Choices!.Select(choice => (choice!.ChoiceId, choice.DisplayText)));
+                }
+            }
+        }
+        Assert.Equal(expected.ResponseSchema.ReferencePolicy?.Kind, actual.ResponseSchema.ReferencePolicy?.Kind);
+        Assert.Equal(expected.ResponseSchema.ReferencePolicy?.MaxReferenceCharacters, actual.ResponseSchema.ReferencePolicy?.MaxReferenceCharacters);
+    }
+
+    [Fact]
     public async Task Captured_nested_human_input_values_cannot_diverge_from_persisted_graph_identity_or_json()
     {
         using var workspace = new TestWorkspace();
@@ -1784,7 +1922,9 @@ public sealed class GovernedLoopGraphRevisionStoreTests
             0,
             maximumTokens: 3_000);
 
-    private static GovernedLoopGraphDefinition GraphWithEveryClosedEnum(GovernedLoopHumanInputNodeConfiguration? humanInputConfiguration = null)
+    private static GovernedLoopGraphDefinition GraphWithEveryClosedEnum(
+        GovernedLoopHumanInputNodeConfiguration? humanInputConfiguration = null,
+        bool requireBooleanNonNullable = false)
     {
         var configuration = humanInputConfiguration ?? new GovernedLoopHumanInputNodeConfiguration(
             GovernedLoopHumanInputNodeConfiguration.CurrentSchemaVersion,
@@ -1864,7 +2004,7 @@ public sealed class GovernedLoopGraphRevisionStoreTests
             GovernedLoopAuthorityCeiling.Create([ModelInferenceCapabilityId]),
             [
                 new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false),
-                new GovernedLoopValueSchemaDefinition("boolean", GovernedLoopValueKind.Boolean, true),
+                new GovernedLoopValueSchemaDefinition("boolean", GovernedLoopValueKind.Boolean, !requireBooleanNonNullable),
                 new GovernedLoopValueSchemaDefinition("integer", GovernedLoopValueKind.Integer, false),
                 new GovernedLoopValueSchemaDefinition("number", GovernedLoopValueKind.Number, false),
                 new GovernedLoopValueSchemaDefinition("object", GovernedLoopValueKind.Object, false),
@@ -1884,6 +2024,23 @@ public sealed class GovernedLoopGraphRevisionStoreTests
             new GovernedLoopDisplayMetadata("All enums", "Every closed discriminator.", display),
             GovernedLoopGraphTestFixture.DefaultModelRoutingPolicy());
     }
+
+    private static GovernedLoopHumanInputNodeConfiguration HumanInputConfiguration(
+        string requestSchemaReference,
+        HumanInputPrivacyClass privacyClass,
+        HumanInputResponseSchema responseSchema,
+        HumanInputResponsePolicy responsePolicy)
+        => new(
+            GovernedLoopHumanInputNodeConfiguration.CurrentSchemaVersion,
+            requestSchemaReference,
+            "Collect untrusted data.",
+            "Provide a bounded response.",
+            responseSchema,
+            privacyClass,
+            [new HumanInputEligibleRespondent("user-one", "role-one", "route-one"), new HumanInputEligibleRespondent("user-two", "role-two", "route-two")],
+            responsePolicy,
+            "timeout-policy-one",
+            "failure-policy-one");
 
     private static ContextualRoleRevisionPin Role(
         string roleId = "researcher",
