@@ -366,6 +366,7 @@ Assert-True -Condition ($LASTEXITCODE -eq 0 -and $currentCommit -match '^[0-9a-f
 $sharedDirectTestConsumers = @(Get-QualificationExternalTestClassConsumerPaths -RepositoryRoot $repoRoot -Commit $currentCommit -Path $sharedDirectTestPath -TestClass $sharedDirectTestClass)
 $expectedSharedDirectTestConsumers = @(
     "tests/EmbodySense.Core.Application.Tests/HumanReview/HumanReviewAdmissionServiceTests.cs",
+    "tests/EmbodySense.Core.Application.Tests/HumanReview/HumanReviewContinuationConsumerTests.cs",
     "tests/EmbodySense.Core.Application.Tests/HumanReview/HumanReviewDecisionTestData.cs",
     "tests/EmbodySense.Core.Application.Tests/Loops/Sequential/GovernedLoopSequentialBindingResolverTests.cs",
     "tests/EmbodySense.Core.Application.Tests/Loops/Sequential/GovernedLoopSequentialFrontierMachineTests.cs",

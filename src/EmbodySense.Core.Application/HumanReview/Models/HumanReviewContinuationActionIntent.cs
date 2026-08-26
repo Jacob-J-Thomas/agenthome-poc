@@ -13,6 +13,7 @@ namespace EmbodySense.Core.Application.HumanReview.Models;
 /// <param name="Reservation">The exact approval reservation for a release action, otherwise null.</param>
 /// <param name="ExpectedGeneration">The exact wake generation for a release action, otherwise null.</param>
 /// <param name="EffectQuery">The exact effect certainty expectation for an effect release, otherwise null.</param>
+/// <param name="ReleaseReceipt">The immutable future-receipt preparation for a release action, otherwise null.</param>
 public sealed record HumanReviewContinuationActionIntent(
     HumanReviewContinuationAction Action,
     string RunId,
@@ -23,4 +24,5 @@ public sealed record HumanReviewContinuationActionIntent(
     HumanReviewContinuationClaimReference? Claim,
     HumanReviewContinuationReservationReference? Reservation,
     long? ExpectedGeneration,
-    GovernedLoopEffectCertaintySnapshotQuery? EffectQuery);
+    GovernedLoopEffectCertaintySnapshotQuery? EffectQuery,
+    HumanReviewContinuationReleaseReceiptIntent? ReleaseReceipt);
