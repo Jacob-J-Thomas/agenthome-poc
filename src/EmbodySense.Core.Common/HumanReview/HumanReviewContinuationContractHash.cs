@@ -35,6 +35,19 @@ public static class HumanReviewContinuationContractHash
     /// <summary>Gets whether a claim carries an exact canonical hash.</summary>
     public static bool MatchesClaim(HumanReviewContinuationClaim? claim) => claim is not null && HumanReviewContractHash.IsSha256(claim.ClaimHash) && FixedEquals(ComputeClaim(claim), claim.ClaimHash);
 
+    /// <summary>Computes the canonical hash of a continuation release receipt excluding its self-referential hash field.</summary>
+    public static string ComputeReleaseReceipt(HumanReviewContinuationReleaseReceipt receipt)
+    {
+        ArgumentNullException.ThrowIfNull(receipt);
+        return Compute("human-review-continuation-release-receipt-v1", builder => AppendReleaseReceipt(builder, receipt, false));
+    }
+
+    /// <summary>Returns a release receipt carrying its exact canonical hash.</summary>
+    public static HumanReviewContinuationReleaseReceipt ApplyReleaseReceipt(HumanReviewContinuationReleaseReceipt receipt) => receipt with { ReleaseReceiptHash = ComputeReleaseReceipt(receipt) };
+
+    /// <summary>Gets whether a release receipt carries its exact canonical hash.</summary>
+    public static bool MatchesReleaseReceipt(HumanReviewContinuationReleaseReceipt? receipt) => receipt is not null && HumanReviewContractHash.IsSha256(receipt.ReleaseReceiptHash) && FixedEquals(ComputeReleaseReceipt(receipt), receipt.ReleaseReceiptHash);
+
     /// <summary>Computes the canonical hash of a continuation completion excluding its self-referential hash field.</summary>
     public static string ComputeCompletion(HumanReviewContinuationCompletion completion)
     {
@@ -46,12 +59,12 @@ public static class HumanReviewContinuationContractHash
     public static HumanReviewContinuationCompletion ApplyCompletion(HumanReviewContinuationCompletion completion)
     {
         ArgumentNullException.ThrowIfNull(completion);
-        var prepared = completion with { Evidence = ApplyPreviews(completion.Evidence), Provenance = HumanReviewContractHash.ApplyProvenance(completion.Provenance) };
+        var prepared = completion with { ReleaseReceipt = ApplyReleaseReceipt(completion.ReleaseReceipt), Evidence = ApplyPreviews(completion.Evidence), Provenance = HumanReviewContractHash.ApplyProvenance(completion.Provenance) };
         return prepared with { CompletionHash = ComputeCompletion(prepared) };
     }
 
     /// <summary>Gets whether a completion carries exact canonical nested and artifact hashes.</summary>
-    public static bool MatchesCompletion(HumanReviewContinuationCompletion? completion) => completion is not null && HumanReviewContractHash.IsSha256(completion.CompletionHash) && MatchesPreviews(completion.Evidence) && HumanReviewContractHash.MatchesProvenance(completion.Provenance) && FixedEquals(ComputeCompletion(completion), completion.CompletionHash);
+    public static bool MatchesCompletion(HumanReviewContinuationCompletion? completion) => completion is not null && HumanReviewContractHash.IsSha256(completion.CompletionHash) && MatchesReleaseReceipt(completion.ReleaseReceipt) && MatchesPreviews(completion.Evidence) && HumanReviewContractHash.MatchesProvenance(completion.Provenance) && FixedEquals(ComputeCompletion(completion), completion.CompletionHash);
 
     /// <summary>Computes the canonical hash of a continuation retirement excluding its self-referential hash field.</summary>
     public static string ComputeRetirement(HumanReviewContinuationRetirement retirement)
@@ -110,7 +123,8 @@ public static class HumanReviewContinuationContractHash
     private static bool FixedEquals(string left, string right) => CryptographicOperations.FixedTimeEquals(Encoding.ASCII.GetBytes(left), Encoding.ASCII.GetBytes(right));
     private static void AppendWake(StringBuilder builder, HumanReviewContinuationWake wake, bool includeHash) { Append(builder, wake.SchemaVersion); Append(builder, wake.WakeId); AppendRequest(builder, wake.Request); AppendDecision(builder, wake.Decision); AppendReservation(builder, wake.Reservation); Append(builder, wake.BindingHash); Append(builder, wake.ExpectedGeneration); Append(builder, wake.PublishedAtUtc); Append(builder, wake.ExpiresAtUtc); AppendProvenance(builder, wake.Provenance); if (includeHash) Append(builder, wake.WakeHash); }
     private static void AppendClaim(StringBuilder builder, HumanReviewContinuationClaim claim, bool includeHash) { Append(builder, claim.SchemaVersion); Append(builder, claim.ClaimId); AppendWakeReference(builder, claim.Wake); AppendReservation(builder, claim.Reservation); Append(builder, claim.ExpectedGeneration); Append(builder, claim.WorkerId); Append(builder, claim.ClaimedAtUtc); Append(builder, claim.LeaseExpiresAtUtc); AppendProvenance(builder, claim.Provenance); if (includeHash) Append(builder, claim.ClaimHash); }
-    private static void AppendCompletion(StringBuilder builder, HumanReviewContinuationCompletion completion, bool includeHash) { Append(builder, completion.SchemaVersion); Append(builder, completion.CompletionId); AppendWakeReference(builder, completion.Wake); AppendClaimReference(builder, completion.Claim); AppendReservation(builder, completion.Reservation); Append(builder, completion.ExpectedGeneration); Append(builder, completion.CompletedAtUtc); AppendPreviews(builder, completion.Evidence); AppendProvenance(builder, completion.Provenance); if (includeHash) Append(builder, completion.CompletionHash); }
+    private static void AppendCompletion(StringBuilder builder, HumanReviewContinuationCompletion completion, bool includeHash) { Append(builder, completion.SchemaVersion); Append(builder, completion.CompletionId); AppendWakeReference(builder, completion.Wake); AppendClaimReference(builder, completion.Claim); AppendReservation(builder, completion.Reservation); Append(builder, completion.ExpectedGeneration); AppendReleaseReceipt(builder, completion.ReleaseReceipt, true); Append(builder, completion.CompletedAtUtc); AppendPreviews(builder, completion.Evidence); AppendProvenance(builder, completion.Provenance); if (includeHash) Append(builder, completion.CompletionHash); }
+    private static void AppendReleaseReceipt(StringBuilder builder, HumanReviewContinuationReleaseReceipt receipt, bool includeHash) { Append(builder, receipt.SchemaVersion); Append(builder, receipt.ReleaseOperationId); AppendWakeReference(builder, receipt.Wake); AppendClaimReference(builder, receipt.Claim); AppendReservation(builder, receipt.Reservation); Append(builder, receipt.ExpectedGeneration); Append(builder, (int)receipt.Kind); Append(builder, (int)receipt.Disposition); Append(builder, receipt.ResultHash); Append(builder, receipt.FrontierReceiptHash); Append(builder, receipt.EffectReceiptHash); if (includeHash) Append(builder, receipt.ReleaseReceiptHash); }
     private static void AppendRetirement(StringBuilder builder, HumanReviewContinuationRetirement retirement, bool includeHash) { Append(builder, retirement.SchemaVersion); Append(builder, retirement.RetirementId); AppendWakeReference(builder, retirement.Wake); AppendReservation(builder, retirement.Reservation); Append(builder, retirement.ExpectedGeneration); Append(builder, (int)retirement.Outcome); Append(builder, retirement.RetiredAtUtc); AppendPreviews(builder, retirement.Evidence); AppendProvenance(builder, retirement.Provenance); if (includeHash) Append(builder, retirement.RetirementHash); }
     private static void AppendState(StringBuilder builder, HumanReviewContinuationState state, bool includeHash) { Append(builder, state.SchemaVersion); AppendWake(builder, state.Wake, true); if (state.Claims.IsDefault) Append(builder, null); else { Append(builder, state.Claims.Length); foreach (var claim in state.Claims) AppendClaim(builder, claim, true); } if (state.Completion is null) Append(builder, null); else AppendCompletion(builder, state.Completion, true); if (state.Retirement is null) Append(builder, null); else AppendRetirement(builder, state.Retirement, true); if (includeHash) Append(builder, state.StateHash); }
     private static void AppendPreviews(StringBuilder builder, ImmutableArray<HumanReviewRedactedPreview> previews) { if (previews.IsDefault) { Append(builder, null); return; } Append(builder, previews.Length); foreach (var preview in previews) { if (preview is null) { Append(builder, null); } else { Append(builder, (int)preview.Kind); Append(builder, preview.Label); Append(builder, preview.Detail); Append(builder, preview.DetailHash); } } }

@@ -58,11 +58,36 @@ public static class HumanReviewContinuationContractValidator
         ExactClaim(claim, completion.Claim, "$.claim", errors);
         ExactReservation(reservation, completion.Reservation, "$.reservation", errors);
         ExactGeneration(wake.ExpectedGeneration, completion.ExpectedGeneration, "$.expectedGeneration", errors);
+        errors.AddRange(ValidateReleaseReceipt(wake, reservation, claim, completion.ReleaseReceipt).Errors);
+        if (completion.ReleaseReceipt is not null && string.Equals(completion.CompletionId, completion.ReleaseReceipt.ReleaseOperationId, StringComparison.Ordinal)) Add(errors, "completion_release_operation_reused", "$.releaseReceipt.releaseOperationId", "Completion identity must not substitute for the preexisting stable release operation identity.");
         if (!Utc(completion.CompletedAtUtc) || completion.CompletedAtUtc < claim.ClaimedAtUtc || completion.CompletedAtUtc > claim.LeaseExpiresAtUtc) Add(errors, "invalid_completion_time", "$.completedAtUtc", "Completion must occur at trusted UTC inside the exact active claim lease.");
         Evidence(completion.Evidence, "$.evidence", errors);
         Provenance(completion.Provenance, completion.CompletedAtUtc, "$.provenance", errors);
         Hash(completion.CompletionHash, "$.completionHash", errors);
         if (errors.Count == 0 && !HumanReviewContinuationContractHash.MatchesCompletion(completion)) Add(errors, "completion_hash_mismatch", "$.completionHash", "Completion hash must exactly match its canonical contract.");
+        return Result(errors);
+    }
+
+    /// <summary>Validates a preexisting governed-release receipt bound to one exact wake, claim, reservation, and generation without treating it as current authority.</summary>
+    public static HumanReviewContractValidationResult ValidateReleaseReceipt(HumanReviewContinuationWake? wake, HumanReviewContinuationReservation? reservation, HumanReviewContinuationClaim? claim, HumanReviewContinuationReleaseReceipt? receipt)
+    {
+        var errors = new List<HumanReviewContractValidationError>();
+        if (wake is null || reservation is null || claim is null) { Add(errors, "release_receipt_context_required", "$", "Exact wake, reservation, and claim context is required."); return Result(errors); }
+        if (receipt is null) { Add(errors, "release_receipt_required", "$", "A stable governed-release receipt is required before completion."); return Result(errors); }
+        ValidateSchema(receipt.SchemaVersion, "$.schemaVersion", errors);
+        ValidateId(receipt.ReleaseOperationId, "$.releaseOperationId", errors);
+        ExactWake(wake, receipt.Wake, "$.wake", errors);
+        ExactClaim(claim, receipt.Claim, "$.claim", errors);
+        ExactReservation(reservation, receipt.Reservation, "$.reservation", errors);
+        ExactGeneration(wake.ExpectedGeneration, receipt.ExpectedGeneration, "$.expectedGeneration", errors);
+        if (!Enum.IsDefined(receipt.Kind) || receipt.Kind == HumanReviewContinuationReleaseKind.Unknown) Add(errors, "unsupported_release_kind", "$.kind", "Release kind must be a supported closed schema-1 value.");
+        if (!Enum.IsDefined(receipt.Disposition) || receipt.Disposition != HumanReviewContinuationReleaseDisposition.Released) Add(errors, "unsupported_release_disposition", "$.disposition", "Only a conclusive released disposition can support completion.");
+        Hash(receipt.ResultHash, "$.resultHash", errors);
+        Hash(receipt.FrontierReceiptHash, "$.frontierReceiptHash", errors);
+        if (receipt.Kind == HumanReviewContinuationReleaseKind.Continuation && receipt.EffectReceiptHash is not null) Add(errors, "unexpected_effect_receipt", "$.effectReceiptHash", "Continuation-only release receipts cannot claim an effect receipt.");
+        if (receipt.Kind == HumanReviewContinuationReleaseKind.PreDispatchEffect && !HumanReviewContractHash.IsSha256(receipt.EffectReceiptHash)) Add(errors, "effect_receipt_required", "$.effectReceiptHash", "Pre-dispatch effect release receipts require an exact canonical effect receipt hash.");
+        Hash(receipt.ReleaseReceiptHash, "$.releaseReceiptHash", errors);
+        if (errors.Count == 0 && !HumanReviewContinuationContractHash.MatchesReleaseReceipt(receipt)) Add(errors, "release_receipt_hash_mismatch", "$.releaseReceiptHash", "Release receipt hash must exactly match its canonical contract.");
         return Result(errors);
     }
 
@@ -78,7 +103,7 @@ public static class HumanReviewContinuationContractValidator
         ExactReservation(reservation, retirement.Reservation, "$.reservation", errors);
         ExactGeneration(wake.ExpectedGeneration, retirement.ExpectedGeneration, "$.expectedGeneration", errors);
         if (!Enum.IsDefined(retirement.Outcome) || retirement.Outcome is HumanReviewContinuationOutcome.Unknown or HumanReviewContinuationOutcome.Completed) Add(errors, "unsupported_retirement_outcome", "$.outcome", "Retirement requires one supported non-completion outcome.");
-        if (!Utc(retirement.RetiredAtUtc) || retirement.RetiredAtUtc < wake.PublishedAtUtc || retirement.Outcome == HumanReviewContinuationOutcome.Expired && retirement.RetiredAtUtc < wake.ExpiresAtUtc) Add(errors, "invalid_retirement_time", "$.retiredAtUtc", "Retirement time must be trusted UTC and expiry retirement cannot predate wake expiry.");
+        if (!Utc(retirement.RetiredAtUtc) || retirement.RetiredAtUtc < wake.PublishedAtUtc || retirement.Outcome == HumanReviewContinuationOutcome.Expired && retirement.RetiredAtUtc < wake.ExpiresAtUtc) Add(errors, "invalid_retirement_time", "$.retiredAtUtc", "Retirement time must be trusted UTC and an expired outcome can only follow exact wake expiry.");
         Evidence(retirement.Evidence, "$.evidence", errors);
         Provenance(retirement.Provenance, retirement.RetiredAtUtc, "$.provenance", errors);
         Hash(retirement.RetirementHash, "$.retirementHash", errors);

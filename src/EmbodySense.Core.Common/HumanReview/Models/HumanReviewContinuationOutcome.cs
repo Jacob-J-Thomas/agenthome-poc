@@ -9,7 +9,7 @@ public enum HumanReviewContinuationOutcome
     Completed = 1,
     /// <summary>The wake was retired because the review or continuation was cancelled.</summary>
     Cancelled = 2,
-    /// <summary>The wake was retired after its deadline or a claim lease elapsed.</summary>
+    /// <summary>The wake was retired only after its exact wake-expiry boundary elapsed.</summary>
     Expired = 3,
     /// <summary>The wake was retired because its exact bound state was superseded.</summary>
     Superseded = 4,

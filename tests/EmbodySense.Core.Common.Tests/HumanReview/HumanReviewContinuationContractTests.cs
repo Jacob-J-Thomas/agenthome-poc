@@ -1,5 +1,4 @@
 using System.Collections.Immutable;
-using System.Text.Json;
 using EmbodySense.Core.Common.HumanReview;
 using EmbodySense.Core.Common.HumanReview.Models;
 
@@ -32,6 +31,11 @@ public sealed class HumanReviewContinuationContractTests
         var wake = Wake(request, reservation);
         var claim = Claim(wake, reservation);
         var retirement = Retirement(wake, reservation);
+        var completion = Completion(wake, reservation, claim);
+        var extendedWake = HumanReviewContinuationContractHash.ApplyWake(wake with { ExpiresAtUtc = wake.ExpiresAtUtc.AddDays(2), WakeHash = string.Empty });
+        var claims = new List<HumanReviewContinuationClaim> { Claim(extendedWake, reservation) };
+        for (var index = 1; index <= HumanReviewContractLimits.MaxContinuationClaims; index++) claims.Add(Takeover(claims[^1], $"claim-{index}"));
+        var tooManyClaims = HumanReviewContinuationContractHash.ApplyState(new HumanReviewContinuationState(1, extendedWake, claims.ToImmutableArray(), null, null, string.Empty));
 
         Assert.False(HumanReviewContinuationContractValidator.ValidateWake(request, reservation, HumanReviewContinuationContractHash.ApplyWake(wake with { ExpectedGeneration = HumanReviewContractLimits.MaxVersion + 1, WakeHash = string.Empty })).IsValid);
         Assert.False(HumanReviewContinuationContractValidator.ValidateWake(request, reservation, HumanReviewContinuationContractHash.ApplyWake(wake with { BindingHash = HumanReviewTestData.Hash('f'), WakeHash = string.Empty })).IsValid);
@@ -39,6 +43,10 @@ public sealed class HumanReviewContinuationContractTests
         Assert.False(HumanReviewContinuationContractValidator.ValidateClaim(wake, reservation, HumanReviewContinuationContractHash.ApplyClaim(claim with { LeaseExpiresAtUtc = claim.ClaimedAtUtc.Add(HumanReviewContractLimits.MaxContinuationClaimLease).AddTicks(1), ClaimHash = string.Empty })).IsValid);
         Assert.False(HumanReviewContinuationContractValidator.ValidateRetirement(wake, reservation, HumanReviewContinuationContractHash.ApplyRetirement(retirement with { Outcome = (HumanReviewContinuationOutcome)99, RetirementHash = string.Empty })).IsValid);
         Assert.False(HumanReviewContinuationContractValidator.ValidateRetirement(wake, reservation, HumanReviewContinuationContractHash.ApplyRetirement(retirement with { Outcome = HumanReviewContinuationOutcome.Completed, RetirementHash = string.Empty })).IsValid);
+        Assert.Contains(HumanReviewContinuationContractValidator.ValidateCompletion(wake, reservation, claim, completion with { ReleaseReceipt = null! }).Errors, error => error.Code == "release_receipt_required");
+        Assert.Contains(HumanReviewContinuationContractValidator.ValidateCompletion(wake, reservation, claim, HumanReviewContinuationContractHash.ApplyCompletion(completion with { ReleaseReceipt = HumanReviewContinuationContractHash.ApplyReleaseReceipt(completion.ReleaseReceipt with { Disposition = HumanReviewContinuationReleaseDisposition.Ambiguous, ReleaseReceiptHash = string.Empty }), CompletionHash = string.Empty })).Errors, error => error.Code == "unsupported_release_disposition");
+        Assert.Contains(HumanReviewContinuationContractValidator.ValidateCompletion(wake, reservation, claim, HumanReviewContinuationContractHash.ApplyCompletion(completion with { ReleaseReceipt = HumanReviewContinuationContractHash.ApplyReleaseReceipt(completion.ReleaseReceipt with { Kind = HumanReviewContinuationReleaseKind.PreDispatchEffect, EffectReceiptHash = null, ReleaseReceiptHash = string.Empty }), CompletionHash = string.Empty })).Errors, error => error.Code == "effect_receipt_required");
+        Assert.Contains(HumanReviewContinuationContractValidator.ValidateState(request, reservation, tooManyClaims).Errors, error => error.Code == "invalid_claim_count");
     }
 
     [Fact]
@@ -51,10 +59,13 @@ public sealed class HumanReviewContinuationContractTests
         var early = HumanReviewContinuationContractHash.ApplyClaim(first with { ClaimId = "claim-two", ClaimedAtUtc = first.LeaseExpiresAtUtc.AddTicks(-1), LeaseExpiresAtUtc = first.LeaseExpiresAtUtc.AddMinutes(1), Provenance = Provenance("claim-two", first.LeaseExpiresAtUtc.AddTicks(-1)), ClaimHash = string.Empty });
         var atExpiry = HumanReviewContinuationContractHash.ApplyClaim(first with { ClaimId = "claim-two", ClaimedAtUtc = first.LeaseExpiresAtUtc, LeaseExpiresAtUtc = first.LeaseExpiresAtUtc.AddMinutes(1), Provenance = Provenance("claim-two", first.LeaseExpiresAtUtc), ClaimHash = string.Empty });
         var takeover = HumanReviewContinuationContractHash.ApplyClaim(first with { ClaimId = "claim-two", ClaimedAtUtc = first.LeaseExpiresAtUtc.AddTicks(1), LeaseExpiresAtUtc = first.LeaseExpiresAtUtc.AddMinutes(1).AddTicks(1), Provenance = Provenance("claim-two", first.LeaseExpiresAtUtc.AddTicks(1)), ClaimHash = string.Empty });
+        var predecessor = HumanReviewContinuationContractHash.ApplyState(new HumanReviewContinuationState(1, wake, ImmutableArray<HumanReviewContinuationClaim>.Empty, null, null, string.Empty));
         var invalid = HumanReviewContinuationContractHash.ApplyState(new HumanReviewContinuationState(1, wake, [first, early], null, null, string.Empty));
         var equalBoundary = HumanReviewContinuationContractHash.ApplyState(new HumanReviewContinuationState(1, wake, [first, atExpiry], null, null, string.Empty));
         var valid = HumanReviewContinuationContractHash.ApplyState(new HumanReviewContinuationState(1, wake, [first, takeover], Completion(wake, reservation, takeover), null, string.Empty));
 
+        Assert.True(HumanReviewContinuationContractValidator.ValidateState(request, reservation, predecessor).IsValid);
+        Assert.True(HumanReviewContinuationStateTransitionValidator.ValidateTransition(request, reservation, predecessor, HumanReviewContinuationContractHash.ApplyState(predecessor with { Claims = [first], StateHash = string.Empty })).IsValid);
         Assert.Contains(HumanReviewContinuationContractValidator.ValidateState(request, reservation, invalid).Errors, error => error.Code == "claim_takeover_before_expiry");
         Assert.Contains(HumanReviewContinuationContractValidator.ValidateState(request, reservation, equalBoundary).Errors, error => error.Code == "claim_takeover_before_expiry");
         var validValidation = HumanReviewContinuationContractValidator.ValidateState(request, reservation, valid);
@@ -112,7 +123,7 @@ public sealed class HumanReviewContinuationContractTests
         var expiryEarly = HumanReviewContinuationContractHash.ApplyRetirement(retirement with { Outcome = HumanReviewContinuationOutcome.Expired, RetiredAtUtc = wake.ExpiresAtUtc.AddTicks(-1), Provenance = Provenance("retire-early", wake.ExpiresAtUtc.AddTicks(-1)), RetirementHash = string.Empty });
 
         Assert.True(HumanReviewContinuationContractValidator.ValidateState(request, reservation, prior).IsValid);
-        Assert.Contains(HumanReviewContinuationStateTransitionValidator.ValidateTransition(request, reservation, prior, rewritten).Errors, error => error.Code == "retirement_rewritten");
+        Assert.Contains(HumanReviewContinuationStateTransitionValidator.ValidateTransition(request, reservation, prior, rewritten).Errors, error => error.Code == "terminal_exact_replay_required");
         Assert.False(HumanReviewContinuationContractValidator.ValidateRetirement(wake, reservation, expiryEarly).IsValid);
         Assert.False(HumanReviewContinuationContractValidator.ValidateState(request, reservation, HumanReviewContinuationContractHash.ApplyState(prior with { Completion = completed, StateHash = string.Empty })).IsValid);
     }
@@ -136,6 +147,86 @@ public sealed class HumanReviewContinuationContractTests
     }
 
     [Fact]
+    public void Single_boundary_transition_table_allows_only_the_closed_wake_claim_and_terminal_paths()
+    {
+        var request = HumanReviewTestData.Request();
+        var reservation = Reservation(request);
+        var wake = Wake(request, reservation);
+        var wakeOnly = HumanReviewContinuationContractHash.ApplyState(new HumanReviewContinuationState(1, wake, ImmutableArray<HumanReviewContinuationClaim>.Empty, null, null, string.Empty));
+        var claim = Claim(wake, reservation);
+        var claimed = HumanReviewContinuationContractHash.ApplyState(wakeOnly with { Claims = [claim], StateHash = string.Empty });
+        var completed = HumanReviewContinuationContractHash.ApplyState(claimed with { Completion = Completion(wake, reservation, claim), StateHash = string.Empty });
+        var retired = HumanReviewContinuationContractHash.ApplyState(wakeOnly with { Retirement = Retirement(wake, reservation), StateHash = string.Empty });
+        var claimAndCompletion = HumanReviewContinuationContractHash.ApplyState(wakeOnly with { Claims = [claim], Completion = Completion(wake, reservation, claim), StateHash = string.Empty });
+        var divergentCompletion = HumanReviewContinuationContractHash.ApplyState(completed with { Completion = HumanReviewContinuationContractHash.ApplyCompletion(completed.Completion! with { CompletionId = "completion-two", CompletionHash = string.Empty }), StateHash = string.Empty });
+
+        Assert.True(HumanReviewContinuationStateTransitionValidator.ValidateTransition(request, reservation, null, wakeOnly).IsValid);
+        Assert.True(HumanReviewContinuationStateTransitionValidator.ValidateTransition(request, reservation, wakeOnly, wakeOnly with { }).IsValid);
+        Assert.True(HumanReviewContinuationStateTransitionValidator.ValidateTransition(request, reservation, wakeOnly, claimed).IsValid);
+        Assert.True(HumanReviewContinuationStateTransitionValidator.ValidateTransition(request, reservation, claimed, completed).IsValid);
+        Assert.True(HumanReviewContinuationStateTransitionValidator.ValidateTransition(request, reservation, wakeOnly, retired).IsValid);
+        Assert.True(HumanReviewContinuationStateTransitionValidator.ValidateTransition(request, reservation, completed, completed with { }).IsValid);
+        Assert.Contains(HumanReviewContinuationStateTransitionValidator.ValidateTransition(request, reservation, null, claimed).Errors, error => error.Code == "initial_transition_must_be_wake_only");
+        Assert.Contains(HumanReviewContinuationStateTransitionValidator.ValidateTransition(request, reservation, wakeOnly, claimAndCompletion).Errors, error => error.Code == "claim_transition_must_not_terminalize");
+        Assert.Contains(HumanReviewContinuationStateTransitionValidator.ValidateTransition(request, reservation, completed, divergentCompletion).Errors, error => error.Code == "terminal_exact_replay_required");
+    }
+
+    [Fact]
+    public void Canonical_replay_classification_survives_restart_and_never_uses_immutable_array_backing_identity()
+    {
+        var request = HumanReviewTestData.Request();
+        var reservation = Reservation(request);
+        var wake = Wake(request, reservation);
+        var claim = Claim(wake, reservation);
+        var completion = Completion(wake, reservation, claim);
+        var retirement = Retirement(wake, reservation);
+        var completionCopy = HumanReviewContinuationContractHash.ApplyCompletion(completion with { Evidence = completion.Evidence.Select(item => item with { }).ToImmutableArray(), CompletionHash = string.Empty });
+        var retirementCopy = HumanReviewContinuationContractHash.ApplyRetirement(retirement with { Evidence = retirement.Evidence.Select(item => item with { }).ToImmutableArray(), RetirementHash = string.Empty });
+        var state = HumanReviewContinuationContractHash.ApplyState(new HumanReviewContinuationState(1, wake, [claim], completion, null, string.Empty));
+        var stateCopy = HumanReviewContinuationContractHash.ApplyState(state with { Claims = state.Claims.Select(item => item with { }).ToImmutableArray(), Completion = completionCopy, StateHash = string.Empty });
+        var divergedCompletionTime = completionCopy.CompletedAtUtc.AddTicks(1);
+        var divergedRetirementTime = retirementCopy.RetiredAtUtc.AddTicks(1);
+        var divergentCompletion = HumanReviewContinuationContractHash.ApplyCompletion(completionCopy with { CompletedAtUtc = divergedCompletionTime, Provenance = Provenance("completion-divergent", divergedCompletionTime), CompletionHash = string.Empty });
+        var divergentRetirement = HumanReviewContinuationContractHash.ApplyRetirement(retirementCopy with { RetiredAtUtc = divergedRetirementTime, Provenance = Provenance("retirement-divergent", divergedRetirementTime), RetirementHash = string.Empty });
+        var divergent = HumanReviewContinuationContractHash.ApplyState(stateCopy with { Completion = divergentCompletion, StateHash = string.Empty });
+
+        Assert.Equal(HumanReviewContinuationReplayDisposition.ExactReplay, HumanReviewContinuationReplayClassifier.ClassifyCompletion(completion, completionCopy));
+        Assert.Equal(HumanReviewContinuationReplayDisposition.ExactReplay, HumanReviewContinuationReplayClassifier.ClassifyRetirement(retirement, retirementCopy));
+        Assert.Equal(HumanReviewContinuationReplayDisposition.ExactReplay, HumanReviewContinuationReplayClassifier.ClassifyState(state, stateCopy));
+        Assert.Equal(HumanReviewContinuationReplayDisposition.DivergentReuse, HumanReviewContinuationReplayClassifier.ClassifyCompletion(completion, divergentCompletion));
+        Assert.Equal(HumanReviewContinuationReplayDisposition.DivergentReuse, HumanReviewContinuationReplayClassifier.ClassifyRetirement(retirement, divergentRetirement));
+        Assert.Equal(HumanReviewContinuationReplayDisposition.DivergentReuse, HumanReviewContinuationReplayClassifier.ClassifyState(state, divergent));
+    }
+
+    [Fact]
+    public void Strict_schema_one_json_round_trips_and_rejects_unknown_duplicate_missing_enum_and_forward_version_fields()
+    {
+        var request = HumanReviewTestData.Request();
+        var reservation = Reservation(request);
+        var wake = Wake(request, reservation);
+        var claim = Claim(wake, reservation);
+        var state = HumanReviewContinuationContractHash.ApplyState(new HumanReviewContinuationState(1, wake, [claim], Completion(wake, reservation, claim), null, string.Empty));
+        var retirementState = HumanReviewContinuationContractHash.ApplyState(new HumanReviewContinuationState(1, wake, ImmutableArray<HumanReviewContinuationClaim>.Empty, null, Retirement(wake, reservation), string.Empty));
+
+        Assert.True(HumanReviewContinuationContractJson.TrySerializeState(request, reservation, state, out var json, out var serialization));
+        Assert.True(serialization.IsValid);
+        Assert.True(HumanReviewContinuationContractJson.TryDeserializeState(request, reservation, json, out var restored, out var roundTrip));
+        Assert.True(roundTrip.IsValid);
+        Assert.Equal(HumanReviewContinuationReplayDisposition.ExactReplay, HumanReviewContinuationReplayClassifier.ClassifyState(state, restored));
+        Assert.False(HumanReviewContinuationContractJson.TryDeserializeState(request, reservation, json![..^1] + ",\"unknown\":true}", out _, out var unknown));
+        Assert.Contains(unknown.Errors, error => error.Code == "unknown_json_property");
+        Assert.False(HumanReviewContinuationContractJson.TryDeserializeState(request, reservation, json[..^1] + ",\"schemaVersion\":1}", out _, out var duplicate));
+        Assert.Contains(duplicate.Errors, error => error.Code == "duplicate_json_property");
+        Assert.False(HumanReviewContinuationContractJson.TryDeserializeState(request, reservation, json.Replace($",\"stateHash\":\"{state.StateHash}\"", string.Empty, StringComparison.Ordinal), out _, out var missing));
+        Assert.Contains(missing.Errors, error => error.Code == "required_json_property_missing");
+        Assert.False(HumanReviewContinuationContractJson.TryDeserializeState(request, reservation, json.Replace("\"schemaVersion\":1", "\"schemaVersion\":2", StringComparison.Ordinal), out _, out var forward));
+        Assert.Contains(forward.Errors, error => error.Code == "unsupported_schema_version");
+        Assert.True(HumanReviewContinuationContractJson.TrySerializeState(request, reservation, retirementState, out var retirementJson, out _));
+        Assert.False(HumanReviewContinuationContractJson.TryDeserializeState(request, reservation, retirementJson!.Replace("\"outcome\":5", "\"outcome\":99", StringComparison.Ordinal), out _, out var unknownEnum));
+        Assert.Contains(unknownEnum.Errors, error => error.Code == "unsupported_json_enum");
+    }
+
+    [Fact]
     public void Snapshots_are_defensive_and_malformed_or_default_collections_fail_without_throwing()
     {
         var request = HumanReviewTestData.Request();
@@ -146,7 +237,8 @@ public sealed class HumanReviewContinuationContractTests
         var state = HumanReviewContinuationContractHash.ApplyState(new HumanReviewContinuationState(1, wake, [claim], completion, null, string.Empty));
         var retired = HumanReviewContinuationContractHash.ApplyState(new HumanReviewContinuationState(1, wake, ImmutableArray<HumanReviewContinuationClaim>.Empty, null, Retirement(wake, reservation), string.Empty));
         var malformed = state with { Claims = default };
-        var roundTrip = JsonSerializer.Deserialize<HumanReviewContinuationState>(JsonSerializer.Serialize(state));
+        Assert.True(HumanReviewContinuationContractJson.TrySerializeState(request, reservation, state, out var json, out _));
+        Assert.True(HumanReviewContinuationContractJson.TryDeserializeState(request, reservation, json, out var roundTrip, out _));
 
         Assert.True(HumanReviewContinuationContractSnapshot.TryCaptureState(request, reservation, state, out var snapshot, out var validation));
         Assert.True(validation.IsValid);
@@ -191,7 +283,8 @@ public sealed class HumanReviewContinuationContractTests
     private static HumanReviewContinuationCompletion Completion(HumanReviewContinuationWake wake, HumanReviewContinuationReservation reservation, HumanReviewContinuationClaim claim)
     {
         var time = claim.ClaimedAtUtc.AddMinutes(1);
-        return HumanReviewContinuationContractHash.ApplyCompletion(new HumanReviewContinuationCompletion(1, "completion-one", new HumanReviewContinuationWakeReference(wake.WakeId, wake.WakeHash), new HumanReviewContinuationClaimReference(claim.ClaimId, claim.ClaimHash), new HumanReviewContinuationReservationReference(reservation.ReservationId, reservation.ReservationHash), wake.ExpectedGeneration, time, ImmutableArray<HumanReviewRedactedPreview>.Empty, Provenance("completion", time), string.Empty));
+        var receipt = HumanReviewContinuationContractHash.ApplyReleaseReceipt(new HumanReviewContinuationReleaseReceipt(1, "release-one", new HumanReviewContinuationWakeReference(wake.WakeId, wake.WakeHash), new HumanReviewContinuationClaimReference(claim.ClaimId, claim.ClaimHash), new HumanReviewContinuationReservationReference(reservation.ReservationId, reservation.ReservationHash), wake.ExpectedGeneration, HumanReviewContinuationReleaseKind.Continuation, HumanReviewContinuationReleaseDisposition.Released, HumanReviewTestData.Hash('a'), HumanReviewTestData.Hash('b'), null, string.Empty));
+        return HumanReviewContinuationContractHash.ApplyCompletion(new HumanReviewContinuationCompletion(1, "completion-one", new HumanReviewContinuationWakeReference(wake.WakeId, wake.WakeHash), new HumanReviewContinuationClaimReference(claim.ClaimId, claim.ClaimHash), new HumanReviewContinuationReservationReference(reservation.ReservationId, reservation.ReservationHash), wake.ExpectedGeneration, receipt, time, ImmutableArray<HumanReviewRedactedPreview>.Empty, Provenance("completion", time), string.Empty));
     }
 
     private static HumanReviewContinuationRetirement Retirement(HumanReviewContinuationWake wake, HumanReviewContinuationReservation reservation)
