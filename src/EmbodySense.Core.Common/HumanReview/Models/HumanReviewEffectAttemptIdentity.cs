@@ -6,6 +6,7 @@ namespace EmbodySense.Core.Common.HumanReview.Models;
 /// <param name="GraphId">The exact governed-loop graph identity.</param>
 /// <param name="RevisionId">The exact immutable revision identity.</param>
 /// <param name="RevisionHash">The exact immutable executable revision hash.</param>
+/// <param name="ExecutionGeneration">The exact positive execution generation that distinguishes a replaced or forked frontier for the same run.</param>
 /// <param name="FrontierId">The exact parked frontier identity.</param>
 /// <param name="FrontierVersion">The exact parked frontier version.</param>
 /// <param name="FrontierHash">The exact parked frontier hash.</param>
@@ -30,6 +31,7 @@ public sealed record HumanReviewEffectAttemptIdentity(
     string GraphId,
     string RevisionId,
     string RevisionHash,
+    long ExecutionGeneration,
     string FrontierId,
     long FrontierVersion,
     string FrontierHash,

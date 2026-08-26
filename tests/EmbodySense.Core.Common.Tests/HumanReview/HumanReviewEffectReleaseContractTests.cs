@@ -20,6 +20,7 @@ public sealed class HumanReviewEffectReleaseContractTests
         Assert.Equal(attempt.Payload.EffectId, snapshot.Identity.EffectId);
         Assert.Equal(attempt.Payload.OperationId, snapshot.Identity.OperationId);
         Assert.Equal(attempt.Payload.EffectGeneration, snapshot.Identity.EffectGeneration);
+        Assert.Equal(attempt.Binding.ExecutionGeneration, snapshot.Identity.ExecutionGeneration);
         Assert.Equal(attempt.InputFingerprint, snapshot.Preparation.InputFingerprint);
         Assert.True(HumanReviewEffectReleaseContract.TryCapture(snapshot, out var captured, out var reason), reason);
         Assert.Equal(snapshot, captured);
@@ -69,10 +70,17 @@ public sealed class HumanReviewEffectReleaseContractTests
         unknown = unknown with { SnapshotHash = HumanReviewEffectReleaseContract.ComputeSnapshot(unknown) };
         var invalidCoordinate = snapshot with { Identity = snapshot.Identity with { ActivationOrdinal = null, VisitOrdinal = null } };
         invalidCoordinate = invalidCoordinate with { SnapshotHash = HumanReviewEffectReleaseContract.ComputeSnapshot(invalidCoordinate) };
+        var invalidVisitIdentity = snapshot.Identity with { ActivationOrdinal = null, VisitOrdinal = 0, IdentityHash = string.Empty };
+        invalidVisitIdentity = invalidVisitIdentity with { IdentityHash = HumanReviewEffectReleaseContract.ComputeIdentity(invalidVisitIdentity) };
+        var invalidVisit = snapshot with { Identity = invalidVisitIdentity, SnapshotHash = string.Empty };
+        invalidVisit = invalidVisit with { SnapshotHash = HumanReviewEffectReleaseContract.ComputeSnapshot(invalidVisit) };
 
         Assert.Equal("effect-certainty-snapshot-invalid", HumanReviewEffectReleaseContract.Validate(forward));
         Assert.Equal("effect-certainty-snapshot-posture-invalid", HumanReviewEffectReleaseContract.Validate(unknown));
         Assert.Equal("effect-certainty-snapshot-binding-invalid", HumanReviewEffectReleaseContract.Validate(invalidCoordinate));
+        Assert.Equal("effect-certainty-snapshot-binding-invalid", HumanReviewEffectReleaseContract.Validate(invalidVisit));
+        Assert.False(HumanReviewEffectReleaseContract.TryCapture(invalidVisit, out _, out var invalidVisitReason));
+        Assert.Equal("effect-certainty-snapshot-binding-invalid", invalidVisitReason);
     }
 
     [Fact]

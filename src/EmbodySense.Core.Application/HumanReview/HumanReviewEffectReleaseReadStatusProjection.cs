@@ -1,6 +1,7 @@
 using EmbodySense.Core.Application.HumanReview.Models;
 using EmbodySense.Core.Common.HumanReview;
 using EmbodySense.Core.Common.HumanReview.Models;
+using EmbodySense.Core.Common.Loops.Execution.Models;
 
 namespace EmbodySense.Core.Application.HumanReview;
 
@@ -44,6 +45,12 @@ public static class HumanReviewEffectReleaseReadStatusProjection
             return HumanReviewEffectReleaseReadStatus.Invalid;
         }
         if (!Equals(expectedIdentity, detached.Identity) || !Equals(expectedPreparation, detached.Preparation))
+        {
+            return HumanReviewEffectReleaseReadStatus.Stale;
+        }
+
+        if (detached.Certainty == HumanReviewEffectCertainty.NotStarted
+            && (detached.Phase != GovernedLoopEffectPhase.IntentPrepared || detached.DispatchAuthorityEvidenceHash is not null))
         {
             return HumanReviewEffectReleaseReadStatus.Stale;
         }

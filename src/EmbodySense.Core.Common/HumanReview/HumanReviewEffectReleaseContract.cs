@@ -191,7 +191,7 @@ public static class HumanReviewEffectReleaseContract
             throw new ArgumentException("The review binding and effect attempt must name the exact same run, revision, node, and attempt coordinates.", nameof(binding));
         }
         var identity = new HumanReviewEffectAttemptIdentity(
-            1, binding.RunId, binding.GraphId, binding.RevisionId, binding.RevisionHash, binding.FrontierId, binding.FrontierVersion, binding.FrontierHash,
+            1, binding.RunId, binding.GraphId, binding.RevisionId, binding.RevisionHash, attempt.Binding.ExecutionGeneration, binding.FrontierId, binding.FrontierVersion, binding.FrontierHash,
             binding.NodeId, binding.ActivationOrdinal, binding.VisitOrdinal, binding.Attempt, attempt.Payload.EffectId, attempt.Payload.OperationId,
             attempt.Payload.EffectGeneration, attempt.ActuatorOperationId, attempt.Capability.Id.Value, attempt.Capability.Version.Value, attempt.Capability.Hash.Value,
             attempt.Implementation.ProviderId.Value, attempt.Implementation.ImplementationId, attempt.Payload.IntentHash, string.Empty);
@@ -241,11 +241,12 @@ public static class HumanReviewEffectReleaseContract
             || !CapabilityId.TryParse(identity.CapabilityId, out _, out _) || !CapabilityVersion.TryParse(identity.CapabilityVersion, out _, out _)
             || !CapabilityProviderId.TryParse(identity.ProviderId, out _, out _) || !Path(identity.ImplementationId, CapabilityContractLimits.MaxImplementationIdCharacters)
             || !IsHash(identity.RevisionHash) || !IsHash(identity.FrontierHash) || !CapabilityDescriptorHash.TryParse(identity.CapabilityDescriptorHash, out _, out _) || !IsHash(identity.IntentHash)
+            || identity.ExecutionGeneration is < 1 or > GovernedLoopExecutionLimits.MaxExecutionGeneration
             || identity.FrontierVersion is < 1 or > HumanReviewContractLimits.MaxVersion
             || identity.NodeAttempt is < 1 or > HumanReviewContractLimits.MaxNodeAttempt
             || identity.EffectGeneration is < 1 or > HumanReviewContractLimits.MaxVersion
             || !ExactlyOneCoordinate(identity.ActivationOrdinal, identity.VisitOrdinal)
-            || !IsOrdinal(identity.ActivationOrdinal) || !IsOrdinal(identity.VisitOrdinal)
+            || !IsActivationOrdinal(identity.ActivationOrdinal) || !IsVisitOrdinal(identity.VisitOrdinal)
             || requireHash && !IsHash(identity.IdentityHash))
         {
             return "effect-attempt-identity-invalid";
@@ -315,7 +316,7 @@ public static class HumanReviewEffectReleaseContract
 
     private static void AppendIdentity(StringBuilder builder, HumanReviewEffectAttemptIdentity identity, bool includeHash)
     {
-        Append(builder, identity.SchemaVersion); Append(builder, identity.RunId); Append(builder, identity.GraphId); Append(builder, identity.RevisionId); Append(builder, identity.RevisionHash);
+        Append(builder, identity.SchemaVersion); Append(builder, identity.RunId); Append(builder, identity.GraphId); Append(builder, identity.RevisionId); Append(builder, identity.RevisionHash); Append(builder, identity.ExecutionGeneration);
         Append(builder, identity.FrontierId); Append(builder, identity.FrontierVersion); Append(builder, identity.FrontierHash); Append(builder, identity.NodeId); Append(builder, identity.ActivationOrdinal); Append(builder, identity.VisitOrdinal); Append(builder, identity.NodeAttempt);
         Append(builder, identity.EffectId); Append(builder, identity.OperationId); Append(builder, identity.EffectGeneration); Append(builder, identity.ActuatorOperationId); Append(builder, identity.CapabilityId); Append(builder, identity.CapabilityVersion); Append(builder, identity.CapabilityDescriptorHash); Append(builder, identity.ProviderId); Append(builder, identity.ImplementationId); Append(builder, identity.IntentHash);
         if (includeHash) Append(builder, identity.IdentityHash);
@@ -332,7 +333,8 @@ public static class HumanReviewEffectReleaseContract
     private static bool Path(string? value, int maxCharacters) => CapabilityIdentifierRules.IsPath(value, maxCharacters);
     private static bool IsHash(string? value) => HumanReviewContractHash.IsSha256(value);
     private static bool IsUtc(DateTimeOffset value) => value != default && value.Offset == TimeSpan.Zero;
-    private static bool IsOrdinal(int? value) => value is null || value is >= 0 and <= HumanReviewContractLimits.MaxActivationOrVisit;
+    private static bool IsActivationOrdinal(int? value) => value is null || value is >= 0 and <= HumanReviewContractLimits.MaxActivationOrVisit;
+    private static bool IsVisitOrdinal(int? value) => value is null || value is >= 1 and <= HumanReviewContractLimits.MaxActivationOrVisit;
     private static bool ExactlyOneCoordinate(int? activation, int? visit) => (activation is null) != (visit is null);
     private static bool FixedEquals(string left, string right) => CryptographicOperations.FixedTimeEquals(Encoding.ASCII.GetBytes(left), Encoding.ASCII.GetBytes(right));
     private static void Append(StringBuilder builder, DateTimeOffset value) => Append(builder, value.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture));

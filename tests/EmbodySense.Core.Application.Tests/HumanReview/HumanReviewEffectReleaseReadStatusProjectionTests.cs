@@ -46,10 +46,24 @@ public sealed class HumanReviewEffectReleaseReadStatusProjectionTests
         var expected = SnapshotFor(HumanReviewEffectCertainty.NotStarted);
         var crossEffect = SnapshotFor(HumanReviewEffectCertainty.NotStarted, effectId: "effect-two");
         var changedPreparation = SnapshotFor(HumanReviewEffectCertainty.NotStarted, reviewPayloadHash: 'b');
+        var changedExecutionGeneration = SnapshotFor(HumanReviewEffectCertainty.NotStarted, executionGeneration: 2);
 
         Assert.Equal(HumanReviewEffectReleaseReadStatus.ExactNotStarted, HumanReviewEffectReleaseReadStatusProjection.Project(Query(expected), new GovernedLoopEffectCertaintySnapshotResult(GovernedLoopEffectCertaintySnapshotStatus.Current, expected)));
         Assert.Equal(HumanReviewEffectReleaseReadStatus.Stale, HumanReviewEffectReleaseReadStatusProjection.Project(Query(expected), new GovernedLoopEffectCertaintySnapshotResult(GovernedLoopEffectCertaintySnapshotStatus.Current, crossEffect)));
         Assert.Equal(HumanReviewEffectReleaseReadStatus.Stale, HumanReviewEffectReleaseReadStatusProjection.Project(Query(expected), new GovernedLoopEffectCertaintySnapshotResult(GovernedLoopEffectCertaintySnapshotStatus.Current, changedPreparation)));
+        Assert.Equal(HumanReviewEffectReleaseReadStatus.Stale, HumanReviewEffectReleaseReadStatusProjection.Project(Query(expected), new GovernedLoopEffectCertaintySnapshotResult(GovernedLoopEffectCertaintySnapshotStatus.Current, changedExecutionGeneration)));
+    }
+
+    [Fact]
+    public void Prior_dispatch_evidence_never_projects_as_a_releasable_initial_effect()
+    {
+        var reviewed = SnapshotFor(HumanReviewEffectCertainty.NotStarted);
+        var prepared = Attempt();
+        var dispatchNotStarted = GovernedLoopEffectAttemptContract.Advance(prepared, GovernedLoopEffectPhase.DispatchNotStarted, GovernedLoopEffectOutcome.None, GovernedLoopEffectEvidenceStatus.Complete, null, null, prepared.Payload.UpdatedAtUtc.AddSeconds(1));
+        var authorityAttached = GovernedLoopEffectAttemptContract.AttachDispatchAuthority(prepared, Hash('2'), prepared.Payload.UpdatedAtUtc.AddSeconds(1));
+
+        Assert.Equal(HumanReviewEffectReleaseReadStatus.Stale, HumanReviewEffectReleaseReadStatusProjection.Project(Query(reviewed), new GovernedLoopEffectCertaintySnapshotResult(GovernedLoopEffectCertaintySnapshotStatus.Current, SnapshotForAttempt(dispatchNotStarted))));
+        Assert.Equal(HumanReviewEffectReleaseReadStatus.Stale, HumanReviewEffectReleaseReadStatusProjection.Project(Query(reviewed), new GovernedLoopEffectCertaintySnapshotResult(GovernedLoopEffectCertaintySnapshotStatus.Current, SnapshotForAttempt(authorityAttached))));
     }
 
     [Fact]
@@ -57,10 +71,14 @@ public sealed class HumanReviewEffectReleaseReadStatusProjectionTests
     {
         var snapshot = SnapshotFor(HumanReviewEffectCertainty.NotStarted);
         var malformedQuery = new GovernedLoopEffectCertaintySnapshotQuery(snapshot.Identity with { IdentityHash = Hash('f') }, snapshot.Preparation);
+        var zeroVisitIdentity = snapshot.Identity with { ActivationOrdinal = null, VisitOrdinal = 0, IdentityHash = string.Empty };
+        zeroVisitIdentity = zeroVisitIdentity with { IdentityHash = HumanReviewEffectReleaseContract.ComputeIdentity(zeroVisitIdentity) };
+        var zeroVisitQuery = new GovernedLoopEffectCertaintySnapshotQuery(zeroVisitIdentity, snapshot.Preparation);
         var malformedResult = snapshot with { SnapshotHash = Hash('f') };
 
         Assert.Equal(HumanReviewEffectReleaseReadStatus.Invalid, HumanReviewEffectReleaseReadStatusProjection.Project(null, null));
         Assert.Equal(HumanReviewEffectReleaseReadStatus.Invalid, HumanReviewEffectReleaseReadStatusProjection.Project(malformedQuery, new GovernedLoopEffectCertaintySnapshotResult(GovernedLoopEffectCertaintySnapshotStatus.Current, snapshot)));
+        Assert.Equal(HumanReviewEffectReleaseReadStatus.Invalid, HumanReviewEffectReleaseReadStatusProjection.Project(zeroVisitQuery, new GovernedLoopEffectCertaintySnapshotResult(GovernedLoopEffectCertaintySnapshotStatus.Current, snapshot)));
         Assert.Equal(HumanReviewEffectReleaseReadStatus.Invalid, HumanReviewEffectReleaseReadStatusProjection.Project(Query(snapshot), new GovernedLoopEffectCertaintySnapshotResult(GovernedLoopEffectCertaintySnapshotStatus.Current)));
         Assert.Equal(HumanReviewEffectReleaseReadStatus.Invalid, HumanReviewEffectReleaseReadStatusProjection.Project(Query(snapshot), new GovernedLoopEffectCertaintySnapshotResult((GovernedLoopEffectCertaintySnapshotStatus)99)));
         Assert.Equal(HumanReviewEffectReleaseReadStatus.Invalid, HumanReviewEffectReleaseReadStatusProjection.Project(Query(snapshot), new GovernedLoopEffectCertaintySnapshotResult(GovernedLoopEffectCertaintySnapshotStatus.Missing, snapshot)));
@@ -70,9 +88,9 @@ public sealed class HumanReviewEffectReleaseReadStatusProjectionTests
     private static GovernedLoopEffectCertaintySnapshotQuery Query(HumanReviewEffectCertaintySnapshot snapshot)
         => new(snapshot.Identity, snapshot.Preparation);
 
-    private static HumanReviewEffectCertaintySnapshot SnapshotFor(HumanReviewEffectCertainty certainty, string effectId = "effect-one", char reviewPayloadHash = 'a')
+    private static HumanReviewEffectCertaintySnapshot SnapshotFor(HumanReviewEffectCertainty certainty, string effectId = "effect-one", char reviewPayloadHash = 'a', long executionGeneration = 1)
     {
-        var prepared = Attempt(effectId);
+        var prepared = Attempt(effectId, executionGeneration);
         var attempt = certainty switch
         {
             HumanReviewEffectCertainty.NotStarted => prepared,
@@ -82,20 +100,25 @@ public sealed class HumanReviewEffectReleaseReadStatusProjectionTests
             HumanReviewEffectCertainty.Terminal => Terminal(prepared),
             _ => throw new ArgumentOutOfRangeException(nameof(certainty)),
         };
+        return SnapshotForAttempt(attempt, reviewPayloadHash);
+    }
+
+    private static HumanReviewEffectCertaintySnapshot SnapshotForAttempt(GovernedLoopEffectAttempt attempt, char reviewPayloadHash = 'a')
+    {
         var binding = Binding(attempt, null, reviewPayloadHash);
         var preparation = HumanReviewEffectReleaseContract.CreatePreparation(binding, attempt);
         var reviewed = HumanReviewContractHash.ApplyEffectAttempt(new HumanReviewEffectAttemptBinding(attempt.Payload.EffectId, attempt.Payload.OperationId, attempt.Payload.EffectGeneration, attempt.Payload.IntentHash, preparation.PreparationHash, HumanReviewEffectDispatchCertainty.NotDispatched, string.Empty));
         return HumanReviewEffectReleaseContract.Create(Binding(attempt, reviewed, reviewPayloadHash), attempt, attempt.Payload.UpdatedAtUtc.AddSeconds(1));
     }
 
-    private static GovernedLoopEffectAttempt Attempt(string effectId)
+    private static GovernedLoopEffectAttempt Attempt(string effectId = "effect-one", long executionGeneration = 1)
     {
         Assert.True(CapabilityId.TryParse("org.embodysense/workspace/read-file", out var capabilityId, out _));
         Assert.True(CapabilityVersion.TryParse("1.2.3", out var capabilityVersion, out _));
         Assert.True(CapabilityDescriptorHash.TryParse("sha256:" + Hash('a'), out var capabilityHash, out _));
         Assert.True(CapabilityProviderId.TryParse("org.embodysense", out var providerId, out _));
         var revision = GovernedLoopRevisionReference.Create(1, "graph-one", "revision-one", Hash('b'));
-        var binding = GovernedLoopExecutionBinding.Create(1, "run-one", revision, 1);
+        var binding = GovernedLoopExecutionBinding.Create(1, "run-one", revision, executionGeneration);
         return GovernedLoopEffectAttemptContract.Prepare(
             binding,
             "node-one",

@@ -6,7 +6,7 @@ public enum HumanReviewEffectReleaseReadStatus
     /// <summary>The source result is malformed or not a supported closed disposition.</summary>
     Invalid = 0,
 
-    /// <summary>The exact effect is conclusively not started; separate release-time authority checks are still mandatory.</summary>
+    /// <summary>The exact effect remains in its initial unauthorised IntentPrepared state; separate release-time authority checks are still mandatory.</summary>
     ExactNotStarted = 1,
 
     /// <summary>The exact effect has crossed dispatch without a terminal outcome and must not be redispatched.</summary>
