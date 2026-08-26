@@ -215,8 +215,10 @@ internal sealed class ScheduleCurrentEvidenceTestContext :
     internal ScheduleGovernedPayloadResolution PayloadResolution { get; set; }
     internal Exception? TargetFailure { get; set; }
     internal Exception? GrantFailure { get; set; }
+    internal Action? BeforeGrantResolve { get; set; }
     internal Exception? ProfileFailure { get; set; }
     internal Exception? CatalogFailure { get; set; }
+    internal Action? BeforeCatalogRead { get; set; }
     internal Exception? PayloadFailure { get; set; }
     internal Action? BeforePayloadResolve { get; set; }
     internal int FenceCount { get; private set; }
@@ -281,6 +283,7 @@ internal sealed class ScheduleCurrentEvidenceTestContext :
         cancellationToken.ThrowIfCancellationRequested();
         GrantReadCount++;
         AllReadsInsideFence &= _fenceDepth > 0;
+        BeforeGrantResolve?.Invoke();
         if (GrantFailure is not null)
         {
             throw GrantFailure;
@@ -294,6 +297,8 @@ internal sealed class ScheduleCurrentEvidenceTestContext :
         cancellationToken.ThrowIfCancellationRequested();
         CatalogReadCount++;
         AllReadsInsideFence &= _fenceDepth > 0;
+        BeforeCatalogRead?.Invoke();
+        cancellationToken.ThrowIfCancellationRequested();
         if (CatalogFailure is not null)
         {
             throw CatalogFailure;
