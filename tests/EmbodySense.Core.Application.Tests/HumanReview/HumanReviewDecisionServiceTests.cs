@@ -241,6 +241,26 @@ public sealed class HumanReviewDecisionServiceTests
     }
 
     [Fact]
+    public async Task Authorization_that_completes_at_expiry_records_expiry_without_accepting_approval()
+    {
+        var fixture = await HumanReviewDecisionTestData.CreateAsync();
+        var store = new HumanReviewDecisionTestStore(fixture.Run);
+        var authorizer = new HumanReviewDecisionTestAuthorizer();
+        var authorizationAtUtc = fixture.Request.Timing.ExpiresAtUtc.AddTicks(-1);
+
+        var result = await Service(store, authorizer, authorizationAtUtc, fixture.Request.Timing.ExpiresAtUtc).DecideAsync(HumanReviewDecisionTestData.Command(fixture.Run, "expiry-during-authorization", HumanReviewDecisionKind.Approve));
+
+        Assert.Equal(HumanReviewDecisionServiceStatus.Expired, result.Status);
+        Assert.Equal(fixture.Request.Timing.ExpiresAtUtc, result.Receipt?.RecordedAtUtc);
+        Assert.Equal(authorizationAtUtc, Assert.Single(authorizer.Requests).EvaluatedAtUtc);
+        Assert.Empty(store.Run?.HumanReview?.AcceptedDecisions ?? []);
+        Assert.Null(store.Run?.HumanReview?.AcceptedTerminalDecision);
+        Assert.Null(store.Run?.HumanReview?.ContinuationReservation);
+        Assert.Equal(HumanReviewLifecycleStatus.Expired, store.Run?.HumanReview?.Lifecycle.Status);
+        Assert.True(CustomLoopRunValidator.Validate(Assert.IsType<CustomLoopRunRecord>(store.Run)).IsValid);
+    }
+
+    [Fact]
     public async Task Accepted_decision_quota_leaves_exact_capacity_for_one_expiry_lifecycle()
     {
         var fixture = await HumanReviewDecisionTestData.CreateAsync();
@@ -481,6 +501,35 @@ public sealed class HumanReviewDecisionServiceTests
     }
 
     [Fact]
+    public async Task Invalid_or_backward_trusted_time_after_authorization_fails_closed_without_mutation()
+    {
+        var fixture = await HumanReviewDecisionTestData.CreateAsync();
+        var command = HumanReviewDecisionTestData.Command(fixture.Run, "post-authorization-clock-one", HumanReviewDecisionKind.Reject);
+        var authorizationAtUtc = fixture.Run.UpdatedAtUtc.AddMinutes(2);
+        var nonUtc = new DateTimeOffset(authorizationAtUtc.AddMinutes(1).DateTime, TimeSpan.FromHours(1));
+        var defaultStore = new HumanReviewDecisionTestStore(fixture.Run);
+        var backwardStore = new HumanReviewDecisionTestStore(fixture.Run);
+        var offsetStore = new HumanReviewDecisionTestStore(fixture.Run);
+        var defaultAuthorizer = new HumanReviewDecisionTestAuthorizer();
+        var backwardAuthorizer = new HumanReviewDecisionTestAuthorizer();
+        var offsetAuthorizer = new HumanReviewDecisionTestAuthorizer();
+
+        var invalid = await new HumanReviewDecisionService(defaultStore, defaultAuthorizer, new HumanReviewDecisionTestClock(authorizationAtUtc, default)).DecideAsync(command);
+        var backward = await new HumanReviewDecisionService(backwardStore, backwardAuthorizer, new HumanReviewDecisionTestClock(authorizationAtUtc, authorizationAtUtc.AddTicks(-1))).DecideAsync(command);
+        var offset = await new HumanReviewDecisionService(offsetStore, offsetAuthorizer, new HumanReviewDecisionTestClock(authorizationAtUtc, nonUtc)).DecideAsync(command);
+
+        Assert.Equal(HumanReviewDecisionServiceStatus.Unavailable, invalid.Status);
+        Assert.Equal(HumanReviewDecisionServiceStatus.Unavailable, backward.Status);
+        Assert.Equal(HumanReviewDecisionServiceStatus.Unavailable, offset.Status);
+        Assert.Single(defaultAuthorizer.Requests);
+        Assert.Single(backwardAuthorizer.Requests);
+        Assert.Single(offsetAuthorizer.Requests);
+        Assert.Equal(0, defaultStore.UpdateCount);
+        Assert.Equal(0, backwardStore.UpdateCount);
+        Assert.Equal(0, offsetStore.UpdateCount);
+    }
+
+    [Fact]
     public async Task Cancellation_after_a_durable_write_reconciles_the_exact_operation_without_duplication()
     {
         var fixture = await HumanReviewDecisionTestData.CreateAsync();
@@ -602,7 +651,10 @@ public sealed class HumanReviewDecisionServiceTests
             UpdateOverrideAsync = (candidate, expected, _) => Task.FromResult(CustomLoopRunStoreResult.VersionConflict(candidate, expected))
         };
         var authorizer = new HumanReviewDecisionTestAuthorizer();
-        var clock = new HumanReviewDecisionTestClock(fixture.Run.UpdatedAtUtc.AddMinutes(1), fixture.Run.UpdatedAtUtc.AddMinutes(2), fixture.Run.UpdatedAtUtc.AddMinutes(3));
+        var firstAttemptUtc = fixture.Run.UpdatedAtUtc.AddMinutes(1);
+        var secondAttemptUtc = fixture.Run.UpdatedAtUtc.AddMinutes(2);
+        var thirdAttemptUtc = fixture.Run.UpdatedAtUtc.AddMinutes(3);
+        var clock = new HumanReviewDecisionTestClock(firstAttemptUtc, firstAttemptUtc, secondAttemptUtc, secondAttemptUtc, thirdAttemptUtc, thirdAttemptUtc);
 
         var result = await new HumanReviewDecisionService(store, authorizer, clock).DecideAsync(HumanReviewDecisionTestData.Command(fixture.Run, "retry-one", HumanReviewDecisionKind.Reject));
 
@@ -610,19 +662,24 @@ public sealed class HumanReviewDecisionServiceTests
         Assert.Equal(3, store.UpdateAttempts);
         Assert.Equal(3, store.ReadCount);
         Assert.Equal(3, authorizer.Requests.Count);
-        Assert.Equal(3, clock.ReadCount);
-        Assert.Equal([fixture.Run.UpdatedAtUtc.AddMinutes(1), fixture.Run.UpdatedAtUtc.AddMinutes(2), fixture.Run.UpdatedAtUtc.AddMinutes(3)], authorizer.Requests.Select(request => request.EvaluatedAtUtc));
+        Assert.Equal(6, clock.ReadCount);
+        Assert.Equal([firstAttemptUtc, secondAttemptUtc, thirdAttemptUtc], authorizer.Requests.Select(request => request.EvaluatedAtUtc));
         Assert.Equal(0, store.UpdateCount);
     }
 
-    [Fact]
-    public async Task Receipt_quota_and_invalid_durable_state_fail_before_the_store_mutation_boundary()
+    [Theory]
+    [InlineData(HumanReviewDecisionKind.Approve, false, HumanReviewDecisionServiceStatus.Accepted, HumanReviewLifecycleStatus.Approved)]
+    [InlineData(HumanReviewDecisionKind.Reject, false, HumanReviewDecisionServiceStatus.Accepted, HumanReviewLifecycleStatus.Rejected)]
+    [InlineData(HumanReviewDecisionKind.Cancel, false, HumanReviewDecisionServiceStatus.Accepted, HumanReviewLifecycleStatus.Cancelled)]
+    [InlineData(HumanReviewDecisionKind.Reject, true, HumanReviewDecisionServiceStatus.Expired, HumanReviewLifecycleStatus.Expired)]
+    public async Task Denial_receipt_quota_reserves_capacity_for_an_eligible_terminal_or_expiry_outcome(HumanReviewDecisionKind kind, bool atExpiry, HumanReviewDecisionServiceStatus expectedStatus, HumanReviewLifecycleStatus expectedLifecycle)
     {
         var fixture = await HumanReviewDecisionTestData.CreateAsync();
         var quotaStore = new HumanReviewDecisionTestStore(fixture.Run);
         var denied = new HumanReviewDecisionTestAuthorizer { ReviewerRoleId = "reviewer-role-two" };
-        var service = Service(quotaStore, denied, fixture.Run.UpdatedAtUtc.AddMinutes(1));
-        for (var index = 0; index < HumanReviewContractLimits.MaxDecisionOperationReceipts; index++)
+        var atUtc = atExpiry ? fixture.Request.Timing.ExpiresAtUtc : fixture.Run.UpdatedAtUtc.AddMinutes(1);
+        var service = Service(quotaStore, denied, atUtc);
+        for (var index = 0; index < HumanReviewContractLimits.MaxDecisionOperationReceipts - 1; index++)
         {
             var current = Assert.IsType<CustomLoopRunRecord>(quotaStore.Run);
             var result = await service.DecideAsync(HumanReviewDecisionTestData.Command(current, $"quota-{index:00}", HumanReviewDecisionKind.Reject));
@@ -630,12 +687,37 @@ public sealed class HumanReviewDecisionServiceTests
         }
 
         var exhausted = await service.DecideAsync(HumanReviewDecisionTestData.Command(Assert.IsType<CustomLoopRunRecord>(quotaStore.Run), "quota-over", HumanReviewDecisionKind.Reject));
+        Assert.Equal(HumanReviewDecisionServiceStatus.LimitExceeded, exhausted.Status);
+        Assert.Equal(HumanReviewContractLimits.MaxDecisionOperationReceipts - 1, quotaStore.UpdateCount);
+
+        denied.ReviewerRoleId = "reviewer-role-one";
+        var beforeTerminal = Assert.IsType<CustomLoopRunRecord>(quotaStore.Run);
+        if (!atExpiry)
+        {
+            var information = await service.DecideAsync(HumanReviewDecisionTestData.Command(beforeTerminal, "quota-information", HumanReviewDecisionKind.RequestInformation, "Need a redacted clarification."));
+            var stale = await service.DecideAsync(HumanReviewDecisionTestData.Command(beforeTerminal, "quota-stale", HumanReviewDecisionKind.Reject, expectedLifecycleVersion: beforeTerminal.LifecycleVersion - 1));
+            Assert.Equal(HumanReviewDecisionServiceStatus.LimitExceeded, information.Status);
+            Assert.Equal(HumanReviewDecisionServiceStatus.LimitExceeded, stale.Status);
+        }
+
+        var terminal = await service.DecideAsync(HumanReviewDecisionTestData.Command(beforeTerminal, "quota-terminal", kind));
+
+        Assert.Equal(expectedStatus, terminal.Status);
+        Assert.Equal(expectedLifecycle, quotaStore.Run?.HumanReview?.Lifecycle.Status);
+        Assert.Equal(HumanReviewContractLimits.MaxDecisionOperationReceipts, quotaStore.Run?.HumanReview?.OperationReceipts.Length);
+        Assert.Equal(HumanReviewContractLimits.MaxDecisionOperationReceipts, quotaStore.UpdateCount);
+        Assert.Equal(kind == HumanReviewDecisionKind.Approve, quotaStore.Run?.HumanReview?.ContinuationReservation is not null);
+        Assert.True(CustomLoopRunValidator.Validate(Assert.IsType<CustomLoopRunRecord>(quotaStore.Run)).IsValid);
+    }
+
+    [Fact]
+    public async Task Invalid_durable_state_fails_before_the_store_mutation_boundary()
+    {
+        var fixture = await HumanReviewDecisionTestData.CreateAsync();
         var invalidRun = fixture.Run with { HumanReview = fixture.Run.HumanReview! with { Evidence = default } };
         var invalidStore = new HumanReviewDecisionTestStore(invalidRun);
         var invalid = await Service(invalidStore, new HumanReviewDecisionTestAuthorizer(), fixture.Run.UpdatedAtUtc.AddMinutes(1)).DecideAsync(HumanReviewDecisionTestData.Command(invalidRun, "invalid-one", HumanReviewDecisionKind.Reject));
 
-        Assert.Equal(HumanReviewDecisionServiceStatus.LimitExceeded, exhausted.Status);
-        Assert.Equal(HumanReviewContractLimits.MaxDecisionOperationReceipts, quotaStore.UpdateCount);
         Assert.Equal(HumanReviewDecisionServiceStatus.Invalid, invalid.Status);
         Assert.Equal(0, invalidStore.UpdateCount);
     }

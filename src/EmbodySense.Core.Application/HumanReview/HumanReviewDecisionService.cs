@@ -119,13 +119,18 @@ public sealed class HumanReviewDecisionService : IHumanReviewDecisionService
 
             predecessorWasStale |= current.LifecycleVersion != command.ExpectedLifecycleVersion;
 
-            var disposition = SelectDisposition(state, proposal, permitted, predecessorWasStale, atUtc);
+            if (!TryGetTrustedNow(current, out var decisionAtUtc) || decisionAtUtc < atUtc)
+            {
+                return Result(HumanReviewDecisionServiceStatus.Unavailable);
+            }
+
+            var disposition = SelectDisposition(state, proposal, permitted, predecessorWasStale, decisionAtUtc);
             if (!CanAppend(current, state, proposal, disposition))
             {
                 return Result(HumanReviewDecisionServiceStatus.LimitExceeded);
             }
 
-            if (!TryCreateCandidate(current, state, proposal, authorization, disposition, atUtc, out var next, out var receipt))
+            if (!TryCreateCandidate(current, state, proposal, authorization, disposition, decisionAtUtc, out var next, out var receipt))
             {
                 return Result(HumanReviewDecisionServiceStatus.Invalid);
             }
@@ -342,7 +347,12 @@ public sealed class HumanReviewDecisionService : IHumanReviewDecisionService
     private static bool CanAppend(CustomLoopRunRecord current, HumanReviewRunState state, HumanReviewDecisionProposal proposal, HumanReviewDecisionOperationDisposition disposition)
     {
         var eventCount = disposition == HumanReviewDecisionOperationDisposition.Accepted && proposal.Kind == HumanReviewDecisionKind.Approve ? 2 : 1;
-        if (current.LifecycleVersion == int.MaxValue || current.Events.Length > CustomLoopLimits.MaxTraceEventsPerRun - eventCount || state.OperationReceipts.Length >= HumanReviewContractLimits.MaxDecisionOperationReceipts)
+        var closureRemainsRequired = state.AcceptedTerminalDecision is null && state.Lifecycle.Status != HumanReviewLifecycleStatus.Expired;
+        var closesRequest = disposition == HumanReviewDecisionOperationDisposition.Expired || disposition == HumanReviewDecisionOperationDisposition.Accepted && proposal.Kind != HumanReviewDecisionKind.RequestInformation;
+        var closureEventReserve = state.Request.RequestedDecisions.Contains(HumanReviewDecisionKind.Approve) ? 2 : 1;
+        var reservedEventCount = closureRemainsRequired && !closesRequest ? closureEventReserve : 0;
+        var receiptLimit = closureRemainsRequired && !closesRequest ? HumanReviewContractLimits.MaxDecisionOperationReceipts - 1 : HumanReviewContractLimits.MaxDecisionOperationReceipts;
+        if (current.LifecycleVersion == int.MaxValue || current.Events.Length > CustomLoopLimits.MaxTraceEventsPerRun - eventCount - reservedEventCount || state.OperationReceipts.Length >= receiptLimit)
         {
             return false;
         }
