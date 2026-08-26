@@ -1867,7 +1867,7 @@ public sealed class GovernedLoopGraphRevisionStoreTests
                 new GovernedLoopValueSchemaDefinition("boolean", GovernedLoopValueKind.Boolean, true),
                 new GovernedLoopValueSchemaDefinition("integer", GovernedLoopValueKind.Integer, false),
                 new GovernedLoopValueSchemaDefinition("number", GovernedLoopValueKind.Number, false),
-                new GovernedLoopValueSchemaDefinition("object", GovernedLoopValueKind.Object, true),
+                new GovernedLoopValueSchemaDefinition("object", GovernedLoopValueKind.Object, false),
                 new GovernedLoopValueSchemaDefinition("array", GovernedLoopValueKind.Array, false, ElementSchemaId: "text"),
                 new GovernedLoopValueSchemaDefinition("binary", GovernedLoopValueKind.Binary, false, "base64"),
             ],

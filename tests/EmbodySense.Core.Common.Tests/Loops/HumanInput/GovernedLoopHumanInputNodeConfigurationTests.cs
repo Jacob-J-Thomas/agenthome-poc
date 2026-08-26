@@ -41,6 +41,26 @@ public sealed class GovernedLoopHumanInputNodeConfigurationTests
     }
 
     [Fact]
+    public void Nullable_graph_schema_cannot_claim_exact_human_input_response_semantics()
+    {
+        var configuration = Configuration();
+        var graph = Graph(configuration, "text", GovernedLoopValueKind.Text);
+        var node = graph.Nodes.Single(value => value.Id == "human-input");
+        var exactSchemas = graph.ValueSchemas.ToDictionary(value => value.Id, StringComparer.Ordinal);
+        var nullableSchemas = graph.ValueSchemas
+            .Select(value => value with { Nullable = true })
+            .ToDictionary(value => value.Id, StringComparer.Ordinal);
+
+        Assert.True(GovernedLoopHumanInputNodeConfigurationValidator.HasExactNodeSemantics(node, exactSchemas));
+        Assert.False(GovernedLoopHumanInputNodeConfigurationValidator.HasExactNodeSemantics(node, nullableSchemas));
+        Assert.Throws<ArgumentException>(() => Graph(
+            configuration,
+            "text",
+            GovernedLoopValueKind.Text,
+            schemaNullable: true));
+    }
+
+    [Fact]
     public void Hostile_unknown_and_noncanonical_configuration_shapes_fail_closed()
     {
         var variants = new[]
@@ -169,7 +189,8 @@ public sealed class GovernedLoopHumanInputNodeConfigurationTests
         GovernedLoopHumanInputNodeConfiguration configuration,
         string schemaId,
         GovernedLoopValueKind valueKind,
-        GovernedLoopNodeDefinition[]? nodes = null)
+        GovernedLoopNodeDefinition[]? nodes = null,
+        bool schemaNullable = false)
         => GovernedLoopGraphDefinition.Create(
             1,
             "human-input-graph",
@@ -179,7 +200,7 @@ public sealed class GovernedLoopHumanInputNodeConfigurationTests
             "trigger",
             ["exit"],
             GovernedLoopAuthorityCeiling.Create([GovernedLoopGraphTestFixture.WorkspaceReadCapability]),
-            [new GovernedLoopValueSchemaDefinition(schemaId, valueKind, false)],
+            [new GovernedLoopValueSchemaDefinition(schemaId, valueKind, schemaNullable)],
             nodes ?? GraphNodes(configuration, schemaId),
             [
                 new GovernedLoopControlEdgeDefinition("trigger-to-human-input", "trigger", "human-input", GovernedLoopControlCondition.Always),

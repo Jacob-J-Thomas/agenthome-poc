@@ -89,6 +89,7 @@ public static class GovernedLoopHumanInputNodeConfigurationValidator
             && string.Equals(port.ValueSchemaId, configuration.RequestSchemaReference, StringComparison.Ordinal)
             && schemas.TryGetValue(configuration.RequestSchemaReference!, out var schema)
             && TryGetResponseValueKind(configuration.ResponseSchema, out var responseKind)
+            && !schema.Nullable
             && schema.Kind == responseKind;
     }
 
