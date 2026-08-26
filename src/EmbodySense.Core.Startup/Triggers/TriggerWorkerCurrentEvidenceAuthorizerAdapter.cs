@@ -5,15 +5,21 @@ using EmbodySense.Core.Startup.Triggers.Models;
 
 namespace EmbodySense.Core.Startup.Triggers;
 
-internal sealed class TriggerWorkerCurrentEvidenceAuthorizerAdapter : ITriggerDispatchAuthorizer
+/// <summary>Adapts trusted Startup current-evidence decisions to the application trigger-worker authorization port.</summary>
+/// <remarks>The adapter projects selected envelope evidence without granting authority or changing the worker's durable intent boundary.</remarks>
+public sealed class TriggerWorkerCurrentEvidenceAuthorizerAdapter : ITriggerDispatchAuthorizer
 {
     private readonly ITriggerWorkerCurrentEvidenceAuthorizer _authorizer;
 
-    internal TriggerWorkerCurrentEvidenceAuthorizerAdapter(ITriggerWorkerCurrentEvidenceAuthorizer authorizer)
+    /// <summary>Creates the application-port adapter over one composition-owned authorizer.</summary>
+    /// <param name="authorizer">The trusted current-evidence authorizer retained for the adapter lifetime.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="authorizer"/> is <see langword="null"/>.</exception>
+    public TriggerWorkerCurrentEvidenceAuthorizerAdapter(ITriggerWorkerCurrentEvidenceAuthorizer authorizer)
     {
         _authorizer = authorizer ?? throw new ArgumentNullException(nameof(authorizer));
     }
 
+    /// <inheritdoc />
     public async Task<TriggerDispatchAuthorization> AuthorizeAsync(TriggerDeliveryEnvelope envelope, DateTimeOffset evaluatedAtUtc, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(envelope);
