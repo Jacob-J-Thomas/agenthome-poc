@@ -240,6 +240,7 @@ const governedGraphWorkspace = createGovernedGraphWorkspace({
   operationId: (prefix) => `${prefix}-${newOperationId()}`,
   runtimeCatalog: () => catalog,
   invokePublishedGraph: invokePublishedGovernedGraph,
+  retryWorkspaceHydration: refreshWorkspace,
 });
 
 setWorkspaceAuthoringHydrated(false);
@@ -1764,8 +1765,7 @@ async function switchView(view) {
   currentView = view;
   if (view === "graph") {
     renderAll();
-    await governedGraphWorkspace.activate();
-    return;
+    return await governedGraphWorkspace.activate();
   }
   governedGraphWorkspace.deactivate();
   if (view === "runs") {
