@@ -92,6 +92,83 @@ namespace EmbodySense.Core.Startup.Tests.Runtime;
 public sealed class AgentRuntimeFactoryTests
 {
     [Fact]
+    public async Task CreateAsync_exposes_authoring_that_observes_the_runtime_materialized_nonterminal_run_until_runtime_disposal()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var attemptStartedPath = workspace.File("runtime-authoring-attempt-started.marker");
+        var attemptReleasePath = workspace.File("runtime-authoring-attempt-release.marker");
+        var executablePath = await CreateFakeCodexExecutableAsync(workspace, turnStartMarkerPath: attemptStartedPath, turnReleaseMarkerPath: attemptReleasePath);
+        var factory = AgentRuntimeFactory.ForFileCapabilityTrustRoot(
+            new RejectingApprovalPrompt(),
+            workspace.ServerStatePath,
+            CreateCompatibleRuntimeStatus(executablePath));
+        var runtime = await factory.CreateAsync(
+            "test-model",
+            workspace.RootPath,
+            executablePath,
+            "read-only",
+            AgentRuntimeSurface.Web);
+        Task<LoopRunInvocationResponse>? invocation = null;
+
+        try
+        {
+            var created = Assert.IsType<LoopDefinitionSnapshot>((await runtime.LoopAuthoring.CreateAsync("create-runtime-authoring-active-loop")).Definition);
+            var invocationInput = new LoopRunInvocationInput(
+                created.Id,
+                created.DefinitionVersion,
+                created.ContentHash,
+                "invoke-runtime-authoring-active-loop",
+                "hold this runtime-owned custom-loop run");
+            invocation = runtime.InvokeCustomLoopAsync(invocationInput);
+
+            await WaitForFileAsync(attemptStartedPath);
+            var materialized = Assert.Single(await runtime.ListCustomLoopRunsAsync(), run => run.LoopId == created.Id);
+            var exactRun = Assert.IsType<LoopRunSnapshot>(await runtime.GetCustomLoopRunAsync(materialized.Id));
+            var update = await runtime.LoopAuthoring.UpdateAsync(
+                created.Id,
+                created.DefinitionVersion,
+                "update-runtime-authoring-active-loop",
+                new LoopDefinitionInput(
+                    created.DisplayName,
+                    "This update must remain blocked by the exact active runtime run.",
+                    created.TriggerPolicy,
+                    created.InferenceSteps,
+                    created.ToolAssignments,
+                    created.ExitPolicy));
+            var delete = await runtime.LoopAuthoring.DeleteAsync(
+                created.Id,
+                created.DefinitionVersion,
+                "delete-runtime-authoring-active-loop");
+
+            Assert.Null(materialized.CompletedAtUtc);
+            Assert.Equal(created.Id, exactRun.LoopId);
+            Assert.Null(exactRun.CompletedAtUtc);
+            Assert.Equal("ActiveRunExists", update.Status);
+            Assert.Equal("ActiveRunExists", delete.Status);
+            Assert.Equal(created.Id, (await runtime.LoopAuthoring.GetAsync(created.Id))!.Id);
+
+            await File.WriteAllTextAsync(attemptReleasePath, "release");
+            var completed = await invocation;
+            Assert.Equal("Completed", completed.ExecutionStatus);
+            Assert.Equal("Completed", completed.Run!.Status);
+
+            await runtime.DisposeAsync();
+            await runtime.DisposeAsync();
+        }
+        finally
+        {
+            if (invocation is { IsCompleted: false })
+            {
+                await File.WriteAllTextAsync(attemptReleasePath, "release");
+                await invocation;
+            }
+
+            await runtime.DisposeAsync();
+        }
+    }
+
+    [Fact]
     public async Task CreateAsync_exposes_one_shared_operational_facade_over_the_canonical_runtime_stores()
     {
         using var workspace = new TestWorkspace();
@@ -2357,12 +2434,17 @@ public sealed class AgentRuntimeFactoryTests
         return record;
     }
 
-    private static async Task<string> CreateFakeCodexExecutableAsync(TestWorkspace workspace, string? turnFailureMessage = null, string? turnStartMarkerPath = null)
+    private static async Task<string> CreateFakeCodexExecutableAsync(
+        TestWorkspace workspace,
+        string? turnFailureMessage = null,
+        string? turnStartMarkerPath = null,
+        string? turnReleaseMarkerPath = null)
     {
         var scriptPath = workspace.File("fake-codex.js");
         var commandPath = workspace.File(OperatingSystem.IsWindows() ? "fake-codex.cmd" : "fake-codex");
         var serializedTurnFailureMessage = System.Text.Json.JsonSerializer.Serialize(turnFailureMessage);
         var serializedTurnStartMarkerPath = System.Text.Json.JsonSerializer.Serialize(turnStartMarkerPath);
+        var serializedTurnReleaseMarkerPath = System.Text.Json.JsonSerializer.Serialize(turnReleaseMarkerPath);
         await File.WriteAllTextAsync(scriptPath, $$"""
             const fs = require("node:fs");
             const readline = require("node:readline");
@@ -2375,6 +2457,7 @@ public sealed class AgentRuntimeFactoryTests
             const threadId = "thread-test";
             const turnFailureMessage = {{serializedTurnFailureMessage}};
             const turnStartMarkerPath = {{serializedTurnStartMarkerPath}};
+            const turnReleaseMarkerPath = {{serializedTurnReleaseMarkerPath}};
             const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
             let developerInstructions = "";
 
@@ -2382,7 +2465,7 @@ public sealed class AgentRuntimeFactoryTests
               process.stdout.write(`${JSON.stringify(value)}\n`);
             }
 
-            input.on("line", line => {
+            input.on("line", async line => {
               const message = JSON.parse(line);
               switch (message.method) {
                 case "initialize":
@@ -2410,6 +2493,12 @@ public sealed class AgentRuntimeFactoryTests
                 case "turn/start": {
                   if (turnStartMarkerPath) {
                     fs.appendFileSync(turnStartMarkerPath, "started\n");
+                  }
+                  if (turnReleaseMarkerPath) {
+                    while (!fs.existsSync(turnReleaseMarkerPath)) {
+                      await new Promise(resolve => setTimeout(resolve, 25));
+                    }
+                    fs.rmSync(turnReleaseMarkerPath);
                   }
                   const turnId = "turn-test";
                   let userText = String(message.params?.input?.[0]?.text ?? "");
@@ -2476,6 +2565,17 @@ public sealed class AgentRuntimeFactoryTests
         }
 
         return commandPath;
+    }
+
+    private static async Task WaitForFileAsync(string path)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        while (!File.Exists(path) && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(50);
+        }
+
+        Assert.True(File.Exists(path), "The fake Codex provider did not reach the held custom-loop attempt.");
     }
 
     private static async Task<AgentRuntime> CreateRuntimeAsync(

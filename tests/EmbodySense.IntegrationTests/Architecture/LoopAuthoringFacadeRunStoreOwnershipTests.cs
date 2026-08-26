@@ -67,6 +67,7 @@ public sealed class LoopAuthoringFacadeRunStoreOwnershipTests
             "AgentRuntime.cs"));
 
         Assert.Single(FindCanonicalRunStoreDisposals(source));
+        Assert.Contains("Interlocked.Exchange(ref _disposed, 1)", source, StringComparison.Ordinal);
     }
 
     [Theory]
