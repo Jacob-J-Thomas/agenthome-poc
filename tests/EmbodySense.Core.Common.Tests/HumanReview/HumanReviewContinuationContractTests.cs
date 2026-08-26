@@ -49,13 +49,53 @@ public sealed class HumanReviewContinuationContractTests
         var wake = Wake(request, reservation);
         var first = Claim(wake, reservation);
         var early = HumanReviewContinuationContractHash.ApplyClaim(first with { ClaimId = "claim-two", ClaimedAtUtc = first.LeaseExpiresAtUtc.AddTicks(-1), LeaseExpiresAtUtc = first.LeaseExpiresAtUtc.AddMinutes(1), Provenance = Provenance("claim-two", first.LeaseExpiresAtUtc.AddTicks(-1)), ClaimHash = string.Empty });
-        var takeover = HumanReviewContinuationContractHash.ApplyClaim(first with { ClaimId = "claim-two", ClaimedAtUtc = first.LeaseExpiresAtUtc, LeaseExpiresAtUtc = first.LeaseExpiresAtUtc.AddMinutes(1), Provenance = Provenance("claim-two", first.LeaseExpiresAtUtc), ClaimHash = string.Empty });
+        var atExpiry = HumanReviewContinuationContractHash.ApplyClaim(first with { ClaimId = "claim-two", ClaimedAtUtc = first.LeaseExpiresAtUtc, LeaseExpiresAtUtc = first.LeaseExpiresAtUtc.AddMinutes(1), Provenance = Provenance("claim-two", first.LeaseExpiresAtUtc), ClaimHash = string.Empty });
+        var takeover = HumanReviewContinuationContractHash.ApplyClaim(first with { ClaimId = "claim-two", ClaimedAtUtc = first.LeaseExpiresAtUtc.AddTicks(1), LeaseExpiresAtUtc = first.LeaseExpiresAtUtc.AddMinutes(1).AddTicks(1), Provenance = Provenance("claim-two", first.LeaseExpiresAtUtc.AddTicks(1)), ClaimHash = string.Empty });
         var invalid = HumanReviewContinuationContractHash.ApplyState(new HumanReviewContinuationState(1, wake, [first, early], null, null, string.Empty));
+        var equalBoundary = HumanReviewContinuationContractHash.ApplyState(new HumanReviewContinuationState(1, wake, [first, atExpiry], null, null, string.Empty));
         var valid = HumanReviewContinuationContractHash.ApplyState(new HumanReviewContinuationState(1, wake, [first, takeover], Completion(wake, reservation, takeover), null, string.Empty));
 
         Assert.Contains(HumanReviewContinuationContractValidator.ValidateState(request, reservation, invalid).Errors, error => error.Code == "claim_takeover_before_expiry");
-        Assert.True(HumanReviewContinuationContractValidator.ValidateState(request, reservation, valid).IsValid);
+        Assert.Contains(HumanReviewContinuationContractValidator.ValidateState(request, reservation, equalBoundary).Errors, error => error.Code == "claim_takeover_before_expiry");
+        var validValidation = HumanReviewContinuationContractValidator.ValidateState(request, reservation, valid);
+        Assert.True(validValidation.IsValid, string.Join("; ", validValidation.Errors.Select(error => error.Code)));
         Assert.False(HumanReviewContinuationContractValidator.ValidateCompletion(wake, reservation, first, Completion(wake, reservation, takeover)).IsValid);
+    }
+
+    [Fact]
+    public void Claim_history_rejects_nonadjacent_duplicate_id_or_hash_without_throwing()
+    {
+        var request = HumanReviewTestData.Request();
+        var reservation = Reservation(request);
+        var wake = Wake(request, reservation);
+        var first = Claim(wake, reservation);
+        var second = Takeover(first, "claim-two");
+        var duplicateId = Takeover(second, "claim-one");
+        var duplicateHash = Takeover(second, "claim-three") with { ClaimHash = second.ClaimHash };
+        var duplicateIdState = HumanReviewContinuationContractHash.ApplyState(new HumanReviewContinuationState(1, wake, [first, second, duplicateId], null, null, string.Empty));
+        var duplicateHashState = new HumanReviewContinuationState(1, wake, [first, second, duplicateHash], null, null, string.Empty);
+
+        Assert.Contains(HumanReviewContinuationContractValidator.ValidateState(request, reservation, duplicateIdState).Errors, error => error.Code == "duplicate_claim_id");
+        Assert.Contains(HumanReviewContinuationContractValidator.ValidateState(request, reservation, duplicateHashState).Errors, error => error.Code == "duplicate_claim_hash");
+    }
+
+    [Fact]
+    public void Null_claim_elements_at_any_history_position_fail_closed_without_dereferencing_neighbors()
+    {
+        var request = HumanReviewTestData.Request();
+        var reservation = Reservation(request);
+        var wake = Wake(request, reservation);
+        var claim = Claim(wake, reservation);
+        var firstNull = new HumanReviewContinuationState(1, wake, [null!, claim], null, null, string.Empty);
+        var laterNull = new HumanReviewContinuationState(1, wake, [claim, null!], null, null, string.Empty);
+
+        var firstNullValidation = HumanReviewContinuationContractValidator.ValidateState(request, reservation, firstNull);
+        var laterNullValidation = HumanReviewContinuationContractValidator.ValidateState(request, reservation, laterNull);
+
+        Assert.False(firstNullValidation.IsValid);
+        Assert.False(laterNullValidation.IsValid);
+        Assert.Contains(firstNullValidation.Errors, error => error.Code == "claim_required");
+        Assert.Contains(laterNullValidation.Errors, error => error.Code == "claim_required");
     }
 
     [Fact]
@@ -140,6 +180,12 @@ public sealed class HumanReviewContinuationContractTests
     {
         var time = wake.PublishedAtUtc.AddMinutes(1);
         return HumanReviewContinuationContractHash.ApplyClaim(new HumanReviewContinuationClaim(1, "claim-one", new HumanReviewContinuationWakeReference(wake.WakeId, wake.WakeHash), new HumanReviewContinuationReservationReference(reservation.ReservationId, reservation.ReservationHash), wake.ExpectedGeneration, "worker-one", time, time.AddMinutes(10), Provenance("claim", time), string.Empty));
+    }
+
+    private static HumanReviewContinuationClaim Takeover(HumanReviewContinuationClaim prior, string claimId)
+    {
+        var claimedAtUtc = prior.LeaseExpiresAtUtc.AddTicks(1);
+        return HumanReviewContinuationContractHash.ApplyClaim(prior with { ClaimId = claimId, ClaimedAtUtc = claimedAtUtc, LeaseExpiresAtUtc = claimedAtUtc.AddMinutes(10), Provenance = Provenance(claimId, claimedAtUtc), ClaimHash = string.Empty });
     }
 
     private static HumanReviewContinuationCompletion Completion(HumanReviewContinuationWake wake, HumanReviewContinuationReservation reservation, HumanReviewContinuationClaim claim)

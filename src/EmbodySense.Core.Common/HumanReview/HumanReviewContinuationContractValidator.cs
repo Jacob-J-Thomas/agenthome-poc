@@ -95,15 +95,27 @@ public static class HumanReviewContinuationContractValidator
         var wake = state.Wake;
         errors.AddRange(ValidateWake(request, reservation, wake).Errors);
         if (state.Claims.IsDefault || state.Claims.Length > HumanReviewContractLimits.MaxContinuationClaims) Add(errors, "invalid_claim_count", "$.claims", "Claim history must be defined and bounded.");
-        else for (var index = 0; index < state.Claims.Length; index++)
+        else
         {
-            var claim = state.Claims[index];
-            errors.AddRange(ValidateClaim(wake, reservation, claim).Errors);
-            if (index > 0)
+            var claimIds = new HashSet<string>(StringComparer.Ordinal);
+            var claimHashes = new HashSet<string>(StringComparer.Ordinal);
+            for (var index = 0; index < state.Claims.Length; index++)
             {
-                var previous = state.Claims[index - 1];
-                if (string.Equals(previous.ClaimId, claim.ClaimId, StringComparison.Ordinal) || string.Equals(previous.ClaimHash, claim.ClaimHash, StringComparison.Ordinal)) Add(errors, "duplicate_claim", $"$.claims[{index}]", "Claim identities and hashes cannot be reused.");
-                if (claim.ClaimedAtUtc < previous.LeaseExpiresAtUtc) Add(errors, "claim_takeover_before_expiry", $"$.claims[{index}].claimedAtUtc", "A later claim can take over only after the prior lease expires.");
+                var claim = state.Claims[index];
+                errors.AddRange(ValidateClaim(wake, reservation, claim).Errors);
+                if (claim is null)
+                {
+                    continue;
+                }
+
+                if (!claimIds.Add(claim.ClaimId)) Add(errors, "duplicate_claim_id", $"$.claims[{index}].claimId", "Claim identities cannot be reused anywhere in the append-only history.");
+                if (!claimHashes.Add(claim.ClaimHash)) Add(errors, "duplicate_claim_hash", $"$.claims[{index}].claimHash", "Claim hashes cannot be reused anywhere in the append-only history.");
+                if (index == 0 || state.Claims[index - 1] is not { } previous)
+                {
+                    continue;
+                }
+
+                if (claim.ClaimedAtUtc <= previous.LeaseExpiresAtUtc) Add(errors, "claim_takeover_before_expiry", $"$.claims[{index}].claimedAtUtc", "A later claim can take over only after the prior lease expires.");
             }
         }
         if (state.Completion is not null && state.Retirement is not null) Add(errors, "multiple_terminal_outcomes", "$", "Completion and retirement are mutually exclusive terminal outcomes.");
