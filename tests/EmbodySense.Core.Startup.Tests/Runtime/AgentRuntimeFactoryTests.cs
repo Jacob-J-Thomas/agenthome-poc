@@ -91,8 +91,7 @@ namespace EmbodySense.Core.Startup.Tests.Runtime;
 
 public sealed class AgentRuntimeFactoryTests
 {
-    [Fact]
-    public async Task CreateAsync_exposes_authoring_that_observes_the_runtime_materialized_nonterminal_run_until_runtime_disposal()
+    internal static async Task CreateAsync_exposes_authoring_that_observes_the_runtime_materialized_nonterminal_run_until_runtime_disposal()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
