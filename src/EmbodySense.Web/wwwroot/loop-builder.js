@@ -391,6 +391,8 @@ async function refreshWorkspaceCore(
   { propagateFailure = false, signal = null, suppressRecovery = false } = {},
 ) {
   try {
+    workspaceAuthoringHydrated = false;
+    renderTabs();
     const requestOptions = { signal, suppressRecovery };
     const status = await requestJson("/api/status", requestOptions);
     if (signal?.aborted) return false;
@@ -443,9 +445,9 @@ async function refreshWorkspaceCore(
     if (signal?.aborted) return false;
     const runsLoaded = await loadRuns({ propagateFailure, requestOptions });
     if (runsLoaded === false) return false;
-    renderAll();
     if (currentView === "graph") await governedGraphWorkspace.refresh();
     workspaceAuthoringHydrated = true;
+    renderAll();
     renderWorkspaceInitialization();
     return true;
   } catch (error) {
@@ -504,7 +506,7 @@ function renderWorkspaceInitialization() {
       : "This workspace has an incomplete .agent scaffold. Retry initialization to create the missing required files; existing protected seed documents will remain unchanged.";
   } else if (state === "initialized") {
     elements.initializationStatus.textContent =
-      "The workspace is initialized, but Loops has not finished loading authoritative role and catalog state. Retry hydration.";
+      "The workspace is initialized, but Loops has not finished loading authoritative role, catalog, and run state. Retry hydration.";
   } else if (!loopBuilderSessionAvailable) {
     elements.initializationStatus.textContent =
       "The browser session is disconnected. Reconnect before initializing; no completion is assumed.";
@@ -1651,7 +1653,9 @@ function renderTabs() {
   const retentionActive = currentView === "retention";
   elements.builderTab.disabled = mutationInFlight || Boolean(historicalLoopId);
   elements.governedGraphTab.disabled =
-    mutationInFlight || Boolean(historicalLoopId);
+    !workspaceAuthoringHydrated ||
+    mutationInFlight ||
+    Boolean(historicalLoopId);
   elements.runsTab.disabled = mutationInFlight || isNewLoopDraft();
   elements.retentionTab.disabled = mutationInFlight || retentionCleanupInFlight;
   elements.builderTab.classList.toggle("active", builderActive);
@@ -1693,6 +1697,9 @@ async function switchView(view) {
   if (!["builder", "graph", "runs", "retention"].includes(view)) return;
   if (view === "builder" && historicalLoopId) return;
   if (view === "runs" && isNewLoopDraft()) return;
+  // Issue #575: https://github.com/Jacob-J-Thomas/agenthome-poc/issues/575
+  // Graph authoring starts only after conclusive Loops hydration, so a background read cannot consume the first action.
+  if (view === "graph" && !workspaceAuthoringHydrated) return;
   currentView = view;
   if (view === "graph") {
     renderAll();

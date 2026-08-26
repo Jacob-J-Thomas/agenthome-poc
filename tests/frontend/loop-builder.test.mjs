@@ -163,6 +163,100 @@ test("governed graph activation awaits the selected published graph read", async
   );
 });
 
+test("governed graph authoring waits for conclusive Loops hydration", async () => {
+  const sessionStorage = new FakeStorage();
+  sessionStorage.setItem(
+    `embodysense.governed-graph-selection.v1.${encodeURIComponent("C:/workspace")}`,
+    "published-graph",
+  );
+  const server = new FakeFetchServer(createCatalog());
+  const workspaceRunsReady = createDeferred();
+  let workspaceRunsStarted;
+  server.on("GET", "/api/loop-runs?maximumCount=50", async () => {
+    workspaceRunsStarted?.();
+    await workspaceRunsReady.promise;
+    return { status: 200, body: { items: [], continuationCursor: null } };
+  });
+  server.on("GET", "/api/governed-graphs/catalog", () => ({
+    status: 200,
+    body: createGovernedGraphCatalog(),
+  }));
+  server.on(
+    "GET",
+    "/api/governed-graphs/detail?graphId=published-graph",
+    () => ({
+      status: 200,
+      body: governedGraphRead(
+        governedGraphLifecycle("published", 4),
+        governedGraphArtifact(
+          governedGraphLifecycle("published", 4),
+          "Published graph",
+        ),
+      ),
+    }),
+  );
+  server.on(
+    "GET",
+    "/api/governed-graphs/detail?graphId=first-authoring-graph",
+    () => ({ status: 404, body: { detail: "Graph not found." } }),
+  );
+  const runsRequestStarted = new Promise((resolve) => {
+    workspaceRunsStarted = resolve;
+  });
+  const app = await loadLoopBuilder({
+    server,
+    sessionStorage,
+    loopsViewHidden: true,
+  });
+
+  const hydration = app.window.embodySenseLoopBuilder.activate();
+  await runsRequestStarted;
+
+  assert.equal(app.elements.loopList.textContent.includes("System loop"), true);
+  assert.equal(app.elements.governedGraphTab.disabled, true);
+  assert.equal(app.elements.loopInitializationPanel.hidden, false);
+  assert.match(
+    app.elements.loopInitializationStatus.textContent,
+    /authoritative role, catalog, and run state/i,
+  );
+  await app.elements.governedGraphTab.click();
+  assert.equal(
+    server.calls.some((call) => call.url === "/api/governed-graphs/catalog"),
+    false,
+  );
+
+  workspaceRunsReady.resolve();
+  await hydration;
+
+  assert.equal(app.elements.governedGraphTab.disabled, false);
+  assert.equal(app.elements.loopInitializationPanel.hidden, true);
+  await app.elements.governedGraphTab.click();
+  assert.match(
+    app.elements.governedGraphLifecycle.textContent,
+    /Published · lifecycle v4/,
+  );
+  assert.equal(
+    server.calls.filter(
+      (call) =>
+        call.url === "/api/governed-graphs/detail?graphId=published-graph",
+    ).length,
+    1,
+  );
+
+  app.elements.governedGraphId.value = "first-authoring-graph";
+  await app.elements.governedGraphId.input();
+  await app.elements.governedGraphLoadButton.click();
+  assert.match(
+    app.elements.governedGraphNotice.textContent,
+    /No durable governed graph has this ID/,
+  );
+  await app.elements.governedGraphNewButton.click();
+  assert.equal(
+    app.elements.governedGraphLifecycle.textContent,
+    "Local draft · not durable",
+  );
+});
+
 test("visible governed invocation confirms a no-grant preparation with only the exact preview and null grant selector", async () => {
   const previewHash = "a".repeat(64);
   const server = new FakeFetchServer(createCatalog());

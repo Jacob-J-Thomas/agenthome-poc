@@ -442,7 +442,7 @@ public sealed class BrowserFlowTests
             await browser.WaitForExpressionAsync("document.getElementById('workspaceStatus').textContent.includes('Initialized')");
             await browser.WaitForExpressionAsync("document.getElementById('configContent').textContent.includes('compatible-test')");
             await ClickAsync(browser, "#loopsNav");
-            await browser.WaitForExpressionAsync("!document.getElementById('loopsView').hidden && document.getElementById('loopList').textContent.includes('System loop')");
+            await browser.WaitForExpressionAsync("!document.getElementById('loopsView').hidden && document.getElementById('loopList').textContent.includes('System loop') && !document.getElementById('governedGraphTab').disabled");
             await ClickAsync(browser, "#governedGraphTab");
             await browser.WaitForExpressionAsync("document.getElementById('governedGraphCatalog').textContent.includes('schedule-trigger') && document.getElementById('governedGraphCatalog').textContent.includes('provider-inference') && document.getElementById('governedGraphCatalog').textContent.includes('success-exit') && document.getElementById('governedGraphCatalog').textContent.includes('fail-terminal')");
             await browser.WaitForExpressionAsync($"document.getElementById('governedGraphModelProfile').textContent.includes('gpt-test') && [...document.getElementById('governedGraphModelProfile').options].some((option) => option.value === '{BrowserProfileId}' && !option.disabled)");
