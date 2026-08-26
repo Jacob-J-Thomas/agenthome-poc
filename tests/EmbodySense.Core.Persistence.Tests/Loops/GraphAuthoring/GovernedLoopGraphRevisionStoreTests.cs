@@ -2039,8 +2039,8 @@ public sealed class GovernedLoopGraphRevisionStoreTests
             privacyClass,
             [new HumanInputEligibleRespondent("user-one", "role-one", "route-one"), new HumanInputEligibleRespondent("user-two", "role-two", "route-two")],
             responsePolicy,
-            "timeout-policy-one",
-            "failure-policy-one");
+            "timeout-policy-one@revision-one",
+            "failure-policy-one@revision-one");
 
     private static ContextualRoleRevisionPin Role(
         string roleId = "researcher",

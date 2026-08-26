@@ -59,7 +59,7 @@ public sealed class GovernedLoopHumanInputWaitingCheckpointContractTests
         var pending = GovernedLoopHumanInputWaitingCheckpointTestData.Pending();
         var expired = GovernedLoopHumanInputWaitingCheckpointTestData.Expired(pending);
         var atEndpointEvidence = GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(expired.Evidence[1] with { OccurredAtUtc = pending.Request.Timing.ExpiresAtUtc });
-        var atEndpoint = GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(new GovernedLoopHumanInputWaitingCheckpoint(1, pending.Binding, pending.NodeConfiguration, pending.Request, GovernedLoopHumanInputWaitingCheckpointPosture.Expired, [pending.Evidence[0], atEndpointEvidence], string.Empty));
+        var atEndpoint = GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(new GovernedLoopHumanInputWaitingCheckpoint(1, pending.Binding, pending.NodeConfiguration, pending.ResolvedPolicy, pending.Request, GovernedLoopHumanInputWaitingCheckpointPosture.Expired, [pending.Evidence[0], atEndpointEvidence], string.Empty));
 
         Assert.True(GovernedLoopHumanInputWaitingCheckpointContractValidator.Validate(expired).IsValid);
         Assert.True(GovernedLoopHumanInputWaitingCheckpointStateTransitionValidator.ValidateTransition(pending, expired).IsValid);
