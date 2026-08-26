@@ -1,3 +1,6 @@
+using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
+
 namespace EmbodySense.IntegrationTests.Architecture;
 
 public sealed class ScheduleRuntimeFactoryRunStoreOwnershipTests
@@ -13,8 +16,40 @@ public sealed class ScheduleRuntimeFactoryRunStoreOwnershipTests
             "Schedules",
             "ScheduleRuntimeFactory.cs"));
 
-        Assert.DoesNotContain("new CustomLoopRunStore", source, StringComparison.Ordinal);
+        Assert.Empty(FindCustomLoopRunStoreConstructions(source));
     }
+
+    [Theory]
+    [InlineData("new CustomLoopRunStore(paths)")]
+    [InlineData("new EmbodySense.Core.Persistence.Loops.CustomLoopRunStore(paths)")]
+    [InlineData("new global::EmbodySense.Core.Persistence.Loops.CustomLoopRunStore(\n    paths)")]
+    public void Constructor_guard_rejects_reformatted_and_qualified_custom_loop_run_store_construction(string construction)
+    {
+        var source = """
+            internal sealed class ScheduleFactory
+            {
+                internal void Create(object paths)
+                {
+                    var runStore =
+            """
+            + construction
+            + ";"
+            + """
+                }
+            }
+            """;
+
+        Assert.Single(FindCustomLoopRunStoreConstructions(source));
+    }
+
+    private static IReadOnlyList<ObjectCreationExpressionSyntax> FindCustomLoopRunStoreConstructions(string source)
+        => CSharpSyntaxTree
+            .ParseText(source)
+            .GetRoot()
+            .DescendantNodes()
+            .OfType<ObjectCreationExpressionSyntax>()
+            .Where(creation => creation.Type.GetLastToken().ValueText.EndsWith("CustomLoopRunStore", StringComparison.Ordinal))
+            .ToArray();
 
     private static string FindRepositoryRoot()
     {
