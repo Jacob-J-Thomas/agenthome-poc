@@ -42,13 +42,29 @@ public sealed class ScheduleRuntimeFactoryRunStoreOwnershipTests
         Assert.Single(FindCustomLoopRunStoreConstructions(source));
     }
 
+    [Fact]
+    public void Constructor_guard_allows_other_types_that_only_end_with_the_protected_name()
+    {
+        const string Source = """
+            internal sealed class ScheduleFactory
+            {
+                internal void Create(object paths)
+                {
+                    var runStore = new AlternateCustomLoopRunStore(paths);
+                }
+            }
+            """;
+
+        Assert.Empty(FindCustomLoopRunStoreConstructions(Source));
+    }
+
     private static IReadOnlyList<ObjectCreationExpressionSyntax> FindCustomLoopRunStoreConstructions(string source)
         => CSharpSyntaxTree
             .ParseText(source)
             .GetRoot()
             .DescendantNodes()
             .OfType<ObjectCreationExpressionSyntax>()
-            .Where(creation => creation.Type.GetLastToken().ValueText.EndsWith("CustomLoopRunStore", StringComparison.Ordinal))
+            .Where(creation => string.Equals(creation.Type.GetLastToken().ValueText, "CustomLoopRunStore", StringComparison.Ordinal))
             .ToArray();
 
     private static string FindRepositoryRoot()
