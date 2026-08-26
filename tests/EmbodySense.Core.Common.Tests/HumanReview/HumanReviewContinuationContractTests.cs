@@ -24,6 +24,56 @@ public sealed class HumanReviewContinuationContractTests
     }
 
     [Fact]
+    public void Completion_lease_expiry_is_exclusive_across_completion_state_and_canonical_json_validation()
+    {
+        var request = HumanReviewTestData.Request();
+        var reservation = Reservation(request);
+        var wake = Wake(request, reservation);
+        var claim = Claim(wake, reservation);
+        var beforeExpiry = claim.LeaseExpiresAtUtc.AddTicks(-1);
+        var atExpiry = claim.LeaseExpiresAtUtc;
+        var beforeCompletion = HumanReviewContinuationContractHash.ApplyCompletion(Completion(wake, reservation, claim) with
+        {
+            CompletedAtUtc = beforeExpiry,
+            Provenance = Provenance("completion", beforeExpiry),
+            CompletionHash = string.Empty,
+        });
+        var beforeState = HumanReviewContinuationContractHash.ApplyState(new HumanReviewContinuationState(1, wake, [claim], beforeCompletion, null, string.Empty));
+        var atExpiryCompletion = HumanReviewContinuationContractHash.ApplyCompletion(beforeCompletion with
+        {
+            CompletedAtUtc = atExpiry,
+            Provenance = Provenance("completion", atExpiry),
+            CompletionHash = string.Empty,
+        });
+        var atExpiryState = HumanReviewContinuationContractHash.ApplyState(beforeState with { Completion = atExpiryCompletion, StateHash = string.Empty });
+
+        Assert.True(HumanReviewContinuationContractHash.MatchesCompletion(atExpiryCompletion));
+        Assert.True(HumanReviewContinuationContractHash.MatchesState(atExpiryState));
+        Assert.True(HumanReviewContinuationContractValidator.ValidateCompletion(request, wake, reservation, claim, beforeCompletion).IsValid);
+        Assert.True(HumanReviewContinuationContractValidator.ValidateState(request, reservation, beforeState).IsValid);
+        Assert.True(HumanReviewContinuationContractJson.TrySerializeState(request, reservation, beforeState, out var beforeJson, out _));
+        Assert.True(HumanReviewContinuationContractJson.TryDeserializeState(request, reservation, beforeJson, out var beforeRoundTrip, out _));
+        Assert.NotNull(beforeRoundTrip);
+
+        Assert.Contains(HumanReviewContinuationContractValidator.ValidateCompletion(request, wake, reservation, claim, atExpiryCompletion).Errors, error => error.Code == "invalid_completion_time");
+        Assert.Contains(HumanReviewContinuationContractValidator.ValidateState(request, reservation, atExpiryState).Errors, error => error.Code == "invalid_completion_time");
+        Assert.False(HumanReviewContinuationContractJson.TrySerializeState(request, reservation, atExpiryState, out var rejectedJson, out var rejectedSerialization));
+        Assert.Null(rejectedJson);
+        Assert.Contains(rejectedSerialization.Errors, error => error.Code == "invalid_completion_time");
+
+        var atExpiryTimestamp = atExpiry.ToUniversalTime().ToString("O", System.Globalization.CultureInfo.InvariantCulture);
+        var completionTimestampOffset = beforeJson!.IndexOf("\"completedAtUtc\":", StringComparison.Ordinal);
+        var selfHashedExpiryJson = ReplaceJsonStringValue(beforeJson, "completedAtUtc", atExpiryTimestamp, completionTimestampOffset);
+        selfHashedExpiryJson = ReplaceJsonStringValue(selfHashedExpiryJson, "observedAtUtc", atExpiryTimestamp, completionTimestampOffset)
+            .Replace(beforeCompletion.Provenance.ProvenanceHash, atExpiryCompletion.Provenance.ProvenanceHash, StringComparison.Ordinal)
+            .Replace(beforeCompletion.CompletionHash, atExpiryCompletion.CompletionHash, StringComparison.Ordinal)
+            .Replace(beforeState.StateHash, atExpiryState.StateHash, StringComparison.Ordinal);
+        Assert.False(HumanReviewContinuationContractJson.TryDeserializeState(request, reservation, selfHashedExpiryJson, out var rejectedRoundTrip, out var rejectedRoundTripValidation));
+        Assert.Null(rejectedRoundTrip);
+        Assert.Contains(rejectedRoundTripValidation.Errors, error => error.Code == "invalid_completion_time");
+    }
+
+    [Fact]
     public void Completion_release_receipt_kind_is_bound_to_the_exact_reviewed_purpose()
     {
         var continuationRequest = HumanReviewTestData.Request();
@@ -140,7 +190,9 @@ public sealed class HumanReviewContinuationContractTests
         var predecessor = HumanReviewContinuationContractHash.ApplyState(new HumanReviewContinuationState(1, wake, ImmutableArray<HumanReviewContinuationClaim>.Empty, null, null, string.Empty));
         var invalid = HumanReviewContinuationContractHash.ApplyState(new HumanReviewContinuationState(1, wake, [first, early], null, null, string.Empty));
         var equalBoundary = HumanReviewContinuationContractHash.ApplyState(new HumanReviewContinuationState(1, wake, [first, atExpiry], null, null, string.Empty));
-        var valid = HumanReviewContinuationContractHash.ApplyState(new HumanReviewContinuationState(1, wake, [first, takeover], Completion(wake, reservation, takeover), null, string.Empty));
+        var validCompletionTime = takeover.ClaimedAtUtc.AddTicks(1);
+        var validCompletion = HumanReviewContinuationContractHash.ApplyCompletion(Completion(wake, reservation, takeover) with { CompletedAtUtc = validCompletionTime, Provenance = Provenance("completion", validCompletionTime), CompletionHash = string.Empty });
+        var valid = HumanReviewContinuationContractHash.ApplyState(new HumanReviewContinuationState(1, wake, [first, takeover], validCompletion, null, string.Empty));
 
         Assert.True(HumanReviewContinuationContractValidator.ValidateState(request, reservation, predecessor).IsValid);
         Assert.True(HumanReviewContinuationStateTransitionValidator.ValidateTransition(request, reservation, predecessor, HumanReviewContinuationContractHash.ApplyState(predecessor with { Claims = [first], StateHash = string.Empty })).IsValid);
@@ -405,4 +457,15 @@ public sealed class HumanReviewContinuationContractTests
     }
 
     private static HumanReviewProvenance Provenance(string correlation, DateTimeOffset time) => HumanReviewContractHash.ApplyProvenance(new HumanReviewProvenance(HumanReviewProvenanceKind.Coordinator, "coordinator-one", correlation, time, string.Empty));
+
+    private static string ReplaceJsonStringValue(string json, string propertyName, string replacement, int startIndex)
+    {
+        var marker = "\"" + propertyName + "\":\"";
+        var valueStart = json.IndexOf(marker, startIndex, StringComparison.Ordinal);
+        Assert.True(valueStart >= 0);
+        valueStart += marker.Length;
+        var valueEnd = json.IndexOf('"', valueStart);
+        Assert.True(valueEnd >= valueStart);
+        return json[..valueStart] + replacement + json[valueEnd..];
+    }
 }
