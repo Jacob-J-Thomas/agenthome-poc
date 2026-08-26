@@ -46,6 +46,16 @@ if (args is ["human-review-admission-race", var humanReviewRaceWorkspaceRoot, va
     return await HumanReviewAdmissionRaceHost.RunAsync(humanReviewRaceWorkspaceRoot, humanReviewRaceRunId, humanReviewRaceIdentity, humanReviewRaceReadyPath, humanReviewRaceReleasePath, humanReviewRaceResultPath);
 }
 
+if (args is ["human-review-decision-process-loss", var humanReviewDecisionWorkspaceRoot, var humanReviewDecisionRunId, var humanReviewDecisionPublicationBoundary])
+{
+    return await HumanReviewDecisionProcessLossHost.RunAsync(humanReviewDecisionWorkspaceRoot, humanReviewDecisionRunId, humanReviewDecisionPublicationBoundary);
+}
+
+if (args is ["human-review-decision-race", var humanReviewDecisionRaceWorkspaceRoot, var humanReviewDecisionRaceRunId, var humanReviewDecisionRaceIdentity, var humanReviewDecisionRaceKind, var humanReviewDecisionRaceReadyPath, var humanReviewDecisionRaceReleasePath, var humanReviewDecisionRaceResultPath])
+{
+    return await HumanReviewDecisionRaceHost.RunAsync(humanReviewDecisionRaceWorkspaceRoot, humanReviewDecisionRaceRunId, humanReviewDecisionRaceIdentity, humanReviewDecisionRaceKind, humanReviewDecisionRaceReadyPath, humanReviewDecisionRaceReleasePath, humanReviewDecisionRaceResultPath);
+}
+
 if (args is ["codex-runtime-probe", var probeConfigurationPath, .. var probeArguments])
 {
     return await CodexRuntimeProbeHost.RunAsync(probeConfigurationPath, probeArguments);
