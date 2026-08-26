@@ -35,6 +35,12 @@ public static class HumanReviewContractLimits
     public const int MaxActivationOrVisit = 1_000_000;
     /// <summary>The maximum retained positive version value.</summary>
     public const long MaxVersion = 1_000_000_000;
+    /// <summary>The maximum retained claim history for one continuation wake.</summary>
+    public const int MaxContinuationClaims = 32;
+    /// <summary>The maximum retained redacted terminal continuation evidence previews.</summary>
+    public const int MaxContinuationEvidence = 3;
+    /// <summary>The longest permitted durable continuation claim lease.</summary>
+    public static readonly TimeSpan MaxContinuationClaimLease = TimeSpan.FromHours(24);
     /// <summary>The longest permitted request window from creation through expiry.</summary>
     public static readonly TimeSpan MaxReviewWindow = TimeSpan.FromDays(30);
 }
