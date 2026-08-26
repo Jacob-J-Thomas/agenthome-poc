@@ -13,6 +13,7 @@ internal sealed class HumanReviewContinuationRecoveryTestStore(
     public int CompleteCount { get; private set; }
     public int RetireCount { get; private set; }
     public HumanReviewContinuationClaimIntent? LastClaim { get; private set; }
+    public HumanReviewContinuationCandidateQuery? LastRead { get; private set; }
     public HumanReviewContinuationStoreMutationResult ClaimResult { get; init; } = new(HumanReviewContinuationStoreMutationStatus.Committed);
     public HumanReviewContinuationStoreMutationResult CompleteResult { get; init; } = new(HumanReviewContinuationStoreMutationStatus.Committed);
     public HumanReviewContinuationStoreMutationResult RetireResult { get; init; } = new(HumanReviewContinuationStoreMutationStatus.Committed);
@@ -28,6 +29,7 @@ internal sealed class HumanReviewContinuationRecoveryTestStore(
     public Task<HumanReviewContinuationCandidateReadResult> ReadAsync(HumanReviewContinuationCandidateQuery query, CancellationToken cancellationToken = default)
     {
         ReadCount++;
+        LastRead = query;
         return ReadException is null ? Task.FromResult(reread) : Task.FromException<HumanReviewContinuationCandidateReadResult>(ReadException);
     }
 

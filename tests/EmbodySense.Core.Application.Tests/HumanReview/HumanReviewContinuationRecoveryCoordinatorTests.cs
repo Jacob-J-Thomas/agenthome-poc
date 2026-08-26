@@ -73,7 +73,7 @@ public sealed class HumanReviewContinuationRecoveryCoordinatorTests
     }
 
     [Fact]
-    public async Task Replayed_claim_is_not_consumed_again_after_response_loss()
+    public async Task Exact_replayed_claim_continues_through_reread_and_completion_after_response_loss()
     {
         var candidate = Candidate();
         var store = new HumanReviewContinuationRecoveryTestStore(
@@ -83,16 +83,18 @@ public sealed class HumanReviewContinuationRecoveryCoordinatorTests
             ClaimResult = new HumanReviewContinuationStoreMutationResult(HumanReviewContinuationStoreMutationStatus.Replayed),
         };
         var consumer = new HumanReviewContinuationRecoveryTestConsumer(Prepared(candidate));
-        var release = new HumanReviewContinuationRecoveryTestReleasePort(new HumanReviewContinuationReleaseResult(HumanReviewContinuationReleaseStatus.Completed, null!));
+        var release = new HumanReviewContinuationRecoveryTestReleasePort(new HumanReviewContinuationReleaseResult(HumanReviewContinuationReleaseStatus.Completed, Completion()));
         var coordinator = new HumanReviewContinuationRecoveryCoordinator(store, consumer, release, new HumanReviewContinuationRecoveryTestClock(_now));
 
         var result = await coordinator.RecoverAsync(Request());
 
-        Assert.Equal(HumanReviewContinuationRecoveryItemStatus.ClaimReplayed, Assert.Single(result.Items).Status);
+        Assert.Equal(HumanReviewContinuationRecoveryItemStatus.Completed, Assert.Single(result.Items).Status);
         Assert.Equal(1, store.ClaimCount);
-        Assert.Equal(0, store.ReadCount);
-        Assert.Equal(0, consumer.Count);
-        Assert.Equal(0, release.Count);
+        Assert.Equal(1, store.ReadCount);
+        Assert.Equal(new HumanReviewContinuationClaimReference(store.LastClaim!.Claim.ClaimId, store.LastClaim.Claim.ClaimHash), store.LastRead!.Claim);
+        Assert.Equal(1, consumer.Count);
+        Assert.Equal(1, release.Count);
+        Assert.Equal(1, store.CompleteCount);
     }
 
     [Fact]
@@ -434,7 +436,7 @@ public sealed class HumanReviewContinuationRecoveryCoordinatorTests
         var candidate = Candidate(_now.AddMinutes(1));
         var store = new HumanReviewContinuationRecoveryTestStore(
             new HumanReviewContinuationRecoveryPage(HumanReviewContinuationRecoveryPageStatus.Current, [candidate], null, false),
-            new HumanReviewContinuationCandidateReadResult(HumanReviewContinuationCandidateReadStatus.Current, null!))
+            new HumanReviewContinuationCandidateReadResult(HumanReviewContinuationCandidateReadStatus.Unavailable))
         {
             ClaimResult = new HumanReviewContinuationStoreMutationResult(HumanReviewContinuationStoreMutationStatus.Replayed),
         };
@@ -442,7 +444,7 @@ public sealed class HumanReviewContinuationRecoveryCoordinatorTests
 
         var result = await coordinator.RecoverAsync(Request());
 
-        Assert.Equal(HumanReviewContinuationRecoveryItemStatus.ClaimReplayed, Assert.Single(result.Items).Status);
+        Assert.Equal(HumanReviewContinuationRecoveryItemStatus.Parked, Assert.Single(result.Items).Status);
         Assert.NotNull(store.LastClaim);
         Assert.Equal(candidate.WakeExpiresAtUtc, store.LastClaim.Claim.LeaseExpiresAtUtc);
     }
@@ -460,6 +462,52 @@ public sealed class HumanReviewContinuationRecoveryCoordinatorTests
         var result = await coordinator.RecoverAsync(Request());
 
         Assert.Equal(HumanReviewContinuationRecoveryItemStatus.Invalid, Assert.Single(result.Items).Status);
+        Assert.Equal(0, store.ClaimCount);
+    }
+
+    [Fact]
+    public async Task Fresh_claim_time_retains_a_wake_that_expires_while_an_earlier_candidate_is_processed()
+    {
+        var first = Candidate(_now.AddMinutes(30));
+        var expiredBeforeClaim = Candidate(_now.AddMinutes(5)) with { RunId = "run-two" };
+        var store = new HumanReviewContinuationRecoveryTestStore(
+            new HumanReviewContinuationRecoveryPage(HumanReviewContinuationRecoveryPageStatus.Current, [first, expiredBeforeClaim], null, false),
+            new HumanReviewContinuationCandidateReadResult(HumanReviewContinuationCandidateReadStatus.Current, new HumanReviewContinuationCandidate(null!, null, null, null)));
+        var clock = new HumanReviewContinuationRecoveryTestClock([_now, _now, _now.AddMinutes(5)]);
+        var coordinator = new HumanReviewContinuationRecoveryCoordinator(
+            store,
+            new HumanReviewContinuationRecoveryTestConsumer(new HumanReviewContinuationConsumptionResult(HumanReviewContinuationConsumptionStatus.Unavailable)),
+            new HumanReviewContinuationRecoveryTestReleasePort(null!),
+            clock);
+
+        var result = await coordinator.RecoverAsync(Request() with { MaximumCount = 2 });
+
+        Assert.Collection(
+            result.Items,
+            item => Assert.Equal(HumanReviewContinuationRecoveryItemStatus.Parked, item.Status),
+            item => Assert.Equal(HumanReviewContinuationRecoveryItemStatus.ExpiredWakeRetained, item.Status));
+        Assert.Equal(3, clock.ReadCount);
+        Assert.Equal(1, store.ClaimCount);
+        Assert.Equal(_now, store.LastClaim!.Claim.ClaimedAtUtc);
+    }
+
+    [Fact]
+    public async Task Unavailable_fresh_claim_time_parks_without_creating_a_claim()
+    {
+        var candidate = Candidate();
+        var store = StoreFor(candidate);
+        var clock = new HumanReviewContinuationRecoveryTestClock([_now], 2, new IOException());
+        var coordinator = new HumanReviewContinuationRecoveryCoordinator(
+            store,
+            new HumanReviewContinuationRecoveryTestConsumer(null!),
+            new HumanReviewContinuationRecoveryTestReleasePort(null!),
+            clock);
+
+        var result = await coordinator.RecoverAsync(Request());
+
+        Assert.Equal(HumanReviewContinuationRecoveryStatus.Current, result.Status);
+        Assert.Equal(HumanReviewContinuationRecoveryItemStatus.Parked, Assert.Single(result.Items).Status);
+        Assert.Equal(2, clock.ReadCount);
         Assert.Equal(0, store.ClaimCount);
     }
 

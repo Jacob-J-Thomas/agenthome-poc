@@ -66,7 +66,7 @@ public sealed class HumanReviewContinuationRecoveryCoordinator
         foreach (var candidate in page.Candidates)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            items.Add(await RecoverCandidateAsync(candidate, request, observedAtUtc, cancellationToken).ConfigureAwait(false));
+            items.Add(await RecoverCandidateAsync(candidate, request, cancellationToken).ConfigureAwait(false));
         }
 
         return new HumanReviewContinuationRecoveryResult(HumanReviewContinuationRecoveryStatus.Current, page.NextScanCursor, page.SourceTruncated, items);
@@ -75,12 +75,21 @@ public sealed class HumanReviewContinuationRecoveryCoordinator
     private async Task<HumanReviewContinuationRecoveryItemResult> RecoverCandidateAsync(
         HumanReviewContinuationRecoveryCandidate candidate,
         HumanReviewContinuationRecoveryRequest request,
-        DateTimeOffset observedAtUtc,
         CancellationToken cancellationToken)
     {
-        if (!TryCreateClaim(candidate, request, observedAtUtc, out var claim) || claim is null)
+        if (!IsValidClaimCandidate(candidate, request))
         {
-            return Item(candidate, observedAtUtc >= candidate.WakeExpiresAtUtc
+            return Item(candidate, HumanReviewContinuationRecoveryItemStatus.Invalid);
+        }
+
+        if (!TryNow(out var claimedAtUtc))
+        {
+            return Item(candidate, HumanReviewContinuationRecoveryItemStatus.Parked);
+        }
+
+        if (!TryCreateClaim(candidate, request, claimedAtUtc, out var claim) || claim is null)
+        {
+            return Item(candidate, claimedAtUtc >= candidate.WakeExpiresAtUtc
                 ? HumanReviewContinuationRecoveryItemStatus.ExpiredWakeRetained
                 : HumanReviewContinuationRecoveryItemStatus.Invalid);
         }
@@ -104,11 +113,7 @@ public sealed class HumanReviewContinuationRecoveryCoordinator
             return Item(candidate, HumanReviewContinuationRecoveryItemStatus.Parked);
         }
 
-        if (claimResult.Status == HumanReviewContinuationStoreMutationStatus.Replayed)
-        {
-            return Item(candidate, HumanReviewContinuationRecoveryItemStatus.ClaimReplayed);
-        }
-        if (claimResult.Status is not HumanReviewContinuationStoreMutationStatus.Committed)
+        if (claimResult.Status is not (HumanReviewContinuationStoreMutationStatus.Committed or HumanReviewContinuationStoreMutationStatus.Replayed))
         {
             return Item(candidate, claimResult.Status is HumanReviewContinuationStoreMutationStatus.Conflict or HumanReviewContinuationStoreMutationStatus.NotFound
                 ? HumanReviewContinuationRecoveryItemStatus.ClaimConflict
@@ -363,6 +368,13 @@ public sealed class HumanReviewContinuationRecoveryCoordinator
 
     private static HumanReviewContinuationRecoveryItemResult Item(HumanReviewContinuationRecoveryCandidate candidate, HumanReviewContinuationRecoveryItemStatus status)
         => new(candidate?.RunId ?? string.Empty, status);
+
+    private static bool IsValidClaimCandidate(HumanReviewContinuationRecoveryCandidate? candidate, HumanReviewContinuationRecoveryRequest request)
+        => candidate is not null
+            && IsValidCandidate(candidate)
+            && candidate.WakeExpiresAtUtc.Offset == TimeSpan.Zero
+            && HumanReviewIdentifier.IsValid(request.WorkerId)
+            && HumanReviewIdentifier.IsValid(request.CoordinatorSourceId);
 
     private static bool IsValidCandidate(HumanReviewContinuationRecoveryCandidate? candidate)
         => candidate is not null

@@ -18,7 +18,7 @@ public enum HumanReviewContinuationRecoveryItemStatus
     /// <summary>The candidate changed concurrently before this pass acquired its claim.</summary>
     ClaimConflict = 4,
 
-    /// <summary>The exact claim had already been persisted by an earlier response-unknown attempt; this pass did not redispatch it.</summary>
+    /// <summary>Reserved compatibility outcome for a previously persisted response-unknown claim; current recovery passes reread an exact locally generated replay before release.</summary>
     ClaimReplayed = 5,
 
     /// <summary>The candidate was unavailable or an action outcome remained ambiguous; no terminal mutation or redispatch occurred.</summary>
