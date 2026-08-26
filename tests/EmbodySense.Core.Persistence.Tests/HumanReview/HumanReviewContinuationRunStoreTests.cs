@@ -197,6 +197,35 @@ public sealed class HumanReviewContinuationRunStoreTests
     }
 
     [Fact]
+    public async Task Response_unknown_publication_replay_accepts_the_published_wake_after_a_recovery_worker_claims_it()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var approved = await CreateApprovedRunAsync(paths, "continuation-response-loss-descendant");
+        var review = Assert.IsType<HumanReviewRunState>(approved.HumanReview);
+        var reservation = Assert.IsType<HumanReviewContinuationReservation>(review.ContinuationReservation);
+        var wake = Wake(review, reservation, approved.UpdatedAtUtc.AddSeconds(1), "wake-response-loss-descendant");
+        var initial = HumanReviewContinuationContractHash.ApplyState(new HumanReviewContinuationState(1, wake, ImmutableArray<HumanReviewContinuationClaim>.Empty, null, null, string.Empty));
+
+        var claim = Claim(wake, reservation, wake.PublishedAtUtc.AddMinutes(1), "claim-response-loss-descendant");
+        using var canonical = new CustomLoopRunStore(paths);
+        HumanReviewContinuationMutationResult? claimed = null;
+        var uncertain = new ResponseLossAfterClaimingCustomLoopRunStore(canonical, async published =>
+        {
+            claimed = await new HumanReviewContinuationRunStore(canonical).ClaimAsync(published.Id, published.LifecycleVersion, claim);
+        });
+
+        var replay = await new HumanReviewContinuationRunStore(uncertain).PublishAsync(approved.Id, approved.LifecycleVersion, initial);
+
+        Assert.NotNull(claimed);
+        Assert.Equal(HumanReviewContinuationMutationStatus.Committed, claimed.Status);
+        Assert.Equal(HumanReviewContinuationMutationStatus.Replayed, replay.Status);
+        Assert.Equal(claimed.Run!.LifecycleVersion, replay.Run?.LifecycleVersion);
+        Assert.Equal(wake.WakeHash, replay.Run?.HumanReview?.Continuation?.Wake.WakeHash);
+        Assert.Equal(claim.ClaimHash, replay.Run?.HumanReview?.Continuation?.Claims[^1].ClaimHash);
+    }
+
+    [Fact]
     public async Task Corrupt_canonical_run_fails_closed_without_rewriting_the_artifact()
     {
         using var workspace = new TestWorkspace();

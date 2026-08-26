@@ -40,7 +40,8 @@ public sealed class HumanReviewContinuationRunStore
 
         if (review.Continuation is not null)
         {
-            return HumanReviewContinuationReplayClassifier.ClassifyState(review.Continuation, continuation) == HumanReviewContinuationReplayDisposition.ExactReplay
+            if (!IsInitialPublication(review, continuation)) return Result(HumanReviewContinuationMutationStatus.Invalid, current);
+            return IsContinuationDescendant(continuation, review.Continuation)
                 ? Result(HumanReviewContinuationMutationStatus.Replayed, current)
                 : Result(HumanReviewContinuationMutationStatus.Conflict, current);
         }
@@ -203,6 +204,9 @@ public sealed class HumanReviewContinuationRunStore
             var recovered = await _runs.GetAsync(expected.Id, CancellationToken.None).ConfigureAwait(false);
             if (recovered is null) return Result(HumanReviewContinuationMutationStatus.NotFound);
             return CustomLoopRunValidator.HasSameDurableVersion(expected, recovered)
+                || TryGetApprovedReview(expected, expected.Id, out var expectedReview)
+                && TryGetApprovedReview(recovered, expected.Id, out var recoveredReview)
+                && IsContinuationDescendant(expectedReview.Continuation, recoveredReview.Continuation)
                 ? Result(HumanReviewContinuationMutationStatus.Replayed, recovered)
                 : Result(HumanReviewContinuationMutationStatus.Conflict, recovered);
         }
@@ -266,6 +270,33 @@ public sealed class HumanReviewContinuationRunStore
 
     private static bool IsTerminalSuccessor(HumanReviewRunState review, HumanReviewContinuationState previous, HumanReviewContinuationState successor)
         => HumanReviewContinuationStateTransitionValidator.ValidateTransition(review.Request, review.ContinuationReservation, previous, successor).IsValid;
+
+    private static bool IsContinuationDescendant(HumanReviewContinuationState? expected, HumanReviewContinuationState? retained)
+    {
+        if (expected is null
+            || retained is null
+            || !HumanReviewContinuationContractHash.MatchesState(expected)
+            || !HumanReviewContinuationContractHash.MatchesState(retained)
+            || HumanReviewContinuationReplayClassifier.ClassifyWake(expected.Wake, retained.Wake) != HumanReviewContinuationReplayDisposition.ExactReplay
+            || expected.Claims.Length > retained.Claims.Length)
+        {
+            return false;
+        }
+
+        for (var index = 0; index < expected.Claims.Length; index++)
+        {
+            if (HumanReviewContinuationReplayClassifier.ClassifyClaim(expected.Claims[index], retained.Claims[index]) != HumanReviewContinuationReplayDisposition.ExactReplay) return false;
+        }
+
+        if (expected.Completion is not null)
+        {
+            return retained.Retirement is null
+                && HumanReviewContinuationReplayClassifier.ClassifyCompletion(expected.Completion, retained.Completion) == HumanReviewContinuationReplayDisposition.ExactReplay;
+        }
+
+        return expected.Retirement is null || retained.Completion is null
+            && HumanReviewContinuationReplayClassifier.ClassifyRetirement(expected.Retirement, retained.Retirement) == HumanReviewContinuationReplayDisposition.ExactReplay;
+    }
 
     private static HumanReviewContinuationMutationResult Result(HumanReviewContinuationMutationStatus status, CustomLoopRunRecord? run = null) => new(status, run);
 }
