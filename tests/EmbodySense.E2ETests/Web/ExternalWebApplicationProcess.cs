@@ -13,13 +13,20 @@ internal sealed class ExternalWebApplicationProcess : IAsyncDisposable
     private readonly Process _process;
     private readonly ProcessOutputBuffer _output;
     private readonly ProcessOutputBuffer _error;
+    private readonly WindowsConsoleControlledProcess? _windowsConsoleProcess;
 
-    private ExternalWebApplicationProcess(Process process, ProcessOutputBuffer output, ProcessOutputBuffer error, string baseUrl)
+    private ExternalWebApplicationProcess(
+        Process process,
+        ProcessOutputBuffer output,
+        ProcessOutputBuffer error,
+        string baseUrl,
+        WindowsConsoleControlledProcess? windowsConsoleProcess)
     {
         _process = process;
         _output = output;
         _error = error;
         BaseUrl = baseUrl;
+        _windowsConsoleProcess = windowsConsoleProcess;
     }
 
     public string BaseUrl { get; }
@@ -147,12 +154,23 @@ internal sealed class ExternalWebApplicationProcess : IAsyncDisposable
             startInfo.Environment[item.Key] = item.Value;
         }
 
-        var process = Process.Start(startInfo) ?? throw new InvalidOperationException("External Web process did not start.");
-        process.OutputDataReceived += (_, args) => output.Append(args.Data);
-        process.ErrorDataReceived += (_, args) => error.Append(args.Data);
-        process.BeginOutputReadLine();
-        process.BeginErrorReadLine();
-        var application = new ExternalWebApplicationProcess(process, output, error, $"http://127.0.0.1:{port}");
+        WindowsConsoleControlledProcess? windowsConsoleProcess = null;
+        Process process;
+        if (OperatingSystem.IsWindows())
+        {
+            windowsConsoleProcess = WindowsConsoleControlledProcess.Start(startInfo, output, error);
+            process = windowsConsoleProcess.Process;
+        }
+        else
+        {
+            process = Process.Start(startInfo) ?? throw new InvalidOperationException("External Web process did not start.");
+            process.OutputDataReceived += (_, args) => output.Append(args.Data);
+            process.ErrorDataReceived += (_, args) => error.Append(args.Data);
+            process.BeginOutputReadLine();
+            process.BeginErrorReadLine();
+        }
+
+        var application = new ExternalWebApplicationProcess(process, output, error, $"http://127.0.0.1:{port}", windowsConsoleProcess);
         try
         {
             await application.WaitUntilReadyAsync();
@@ -193,8 +211,7 @@ internal sealed class ExternalWebApplicationProcess : IAsyncDisposable
 
         if (OperatingSystem.IsWindows())
         {
-            _process.Kill(entireProcessTree: true);
-            await _process.WaitForExitAsync();
+            await (_windowsConsoleProcess ?? throw new InvalidOperationException("The Windows external Web process was not console-controlled.")).StopAsync();
             return;
         }
 
@@ -217,6 +234,13 @@ internal sealed class ExternalWebApplicationProcess : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        if (_windowsConsoleProcess is not null)
+        {
+            await _windowsConsoleProcess.DisposeAsync();
+            _process.Dispose();
+            return;
+        }
+
         if (!_process.HasExited)
         {
             _process.Kill(entireProcessTree: true);

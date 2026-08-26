@@ -84,11 +84,13 @@ public static class Program
             options.JsonSerializerOptions.UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow;
             options.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.KebabCaseLower, allowIntegerValues: false));
         });
-        services.AddSignalR().AddHubOptions<WebSessionHub>(options =>
-        {
-            options.MaximumReceiveMessageSize = LoopRunTransportLimits.MaxSignalRInvocationMessageUtf8Bytes;
-            options.MaximumParallelInvocationsPerClient = 2;
-        });
+        services.AddSignalR()
+            .AddJsonProtocol(options => options.PayloadSerializerOptions.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.KebabCaseLower, allowIntegerValues: false)))
+            .AddHubOptions<WebSessionHub>(options =>
+            {
+                options.MaximumReceiveMessageSize = LoopRunTransportLimits.MaxSignalRInvocationMessageUtf8Bytes;
+                options.MaximumParallelInvocationsPerClient = 2;
+            });
         services.AddAuthentication(WebSessionAuthenticationDefaults.Scheme).AddScheme<AuthenticationSchemeOptions, WebSessionAuthenticationHandler>(WebSessionAuthenticationDefaults.Scheme, _ => { });
         services.AddAuthorization(options =>
         {
