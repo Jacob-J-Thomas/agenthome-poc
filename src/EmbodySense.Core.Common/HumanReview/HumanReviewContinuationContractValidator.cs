@@ -69,7 +69,7 @@ public static class HumanReviewContinuationContractValidator
         ExactGeneration(wake.ExpectedGeneration, completion.ExpectedGeneration, "$.expectedGeneration", errors);
         errors.AddRange(ValidateReleaseReceipt(request, wake, reservation, claim, completion.ReleaseReceipt).Errors);
         if (completion.ReleaseReceipt is not null && string.Equals(completion.CompletionId, completion.ReleaseReceipt.ReleaseOperationId, StringComparison.Ordinal)) Add(errors, "completion_release_operation_reused", "$.releaseReceipt.releaseOperationId", "Completion identity must not substitute for the preexisting stable release operation identity.");
-        if (!Utc(completion.CompletedAtUtc) || completion.CompletedAtUtc < claim.ClaimedAtUtc || completion.CompletedAtUtc > claim.LeaseExpiresAtUtc) Add(errors, "invalid_completion_time", "$.completedAtUtc", "Completion must occur at trusted UTC inside the exact active claim lease.");
+        if (!Utc(completion.CompletedAtUtc) || completion.CompletedAtUtc < claim.ClaimedAtUtc || completion.CompletedAtUtc >= claim.LeaseExpiresAtUtc) Add(errors, "invalid_completion_time", "$.completedAtUtc", "Completion must occur at trusted UTC after claim acquisition and strictly before the exact active claim lease expiry.");
         Evidence(completion.Evidence, "$.evidence", errors);
         Provenance(completion.Provenance, completion.CompletedAtUtc, "$.provenance", errors);
         Hash(completion.CompletionHash, "$.completionHash", errors);
