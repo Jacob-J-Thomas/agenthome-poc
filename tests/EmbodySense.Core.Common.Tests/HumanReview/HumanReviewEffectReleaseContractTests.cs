@@ -33,11 +33,12 @@ public sealed class HumanReviewEffectReleaseContractTests
         var prepared = CreateSnapshot(GovernedLoopEffectAttemptContractTests.Prepare());
         var authorizedAttempt = GovernedLoopEffectAttemptContract.AttachDispatchAuthority(GovernedLoopEffectAttemptContractTests.Prepare(), Hash('8'), HumanReviewTestData.CreatedAtUtc.AddMinutes(1));
         var authorized = CreateSnapshot(authorizedAttempt);
-        var changedPreparation = prepared with { Preparation = prepared.Preparation with { ReviewPayloadHash = Hash('9') } };
+        var changedPreparation = prepared with { Preparation = prepared.Preparation with { ReviewPayloadHash = Hash('9'), PreparationHash = string.Empty } };
+        changedPreparation = changedPreparation with { Preparation = changedPreparation.Preparation with { PreparationHash = HumanReviewEffectReleaseContract.ComputePreparation(changedPreparation.Preparation) } };
         changedPreparation = changedPreparation with { SnapshotHash = HumanReviewEffectReleaseContract.ComputeSnapshot(changedPreparation) };
 
         Assert.Equal(HumanReviewEffectSnapshotReplayDisposition.DivergentReuse, HumanReviewEffectReleaseContract.ClassifyReplay(prepared, changedPreparation));
-        Assert.Equal("effect-certainty-snapshot-binding-invalid", HumanReviewEffectReleaseContract.Validate(changedPreparation));
+        Assert.Null(HumanReviewEffectReleaseContract.Validate(changedPreparation));
         Assert.Equal(HumanReviewEffectSnapshotReplayDisposition.DivergentReuse, HumanReviewEffectReleaseContract.ClassifyReplay(prepared, authorized));
         Assert.NotEqual(prepared.DispatchAuthorityEvidenceHash, authorized.DispatchAuthorityEvidenceHash);
     }
@@ -72,6 +73,24 @@ public sealed class HumanReviewEffectReleaseContractTests
         Assert.Equal("effect-certainty-snapshot-invalid", HumanReviewEffectReleaseContract.Validate(forward));
         Assert.Equal("effect-certainty-snapshot-posture-invalid", HumanReviewEffectReleaseContract.Validate(unknown));
         Assert.Equal("effect-certainty-snapshot-binding-invalid", HumanReviewEffectReleaseContract.Validate(invalidCoordinate));
+    }
+
+    [Fact]
+    public void Replay_classification_rejects_null_and_malformed_snapshots_before_exact_replay()
+    {
+        var snapshot = CreateSnapshot(GovernedLoopEffectAttemptContractTests.Prepare());
+        var forward = snapshot with { SchemaVersion = 2 };
+        forward = forward with { SnapshotHash = HumanReviewEffectReleaseContract.ComputeSnapshot(forward) };
+        var badNestedHash = snapshot with { Identity = snapshot.Identity with { IdentityHash = Hash('f') } };
+        badNestedHash = badNestedHash with { SnapshotHash = HumanReviewEffectReleaseContract.ComputeSnapshot(badNestedHash) };
+        var badSnapshotHash = snapshot with { SnapshotHash = Hash('f') };
+
+        Assert.Equal(HumanReviewEffectSnapshotReplayDisposition.ExactReplay, HumanReviewEffectReleaseContract.ClassifyReplay(snapshot, snapshot));
+        Assert.Equal(HumanReviewEffectSnapshotReplayDisposition.Invalid, HumanReviewEffectReleaseContract.ClassifyReplay(null, snapshot));
+        Assert.Equal(HumanReviewEffectSnapshotReplayDisposition.Invalid, HumanReviewEffectReleaseContract.ClassifyReplay(snapshot, null));
+        Assert.Equal(HumanReviewEffectSnapshotReplayDisposition.Invalid, HumanReviewEffectReleaseContract.ClassifyReplay(snapshot, forward));
+        Assert.Equal(HumanReviewEffectSnapshotReplayDisposition.Invalid, HumanReviewEffectReleaseContract.ClassifyReplay(snapshot, badNestedHash));
+        Assert.Equal(HumanReviewEffectSnapshotReplayDisposition.Invalid, HumanReviewEffectReleaseContract.ClassifyReplay(snapshot, badSnapshotHash));
     }
 
     [Fact]

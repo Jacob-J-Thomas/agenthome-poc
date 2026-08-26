@@ -21,7 +21,11 @@ public sealed class HumanReviewEffectReleaseReadStatusProjectionTests
     [InlineData(GovernedLoopEffectCertaintySnapshotStatus.Unavailable, HumanReviewEffectReleaseReadStatus.Unavailable)]
     [InlineData(GovernedLoopEffectCertaintySnapshotStatus.Stale, HumanReviewEffectReleaseReadStatus.Stale)]
     public void Noncurrent_source_results_are_closed_and_fail_closed(GovernedLoopEffectCertaintySnapshotStatus source, HumanReviewEffectReleaseReadStatus expected)
-        => Assert.Equal(expected, HumanReviewEffectReleaseReadStatusProjection.Project(new GovernedLoopEffectCertaintySnapshotResult(source)));
+    {
+        var snapshot = SnapshotFor(HumanReviewEffectCertainty.NotStarted);
+
+        Assert.Equal(expected, HumanReviewEffectReleaseReadStatusProjection.Project(Query(snapshot), new GovernedLoopEffectCertaintySnapshotResult(source)));
+    }
 
     [Theory]
     [InlineData(HumanReviewEffectCertainty.NotStarted, HumanReviewEffectReleaseReadStatus.ExactNotStarted)]
@@ -33,21 +37,42 @@ public sealed class HumanReviewEffectReleaseReadStatusProjectionTests
     {
         var snapshot = SnapshotFor(certainty);
 
-        Assert.Equal(expected, HumanReviewEffectReleaseReadStatusProjection.Project(new GovernedLoopEffectCertaintySnapshotResult(GovernedLoopEffectCertaintySnapshotStatus.Current, snapshot)));
+        Assert.Equal(expected, HumanReviewEffectReleaseReadStatusProjection.Project(Query(snapshot), new GovernedLoopEffectCertaintySnapshotResult(GovernedLoopEffectCertaintySnapshotStatus.Current, snapshot)));
     }
 
     [Fact]
-    public void Malformed_and_unknown_source_results_never_become_release_eligible()
+    public void Query_must_match_exact_current_identity_and_preparation_before_not_started_is_release_eligible()
     {
-        Assert.Equal(HumanReviewEffectReleaseReadStatus.Invalid, HumanReviewEffectReleaseReadStatusProjection.Project(null));
-        Assert.Equal(HumanReviewEffectReleaseReadStatus.Invalid, HumanReviewEffectReleaseReadStatusProjection.Project(new GovernedLoopEffectCertaintySnapshotResult(GovernedLoopEffectCertaintySnapshotStatus.Current)));
-        Assert.Equal(HumanReviewEffectReleaseReadStatus.Invalid, HumanReviewEffectReleaseReadStatusProjection.Project(new GovernedLoopEffectCertaintySnapshotResult((GovernedLoopEffectCertaintySnapshotStatus)99)));
-        Assert.Equal(HumanReviewEffectReleaseReadStatus.Invalid, HumanReviewEffectReleaseReadStatusProjection.Project(new GovernedLoopEffectCertaintySnapshotResult(GovernedLoopEffectCertaintySnapshotStatus.Missing, SnapshotFor(HumanReviewEffectCertainty.NotStarted))));
+        var expected = SnapshotFor(HumanReviewEffectCertainty.NotStarted);
+        var crossEffect = SnapshotFor(HumanReviewEffectCertainty.NotStarted, effectId: "effect-two");
+        var changedPreparation = SnapshotFor(HumanReviewEffectCertainty.NotStarted, reviewPayloadHash: 'b');
+
+        Assert.Equal(HumanReviewEffectReleaseReadStatus.ExactNotStarted, HumanReviewEffectReleaseReadStatusProjection.Project(Query(expected), new GovernedLoopEffectCertaintySnapshotResult(GovernedLoopEffectCertaintySnapshotStatus.Current, expected)));
+        Assert.Equal(HumanReviewEffectReleaseReadStatus.Stale, HumanReviewEffectReleaseReadStatusProjection.Project(Query(expected), new GovernedLoopEffectCertaintySnapshotResult(GovernedLoopEffectCertaintySnapshotStatus.Current, crossEffect)));
+        Assert.Equal(HumanReviewEffectReleaseReadStatus.Stale, HumanReviewEffectReleaseReadStatusProjection.Project(Query(expected), new GovernedLoopEffectCertaintySnapshotResult(GovernedLoopEffectCertaintySnapshotStatus.Current, changedPreparation)));
     }
 
-    private static HumanReviewEffectCertaintySnapshot SnapshotFor(HumanReviewEffectCertainty certainty)
+    [Fact]
+    public void Malformed_query_and_source_results_never_become_release_eligible()
     {
-        var prepared = Attempt();
+        var snapshot = SnapshotFor(HumanReviewEffectCertainty.NotStarted);
+        var malformedQuery = new GovernedLoopEffectCertaintySnapshotQuery(snapshot.Identity with { IdentityHash = Hash('f') }, snapshot.Preparation);
+        var malformedResult = snapshot with { SnapshotHash = Hash('f') };
+
+        Assert.Equal(HumanReviewEffectReleaseReadStatus.Invalid, HumanReviewEffectReleaseReadStatusProjection.Project(null, null));
+        Assert.Equal(HumanReviewEffectReleaseReadStatus.Invalid, HumanReviewEffectReleaseReadStatusProjection.Project(malformedQuery, new GovernedLoopEffectCertaintySnapshotResult(GovernedLoopEffectCertaintySnapshotStatus.Current, snapshot)));
+        Assert.Equal(HumanReviewEffectReleaseReadStatus.Invalid, HumanReviewEffectReleaseReadStatusProjection.Project(Query(snapshot), new GovernedLoopEffectCertaintySnapshotResult(GovernedLoopEffectCertaintySnapshotStatus.Current)));
+        Assert.Equal(HumanReviewEffectReleaseReadStatus.Invalid, HumanReviewEffectReleaseReadStatusProjection.Project(Query(snapshot), new GovernedLoopEffectCertaintySnapshotResult((GovernedLoopEffectCertaintySnapshotStatus)99)));
+        Assert.Equal(HumanReviewEffectReleaseReadStatus.Invalid, HumanReviewEffectReleaseReadStatusProjection.Project(Query(snapshot), new GovernedLoopEffectCertaintySnapshotResult(GovernedLoopEffectCertaintySnapshotStatus.Missing, snapshot)));
+        Assert.Equal(HumanReviewEffectReleaseReadStatus.Invalid, HumanReviewEffectReleaseReadStatusProjection.Project(Query(snapshot), new GovernedLoopEffectCertaintySnapshotResult(GovernedLoopEffectCertaintySnapshotStatus.Current, malformedResult)));
+    }
+
+    private static GovernedLoopEffectCertaintySnapshotQuery Query(HumanReviewEffectCertaintySnapshot snapshot)
+        => new(snapshot.Identity, snapshot.Preparation);
+
+    private static HumanReviewEffectCertaintySnapshot SnapshotFor(HumanReviewEffectCertainty certainty, string effectId = "effect-one", char reviewPayloadHash = 'a')
+    {
+        var prepared = Attempt(effectId);
         var attempt = certainty switch
         {
             HumanReviewEffectCertainty.NotStarted => prepared,
@@ -57,13 +82,13 @@ public sealed class HumanReviewEffectReleaseReadStatusProjectionTests
             HumanReviewEffectCertainty.Terminal => Terminal(prepared),
             _ => throw new ArgumentOutOfRangeException(nameof(certainty)),
         };
-        var binding = Binding(attempt, null);
+        var binding = Binding(attempt, null, reviewPayloadHash);
         var preparation = HumanReviewEffectReleaseContract.CreatePreparation(binding, attempt);
         var reviewed = HumanReviewContractHash.ApplyEffectAttempt(new HumanReviewEffectAttemptBinding(attempt.Payload.EffectId, attempt.Payload.OperationId, attempt.Payload.EffectGeneration, attempt.Payload.IntentHash, preparation.PreparationHash, HumanReviewEffectDispatchCertainty.NotDispatched, string.Empty));
-        return HumanReviewEffectReleaseContract.Create(Binding(attempt, reviewed), attempt, attempt.Payload.UpdatedAtUtc.AddSeconds(1));
+        return HumanReviewEffectReleaseContract.Create(Binding(attempt, reviewed, reviewPayloadHash), attempt, attempt.Payload.UpdatedAtUtc.AddSeconds(1));
     }
 
-    private static GovernedLoopEffectAttempt Attempt()
+    private static GovernedLoopEffectAttempt Attempt(string effectId)
     {
         Assert.True(CapabilityId.TryParse("org.embodysense/workspace/read-file", out var capabilityId, out _));
         Assert.True(CapabilityVersion.TryParse("1.2.3", out var capabilityVersion, out _));
@@ -79,8 +104,8 @@ public sealed class HumanReviewEffectReleaseReadStatusProjectionTests
             new CapabilityImplementationIdentity(providerId!, "workspace/read-file"),
             "probe/observe",
             Hash('c'),
-            "effect-one",
-            "effect-operation-one",
+            effectId,
+            effectId + "-operation",
             1,
             Hash('d'),
             Hash('e'),
@@ -114,7 +139,7 @@ public sealed class HumanReviewEffectReleaseReadStatusProjectionTests
         return GovernedLoopEffectAttemptContract.Advance(conclusive, GovernedLoopEffectPhase.Committed, GovernedLoopEffectOutcome.Succeeded, GovernedLoopEffectEvidenceStatus.Complete, "outcome-one", "after-one", prepared.Payload.UpdatedAtUtc.AddSeconds(4));
     }
 
-    private static HumanReviewBinding Binding(GovernedLoopEffectAttempt attempt, HumanReviewEffectAttemptBinding? effect)
+    private static HumanReviewBinding Binding(GovernedLoopEffectAttempt attempt, HumanReviewEffectAttemptBinding? effect, char reviewPayloadHash = 'a')
         => HumanReviewContractHash.ApplyBinding(new HumanReviewBinding(
             1,
             "workspace-sha256:" + Hash('0'),
@@ -135,7 +160,7 @@ public sealed class HumanReviewEffectReleaseReadStatusProjectionTests
             Hash('7'),
             Hash('8'),
             Hash('9'),
-            Hash('a'),
+            Hash(reviewPayloadHash),
             effect,
             string.Empty));
 

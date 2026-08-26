@@ -95,14 +95,57 @@ public static class HumanReviewEffectReleaseContract
     /// <summary>Returns whether two snapshots are exact replays, name separate attempts, or reuse an attempt identity with divergent safe evidence.</summary>
     public static HumanReviewEffectSnapshotReplayDisposition ClassifyReplay(HumanReviewEffectCertaintySnapshot? retained, HumanReviewEffectCertaintySnapshot? proposed)
     {
-        if (retained is null || proposed is null || retained.Identity is null || proposed.Identity is null || !string.Equals(retained.Identity.IdentityHash, proposed.Identity.IdentityHash, StringComparison.Ordinal))
+        if (!TryCapture(retained, out var retainedSnapshot, out _) || retainedSnapshot is null
+            || !TryCapture(proposed, out var proposedSnapshot, out _) || proposedSnapshot is null)
+        {
+            return HumanReviewEffectSnapshotReplayDisposition.Invalid;
+        }
+        if (!string.Equals(retainedSnapshot.Identity.IdentityHash, proposedSnapshot.Identity.IdentityHash, StringComparison.Ordinal))
         {
             return HumanReviewEffectSnapshotReplayDisposition.New;
         }
 
-        return string.Equals(retained.SnapshotHash, proposed.SnapshotHash, StringComparison.Ordinal) && Equals(retained, proposed)
+        return string.Equals(retainedSnapshot.SnapshotHash, proposedSnapshot.SnapshotHash, StringComparison.Ordinal) && Equals(retainedSnapshot, proposedSnapshot)
             ? HumanReviewEffectSnapshotReplayDisposition.ExactReplay
             : HumanReviewEffectSnapshotReplayDisposition.DivergentReuse;
+    }
+
+    /// <summary>Captures an independently validated exact identity and preparation expectation for a read-only certainty query.</summary>
+    /// <remarks>The captured values remain expectation evidence only. They do not prove current certainty, grant authority, or permit a dispatch.</remarks>
+    public static bool TryCaptureExpectation(
+        HumanReviewEffectAttemptIdentity? sourceIdentity,
+        HumanReviewEffectPreparationFingerprint? sourcePreparation,
+        out HumanReviewEffectAttemptIdentity? identity,
+        out HumanReviewEffectPreparationFingerprint? preparation,
+        out string? reasonCode)
+    {
+        identity = null;
+        preparation = null;
+        reasonCode = "effect-certainty-query-invalid";
+        try
+        {
+            if (sourceIdentity is null || sourcePreparation is null)
+            {
+                return false;
+            }
+            var copiedIdentity = sourceIdentity with { };
+            var copiedPreparation = sourcePreparation with { };
+            if (ValidateIdentity(copiedIdentity, requireHash: true) is not null
+                || ValidatePreparation(copiedPreparation, requireHash: true) is not null
+                || !string.Equals(copiedIdentity.IntentHash, copiedPreparation.IntentHash, StringComparison.Ordinal))
+            {
+                return false;
+            }
+            identity = copiedIdentity;
+            preparation = copiedPreparation;
+            reasonCode = null;
+            return true;
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or NullReferenceException or IndexOutOfRangeException)
+        {
+            reasonCode = "effect-certainty-query-unstable";
+            return false;
+        }
     }
 
     /// <summary>Creates a detached validated copy, returning <see langword="false"/> when the source changes during capture or is invalid.</summary>
