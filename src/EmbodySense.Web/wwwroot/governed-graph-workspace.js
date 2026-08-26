@@ -194,13 +194,16 @@ export function createGovernedGraphWorkspace({
 
   async function refresh({ signal = null, expectedGraphId } = {}) {
     if (!active || signal?.aborted) return false;
+    return await beginGraphHydration((hydrationGeneration) =>
+      refreshAuthoritatively({ signal, expectedGraphId }, hydrationGeneration),
+    );
+  }
+
+  async function beginGraphHydration(hydrate) {
     if (activeGraphHydrationPromise) return await activeGraphHydrationPromise;
     const hydrationGeneration = ++graphHydrationGeneration;
     activeGraphHydrationGeneration = hydrationGeneration;
-    const hydration = refreshAuthoritatively(
-      { signal, expectedGraphId },
-      hydrationGeneration,
-    );
+    const hydration = hydrate(hydrationGeneration);
     activeGraphHydrationPromise = hydration;
     try {
       return await hydration;
@@ -468,6 +471,7 @@ export function createGovernedGraphWorkspace({
       if (preserveDraft) {
         if (error.status === 404) {
           durableGraphSelection = null;
+          aggregate = null;
           outcome =
             "Authoritative graph evidence confirms no durable graph has this ID. Unsaved graph edits remain local.";
           return true;
@@ -506,15 +510,22 @@ export function createGovernedGraphWorkspace({
   }
 
   async function refreshDurable() {
-    const catalogHydrated = await refreshCatalog();
-    if (!catalogHydrated) return false;
+    if (!active) return false;
+    return await beginGraphHydration(refreshDurably);
+  }
+
+  async function refreshDurably(hydrationGeneration) {
+    const catalogHydrated = await refreshCatalog({ hydrationGeneration });
+    if (!catalogHydrated || !ownsGraphHydration(hydrationGeneration, null))
+      return false;
     if (pendingMutation) {
       outcome =
         "The catalog was refreshed, but the exact unresolved mutation must be retried before a durable graph reload.";
       render();
       return true;
     }
-    if (elements.graphId.value.trim()) return await readGraph(false);
+    if (elements.graphId.value.trim())
+      return await readGraph(false, { hydrationGeneration });
     return true;
   }
 

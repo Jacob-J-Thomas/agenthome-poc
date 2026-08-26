@@ -3679,6 +3679,79 @@ test("an unavailable final governed graph detail preserves a dirty durable draft
   assert.equal(retry.disabled, false);
 });
 
+test("a conclusive missing durable graph retains a dirty draft and saves it as create draft", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  let durableGraphExists = true;
+  const initialLifecycle = governedGraphLifecycle("published", 4);
+  const createdLifecycle = governedGraphLifecycle("draft", 5);
+  server.on("GET", "/api/governed-graphs/catalog", () => ({
+    status: 200,
+    body: createGovernedGraphCatalog(),
+  }));
+  server.on("GET", "/api/governed-graphs/detail?graphId=published-graph", () =>
+    durableGraphExists
+      ? {
+          status: 200,
+          body: governedGraphRead(
+            initialLifecycle,
+            governedGraphArtifact(initialLifecycle, "Published graph"),
+          ),
+        }
+      : { status: 404, body: { detail: "Graph not found." } },
+  );
+  server.on("POST", "/api/governed-graphs/mutate", ({ body }) => ({
+    status: 200,
+    body: {
+      status: "committed",
+      operationId: body.operationId,
+      authoringRequestHash: "a".repeat(64),
+      graphValidationEvidenceHash: null,
+      changeKind: body.kind,
+      errors: [],
+      current: governedGraphRead(
+        createdLifecycle,
+        governedGraphArtifact(createdLifecycle, "Recreated graph"),
+      ),
+    },
+  }));
+  const app = await loadLoopBuilder({ server });
+  await openPublishedGovernedGraphAsync(app);
+  app.elements.governedGraphPurpose.value =
+    "Keep this local durable draft after the confirmed deletion.";
+  await app.elements.governedGraphPurpose.input();
+
+  durableGraphExists = false;
+  assert.equal(await app.context.refreshWorkspace(), true);
+  assert.equal(
+    vm.runInContext("workspaceAuthoringHydrated", app.context),
+    true,
+  );
+  assert.equal(app.elements.governedGraphView.inert, false);
+  assert.equal(
+    app.elements.governedGraphLifecycle.textContent,
+    "Local draft · not durable",
+  );
+  assert.equal(
+    app.elements.governedGraphPurpose.value,
+    "Keep this local durable draft after the confirmed deletion.",
+  );
+  assert.equal(app.elements.governedGraphSaveButton.disabled, false);
+
+  await app.elements.governedGraphSaveButton.click();
+  const mutation = server.calls.find(
+    (call) =>
+      call.method === "POST" && call.url === "/api/governed-graphs/mutate",
+  );
+  assert.equal(mutation.body.kind, "create-draft");
+  assert.equal(mutation.body.expectedLifecycleStatus, "unknown");
+  assert.equal(mutation.body.expectedLifecycleVersion, 0);
+  assert.equal(mutation.body.expectedPublishedRevision, null);
+  assert.equal(
+    mutation.body.graphCandidate.purpose,
+    "Keep this local durable draft after the confirmed deletion.",
+  );
+});
+
 test("dirty durable reconnect keeps fresh lifecycle evidence and the exact owning role for replace save", async () => {
   const server = new FakeFetchServer(createCatalog());
   let refreshed = false;
@@ -3819,6 +3892,154 @@ test("repeated governed graph activation shares a busy hydration and fences a la
   assert.doesNotMatch(
     app.elements.governedGraphNotice.textContent,
     /late catalog request failed/i,
+  );
+});
+
+test("a late standalone catalog success cannot replace fresh reconnect catalog evidence", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const lateCatalog = createDeferred();
+  const freshCatalog = createGovernedGraphCatalog();
+  const staleCatalog = createGovernedGraphCatalog();
+  freshCatalog.roles.roles[0].displayName = "Fresh Researcher";
+  staleCatalog.roles.roles[0].displayName = "Late Researcher";
+  let holdStandaloneCatalog = false;
+  let standaloneCatalogStarted;
+  let reconnected = false;
+  server.on("GET", "/api/governed-graphs/catalog", async () => {
+    if (holdStandaloneCatalog) {
+      standaloneCatalogStarted?.();
+      return await lateCatalog.promise;
+    }
+    return { status: 200, body: freshCatalog };
+  });
+  server.on(
+    "GET",
+    "/api/governed-graphs/detail?graphId=published-graph",
+    () => {
+      const lifecycle = governedGraphLifecycle(
+        "published",
+        reconnected ? 9 : 4,
+      );
+      return {
+        status: 200,
+        body: governedGraphRead(
+          lifecycle,
+          governedGraphArtifact(lifecycle, "Fresh durable graph"),
+        ),
+      };
+    },
+  );
+  const app = await loadLoopBuilder({ server });
+  await openPublishedGovernedGraphAsync(app);
+  const catalogRequestStarted = new Promise((resolve) => {
+    standaloneCatalogStarted = resolve;
+  });
+
+  holdStandaloneCatalog = true;
+  const standaloneRefresh = app.elements.governedGraphRefreshButton.click();
+  await catalogRequestStarted;
+  app.window.embodySenseLoopBuilder.suspendSession();
+  holdStandaloneCatalog = false;
+  reconnected = true;
+  app.window.embodySenseLoopBuilder.resumeSession();
+  assert.equal(
+    (
+      await app.window.embodySenseLoopBuilder.rehydrateSession({
+        approvals: [],
+        workspaceRoot: "C:/workspace",
+      })
+    ).refreshed,
+    true,
+  );
+
+  lateCatalog.resolve({ status: 200, body: staleCatalog });
+  assert.equal(await standaloneRefresh, false);
+  await flushAsyncWork();
+
+  assert.equal(
+    vm.runInContext("workspaceAuthoringHydrated", app.context),
+    true,
+  );
+  assert.equal(app.elements.governedGraphView.inert, false);
+  assert.equal(app.elements.governedGraphNewButton.disabled, false);
+  assert.match(app.elements.governedGraphLifecycle.textContent, /lifecycle v9/);
+  assert.match(app.elements.governedGraphRole.textContent, /Fresh Researcher/);
+  assert.doesNotMatch(
+    app.elements.governedGraphRole.textContent,
+    /Late Researcher/,
+  );
+});
+
+test("a late standalone catalog failure cannot lock fresh reconnect graph authoring", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  const lateCatalog = createDeferred();
+  const freshCatalog = createGovernedGraphCatalog();
+  freshCatalog.roles.roles[0].displayName = "Fresh Researcher";
+  let holdStandaloneCatalog = false;
+  let standaloneCatalogStarted;
+  let reconnected = false;
+  server.on("GET", "/api/governed-graphs/catalog", async () => {
+    if (holdStandaloneCatalog) {
+      standaloneCatalogStarted?.();
+      return await lateCatalog.promise;
+    }
+    return { status: 200, body: freshCatalog };
+  });
+  server.on(
+    "GET",
+    "/api/governed-graphs/detail?graphId=published-graph",
+    () => {
+      const lifecycle = governedGraphLifecycle(
+        "published",
+        reconnected ? 9 : 4,
+      );
+      return {
+        status: 200,
+        body: governedGraphRead(
+          lifecycle,
+          governedGraphArtifact(lifecycle, "Fresh durable graph"),
+        ),
+      };
+    },
+  );
+  const app = await loadLoopBuilder({ server });
+  await openPublishedGovernedGraphAsync(app);
+  const catalogRequestStarted = new Promise((resolve) => {
+    standaloneCatalogStarted = resolve;
+  });
+
+  holdStandaloneCatalog = true;
+  const standaloneRefresh = app.elements.governedGraphRefreshButton.click();
+  await catalogRequestStarted;
+  app.window.embodySenseLoopBuilder.suspendSession();
+  holdStandaloneCatalog = false;
+  reconnected = true;
+  app.window.embodySenseLoopBuilder.resumeSession();
+  assert.equal(
+    (
+      await app.window.embodySenseLoopBuilder.rehydrateSession({
+        approvals: [],
+        workspaceRoot: "C:/workspace",
+      })
+    ).refreshed,
+    true,
+  );
+
+  lateCatalog.reject(new Error("Late standalone catalog failed."));
+  assert.equal(await standaloneRefresh, false);
+  await flushAsyncWork();
+
+  assert.equal(
+    vm.runInContext("workspaceAuthoringHydrated", app.context),
+    true,
+  );
+  assert.equal(app.elements.governedGraphView.inert, false);
+  assert.equal(app.elements.governedGraphNewButton.disabled, false);
+  assert.match(app.elements.governedGraphLifecycle.textContent, /lifecycle v9/);
+  assert.match(app.elements.governedGraphRole.textContent, /Fresh Researcher/);
+  assert.doesNotMatch(
+    app.elements.governedGraphNotice.textContent,
+    /Late standalone catalog failed/i,
   );
 });
 
