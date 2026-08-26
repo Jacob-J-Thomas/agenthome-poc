@@ -4,7 +4,7 @@ namespace EmbodySense.Core.Application.HumanReview.Models;
 
 /// <summary>Reserves the immutable portion of one future governed release receipt before its irreversible boundary is crossed.</summary>
 /// <remarks>A later durable worker must bind this preparation to its conclusive result and persisted frontier receipt before constructing <see cref="HumanReviewContinuationReleaseReceipt"/>. This intent is not a completed receipt, dispatch permission, or evidence that a release occurred.</remarks>
-/// <param name="ReleaseOperationId">The deterministic stable release-operation identity allocated before the governed boundary.</param>
+/// <param name="ReleaseOperationId">The deterministic request, wake, reservation, generation, and release-kind identity allocated before the governed boundary; it remains stable across an expired-claim takeover.</param>
 /// <param name="Request">The exact reviewed request that determines the only permitted release kind.</param>
 /// <param name="Wake">The exact published continuation wake.</param>
 /// <param name="Claim">The exact active worker claim.</param>

@@ -594,6 +594,43 @@ public sealed class HumanReviewContinuationConsumerTests
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Response_loss_takeover_reuses_the_release_operation_identity_but_fences_the_expired_claim(bool includeEffectAttempt)
+    {
+        var fixture = await ApprovedCandidateAsync(includeEffectAttempt);
+        var first = await ConsumeApprovedAsync(fixture.Candidate, fixture.Claim.ClaimedAtUtc.AddSeconds(1), fixture.EffectAttempt);
+        var takeover = TakeoverCandidate(fixture, out var successorClaim);
+        var recovered = await ConsumeApprovedAsync(takeover, successorClaim.ClaimedAtUtc.AddSeconds(1), fixture.EffectAttempt);
+
+        var firstReceipt = Assert.IsType<HumanReviewContinuationReleaseReceiptIntent>(first.Action?.ReleaseReceipt);
+        var recoveredReceipt = Assert.IsType<HumanReviewContinuationReleaseReceiptIntent>(recovered.Action?.ReleaseReceipt);
+        Assert.Equal(includeEffectAttempt ? HumanReviewContinuationConsumptionStatus.EffectReleasePrepared : HumanReviewContinuationConsumptionStatus.ContinuationReleasePrepared, first.Status);
+        Assert.Equal(first.Status, recovered.Status);
+        Assert.Equal(firstReceipt.ReleaseOperationId, recoveredReceipt.ReleaseOperationId);
+        Assert.NotEqual(firstReceipt.Claim, recoveredReceipt.Claim);
+        Assert.Equal(new HumanReviewContinuationClaimReference(successorClaim.ClaimId, successorClaim.ClaimHash), recoveredReceipt.Claim);
+
+        var review = Assert.IsType<EmbodySense.Core.Common.Loops.Models.Custom.Execution.HumanReviewRunState>(fixture.Run.HumanReview);
+        var reservation = Assert.IsType<HumanReviewContinuationReservation>(review.ContinuationReservation);
+        var wake = Assert.IsType<HumanReviewContinuationState>(takeover.Continuation).Wake;
+        Assert.False(HumanReviewContinuationCompletionIntentFactory.TryCreate(
+            Assert.IsType<HumanReviewContinuationCompletionIntent>(first.Completion),
+            review.Request,
+            wake,
+            reservation,
+            successorClaim,
+            "completion-stale-claim-one",
+            Hash('b'),
+            Hash('c'),
+            successorClaim.ClaimedAtUtc.AddSeconds(1),
+            ImmutableArray<HumanReviewRedactedPreview>.Empty,
+            Provenance("stale-claim-completion", successorClaim.ClaimedAtUtc.AddSeconds(1)),
+            out var staleCompletion));
+        Assert.Null(staleCompletion);
+    }
+
+    [Theory]
     [InlineData(HumanReviewEffectCertainty.Dispatched)]
     [InlineData(HumanReviewEffectCertainty.Conclusive)]
     [InlineData(HumanReviewEffectCertainty.Ambiguous)]
@@ -796,6 +833,47 @@ public sealed class HumanReviewContinuationConsumerTests
         RecordingEffectCertaintySource effectCertainty,
         IHumanReviewTrustedClock clock)
         => new(authority, effectEvidence, effectCertainty, clock);
+
+    private static async Task<HumanReviewContinuationConsumptionResult> ConsumeApprovedAsync(HumanReviewContinuationCandidate candidate, DateTimeOffset now, GovernedLoopEffectAttempt? effectAttempt)
+    {
+        var authority = new RecordingAuthoritySource(HumanReviewContinuationAuthorityReadStatus.Current, HumanReviewContinuationAuthorityReadStatus.Current);
+        var effectEvidence = new RecordingEffectEvidenceSource();
+        var effectCertainty = new RecordingEffectCertaintySource();
+        if (effectAttempt is not null)
+        {
+            var binding = Assert.IsType<EmbodySense.Core.Common.Loops.Models.Custom.Execution.HumanReviewRunState>(candidate.Run.HumanReview).Request.Binding;
+            var evidence = EffectEvidence(binding, effectAttempt);
+            var snapshot = HumanReviewEffectReleaseContract.Create(binding, effectAttempt, effectAttempt.Payload.UpdatedAtUtc.AddSeconds(1));
+            effectEvidence = new RecordingEffectEvidenceSource(CurrentEvidence(evidence), CurrentEvidence(evidence));
+            effectCertainty = new RecordingEffectCertaintySource(CurrentSnapshot(snapshot), CurrentSnapshot(snapshot));
+        }
+
+        return await Consumer(authority, effectEvidence, effectCertainty, now).ConsumeAsync(candidate);
+    }
+
+    private static HumanReviewContinuationCandidate TakeoverCandidate(ApprovedCandidateFixture fixture, out HumanReviewContinuationClaim successorClaim)
+    {
+        var review = Assert.IsType<EmbodySense.Core.Common.Loops.Models.Custom.Execution.HumanReviewRunState>(fixture.Run.HumanReview);
+        var reservation = Assert.IsType<HumanReviewContinuationReservation>(review.ContinuationReservation);
+        var continuation = Assert.IsType<HumanReviewContinuationState>(fixture.Candidate.Continuation);
+        var claimedAtUtc = fixture.Claim.LeaseExpiresAtUtc.AddTicks(1);
+        successorClaim = HumanReviewContinuationContractHash.ApplyClaim(fixture.Claim with
+        {
+            ClaimId = "claim-continuation-takeover",
+            WorkerId = "worker-continuation-takeover",
+            ClaimedAtUtc = claimedAtUtc,
+            LeaseExpiresAtUtc = claimedAtUtc.AddMinutes(2),
+            Provenance = Provenance("claim-takeover", claimedAtUtc),
+            ClaimHash = string.Empty,
+        });
+        var successorState = HumanReviewContinuationContractHash.ApplyState(continuation with
+        {
+            Claims = [fixture.Claim, successorClaim],
+            StateHash = string.Empty,
+        });
+        Assert.True(HumanReviewContinuationContractValidator.ValidateState(review.Request, reservation, successorState).IsValid);
+        return new HumanReviewContinuationCandidate(fixture.Run, fixture.Candidate.GraphArtifact, successorState, successorClaim);
+    }
 
     private static async Task<ApprovedCandidateFixture> ApprovedCandidateAsync(bool includeEffectAttempt = false)
     {
