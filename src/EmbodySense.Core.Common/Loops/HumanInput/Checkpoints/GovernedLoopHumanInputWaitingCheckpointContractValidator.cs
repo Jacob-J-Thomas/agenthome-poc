@@ -415,7 +415,7 @@ public static class GovernedLoopHumanInputWaitingCheckpointContractValidator
 
     private static void Utc(DateTimeOffset value, string path, List<GovernedLoopHumanInputWaitingCheckpointValidationError> errors)
     {
-        if (value.Offset != TimeSpan.Zero) Add(errors, "timestamp_not_utc", path, "Timestamps must be exact UTC instants.");
+        if (value == default || value.Offset != TimeSpan.Zero) Add(errors, "timestamp_not_utc", path, "Timestamps must be non-default exact UTC instants.");
     }
 
     private static void RequireAbsent(object? value, string path, List<GovernedLoopHumanInputWaitingCheckpointValidationError> errors)

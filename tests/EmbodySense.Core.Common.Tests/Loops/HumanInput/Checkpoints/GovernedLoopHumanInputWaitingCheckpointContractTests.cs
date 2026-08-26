@@ -135,6 +135,18 @@ public sealed class GovernedLoopHumanInputWaitingCheckpointContractTests
     }
 
     [Fact]
+    public void Self_hashed_default_utc_evidence_is_rejected_before_replay_classification()
+    {
+        var pending = GovernedLoopHumanInputWaitingCheckpointTestData.Pending();
+        var defaultTimestampEvidence = GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(pending.Evidence[0] with { OccurredAtUtc = default });
+
+        Assert.True(GovernedLoopHumanInputWaitingCheckpointContractHash.Matches(defaultTimestampEvidence));
+        Assert.Contains(GovernedLoopHumanInputWaitingCheckpointContractValidator.ValidateEvidence(defaultTimestampEvidence).Errors, error => error.Code == "timestamp_not_utc");
+        Assert.Equal(GovernedLoopHumanInputWaitingCheckpointReplayDisposition.Invalid, GovernedLoopHumanInputWaitingCheckpointReplayClassifier.Classify(defaultTimestampEvidence, pending.Evidence[0]));
+        Assert.Equal(GovernedLoopHumanInputWaitingCheckpointReplayDisposition.Invalid, GovernedLoopHumanInputWaitingCheckpointReplayClassifier.Classify(pending.Evidence[0], defaultTimestampEvidence));
+    }
+
+    [Fact]
     public void Supersession_requires_a_distinct_replacing_checkpoint_identity()
     {
         var superseded = GovernedLoopHumanInputWaitingCheckpointTestData.Superseded();
