@@ -260,27 +260,85 @@ public sealed class HumanReviewDecisionServiceTests
         Assert.True(CustomLoopRunValidator.Validate(Assert.IsType<CustomLoopRunRecord>(store.Run)).IsValid);
     }
 
-    [Fact]
-    public async Task Accepted_decision_quota_leaves_exact_capacity_for_one_expiry_lifecycle()
+    [Theory]
+    [InlineData(HumanReviewDecisionKind.Approve, HumanReviewLifecycleStatus.Approved, 2)]
+    [InlineData(HumanReviewDecisionKind.Reject, HumanReviewLifecycleStatus.Rejected, 1)]
+    [InlineData(HumanReviewDecisionKind.Cancel, HumanReviewLifecycleStatus.Cancelled, 1)]
+    public async Task Fifteen_information_decisions_reserve_accepted_capacity_for_an_eligible_terminal_decision(HumanReviewDecisionKind kind, HumanReviewLifecycleStatus lifecycle, int terminalEventCount)
     {
         var fixture = await HumanReviewDecisionTestData.CreateAsync();
         var store = new HumanReviewDecisionTestStore(fixture.Run);
         var information = Service(store, new HumanReviewDecisionTestAuthorizer(), fixture.Run.UpdatedAtUtc.AddMinutes(1));
-        for (var index = 0; index < HumanReviewContractLimits.MaxAcceptedDecisions; index++)
+        for (var index = 0; index < HumanReviewContractLimits.MaxAcceptedDecisions - 1; index++)
         {
             var current = Assert.IsType<CustomLoopRunRecord>(store.Run);
             var result = await information.DecideAsync(HumanReviewDecisionTestData.Command(current, $"information-{index:00}", HumanReviewDecisionKind.RequestInformation, "Need a redacted clarification."));
             Assert.Equal(HumanReviewDecisionServiceStatus.InformationRequested, result.Status);
         }
 
-        var atQuota = Assert.IsType<CustomLoopRunRecord>(store.Run);
-        var overQuota = await information.DecideAsync(HumanReviewDecisionTestData.Command(atQuota, "information-over", HumanReviewDecisionKind.RequestInformation, "Need a redacted clarification."));
-        var expiry = await Service(store, new HumanReviewDecisionTestAuthorizer(), fixture.Request.Timing.ExpiresAtUtc).DecideAsync(HumanReviewDecisionTestData.Command(atQuota, "expiry-after-information", HumanReviewDecisionKind.Reject));
+        var beforeTerminal = Assert.IsType<CustomLoopRunRecord>(store.Run);
+        var terminalCommand = HumanReviewDecisionTestData.Command(beforeTerminal, "terminal-after-information", kind, "Terminal decision detail.");
+        var terminal = await information.DecideAsync(terminalCommand);
+        var afterTerminal = Assert.IsType<CustomLoopRunRecord>(store.Run);
+        var replay = await information.DecideAsync(terminalCommand);
+        var divergent = await information.DecideAsync(terminalCommand with { Detail = "A different terminal decision detail." });
 
-        Assert.Equal(HumanReviewDecisionServiceStatus.LimitExceeded, overQuota.Status);
+        Assert.Equal(HumanReviewDecisionServiceStatus.Accepted, terminal.Status);
+        Assert.Equal(HumanReviewDecisionOperationDisposition.Accepted, terminal.Receipt?.Disposition);
+        Assert.Equal(HumanReviewDecisionServiceStatus.Replayed, replay.Status);
+        Assert.Equal(terminal.Receipt?.ReceiptHash, replay.Receipt?.ReceiptHash);
+        Assert.Equal(HumanReviewDecisionServiceStatus.Conflict, divergent.Status);
+        Assert.Null(divergent.Receipt);
+        var review = Assert.IsType<HumanReviewRunState>(store.Run?.HumanReview);
+        Assert.Equal(HumanReviewContractLimits.MaxAcceptedDecisions, review.AcceptedDecisions.Length);
+        Assert.Equal(kind, review.AcceptedTerminalDecision?.Kind);
+        Assert.Equal(lifecycle, review.Lifecycle.Status);
+        Assert.Equal(HumanReviewContractLimits.MaxAcceptedDecisions, review.OperationReceipts.Length);
+        Assert.Equal(HumanReviewContractLimits.MaxAcceptedDecisions + 1, review.LifecycleHistory.Length);
+        Assert.Equal(kind == HumanReviewDecisionKind.Approve, review.ContinuationReservation is not null);
+        Assert.Equal(beforeTerminal.Events.Length + terminalEventCount, afterTerminal.Events.Length);
+        Assert.Equal(afterTerminal.Events.Length, store.Run?.Events.Length);
+        Assert.Equal(HumanReviewContractLimits.MaxAcceptedDecisions, store.UpdateCount);
+        Assert.True(CustomLoopRunValidator.Validate(Assert.IsType<CustomLoopRunRecord>(store.Run)).IsValid);
+    }
+
+    [Fact]
+    public async Task Sixteenth_information_decision_is_rejected_while_the_reserved_slot_keeps_later_expiry_and_exact_replay_recordable()
+    {
+        var fixture = await HumanReviewDecisionTestData.CreateAsync();
+        var store = new HumanReviewDecisionTestStore(fixture.Run);
+        var information = Service(store, new HumanReviewDecisionTestAuthorizer(), fixture.Run.UpdatedAtUtc.AddMinutes(1));
+        for (var index = 0; index < HumanReviewContractLimits.MaxAcceptedDecisions - 1; index++)
+        {
+            var current = Assert.IsType<CustomLoopRunRecord>(store.Run);
+            var result = await information.DecideAsync(HumanReviewDecisionTestData.Command(current, $"information-{index:00}", HumanReviewDecisionKind.RequestInformation, "Need a redacted clarification."));
+            Assert.Equal(HumanReviewDecisionServiceStatus.InformationRequested, result.Status);
+        }
+
+        var beforeLimit = Assert.IsType<CustomLoopRunRecord>(store.Run);
+        var sixteenth = await information.DecideAsync(HumanReviewDecisionTestData.Command(beforeLimit, "information-sixteenth", HumanReviewDecisionKind.RequestInformation, "Need a redacted clarification."));
+        var expiryCommand = HumanReviewDecisionTestData.Command(beforeLimit, "expiry-after-information", HumanReviewDecisionKind.Reject);
+        var expiry = await Service(store, new HumanReviewDecisionTestAuthorizer(), fixture.Request.Timing.ExpiresAtUtc).DecideAsync(expiryCommand);
+        var afterExpiry = Assert.IsType<CustomLoopRunRecord>(store.Run);
+        var expiryService = Service(store, new HumanReviewDecisionTestAuthorizer(), fixture.Request.Timing.ExpiresAtUtc);
+        var replay = await expiryService.DecideAsync(expiryCommand);
+        var divergent = await expiryService.DecideAsync(expiryCommand with { Kind = HumanReviewDecisionKind.Cancel });
+
+        Assert.Equal(HumanReviewDecisionServiceStatus.LimitExceeded, sixteenth.Status);
         Assert.Equal(HumanReviewDecisionServiceStatus.Expired, expiry.Status);
-        Assert.Equal(HumanReviewContractLimits.MaxLifecycleHistory, store.Run?.HumanReview?.LifecycleHistory.Length);
-        Assert.Equal(HumanReviewLifecycleStatus.Expired, store.Run?.HumanReview?.Lifecycle.Status);
+        Assert.Equal(HumanReviewDecisionOperationDisposition.Expired, expiry.Receipt?.Disposition);
+        Assert.Equal(HumanReviewDecisionServiceStatus.Replayed, replay.Status);
+        Assert.Equal(expiry.Receipt?.ReceiptHash, replay.Receipt?.ReceiptHash);
+        Assert.Equal(HumanReviewDecisionServiceStatus.Conflict, divergent.Status);
+        Assert.Null(divergent.Receipt);
+        var review = Assert.IsType<HumanReviewRunState>(store.Run?.HumanReview);
+        Assert.Equal(HumanReviewContractLimits.MaxAcceptedDecisions - 1, review.AcceptedDecisions.Length);
+        Assert.Equal(HumanReviewContractLimits.MaxAcceptedDecisions, review.OperationReceipts.Length);
+        Assert.Equal(HumanReviewContractLimits.MaxAcceptedDecisions + 1, review.LifecycleHistory.Length);
+        Assert.Equal(HumanReviewLifecycleStatus.Expired, review.Lifecycle.Status);
+        Assert.Equal(beforeLimit.Events.Length + 1, afterExpiry.Events.Length);
+        Assert.Equal(afterExpiry.Events.Length, store.Run?.Events.Length);
+        Assert.Equal(HumanReviewContractLimits.MaxAcceptedDecisions, store.UpdateCount);
         Assert.True(CustomLoopRunValidator.Validate(Assert.IsType<CustomLoopRunRecord>(store.Run)).IsValid);
     }
 

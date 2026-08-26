@@ -352,13 +352,14 @@ public sealed class HumanReviewDecisionService : IHumanReviewDecisionService
         var closureEventReserve = state.Request.RequestedDecisions.Contains(HumanReviewDecisionKind.Approve) ? 2 : 1;
         var reservedEventCount = closureRemainsRequired && !closesRequest ? closureEventReserve : 0;
         var receiptLimit = closureRemainsRequired && !closesRequest ? HumanReviewContractLimits.MaxDecisionOperationReceipts - 1 : HumanReviewContractLimits.MaxDecisionOperationReceipts;
+        var acceptedDecisionLimit = closureRemainsRequired && !closesRequest ? HumanReviewContractLimits.MaxAcceptedDecisions - 1 : HumanReviewContractLimits.MaxAcceptedDecisions;
         if (current.LifecycleVersion == int.MaxValue || current.Events.Length > CustomLoopLimits.MaxTraceEventsPerRun - eventCount - reservedEventCount || state.OperationReceipts.Length >= receiptLimit)
         {
             return false;
         }
 
         var acceptsDecision = disposition is HumanReviewDecisionOperationDisposition.Accepted or HumanReviewDecisionOperationDisposition.InformationRequested;
-        if (acceptsDecision && state.AcceptedDecisions.Length >= HumanReviewContractLimits.MaxAcceptedDecisions)
+        if (acceptsDecision && state.AcceptedDecisions.Length >= acceptedDecisionLimit)
         {
             return false;
         }
