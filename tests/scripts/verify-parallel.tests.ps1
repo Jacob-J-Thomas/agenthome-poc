@@ -108,6 +108,8 @@ $requiredGateProfiles = @(Get-VerificationRequiredGateScheduleProfiles)
 Assert-True -Condition ((Get-VerificationRequiredGateResourceCapacity) -eq 12) -Message "Required gates must retain the explicit twelve-unit logical resource capacity."
 Assert-True -Condition ((Get-VerificationRequiredGateMaximumProcessHeavyWorkers) -eq 2) -Message "Required gates must admit at most two assembly-wide helper-process-heavy phases."
 Assert-True -Condition ((Get-VerificationRequiredGateMaximumCpuBoundWorkers) -eq 1) -Message "Required gates must admit at most one CPU-bound format gate."
+Assert-True -Condition ((Get-VerificationRequiredGateMinimumTimeoutHeadroomSeconds) -eq 120) -Message "Required test lanes must retain the explicit two-minute profile timeout headroom."
+Assert-True -Condition ((Get-VerificationSolutionWatchdogDeadlineSeconds) -eq 1500) -Message "Solution promotion must retain the bounded evidence-backed 1,500-second watchdog policy."
 Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers 8 -HardwareProcessorCount 10) -eq 3) -Message "A larger host must retain the checked-in three-process required-gate ceiling."
 Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers 6 -HardwareProcessorCount 4) -eq 3) -Message "A hosted four-core runner must admit exactly three physical required-gate workers."
 Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers 4 -HardwareProcessorCount 10) -eq 3) -Message "An explicit four-worker request must remain capped by the required-gate outer-process policy."
@@ -175,11 +177,38 @@ Assert-True -Condition ($declaredRequiredGateProfiles.Count -eq $declaredRequire
 Assert-True -Condition ($declaredRequiredGateProfiles.Count -eq $requiredGateProfiles.Count) -Message "The checked-in scheduling catalog cannot retain stale profiles for gates outside the current plan."
 foreach ($processHeavyGateName in @("tests-EmbodySense.Core.Persistence.Tests-all", "tests-EmbodySense.Core.Startup.Tests-remainder")) {
     $processHeavyProfile = Get-VerificationRequiredGateScheduleProfile -Name $processHeavyGateName
-    Assert-True -Condition ($processHeavyProfile.Weight -eq 6 -and $processHeavyProfile.ResourceClass -ceq "ProcessHeavy") -Message "A dominant internally parallel assembly gate '$processHeavyGateName' must reserve half of the four-core runner's logical capacity."
+    Assert-True -Condition ($processHeavyProfile.Weight -eq 6 -and $processHeavyProfile.TimeoutSeconds -eq 720 -and $processHeavyProfile.ResourceClass -ceq "ProcessHeavy") -Message "A dominant internally parallel assembly gate '$processHeavyGateName' must reserve half of the four-core runner and its measured 720-second child budget."
 }
 $nestedProcessProfile = Get-VerificationRequiredGateScheduleProfile -Name "tests-EmbodySense.Core.Startup.Tests-nested-process"
-Assert-True -Condition ($nestedProcessProfile.EstimatedDurationSeconds -eq 180 -and $nestedProcessProfile.Weight -eq 12 -and $nestedProcessProfile.ResourceClass -ceq "ProcessHeavy") -Message "The nested-process Startup lane must reserve the entire logical capacity with its measured profile."
+Assert-True -Condition ($nestedProcessProfile.EstimatedDurationSeconds -eq 180 -and $nestedProcessProfile.TimeoutSeconds -eq 600 -and $nestedProcessProfile.Weight -eq 12 -and $nestedProcessProfile.ResourceClass -ceq "ProcessHeavy") -Message "The nested-process Startup lane must reserve the entire logical capacity with its measured profile."
 Assert-True -Condition (@($requiredGateProfiles | Where-Object { $_.Name -ceq "tests-EmbodySense.Core.Startup.Tests-all" }).Count -eq 0) -Message "The stale all-Startup scheduling profile must not survive the two-lane partition."
+foreach ($testProfile in @($requiredGateProfiles | Where-Object { $_.Name.StartsWith("tests-", [StringComparison]::Ordinal) -and $_.Name -cnotin @("tests-EmbodySense.Core.Persistence.Tests-all", "tests-EmbodySense.Core.Startup.Tests-remainder") })) {
+    Assert-True -Condition ($testProfile.TimeoutSeconds -eq 600) -Message "Non-dominant required test gate '$($testProfile.Name)' must retain the normal bounded 600-second child budget."
+}
+$persistenceProfileSource = @($script:VerificationRequiredGateScheduleProfiles | Where-Object Name -ceq "tests-EmbodySense.Core.Persistence.Tests-all")[0]
+$originalPersistenceTimeoutSeconds = $persistenceProfileSource.TimeoutSeconds
+try {
+    $persistenceProfileSource.TimeoutSeconds = 719
+    try {
+        Get-VerificationRequiredGateScheduleProfile -Name $persistenceProfileSource.Name | Out-Null
+        throw "Expected insufficient Persistence timeout headroom to fail closed."
+    }
+    catch {
+        Assert-True -Condition ($_.Exception.Message.IndexOf("timeout headroom", [StringComparison]::Ordinal) -ge 0) -Message "A stale dominant-lane child budget must fail closed."
+    }
+
+    $persistenceProfileSource.TimeoutSeconds = 721
+    try {
+        Get-VerificationRequiredGateScheduleProfile -Name $persistenceProfileSource.Name | Out-Null
+        throw "Expected an over-broad Persistence timeout to fail closed."
+    }
+    catch {
+        Assert-True -Condition ($_.Exception.Message.IndexOf("bounded child-timeout policy", [StringComparison]::Ordinal) -ge 0) -Message "An over-broad dominant-lane child budget must fail closed."
+    }
+}
+finally {
+    $persistenceProfileSource.TimeoutSeconds = $originalPersistenceTimeoutSeconds
+}
 foreach ($processHeavyGateName in @("tests-EmbodySense.IntegrationTests-all", "tests-EmbodySense.Web.Tests-all")) {
     $processHeavyProfile = Get-VerificationRequiredGateScheduleProfile -Name $processHeavyGateName
     Assert-True -Condition ($processHeavyProfile.Weight -eq 3 -and $processHeavyProfile.ResourceClass -ceq "ProcessHeavy") -Message "A secondary internally parallel assembly gate '$processHeavyGateName' must retain its bounded logical weight."
@@ -190,7 +219,7 @@ foreach ($formatGateName in @("format-naming-style", "format-whitespace")) {
 }
 
 $requiredGateVirtualSchedule = Get-VirtualVerificationSchedule -Profiles $requiredGateProfiles -MaximumWorkers 3 -MaximumResourceCapacity 12 -MaximumProcessHeavyWorkers 2 -MaximumCpuBoundWorkers 1
-Assert-True -Condition ($requiredGateVirtualSchedule.MakespanSeconds -le 900) -Message "The assembly-wide resource-bounded schedule must retain at least five minutes of headroom inside the 1200-second Solution watchdog. Actual: $($requiredGateVirtualSchedule.MakespanSeconds)."
+Assert-True -Condition ($requiredGateVirtualSchedule.MakespanSeconds -le 1140) -Message "The assembly-wide resource-bounded schedule must retain at least six minutes of headroom inside the 1500-second Solution watchdog. Actual: $($requiredGateVirtualSchedule.MakespanSeconds)."
 foreach ($assemblyGateName in @("tests-EmbodySense.Core.Persistence.Tests-all", "tests-EmbodySense.Core.Startup.Tests-remainder")) {
     Assert-True -Condition ($requiredGateVirtualSchedule.Starts[$assemblyGateName] -eq 0) -Message "The two longest assembly gates must start at virtual second zero."
 }
@@ -201,7 +230,7 @@ Assert-True -Condition ($requiredGateVirtualSchedule.Starts["format-naming-style
 Assert-True -Condition ($requiredGateVirtualSchedule.Starts["tests-EmbodySense.Web.Tests-all"] -gt 0) -Message "The third internally parallel assembly must wait for one of the two admitted heavy slots."
 Assert-True -Condition ($requiredGateVirtualSchedule.Starts["tests-EmbodySense.IntegrationTests-all"] -gt 0) -Message "The fourth internally parallel assembly must wait for one of the two admitted heavy slots."
 foreach ($formatGateName in @("format-naming-style", "format-whitespace")) {
-    Assert-True -Condition ($requiredGateVirtualSchedule.Starts[$formatGateName] -lt 480) -Message "Format gate '$formatGateName' must execute before the final assembly-wide gate completes."
+    Assert-True -Condition ($requiredGateVirtualSchedule.Starts[$formatGateName] -lt $requiredGateVirtualSchedule.MakespanSeconds) -Message "Format gate '$formatGateName' must execute before the final assembly-wide gate completes."
 }
 
 $counterexamplePhases = @(

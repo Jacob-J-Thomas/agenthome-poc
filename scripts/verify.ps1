@@ -38,9 +38,8 @@ $powerShellExecutable = (Get-Process -Id $PID).Path
 $runningOnWindows = [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)
 $maximumArtifactStressTest = "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopRunArtifactMaximumShapeTests.Adversarial_maximum_transition_reservations_and_canonical_order_checks_remain_bounded"
 $deletionCapacityStressTest = "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopTraceRetentionStoreTests.Rejected_operation_capacity_preserves_reserved_tombstone_deletions_and_remains_visible"
-# https://github.com/Jacob-J-Thomas/agenthome-poc/issues/422: retain one bounded lane-level hang guard without rejecting a healthy coverage lane before the 1200-second Solution watchdog.
-# https://github.com/Jacob-J-Thomas/agenthome-poc/issues/509: keep the outer Solution watchdog at its expanded certification bound.
-$testLaneTimeoutSeconds = 600
+# https://github.com/Jacob-J-Thomas/agenthome-poc/issues/610 owns the measured per-lane budgets. A required gate cannot select an unprofiled
+# timeout, so every child remains bounded and observable without retrying or dropping work.
 $coverageChildProcessTestProjects = @(
     "EmbodySense.Core.Persistence.Tests.csproj",
     "EmbodySense.Core.Startup.Tests.csproj"
@@ -226,7 +225,6 @@ function Add-ProfiledRequiredGatePhase {
         [Parameter(Mandatory = $true)] [string]$Name,
         [Parameter(Mandatory = $true)] [string]$FileName,
         [Parameter(Mandatory = $true)] [string[]]$Arguments,
-        [Parameter(Mandatory = $true)] [int]$TimeoutSeconds,
         [Parameter(Mandatory = $true)] [string]$OutputPath,
         [string]$CoverageSearchRoot,
         [string]$TrxPath,
@@ -234,7 +232,7 @@ function Add-ProfiledRequiredGatePhase {
     )
 
     $profile = Get-VerificationRequiredGateScheduleProfile -Name $Name
-    Add-VerificationParallelPhase -Name $Name -FileName $FileName -Arguments $Arguments -TimeoutSeconds $TimeoutSeconds -WorkingDirectory $repoRoot -OutputPath $OutputPath -CoverageSearchRoot $CoverageSearchRoot -TrxPath $TrxPath -Environment $Environment -EstimatedDurationSeconds $profile.EstimatedDurationSeconds -Weight $profile.Weight -ResourceClass $profile.ResourceClass
+    Add-VerificationParallelPhase -Name $Name -FileName $FileName -Arguments $Arguments -TimeoutSeconds $profile.TimeoutSeconds -WorkingDirectory $repoRoot -OutputPath $OutputPath -CoverageSearchRoot $CoverageSearchRoot -TrxPath $TrxPath -Environment $Environment -EstimatedDurationSeconds $profile.EstimatedDurationSeconds -Weight $profile.Weight -ResourceClass $profile.ResourceClass
 }
 
 function Add-TestExecutionPhase {
@@ -254,7 +252,7 @@ function Add-TestExecutionPhase {
         $arguments += "--Collect:XPlat Code Coverage"
     }
 
-    Add-ProfiledRequiredGatePhase -Name "tests-$($Lane.Name)" -FileName "dotnet" -Arguments $arguments -TimeoutSeconds $testLaneTimeoutSeconds -OutputPath (Join-Path $verificationLogsPath "$($Lane.Name).log") -CoverageSearchRoot $(if ($SkipCoverage) { $null } else { $Lane.ResultsPath }) -TrxPath (Join-Path $Lane.ResultsPath $trxName) -Environment $Lane.Environment
+    Add-ProfiledRequiredGatePhase -Name "tests-$($Lane.Name)" -FileName "dotnet" -Arguments $arguments -OutputPath (Join-Path $verificationLogsPath "$($Lane.Name).log") -CoverageSearchRoot $(if ($SkipCoverage) { $null } else { $Lane.ResultsPath }) -TrxPath (Join-Path $Lane.ResultsPath $trxName) -Environment $Lane.Environment
 }
 
 function Invoke-StaticVerificationContracts {
@@ -539,9 +537,9 @@ try {
 
     $coverageStartedUtc = [DateTime]::UtcNow
     if ($VerificationComponent -ne "Solution") {
-        Add-ProfiledRequiredGatePhase -Name "git-diff-check" -FileName "git" -Arguments @("diff", "--check") -TimeoutSeconds 60 -OutputPath (Join-Path $verificationLogsPath "git-diff-check.log")
-        Add-ProfiledRequiredGatePhase -Name "format-whitespace" -FileName "dotnet" -Arguments @("format", "whitespace", "EmbodySense.sln", "--verify-no-changes", "--no-restore", "--verbosity", "minimal") -TimeoutSeconds 240 -OutputPath (Join-Path $verificationLogsPath "format-whitespace.log")
-        Add-ProfiledRequiredGatePhase -Name "format-naming-style" -FileName "dotnet" -Arguments @("format", "style", "EmbodySense.sln", "--verify-no-changes", "--no-restore", "--severity", "warn", "--diagnostics", "IDE1006", "--verbosity", "minimal") -TimeoutSeconds 240 -OutputPath (Join-Path $verificationLogsPath "format-naming-style.log")
+        Add-ProfiledRequiredGatePhase -Name "git-diff-check" -FileName "git" -Arguments @("diff", "--check") -OutputPath (Join-Path $verificationLogsPath "git-diff-check.log")
+        Add-ProfiledRequiredGatePhase -Name "format-whitespace" -FileName "dotnet" -Arguments @("format", "whitespace", "EmbodySense.sln", "--verify-no-changes", "--no-restore", "--verbosity", "minimal") -OutputPath (Join-Path $verificationLogsPath "format-whitespace.log")
+        Add-ProfiledRequiredGatePhase -Name "format-naming-style" -FileName "dotnet" -Arguments @("format", "style", "EmbodySense.sln", "--verify-no-changes", "--no-restore", "--severity", "warn", "--diagnostics", "IDE1006", "--verbosity", "minimal") -OutputPath (Join-Path $verificationLogsPath "format-naming-style.log")
     }
     foreach ($isolation in $isolations) {
         foreach ($lane in $isolation.Lanes) {

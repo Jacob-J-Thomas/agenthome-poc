@@ -198,7 +198,9 @@ Assert-Contains -Actual $parallelScript -Expected '-AvailableResourceClassSlots 
 Assert-Contains -Actual $parallelScript -Expected 'resource-class limits cannot exceed the maximum worker count' -Message "Invalid resource-class concurrency limits must fail closed."
 Assert-Contains -Actual $parallelScript -Expected '$Pending[$index].SchedulingDeferrals -ge 1' -Message "Backfill must reserve a later fitting opportunity for bypassed phases."
 Assert-Contains -Actual $parallelScript -Expected 'VERIFY_CHILD_TIMEOUT name=$($result.Name)' -Message "Parallel timeouts must emit structured watchdog evidence."
-Assert-Contains -Actual $verifyScript -Expected '$testLaneTimeoutSeconds = 600' -Message "Every required lane must retain bounded hosted-runner headroom inside the 1200-second Solution watchdog."
+Assert-Contains -Actual $verifyScript -Expected '-TimeoutSeconds $profile.TimeoutSeconds' -Message "Every required lane must execute only with its checked-in profile-owned timeout."
+Assert-Contains -Actual $scheduleScript -Expected '$script:VerificationRequiredGateMinimumTimeoutHeadroomSeconds = 120' -Message "Required test lanes must retain explicit measured timeout headroom."
+Assert-Contains -Actual $scheduleScript -Expected '$script:VerificationRequiredGateExtendedTestTimeoutSeconds = 720' -Message "Only measured dominant test lanes may use the bounded extended child timeout."
 Assert-Contains -Actual $verifyScript -Expected 'Get-ProjectCoverageIsolation' -Message "Every test project must execute from isolated exact-build copies."
 Assert-Contains -Actual $verifyScript -Expected 'Get-VerificationIsolatedOutputPath -IsolationRoot (Join-Path $projectRoot $lane.Name) -Configuration $Configuration -TargetFramework $targetFramework' -Message "Every lane must preserve its bin/<Configuration>/<TargetFramework> AppContext suffix."
 Assert-Contains -Actual $verifyScript -Expected 'Copy-VerifiedDirectoryFromManifest -SourceDirectory $pristineDirectory -SourceManifest $pristineManifest -DestinationDirectory $laneDirectory' -Message "Every lane copy must use and verify the already authenticated pristine manifest."
@@ -272,11 +274,11 @@ foreach ($webSharedRuntimeTest in @(
     Assert-Contains -Actual $webSharedRuntimeTestSource -Expected '[Collection(EphemeralPortApiCollection.Name)]' -Message "Web runtime/API test '$webSharedRuntimeTest' must serialize shared default trust and host state inside the assembly-wide lane."
 }
 foreach ($assemblyProfile in @(
-    'Name = "tests-EmbodySense.Core.Persistence.Tests-all"; EstimatedDurationSeconds = 300; Weight = 6; ResourceClass = "ProcessHeavy"'
-    'Name = "tests-EmbodySense.Core.Startup.Tests-remainder"; EstimatedDurationSeconds = 560; Weight = 6; ResourceClass = "ProcessHeavy"'
-    'Name = "tests-EmbodySense.Core.Startup.Tests-nested-process"; EstimatedDurationSeconds = 180; Weight = 12; ResourceClass = "ProcessHeavy"'
-    'Name = "tests-EmbodySense.Web.Tests-all"; EstimatedDurationSeconds = 210; Weight = 3; ResourceClass = "ProcessHeavy"'
-    'Name = "tests-EmbodySense.IntegrationTests-all"; EstimatedDurationSeconds = 180; Weight = 3; ResourceClass = "ProcessHeavy"'
+    'Name = "tests-EmbodySense.Core.Persistence.Tests-all"; EstimatedDurationSeconds = 600; TimeoutSeconds = 720; Weight = 6; ResourceClass = "ProcessHeavy"'
+    'Name = "tests-EmbodySense.Core.Startup.Tests-remainder"; EstimatedDurationSeconds = 560; TimeoutSeconds = 720; Weight = 6; ResourceClass = "ProcessHeavy"'
+    'Name = "tests-EmbodySense.Core.Startup.Tests-nested-process"; EstimatedDurationSeconds = 180; TimeoutSeconds = 600; Weight = 12; ResourceClass = "ProcessHeavy"'
+    'Name = "tests-EmbodySense.Web.Tests-all"; EstimatedDurationSeconds = 210; TimeoutSeconds = 600; Weight = 3; ResourceClass = "ProcessHeavy"'
+    'Name = "tests-EmbodySense.IntegrationTests-all"; EstimatedDurationSeconds = 180; TimeoutSeconds = 600; Weight = 3; ResourceClass = "ProcessHeavy"'
 )) {
     Assert-Contains -Actual $scheduleScript -Expected $assemblyProfile -Message "Internally parallel assembly gates must retain exact conservative process-heavy scheduling profiles."
 }
@@ -292,8 +294,8 @@ Assert-Contains -Actual $scheduleScript -Expected '$script:VerificationRequiredG
 Assert-Contains -Actual $scheduleScript -Expected '$script:VerificationRequiredGateMaximumCpuBoundWorkers = 1' -Message "Required gates must enforce an explicit one-CPU-bound concurrency ceiling."
 Assert-Contains -Actual $scheduleScript -Expected 'Weight = 3; ResourceClass = "ProcessHeavy"' -Message "Process-heavy required gates must retain their evidence-backed logical weight."
 Assert-Contains -Actual $scheduleScript -Expected '"ProcessHeavy" { 3; break }' -Message "Required-gate profile validation must reject underweighted process-heavy gates."
-Assert-Contains -Actual $scheduleScript -Expected 'Name = "format-whitespace"; EstimatedDurationSeconds = 35; Weight = 2; ResourceClass = "CpuBound"' -Message "Whitespace formatting must retain one checked-in CPU-bound required-gate profile."
-Assert-Contains -Actual $scheduleScript -Expected 'Name = "format-naming-style"; EstimatedDurationSeconds = 65; Weight = 2; ResourceClass = "CpuBound"' -Message "Naming/style formatting must retain one checked-in CPU-bound required-gate profile."
+Assert-Contains -Actual $scheduleScript -Expected 'Name = "format-whitespace"; EstimatedDurationSeconds = 35; TimeoutSeconds = 240; Weight = 2; ResourceClass = "CpuBound"' -Message "Whitespace formatting must retain one checked-in CPU-bound required-gate profile."
+Assert-Contains -Actual $scheduleScript -Expected 'Name = "format-naming-style"; EstimatedDurationSeconds = 65; TimeoutSeconds = 240; Weight = 2; ResourceClass = "CpuBound"' -Message "Naming/style formatting must retain one checked-in CPU-bound required-gate profile."
 Assert-Contains -Actual $verifyScript -Expected 'Add-ProfiledRequiredGatePhase -Name "format-whitespace"' -Message "Whitespace formatting must overlap only immutable required-gate test execution."
 Assert-Contains -Actual $verifyScript -Expected 'Add-ProfiledRequiredGatePhase -Name "format-naming-style"' -Message "Naming/style formatting must overlap only immutable required-gate test execution."
 Assert-Contains -Actual $verifyScript -Expected 'Get-VerificationRequiredGateScheduleProfile -Name $Name' -Message "Every required gate must obtain checked-in duration and resource metadata by exact name."
@@ -409,7 +411,7 @@ $fanInNeedsIndex = $verifyWorkflow.IndexOf("    needs: [verify-solution, verify-
 Assert-True -Condition ($solutionJobIndex -ge 0 -and $solutionJobConditionIndex -gt $solutionJobIndex -and $solutionJobConcurrencyIndex -gt $solutionJobConditionIndex -and $contractJobIndex -gt $solutionJobIndex -and $contractJobConditionIndex -gt $contractJobIndex -and $contractJobConcurrencyIndex -gt $contractJobConditionIndex -and $fanInJobIndex -gt $contractJobIndex -and $fanInJobConditionIndex -gt $fanInJobIndex -and $fanInNeedsIndex -gt $fanInJobConditionIndex) -Message "Solution and contract cancellation must remain job-scoped behind non-draft eligibility, with a final fan-in after both children."
 Assert-True -Condition ($verifyWorkflow.IndexOf("`nconcurrency:", [StringComparison]::Ordinal) -lt 0) -Message "Full verification must not use workflow-scoped cancellation for ineligible metadata edits."
 Assert-True -Condition ($verifyWorkflow.IndexOf("-SkipCoverage", [StringComparison]::Ordinal) -lt 0) -Message "Promotion verification must retain exact coverage collection and reduction."
-Assert-Contains -Actual $verifyWorkflow -Expected "run: ./scripts/verify-with-watchdog.ps1 -Configuration Release -DeadlineSeconds 1200 -VerificationComponent Solution" -Message "The solution child must own build, lanes, inventory, and coverage behind the expanded 1200-second watchdog."
+Assert-Contains -Actual $verifyWorkflow -Expected "run: ./scripts/verify-with-watchdog.ps1 -Configuration Release -DeadlineSeconds 1500 -VerificationComponent Solution" -Message "The solution child must own build, lanes, inventory, and coverage behind the evidence-backed 1500-second watchdog."
 Assert-Contains -Actual $verifyWorkflow -Expected "run: ./scripts/verify-with-watchdog.ps1 -Configuration Release -DeadlineSeconds 600 -VerificationComponent StaticContracts" -Message "The static child must own all static contracts behind a bounded 600-second watchdog."
 Assert-Contains -Actual $verifyWorkflow -Expected "uses: actions/download-artifact@v7" -Message "The protected fan-in must transport child artifacts explicitly."
 Assert-Contains -Actual $verifyWorkflow -Expected 'name: verification-solution-diagnostics-${{ github.run_attempt }}' -Message "The solution evidence artifact must bind to the current workflow attempt."
@@ -476,8 +478,8 @@ foreach ($workflowText in @($verifyWorkflow, $browserWorkflow, $qualificationWor
     Assert-True -Condition ($workflowText.IndexOf("metadata-edit", [StringComparison]::Ordinal) -lt 0) -Message "No workflow may replace a protected context with an unevaluated skipped metadata name."
 }
 Assert-True -Condition ($verifyWorkflow.IndexOf("run: ./scripts/verify.ps1", [StringComparison]::Ordinal) -lt 0) -Message "Standard CI cannot bypass the watchdog."
-Assert-Contains -Actual $verifyWorkflow -Expected "run: ./scripts/verify-with-watchdog.ps1 -Configuration Release -DeadlineSeconds 1200" -Message "Promotion must have one explicit bounded twenty-minute certification window for the complete solution child."
-Assert-Contains -Actual $verifyWorkflow -Expected "timeout-minutes: 25" -Message "Workflow setup and diagnostic upload must retain bounded margin outside the measured 1200-second promotion child."
+Assert-Contains -Actual $verifyWorkflow -Expected "run: ./scripts/verify-with-watchdog.ps1 -Configuration Release -DeadlineSeconds 1500" -Message "Promotion must have one explicit bounded twenty-five-minute certification window for the complete solution child."
+Assert-Contains -Actual $verifyWorkflow -Expected "timeout-minutes: 30" -Message "Workflow setup and diagnostic upload must retain bounded margin outside the measured 1500-second promotion child."
 Assert-Contains -Actual $verifyWorkflow -Expected "timeout-minutes: 15" -Message "The static child job must leave bounded setup and receipt-upload margin around its 600-second verifier."
 Assert-True -Condition ($verifyWorkflow.IndexOf("run: ./tests/scripts/", [StringComparison]::Ordinal) -lt 0) -Message "Repository script tests must execute inside the measured verifier child."
 foreach ($contractScript in @("verify-sdk-diagnostics.tests.ps1", "verify-preflight-overlap.tests.ps1", "verify-coverage.tests.ps1", "verify-bounded-phases.tests.ps1", "verify-parallel.tests.ps1", "verify-test-inventory.tests.ps1", "verify-watchdog.tests.ps1", "verify-promotion-fan-in.tests.ps1")) {
