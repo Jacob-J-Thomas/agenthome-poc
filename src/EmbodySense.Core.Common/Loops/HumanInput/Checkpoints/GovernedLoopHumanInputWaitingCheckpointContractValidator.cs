@@ -307,9 +307,9 @@ public static class GovernedLoopHumanInputWaitingCheckpointContractValidator
                 Add(errors, "invalid_answer_evidence", "$.evidence[1]", "Answer evidence must be a privacy-safe exact selection for this request inside its response window.");
             }
         }
-        if (posture == GovernedLoopHumanInputWaitingCheckpointPosture.Expired && evidence[1] is { } expired && expired.OccurredAtUtc < request.Timing.ExpiresAtUtc)
+        if (posture == GovernedLoopHumanInputWaitingCheckpointPosture.Expired && evidence[1] is { } expired && expired.OccurredAtUtc <= request.Timing.ExpiresAtUtc)
         {
-            Add(errors, "expired_before_deadline", "$.evidence[1].occurredAtUtc", "Expired posture may be recorded only at or after the exact request deadline.");
+            Add(errors, "expired_at_or_before_deadline", "$.evidence[1].occurredAtUtc", "Expired posture may be recorded only strictly after the inclusive response endpoint.");
         }
         if ((posture is GovernedLoopHumanInputWaitingCheckpointPosture.Cancelled or GovernedLoopHumanInputWaitingCheckpointPosture.Superseded) && evidence[1] is { } terminal && terminal.OccurredAtUtc > request.Timing.ExpiresAtUtc)
         {

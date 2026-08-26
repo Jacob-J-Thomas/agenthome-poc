@@ -35,6 +35,20 @@ public sealed class GovernedLoopHumanInputWaitingCheckpointContractTests
     }
 
     [Fact]
+    public void Expiration_requires_evidence_strictly_after_the_inclusive_response_endpoint()
+    {
+        var pending = GovernedLoopHumanInputWaitingCheckpointTestData.Pending();
+        var expired = GovernedLoopHumanInputWaitingCheckpointTestData.Expired(pending);
+        var atEndpointEvidence = GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(expired.Evidence[1] with { OccurredAtUtc = pending.Request.Timing.ExpiresAtUtc });
+        var atEndpoint = GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(new GovernedLoopHumanInputWaitingCheckpoint(1, pending.Binding, pending.NodeConfiguration, pending.Request, GovernedLoopHumanInputWaitingCheckpointPosture.Expired, [pending.Evidence[0], atEndpointEvidence], string.Empty));
+
+        Assert.True(GovernedLoopHumanInputWaitingCheckpointContractValidator.Validate(expired).IsValid);
+        Assert.True(GovernedLoopHumanInputWaitingCheckpointStateTransitionValidator.ValidateTransition(pending, expired).IsValid);
+        Assert.Contains(GovernedLoopHumanInputWaitingCheckpointContractValidator.Validate(atEndpoint).Errors, error => error.Code == "expired_at_or_before_deadline");
+        Assert.False(GovernedLoopHumanInputWaitingCheckpointStateTransitionValidator.ValidateTransition(pending, atEndpoint).IsValid);
+    }
+
+    [Fact]
     public void Canonical_json_restarts_exactly_and_rejects_unknown_malformed_or_noncanonical_artifacts()
     {
         var checkpoint = GovernedLoopHumanInputWaitingCheckpointTestData.Terminal();

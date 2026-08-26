@@ -115,7 +115,7 @@ internal static class GovernedLoopHumanInputWaitingCheckpointTestData
     internal static GovernedLoopHumanInputWaitingCheckpoint Expired(GovernedLoopHumanInputWaitingCheckpoint? pending = null)
     {
         var previous = pending ?? Pending();
-        var expired = Evidence(2, GovernedLoopHumanInputWaitingCheckpointEvidenceKind.Expired, previous.Request.Timing.ExpiresAtUtc, null, null, null, null, null, previous.Evidence[0].EvidenceHash);
+        var expired = Evidence(2, GovernedLoopHumanInputWaitingCheckpointEvidenceKind.Expired, previous.Request.Timing.ExpiresAtUtc.AddTicks(1), null, null, null, null, null, previous.Evidence[0].EvidenceHash);
         return Checkpoint(previous, GovernedLoopHumanInputWaitingCheckpointPosture.Expired, [previous.Evidence[0], expired]);
     }
 
