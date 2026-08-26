@@ -228,8 +228,8 @@ function Assert-VerificationRequiredGateSchedule {
 
     foreach ($phase in $Phases) {
         $profile = Get-VerificationRequiredGateScheduleProfile -Name $phase.Name
-        if ($phase.EstimatedDurationSeconds -ne $profile.EstimatedDurationSeconds -or $phase.Weight -ne $profile.Weight -or $phase.ResourceClass -cne $profile.ResourceClass) {
-            throw "Required verification gate '$($phase.Name)' does not match its checked-in duration and resource profile."
+        if ($phase.EstimatedDurationSeconds -ne $profile.EstimatedDurationSeconds -or $phase.TimeoutSeconds -ne $profile.TimeoutSeconds -or $phase.Weight -ne $profile.Weight -or $phase.ResourceClass -cne $profile.ResourceClass) {
+            throw "Required verification gate '$($phase.Name)' does not match its checked-in duration, timeout, and resource profile."
         }
     }
 }

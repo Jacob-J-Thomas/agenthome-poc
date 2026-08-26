@@ -117,6 +117,7 @@ Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTest
 Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers 6 -HardwareProcessorCount 2) -eq 2) -Message "A smaller host must reduce required-gate workers to its physical processor count."
 Assert-True -Condition ($requiredGateProfiles.Count -eq 13) -Message "The exact nine-project inventory, ten execution lanes, two format gates, and git-diff gate must have checked-in duration/resource profiles."
 Assert-True -Condition (@($requiredGateProfiles | Group-Object Name -CaseSensitive | Where-Object Count -ne 1).Count -eq 0) -Message "Required gate scheduling profiles must have exact unique names."
+Assert-True -Condition (@($requiredGateProfiles | Where-Object { $null -eq $_.PSObject.Properties["TimeoutSeconds"] }).Count -eq 0) -Message "Every required-gate phase profile must carry its explicit child timeout."
 Assert-VerificationRequiredGateSchedule -Phases $requiredGateProfiles
 $expectedRequiredGateNames = @(
     "format-naming-style"
@@ -264,6 +265,24 @@ try {
 }
 catch {
     Assert-Contains -Actual $_.Exception.Message -Expected "unexpected_profiles=[" -Message "A profile without a current declared gate must fail closed."
+}
+
+$mismatchedTimeoutPhases = @($declaredRequiredGateProfiles | ForEach-Object {
+    [pscustomobject]@{
+        Name = $_.Name
+        EstimatedDurationSeconds = $_.EstimatedDurationSeconds
+        TimeoutSeconds = $_.TimeoutSeconds
+        Weight = $_.Weight
+        ResourceClass = $_.ResourceClass
+    }
+})
+$mismatchedTimeoutPhases[0].TimeoutSeconds = $mismatchedTimeoutPhases[0].TimeoutSeconds - 1
+try {
+    Assert-VerificationRequiredGateSchedule -Phases $mismatchedTimeoutPhases
+    throw "Expected mismatched required-gate timeout failure."
+}
+catch {
+    Assert-Contains -Actual $_.Exception.Message -Expected "does not match its checked-in duration, timeout, and resource profile" -Message "A required gate with a caller-substituted timeout must fail closed."
 }
 
 try {
