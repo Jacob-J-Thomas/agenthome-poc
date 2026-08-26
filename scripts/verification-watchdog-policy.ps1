@@ -2,6 +2,7 @@ Set-StrictMode -Version Latest
 
 $script:VerificationQualificationWatchdogDeadlineSeconds = 480
 $script:VerificationStaticContractsWatchdogDeadlineSeconds = 600
+$script:VerificationFullWatchdogMaximumDeadlineSeconds = 1200
 $script:VerificationSolutionWatchdogDeadlineSeconds = 1500
 
 function Assert-VerificationWatchdogDeadlineContract {
@@ -33,8 +34,8 @@ function Assert-VerificationWatchdogDeadlineContract {
         "Full" { $null; break }
     }
     if ($null -eq $expectedDeadlineSeconds) {
-        if ($DeadlineSeconds -lt 1 -or $DeadlineSeconds -gt $script:VerificationSolutionWatchdogDeadlineSeconds) {
-            throw "Full verification requires a watchdog deadline between 1 and $script:VerificationSolutionWatchdogDeadlineSeconds seconds."
+        if ($DeadlineSeconds -lt 1 -or $DeadlineSeconds -gt $script:VerificationFullWatchdogMaximumDeadlineSeconds) {
+            throw "Full verification requires a watchdog deadline between 1 and $script:VerificationFullWatchdogMaximumDeadlineSeconds seconds."
         }
         return
     }
