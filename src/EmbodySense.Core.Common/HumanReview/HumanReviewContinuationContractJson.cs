@@ -51,13 +51,13 @@ public static class HumanReviewContinuationContractJson
         return false;
     }
 
-    /// <summary>Parses only the closed canonical schema-1 continuation state shape, rejecting unknown, duplicate, missing, malformed, or forward-versioned fields.</summary>
+    /// <summary>Parses only the exact canonical schema-1 continuation state representation, rejecting semantic-but-noncanonical JSON such as reordered properties, whitespace, alternate escapes, numeric lexemes, unknown fields, duplicates, missing fields, malformed content, or forward versions.</summary>
     /// <param name="request">The exact request that must bind the parsed state.</param>
     /// <param name="reservation">The exact approved continuation reservation that must bind the parsed state.</param>
     /// <param name="json">The candidate continuation JSON.</param>
     /// <param name="state">The detached validated state when parsing succeeds.</param>
     /// <param name="validation">The structured parse or contract validation failures.</param>
-    /// <returns><see langword="true"/> when parsing and validation succeed; otherwise, <see langword="false"/>.</returns>
+    /// <returns><see langword="true"/> when parsing, snapshot validation, and exact canonical representation checks succeed; otherwise, <see langword="false"/>.</returns>
     public static bool TryDeserializeState(HumanReviewRequest? request, HumanReviewContinuationReservation? reservation, string? json, out HumanReviewContinuationState? state, out HumanReviewContractValidationResult validation)
     {
         state = null;
@@ -77,9 +77,10 @@ public static class HumanReviewContinuationContractJson
                 validation = new HumanReviewContractValidationResult(errors);
                 return false;
             }
-            validation = HumanReviewContinuationContractValidator.ValidateState(request, reservation, parsed);
-            if (!validation.IsValid) return false;
-            state = parsed;
+            if (!HumanReviewContinuationContractSnapshot.TryCaptureState(request, reservation, parsed, out var snapshot, out validation)) return false;
+            if (!TrySerializeState(request, reservation, snapshot, out var canonical, out validation)) return false;
+            if (!RequireCanonical(json, canonical!, ref state, out validation)) return false;
+            state = snapshot;
             return true;
         }
         catch (JsonException exception)
@@ -421,6 +422,7 @@ public static class HumanReviewContinuationContractJson
     {
         var property = value.GetProperty(propertyName);
         if (property.ValueKind == JsonValueKind.Number && property.TryGetInt32(out var number)) return number;
+        if (property.ValueKind == JsonValueKind.Number && property.TryGetDecimal(out var decimalNumber) && decimal.Truncate(decimalNumber) == decimalNumber && decimalNumber >= int.MinValue && decimalNumber <= int.MaxValue) return (int)decimalNumber;
         Add(errors, "invalid_json_number", path + "." + propertyName, "An Int32 JSON number is required.");
         return 0;
     }
@@ -429,6 +431,7 @@ public static class HumanReviewContinuationContractJson
     {
         var property = value.GetProperty(propertyName);
         if (property.ValueKind == JsonValueKind.Number && property.TryGetInt64(out var number)) return number;
+        if (property.ValueKind == JsonValueKind.Number && property.TryGetDecimal(out var decimalNumber) && decimal.Truncate(decimalNumber) == decimalNumber && decimalNumber >= long.MinValue && decimalNumber <= long.MaxValue) return (long)decimalNumber;
         Add(errors, "invalid_json_number", path + "." + propertyName, "An Int64 JSON number is required.");
         return 0;
     }
@@ -451,4 +454,15 @@ public static class HumanReviewContinuationContractJson
 
     private static void Add(List<HumanReviewContractValidationError> errors, string code, string path, string message) => errors.Add(new HumanReviewContractValidationError(code, path, message));
     private static HumanReviewContractValidationResult Invalid(string code, string path, string message) => new([new HumanReviewContractValidationError(code, path, message)]);
+    private static bool RequireCanonical(string input, string canonical, ref HumanReviewContinuationState? state, out HumanReviewContractValidationResult validation)
+    {
+        if (string.Equals(input, canonical, StringComparison.Ordinal))
+        {
+            validation = new HumanReviewContractValidationResult([]);
+            return true;
+        }
+        state = null;
+        validation = Invalid("noncanonical_continuation_json", "$", "Continuation JSON must exactly match the canonical schema-1 serialization.");
+        return false;
+    }
 }

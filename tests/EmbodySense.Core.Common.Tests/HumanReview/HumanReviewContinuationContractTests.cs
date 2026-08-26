@@ -136,14 +136,18 @@ public sealed class HumanReviewContinuationContractTests
         var wake = Wake(request, reservation);
         var altered = HumanReviewContinuationContractHash.ApplyWake(wake with { ExpiresAtUtc = wake.ExpiresAtUtc.AddMinutes(1), Provenance = Provenance("wake-altered", wake.PublishedAtUtc), WakeHash = string.Empty });
         var claim = Claim(wake, reservation);
-        var second = HumanReviewContinuationContractHash.ApplyClaim(claim with { ClaimId = "claim-two", ClaimedAtUtc = claim.LeaseExpiresAtUtc, LeaseExpiresAtUtc = claim.LeaseExpiresAtUtc.AddMinutes(1), Provenance = Provenance("claim-two", claim.LeaseExpiresAtUtc), ClaimHash = string.Empty });
+        var secondClaimedAtUtc = claim.LeaseExpiresAtUtc.AddTicks(1);
+        var second = HumanReviewContinuationContractHash.ApplyClaim(claim with { ClaimId = "claim-two", ClaimedAtUtc = secondClaimedAtUtc, LeaseExpiresAtUtc = secondClaimedAtUtc.AddMinutes(1), Provenance = Provenance("claim-two", secondClaimedAtUtc), ClaimHash = string.Empty });
         var firstState = HumanReviewContinuationContractHash.ApplyState(new HumanReviewContinuationState(1, wake, [claim, second], null, null, string.Empty));
         var reversed = HumanReviewContinuationContractHash.ApplyState(firstState with { Claims = [second, claim], StateHash = string.Empty });
+        var reversedValidation = HumanReviewContinuationContractValidator.ValidateState(request, reservation, reversed);
 
         Assert.Equal(HumanReviewContinuationReplayDisposition.ExactReplay, HumanReviewContinuationReplayClassifier.ClassifyWake(wake, wake with { }));
         Assert.Equal(HumanReviewContinuationReplayDisposition.DivergentReuse, HumanReviewContinuationReplayClassifier.ClassifyWake(wake, altered));
+        Assert.True(HumanReviewContinuationContractValidator.ValidateState(request, reservation, firstState).IsValid);
         Assert.NotEqual(firstState.StateHash, reversed.StateHash);
-        Assert.False(HumanReviewContinuationContractValidator.ValidateState(request, reservation, reversed).IsValid);
+        Assert.False(reversedValidation.IsValid);
+        Assert.Contains(reversedValidation.Errors, error => error.Code == "claim_takeover_before_expiry");
     }
 
     [Fact]
@@ -199,7 +203,7 @@ public sealed class HumanReviewContinuationContractTests
     }
 
     [Fact]
-    public void Strict_schema_one_json_round_trips_and_rejects_unknown_duplicate_missing_enum_and_forward_version_fields()
+    public void Strict_schema_one_json_round_trips_only_in_its_exact_canonical_representation_and_rejects_contract_mutations()
     {
         var request = HumanReviewTestData.Request();
         var reservation = Reservation(request);
@@ -212,7 +216,24 @@ public sealed class HumanReviewContinuationContractTests
         Assert.True(serialization.IsValid);
         Assert.True(HumanReviewContinuationContractJson.TryDeserializeState(request, reservation, json, out var restored, out var roundTrip));
         Assert.True(roundTrip.IsValid);
+        Assert.NotSame(state, restored);
         Assert.Equal(HumanReviewContinuationReplayDisposition.ExactReplay, HumanReviewContinuationReplayClassifier.ClassifyState(state, restored));
+        var reordered = json!.Replace($",\"schemaVersion\":1,\"stateHash\":\"{state.StateHash}\"", $",\"stateHash\":\"{state.StateHash}\",\"schemaVersion\":1", StringComparison.Ordinal);
+        var whitespace = json.Replace("{", "{ ", StringComparison.Ordinal);
+        var alternateEscape = json.Replace("wake-one", "wake\\u002done", StringComparison.Ordinal);
+        var alternateNumber = json.Replace("\"schemaVersion\":1", "\"schemaVersion\":1.0", StringComparison.Ordinal);
+        Assert.False(HumanReviewContinuationContractJson.TryDeserializeState(request, reservation, reordered, out var reorderedState, out var reorderedValidation));
+        Assert.Null(reorderedState);
+        Assert.Contains(reorderedValidation.Errors, error => error.Code == "noncanonical_continuation_json");
+        Assert.False(HumanReviewContinuationContractJson.TryDeserializeState(request, reservation, whitespace, out var whitespaceState, out var whitespaceValidation));
+        Assert.Null(whitespaceState);
+        Assert.Contains(whitespaceValidation.Errors, error => error.Code == "noncanonical_continuation_json");
+        Assert.False(HumanReviewContinuationContractJson.TryDeserializeState(request, reservation, alternateEscape, out var alternateEscapeState, out var alternateEscapeValidation));
+        Assert.Null(alternateEscapeState);
+        Assert.Contains(alternateEscapeValidation.Errors, error => error.Code == "noncanonical_continuation_json");
+        Assert.False(HumanReviewContinuationContractJson.TryDeserializeState(request, reservation, alternateNumber, out var alternateNumberState, out var alternateNumberValidation));
+        Assert.Null(alternateNumberState);
+        Assert.Contains(alternateNumberValidation.Errors, error => error.Code == "noncanonical_continuation_json");
         Assert.False(HumanReviewContinuationContractJson.TryDeserializeState(request, reservation, json![..^1] + ",\"unknown\":true}", out _, out var unknown));
         Assert.Contains(unknown.Errors, error => error.Code == "unknown_json_property");
         Assert.False(HumanReviewContinuationContractJson.TryDeserializeState(request, reservation, json[..^1] + ",\"schemaVersion\":1}", out _, out var duplicate));
