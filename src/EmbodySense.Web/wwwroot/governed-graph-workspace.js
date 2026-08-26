@@ -62,15 +62,23 @@ export function createGovernedGraphWorkspace({
   operationId,
   runtimeCatalog,
   invokePublishedGraph,
+  retryWorkspaceHydration = null,
 }) {
   const elements = bindElements(document);
   let catalog = null;
   let aggregate = null;
   let graph = null;
+  let durableGraphSelection = null;
   let selectedNodeId = null;
   let errors = [];
   let outcome = "";
   let active = false;
+  let authoritativeHydrationStale = true;
+  let hydrationFailure = "";
+  let graphHydrationGeneration = 0;
+  let activeGraphHydrationGeneration = null;
+  let activeGraphHydrationPromise = null;
+  let interactionEnabled = false;
   let inFlight = false;
   let dirty = false;
   let storageScope = null;
@@ -116,8 +124,11 @@ export function createGovernedGraphWorkspace({
       aggregate = null;
       catalog = null;
       graph = null;
+      durableGraphSelection = null;
       selectedNodeId = null;
       errors = [];
+      authoritativeHydrationStale = true;
+      hydrationFailure = "";
       outcome = "";
       dirty = false;
       routingPreview = null;
@@ -134,8 +145,9 @@ export function createGovernedGraphWorkspace({
     async activate() {
       active = true;
       const activationSelection = restoreSelection();
-      if (!catalog) await refreshCatalog();
       if (pendingMutation) restorePendingCandidate();
+      if (authoritativeHydrationStale || !catalog)
+        return await refresh({ expectedGraphId: activationSelection });
       render();
       // Issue #470: https://github.com/Jacob-J-Thomas/agenthome-poc/issues/470 — only the exact pre-activation selection owns auto-hydration after this await.
       if (
@@ -146,30 +158,107 @@ export function createGovernedGraphWorkspace({
         !graph &&
         !pendingMutation
       )
-        await readGraph(true);
+        return await readGraph(true);
+      return true;
     },
     deactivate() {
       active = false;
+      invalidateGraphHydration();
+      render();
     },
-    async refresh() {
-      if (!active) return;
-      // Follow-up: https://github.com/Jacob-J-Thomas/agenthome-poc/issues/470 tracks making restored graph selection hydration conclusive across session reloads.
-      await refreshCatalog();
-      if (pendingMutation) {
-        outcome =
-          "The exact unresolved graph mutation was restored. Retry it before refreshing durable graph evidence.";
-        render();
-      } else if (elements.graphId.value && !dirty) await readGraph(true);
-      else if (dirty) {
-        outcome =
-          "Authoritative catalog refreshed. Unsaved graph edits remain local until you explicitly reload durable evidence.";
-        render();
+    setInteractive(enabled) {
+      interactionEnabled = Boolean(enabled);
+      render();
+    },
+    markHydrationStale() {
+      authoritativeHydrationStale = true;
+      hydrationFailure = "";
+      invalidateGraphHydration();
+      invalidateGraphRead({ retainPending: true });
+      routingPreviewGeneration++;
+      routingPreview = null;
+      retryPolicyPreview = null;
+      catalog = null;
+      aggregate = null;
+      if (!dirty) {
+        graph = null;
+        selectedNodeId = null;
       }
+      render();
     },
+    refresh,
     isDirty() {
       return dirty || Boolean(pendingMutation);
     },
   });
+
+  async function refresh({ signal = null, expectedGraphId } = {}) {
+    if (!active || signal?.aborted) return false;
+    return await beginGraphHydration((hydrationGeneration) =>
+      refreshAuthoritatively({ signal, expectedGraphId }, hydrationGeneration),
+    );
+  }
+
+  async function beginGraphHydration(hydrate) {
+    if (activeGraphHydrationPromise) return await activeGraphHydrationPromise;
+    const hydrationGeneration = ++graphHydrationGeneration;
+    activeGraphHydrationGeneration = hydrationGeneration;
+    const hydration = hydrate(hydrationGeneration);
+    activeGraphHydrationPromise = hydration;
+    try {
+      return await hydration;
+    } finally {
+      if (activeGraphHydrationGeneration === hydrationGeneration) {
+        activeGraphHydrationGeneration = null;
+        activeGraphHydrationPromise = null;
+        render();
+      }
+    }
+  }
+
+  async function refreshAuthoritatively(
+    { signal = null, expectedGraphId },
+    hydrationGeneration,
+  ) {
+    hydrationFailure = "";
+    render();
+    const catalogHydrated = await refreshCatalog({
+      signal,
+      hydrationGeneration,
+    });
+    if (!catalogHydrated || !ownsGraphHydration(hydrationGeneration, signal))
+      return false;
+    if (pendingMutation) {
+      outcome =
+        "The exact unresolved graph mutation was restored after reconnect. Retry it before refreshing durable graph evidence.";
+      authoritativeHydrationStale = false;
+      render();
+      return true;
+    }
+    const graphId = elements.graphId.value.trim();
+    if (
+      !graphId ||
+      (dirty && durableGraphSelection !== graphId) ||
+      (expectedGraphId !== undefined && graphId !== expectedGraphId)
+    ) {
+      if (dirty)
+        outcome =
+          "Authoritative catalog refreshed. Unsaved graph edits remain local until you explicitly reload durable evidence.";
+      authoritativeHydrationStale = false;
+      render();
+      return true;
+    }
+    const graphHydrated = await readGraph(true, {
+      preserveDraft: dirty,
+      signal,
+      hydrationGeneration,
+    });
+    if (!graphHydrated || !ownsGraphHydration(hydrationGeneration, signal))
+      return false;
+    authoritativeHydrationStale = false;
+    render();
+    return true;
+  }
 
   function bindEvents() {
     elements.newButton.addEventListener("click", startNew);
@@ -192,6 +281,8 @@ export function createGovernedGraphWorkspace({
       renderInvocation();
     });
     elements.graphId.addEventListener("input", () => {
+      if (durableGraphSelection !== elements.graphId.value.trim())
+        durableGraphSelection = null;
       invalidateGraphRead({
         retainPending:
           pendingInvocation?.graphId === elements.graphId.value.trim(),
@@ -243,20 +334,43 @@ export function createGovernedGraphWorkspace({
     elements.connectionTo.addEventListener("change", renderConnections);
   }
 
-  async function refreshCatalog() {
+  async function refreshCatalog({
+    signal = null,
+    hydrationGeneration = null,
+  } = {}) {
+    if (!ownsRequestedGraphHydration(hydrationGeneration, signal)) return false;
     inFlight = true;
     outcome = "Loading the authoritative executable-node and role catalog…";
     render();
     try {
-      catalog = await requestJson("/api/governed-graphs/catalog");
+      const nextCatalog = await requestJson("/api/governed-graphs/catalog", {
+        signal,
+      });
+      if (!ownsRequestedGraphHydration(hydrationGeneration, signal))
+        return false;
+      catalog = nextCatalog;
       outcome = "Authoritative catalog loaded.";
+      return true;
     } catch (error) {
+      if (!ownsRequestedGraphHydration(hydrationGeneration, signal))
+        return false;
       catalog = null;
       outcome = `Graph catalog unavailable: ${error.message}`;
+      if (hydrationGeneration !== null)
+        recordHydrationFailure(
+          `Authoritative governed-graph catalog is unavailable: ${error.message}`,
+          hydrationGeneration,
+        );
+      return false;
     } finally {
-      inFlight = false;
-      render();
-      if (graph) void refreshRoutingPreview();
+      if (
+        hydrationGeneration === null ||
+        activeGraphHydrationGeneration === hydrationGeneration
+      ) {
+        inFlight = false;
+        render();
+        if (graph) void refreshRoutingPreview();
+      }
     }
   }
 
@@ -278,6 +392,7 @@ export function createGovernedGraphWorkspace({
       displayName: elements.displayName.value.trim(),
       defaultModelRoutingPolicy: selectedGraphRoutingPolicy(),
     });
+    durableGraphSelection = null;
     invalidateGraphRead();
     aggregate = null;
     selectedNodeId = null;
@@ -289,18 +404,21 @@ export function createGovernedGraphWorkspace({
     render();
   }
 
-  async function readGraph(silent) {
+  async function readGraph(
+    silent,
+    { preserveDraft = false, signal = null, hydrationGeneration = null } = {},
+  ) {
     if (pendingMutation) {
       outcome =
         "Retry the exact unresolved graph mutation before replacing it with durable evidence.";
       render();
-      return;
+      return false;
     }
     const graphId = elements.graphId.value.trim();
     if (!graphId) {
       outcome = "Enter a canonical graph ID before loading.";
       render();
-      return;
+      return false;
     }
     if (
       !silent &&
@@ -309,7 +427,7 @@ export function createGovernedGraphWorkspace({
         "Discard unsaved governed graph edits and reload durable evidence?",
       )
     )
-      return;
+      return false;
     invalidateInvocation({
       retainPending: pendingInvocation?.graphId === graphId,
     });
@@ -319,8 +437,21 @@ export function createGovernedGraphWorkspace({
     try {
       const read = await requestJson(
         `/api/governed-graphs/detail?graphId=${encodeURIComponent(graphId)}`,
+        { signal },
       );
-      if (!ownsGraphRead(readGeneration, graphId)) return;
+      if (
+        !ownsRequestedGraphHydration(hydrationGeneration, signal) ||
+        !ownsGraphRead(readGeneration, graphId)
+      )
+        return false;
+      durableGraphSelection = graphId;
+      if (preserveDraft) {
+        aggregate = read;
+        syncFieldsFromGraph();
+        outcome =
+          "Authoritative graph evidence refreshed. Unsaved graph edits remain local until you explicitly reload durable evidence.";
+        return true;
+      }
       // Issue #491: https://github.com/Jacob-J-Thomas/agenthome-poc/issues/491 — only the current detail request may replace locally owned graph state.
       aggregate = read;
       graph = candidateFromGraph(currentGraph(read));
@@ -330,16 +461,44 @@ export function createGovernedGraphWorkspace({
       outcome = `Loaded durable ${read.lifecycle?.status ?? "unknown"} lifecycle version ${read.lifecycle?.lifecycleVersion ?? 0}.`;
       syncFieldsFromGraph();
       rememberSelection();
+      return true;
     } catch (error) {
-      if (!ownsGraphRead(readGeneration, graphId)) return;
+      if (
+        !ownsRequestedGraphHydration(hydrationGeneration, signal) ||
+        !ownsGraphRead(readGeneration, graphId)
+      )
+        return false;
+      if (preserveDraft) {
+        if (error.status === 404) {
+          durableGraphSelection = null;
+          aggregate = null;
+          outcome =
+            "Authoritative graph evidence confirms no durable graph has this ID. Unsaved graph edits remain local.";
+          return true;
+        }
+        outcome = `Graph read unavailable: ${error.message}`;
+        if (hydrationGeneration !== null)
+          recordHydrationFailure(
+            `Authoritative governed-graph detail is unavailable: ${error.message}`,
+            hydrationGeneration,
+          );
+        return false;
+      }
       aggregate = null;
       graph = null;
+      if (error.status === 404) durableGraphSelection = null;
       selectedNodeId = null;
       errors = error.payload?.errors ?? [];
       outcome =
         error.status === 404
           ? "No durable governed graph has this ID. Start a new local draft to create it."
           : `Graph read unavailable: ${error.message}`;
+      if (error.status !== 404 && hydrationGeneration !== null)
+        recordHydrationFailure(
+          `Authoritative governed-graph detail is unavailable: ${error.message}`,
+          hydrationGeneration,
+        );
+      return error.status === 404;
     } finally {
       if (activeGraphReadGeneration === readGeneration) {
         activeGraphReadGeneration = null;
@@ -351,12 +510,23 @@ export function createGovernedGraphWorkspace({
   }
 
   async function refreshDurable() {
-    await refreshCatalog();
+    if (!active) return false;
+    return await beginGraphHydration(refreshDurably);
+  }
+
+  async function refreshDurably(hydrationGeneration) {
+    const catalogHydrated = await refreshCatalog({ hydrationGeneration });
+    if (!catalogHydrated || !ownsGraphHydration(hydrationGeneration, null))
+      return false;
     if (pendingMutation) {
       outcome =
         "The catalog was refreshed, but the exact unresolved mutation must be retried before a durable graph reload.";
       render();
-    } else if (elements.graphId.value.trim()) await readGraph(false);
+      return true;
+    }
+    if (elements.graphId.value.trim())
+      return await readGraph(false, { hydrationGeneration });
+    return true;
   }
 
   function publishedInvocationSelector() {
@@ -586,6 +756,8 @@ export function createGovernedGraphWorkspace({
       clearPendingMutation();
       aggregate = response.current;
       graph = candidateFromGraph(currentGraph(response.current)) ?? graph;
+      durableGraphSelection =
+        response.current?.lifecycle?.graphId ?? input.graphId;
       selectedNodeId = selectHydratedNodeId(graph?.nodes, selectedNodeId);
       syncFieldsFromGraph();
       rememberSelection();
@@ -614,6 +786,7 @@ export function createGovernedGraphWorkspace({
   function applyCurrentAggregate(current) {
     aggregate = current;
     graph = candidateFromGraph(currentGraph(current));
+    durableGraphSelection = current?.lifecycle?.graphId ?? null;
     selectedNodeId = graph?.nodes?.some((item) => item.id === selectedNodeId)
       ? selectedNodeId
       : (graph?.nodes?.[0]?.id ?? null);
@@ -864,11 +1037,17 @@ export function createGovernedGraphWorkspace({
     renderInspector();
     renderErrors();
     renderStatusOnly();
+    renderRecovery();
     renderInvocation();
+    renderInteractionState();
   }
 
   function renderStatusOnly() {
-    elements.notice.textContent = outcome;
+    elements.notice.textContent =
+      interactionEnabled && !authoritativeHydrationStale
+        ? outcome
+        : "Governed graph authoring is locked until authoritative Loops and graph hydration complete.";
+    elements.notice.setAttribute("role", "status");
     elements.notice.className = `governed-graph-notice${errors.length ? " warning" : ""}`;
     const pendingDraft = ["create-draft", "replace-draft"].includes(
       pendingMutation?.kind,
@@ -932,6 +1111,25 @@ export function createGovernedGraphWorkspace({
         : "No graph loaded";
   }
 
+  function renderRecovery() {
+    const retryableFailure = canRetryHydration();
+    elements.recovery.hidden = !retryableFailure;
+    elements.recovery.setAttribute("role", "alert");
+    elements.recovery.setAttribute("aria-live", "assertive");
+    elements.recovery.replaceChildren();
+    if (!retryableFailure) return;
+    const detail = document.createElement("span");
+    detail.textContent = `Graph authoring remains locked. ${hydrationFailure}`;
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "secondary-button";
+    retry.textContent = "Retry graph hydration";
+    retry.setAttribute("aria-label", "Retry governed graph hydration");
+    retry.disabled = activeGraphHydrationGeneration !== null;
+    retry.addEventListener("click", async () => await retryHydration());
+    elements.recovery.append(detail, retry);
+  }
+
   function renderInvocation() {
     const selector = publishedInvocationSelector();
     const preparation = invocationPreparation;
@@ -962,12 +1160,14 @@ export function createGovernedGraphWorkspace({
     if (!selector) {
       elements.invocationStatus.textContent =
         "Publish the exact current draft with no unsaved changes before preparing a Manual Trigger invocation.";
+      renderInteractionState();
       return;
     }
     if (!preparation) {
       elements.invocationStatus.textContent =
         invocationOutcome ||
         "Prepare current server authority before invoking. The browser cannot submit actor, workspace, role, profile, publication, eligibility, or effective-authority data.";
+      renderInteractionState();
       return;
     }
     elements.invocationStatus.textContent = [
@@ -1014,6 +1214,89 @@ export function createGovernedGraphWorkspace({
           ),
         );
     }
+    renderInteractionState();
+  }
+
+  function renderInteractionState() {
+    const locked = !interactionEnabled || authoritativeHydrationStale;
+    elements.view.inert = locked;
+    elements.view.setAttribute(
+      "aria-busy",
+      String(inFlight || activeGraphHydrationGeneration !== null),
+    );
+    if (!locked) return;
+
+    const controls = elements.view.querySelectorAll?.(
+      "button, input, select, textarea",
+    );
+    if (controls) {
+      for (const control of controls) control.disabled = true;
+      return;
+    }
+
+    for (const control of graphWorkspaceControls()) control.disabled = true;
+  }
+
+  function graphWorkspaceControls() {
+    const controls = new Set();
+    const visit = (element) => {
+      if (!element || controls.has(element)) return;
+      if (["BUTTON", "INPUT", "SELECT", "TEXTAREA"].includes(element.tagName))
+        controls.add(element);
+      for (const child of element.children ?? []) visit(child);
+    };
+    for (const element of [
+      elements.addBindingButton,
+      elements.addControlButton,
+      elements.bindingChoice,
+      elements.canvas,
+      elements.archiveButton,
+      elements.catalog,
+      elements.connectionFrom,
+      elements.connectionTo,
+      elements.controlCondition,
+      elements.displayName,
+      elements.disableButton,
+      elements.fallbackOrder,
+      elements.fallbackProfiles,
+      elements.graphId,
+      elements.grantChoices,
+      elements.grantSelection,
+      elements.inspector,
+      elements.invocationPrompt,
+      elements.loadButton,
+      elements.modelProfile,
+      elements.modelRoutingMode,
+      elements.newButton,
+      elements.prepareInvokeButton,
+      elements.confirmInvokeButton,
+      elements.publishButton,
+      elements.purpose,
+      elements.refreshButton,
+      elements.revisionId,
+      elements.role,
+      elements.saveButton,
+    ])
+      visit(element);
+    return controls;
+  }
+
+  function canRetryHydration() {
+    return (
+      active &&
+      authoritativeHydrationStale &&
+      Boolean(hydrationFailure) &&
+      activeGraphHydrationGeneration === null
+    );
+  }
+
+  async function retryHydration() {
+    if (!canRetryHydration()) return;
+    if (typeof retryWorkspaceHydration === "function") {
+      await retryWorkspaceHydration();
+      return;
+    }
+    await refresh();
   }
 
   function visibleGrantSelection(choice) {
@@ -2054,6 +2337,36 @@ export function createGovernedGraphWorkspace({
     );
   }
 
+  function ownsGraphHydration(hydrationGeneration, signal) {
+    return (
+      activeGraphHydrationGeneration === hydrationGeneration &&
+      active &&
+      !signal?.aborted
+    );
+  }
+
+  function ownsRequestedGraphHydration(hydrationGeneration, signal) {
+    return (
+      hydrationGeneration === null ||
+      ownsGraphHydration(hydrationGeneration, signal)
+    );
+  }
+
+  function invalidateGraphHydration() {
+    graphHydrationGeneration++;
+    if (activeGraphHydrationGeneration !== null) inFlight = false;
+    activeGraphHydrationGeneration = null;
+    activeGraphHydrationPromise = null;
+  }
+
+  function recordHydrationFailure(detail, hydrationGeneration) {
+    if (!ownsGraphHydration(hydrationGeneration, null)) return;
+    authoritativeHydrationStale = true;
+    hydrationFailure = detail;
+    outcome = detail;
+    render();
+  }
+
   function invalidateGraphRead({ retainPending = false } = {}) {
     graphReadGeneration++;
     invalidateInvocation({ retainPending });
@@ -2216,9 +2529,11 @@ function bindElements(document) {
       "governedGraphGrantSelectionField",
     ),
     refreshButton: document.getElementById("governedGraphRefreshButton"),
+    recovery: document.getElementById("governedGraphRecovery"),
     revisionId: document.getElementById("governedGraphRevisionId"),
     role: document.getElementById("governedGraphRole"),
     saveButton: document.getElementById("governedGraphSaveButton"),
+    view: document.getElementById("governedGraphView"),
   };
 }
 

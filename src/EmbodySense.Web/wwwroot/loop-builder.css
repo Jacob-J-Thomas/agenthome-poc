@@ -2170,6 +2170,19 @@
   font-size: 11px;
 }
 
+.governed-graph-recovery {
+  margin: 18px;
+  padding: 12px;
+  border: 1px solid var(--red);
+  background: var(--panel);
+  color: var(--red);
+  font-size: 12px;
+}
+
+.governed-graph-recovery button {
+  margin-left: 10px;
+}
+
 .governed-graph-notice.warning,
 .governed-graph-errors {
   color: var(--red);

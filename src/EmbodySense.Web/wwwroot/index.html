@@ -434,6 +434,7 @@
                     aria-selected="false"
                     aria-controls="governedGraphView"
                     type="button"
+                    disabled
                   >
                     Governed graph
                   </button>
@@ -774,6 +775,13 @@
                         aria-live="polite"
                       ></div>
                     </div>
+                    <div
+                      id="governedGraphRecovery"
+                      class="governed-graph-recovery"
+                      role="alert"
+                      aria-live="assertive"
+                      hidden
+                    ></div>
 
                     <div
                       id="runsView"
