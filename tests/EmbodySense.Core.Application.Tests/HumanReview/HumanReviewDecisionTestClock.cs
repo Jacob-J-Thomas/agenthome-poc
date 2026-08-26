@@ -10,6 +10,8 @@ internal sealed class HumanReviewDecisionTestClock : IHumanReviewTrustedClock
 
     public int ReadCount { get; private set; }
 
+    public Action<int>? AfterRead { get; set; }
+
     public DateTimeOffset UtcNow
     {
         get
@@ -20,7 +22,9 @@ internal sealed class HumanReviewDecisionTestClock : IHumanReviewTrustedClock
                 throw new InvalidOperationException("No trusted test time remains.");
             }
 
-            return _values.Count == 1 ? _values.Peek() : _values.Dequeue();
+            var value = _values.Count == 1 ? _values.Peek() : _values.Dequeue();
+            AfterRead?.Invoke(ReadCount);
+            return value;
         }
     }
 }

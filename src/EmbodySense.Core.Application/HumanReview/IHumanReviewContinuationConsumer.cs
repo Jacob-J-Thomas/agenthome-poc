@@ -9,6 +9,6 @@ public interface IHumanReviewContinuationConsumer
     /// <remarks>Callers must invoke this at most once for a successful exact claim and apply returned intents through the canonical compare-exchange boundary. Effect execution must revalidate again immediately before its irreversible boundary.</remarks>
     /// <param name="candidate">The detached current canonical candidate.</param>
     /// <param name="cancellationToken">Cancels evaluation before a result can be returned.</param>
-    /// <returns>A closed fail-closed action, completion precondition, retirement, invalid, or unavailable result.</returns>
+    /// <returns>A closed fail-closed action, post-action completion precondition, claim-fenced retirement, stale-claim, invalid, or unavailable result.</returns>
     Task<HumanReviewContinuationConsumptionResult> ConsumeAsync(HumanReviewContinuationCandidate candidate, CancellationToken cancellationToken = default);
 }

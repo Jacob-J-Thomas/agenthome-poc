@@ -20,4 +20,7 @@ public enum HumanReviewContinuationConsumptionStatus
 
     /// <summary>Trusted canonical state or authority was unavailable; state remains parked without a release or retirement request.</summary>
     Unavailable = 5,
+
+    /// <summary>The evaluated claim lease expired while its wake remains live, so a canonical store may fence it and allow a later takeover.</summary>
+    StaleClaim = 6,
 }

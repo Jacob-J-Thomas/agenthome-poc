@@ -9,10 +9,14 @@ internal sealed class RecordingAuthoritySource(params HumanReviewContinuationAut
 
     public int ReadCount { get; private set; }
 
+    public Action<int>? AfterRead { get; set; }
+
     public Task<HumanReviewContinuationAuthorityReadResult> ReadAsync(HumanReviewContinuationAuthorityQuery query, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         ReadCount++;
-        return Task.FromResult(new HumanReviewContinuationAuthorityReadResult(_statuses.Count == 0 ? HumanReviewContinuationAuthorityReadStatus.Unavailable : _statuses.Dequeue()));
+        var result = new HumanReviewContinuationAuthorityReadResult(_statuses.Count == 0 ? HumanReviewContinuationAuthorityReadStatus.Unavailable : _statuses.Dequeue());
+        AfterRead?.Invoke(ReadCount);
+        return Task.FromResult(result);
     }
 }
