@@ -113,7 +113,7 @@ Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTest
 Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers 4 -HardwareProcessorCount 10) -eq 3) -Message "An explicit four-worker request must remain capped by the required-gate outer-process policy."
 Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers 4 -HardwareProcessorCount 4) -eq 3) -Message "A hosted four-core request must not expand beyond the three-worker required-gate bound."
 Assert-True -Condition ((Get-VerificationRequiredGateMaximumWorkers -MaximumTestWorkers 6 -HardwareProcessorCount 2) -eq 2) -Message "A smaller host must reduce required-gate workers to its physical processor count."
-Assert-True -Condition ($requiredGateProfiles.Count -eq 12) -Message "The exact nine-assembly test plan, two format gates, and git-diff gate must have checked-in duration/resource profiles."
+Assert-True -Condition ($requiredGateProfiles.Count -eq 13) -Message "The exact nine-project inventory, ten execution lanes, two format gates, and git-diff gate must have checked-in duration/resource profiles."
 Assert-True -Condition (@($requiredGateProfiles | Group-Object Name -CaseSensitive | Where-Object Count -ne 1).Count -eq 0) -Message "Required gate scheduling profiles must have exact unique names."
 Assert-VerificationRequiredGateSchedule -Phases $requiredGateProfiles
 $expectedRequiredGateNames = @(
@@ -125,7 +125,8 @@ $expectedRequiredGateNames = @(
     "tests-EmbodySense.Core.Clients.Tests-all"
     "tests-EmbodySense.Core.Common.Tests-all"
     "tests-EmbodySense.Core.Persistence.Tests-all"
-    "tests-EmbodySense.Core.Startup.Tests-all"
+    "tests-EmbodySense.Core.Startup.Tests-nested-process"
+    "tests-EmbodySense.Core.Startup.Tests-remainder"
     "tests-EmbodySense.E2ETests-all"
     "tests-EmbodySense.IntegrationTests-all"
     "tests-EmbodySense.Web.Tests-all"
@@ -137,6 +138,31 @@ $declaredRequiredGateNames.Add("format-whitespace")
 $declaredRequiredGateNames.Add("git-diff-check")
 $testProjects = @(Get-ChildItem -Path (Join-Path $repoRoot "tests") -Recurse -Filter "*.csproj" | Where-Object { $_.Name -ne "EmbodySense.CancellationHost.csproj" -and $_.Name -ne "EmbodySense.E2EBrowserHost.csproj" -and $_.Name -ne "EmbodySense.Tests.Support.csproj" } | Sort-Object FullName)
 Assert-True -Condition ($testProjects.Name -cnotcontains "EmbodySense.E2EBrowserHost.csproj") -Message "The external browser host must not become a discovered test or coverage lane."
+Assert-True -Condition ($testProjects.Count -eq 9) -Message "The canonical project inventory must remain exactly nine assemblies."
+$startupProject = Get-Item -LiteralPath (Join-Path $repoRoot "tests\EmbodySense.Core.Startup.Tests\EmbodySense.Core.Startup.Tests.csproj")
+$startupLanes = @(Get-VerificationTestProjectLanes -TestProject $startupProject)
+$nestedProcessFullyQualifiedNames = @(
+    "EmbodySense.Core.Startup.Tests.Loops.Execution.GovernedLoopRuntimeTestsModels.Model_attempt_crash_windows_are_durable_and_never_redispatch_across_external_restart",
+    "EmbodySense.Core.Startup.Tests.Loops.Execution.GovernedLoopRuntimeTestsWait.Production_runtime_parks_and_wakes_a_canonical_wait_after_restart",
+    "EmbodySense.Core.Startup.Tests.Loops.Execution.GovernedLoopRuntimeTestsWait.Explicit_background_request_activates_once_after_late_workspace_host_reacquisition"
+)
+Assert-True -Condition ((@($startupLanes.Name) -join "|") -ceq "remainder|nested-process") -Message "Startup must expose exactly the remainder and nested-process execution lanes."
+$startupRemainderLane = @($startupLanes | Where-Object Name -ceq "remainder")
+$startupNestedProcessLane = @($startupLanes | Where-Object Name -ceq "nested-process")
+Assert-True -Condition ($startupRemainderLane.Count -eq 1 -and $startupNestedProcessLane.Count -eq 1) -Message "Startup lane identities must remain unique."
+Assert-True -Condition ((@($startupNestedProcessLane[0].IncludeFullyQualifiedName) -join "|") -ceq ($nestedProcessFullyQualifiedNames -join "|")) -Message "The nested-process lane must own exactly the approved restart fixtures."
+Assert-True -Condition (@($startupNestedProcessLane[0].ExcludeFullyQualifiedName).Count -eq 0 -and @($startupRemainderLane[0].IncludeFullyQualifiedName).Count -eq 0 -and (@($startupRemainderLane[0].ExcludeFullyQualifiedName) -join "|") -ceq ($nestedProcessFullyQualifiedNames -join "|")) -Message "The remainder lane must be the exact complement of the nested-process fixtures."
+$startupNestedProcessFilter = Get-VerificationTestLaneFilter -Lane $startupNestedProcessLane[0]
+$startupRemainderFilter = Get-VerificationTestLaneFilter -Lane $startupRemainderLane[0]
+foreach ($fullyQualifiedName in $nestedProcessFullyQualifiedNames) {
+    Assert-Contains -Actual $startupNestedProcessFilter -Expected "(FullyQualifiedName=$fullyQualifiedName)" -Message "Nested-process ownership must use exact VSTest equality predicates."
+    Assert-Contains -Actual $startupRemainderFilter -Expected "(FullyQualifiedName!=$fullyQualifiedName)" -Message "Remainder ownership must use exact VSTest inequality predicates."
+}
+Assert-True -Condition ($startupNestedProcessFilter.IndexOf("FullyQualifiedName~", [StringComparison]::Ordinal) -lt 0 -and $startupNestedProcessFilter.IndexOf("FullyQualifiedName!~", [StringComparison]::Ordinal) -lt 0 -and $startupRemainderFilter.IndexOf("FullyQualifiedName~", [StringComparison]::Ordinal) -lt 0 -and $startupRemainderFilter.IndexOf("FullyQualifiedName!~", [StringComparison]::Ordinal) -lt 0) -Message "Startup lane predicates must not fall back to substring matching."
+foreach ($testProject in @($testProjects | Where-Object { $_.Name -cne "EmbodySense.Core.Startup.Tests.csproj" })) {
+    $otherProjectLanes = @(Get-VerificationTestProjectLanes -TestProject $testProject)
+    Assert-True -Condition ($otherProjectLanes.Count -eq 1 -and $otherProjectLanes[0].Name -ceq "all" -and @($otherProjectLanes[0].IncludeFullyQualifiedName).Count -eq 0 -and @($otherProjectLanes[0].ExcludeFullyQualifiedName).Count -eq 0) -Message "Non-Startup project '$($testProject.Name)' must retain its one all lane."
+}
 foreach ($testProject in $testProjects) {
     foreach ($lane in @(Get-VerificationTestProjectLanes -TestProject $testProject)) {
         $declaredRequiredGateNames.Add("tests-$($testProject.BaseName)-$($lane.Name)")
@@ -146,10 +172,13 @@ $declaredRequiredGateProfiles = @($declaredRequiredGateNames | ForEach-Object { 
 Assert-VerificationRequiredGateSchedule -Phases $declaredRequiredGateProfiles
 Assert-True -Condition ($declaredRequiredGateProfiles.Count -eq $declaredRequiredGateNames.Count) -Message "Every dynamically declared required gate must resolve to one checked-in profile."
 Assert-True -Condition ($declaredRequiredGateProfiles.Count -eq $requiredGateProfiles.Count) -Message "The checked-in scheduling catalog cannot retain stale profiles for gates outside the current plan."
-foreach ($processHeavyGateName in @("tests-EmbodySense.Core.Persistence.Tests-all", "tests-EmbodySense.Core.Startup.Tests-all")) {
+foreach ($processHeavyGateName in @("tests-EmbodySense.Core.Persistence.Tests-all", "tests-EmbodySense.Core.Startup.Tests-remainder")) {
     $processHeavyProfile = Get-VerificationRequiredGateScheduleProfile -Name $processHeavyGateName
     Assert-True -Condition ($processHeavyProfile.Weight -eq 6 -and $processHeavyProfile.ResourceClass -ceq "ProcessHeavy") -Message "A dominant internally parallel assembly gate '$processHeavyGateName' must reserve half of the four-core runner's logical capacity."
 }
+$nestedProcessProfile = Get-VerificationRequiredGateScheduleProfile -Name "tests-EmbodySense.Core.Startup.Tests-nested-process"
+Assert-True -Condition ($nestedProcessProfile.EstimatedDurationSeconds -eq 180 -and $nestedProcessProfile.Weight -eq 12 -and $nestedProcessProfile.ResourceClass -ceq "ProcessHeavy") -Message "The nested-process Startup lane must reserve the entire logical capacity with its measured profile."
+Assert-True -Condition (@($requiredGateProfiles | Where-Object { $_.Name -ceq "tests-EmbodySense.Core.Startup.Tests-all" }).Count -eq 0) -Message "The stale all-Startup scheduling profile must not survive the two-lane partition."
 foreach ($processHeavyGateName in @("tests-EmbodySense.IntegrationTests-all", "tests-EmbodySense.Web.Tests-all")) {
     $processHeavyProfile = Get-VerificationRequiredGateScheduleProfile -Name $processHeavyGateName
     Assert-True -Condition ($processHeavyProfile.Weight -eq 3 -and $processHeavyProfile.ResourceClass -ceq "ProcessHeavy") -Message "A secondary internally parallel assembly gate '$processHeavyGateName' must retain its bounded logical weight."
@@ -160,12 +189,13 @@ foreach ($formatGateName in @("format-naming-style", "format-whitespace")) {
 }
 
 $requiredGateVirtualSchedule = Get-VirtualVerificationSchedule -Profiles $requiredGateProfiles -MaximumWorkers 3 -MaximumResourceCapacity 12 -MaximumProcessHeavyWorkers 2 -MaximumCpuBoundWorkers 1
-Assert-True -Condition ($requiredGateVirtualSchedule.MakespanSeconds -le 480) -Message "The assembly-wide resource-bounded schedule must retain a deterministic estimate no greater than eight minutes. Actual: $($requiredGateVirtualSchedule.MakespanSeconds)."
-foreach ($assemblyGateName in @("tests-EmbodySense.Core.Persistence.Tests-all", "tests-EmbodySense.Core.Startup.Tests-all")) {
+Assert-True -Condition ($requiredGateVirtualSchedule.MakespanSeconds -le 900) -Message "The assembly-wide resource-bounded schedule must retain at least five minutes of headroom inside the 1200-second Solution watchdog. Actual: $($requiredGateVirtualSchedule.MakespanSeconds)."
+foreach ($assemblyGateName in @("tests-EmbodySense.Core.Persistence.Tests-all", "tests-EmbodySense.Core.Startup.Tests-remainder")) {
     Assert-True -Condition ($requiredGateVirtualSchedule.Starts[$assemblyGateName] -eq 0) -Message "The two longest assembly gates must start at virtual second zero."
 }
 $initialResourceCapacity = ($requiredGateProfiles | Where-Object { $requiredGateVirtualSchedule.Starts[$_.Name] -eq 0 } | Measure-Object -Property Weight -Sum).Sum
 Assert-True -Condition ($initialResourceCapacity -eq 12) -Message "The two dominant assembly-wide phases must reserve all twelve logical units at virtual second zero."
+Assert-True -Condition ($requiredGateVirtualSchedule.Starts["tests-EmbodySense.Core.Startup.Tests-nested-process"] -gt 0) -Message "The nested-process Startup lane must wait for exclusive logical capacity instead of racing the general Startup remainder."
 Assert-True -Condition ($requiredGateVirtualSchedule.Starts["format-naming-style"] -gt 0) -Message "CPU-bound formatting must wait until one dominant assembly releases capacity instead of starving both coverage lanes."
 Assert-True -Condition ($requiredGateVirtualSchedule.Starts["tests-EmbodySense.Web.Tests-all"] -gt 0) -Message "The third internally parallel assembly must wait for one of the two admitted heavy slots."
 Assert-True -Condition ($requiredGateVirtualSchedule.Starts["tests-EmbodySense.IntegrationTests-all"] -gt 0) -Message "The fourth internally parallel assembly must wait for one of the two admitted heavy slots."

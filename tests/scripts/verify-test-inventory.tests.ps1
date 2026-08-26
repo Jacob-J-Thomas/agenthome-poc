@@ -141,6 +141,30 @@ try {
     Assert-True -Condition (@($caseInsensitiveInventory.tests | Where-Object { $_.lane -ceq "lane-b" -and $_.fullyQualifiedName -ceq "Suite.B" }).Count -eq 1) -Message "A differently cased exclusion predicate must leave only the complementary VSTest test case."
 
     Write-LaneDefinitions -Path $laneDefinitionsPath -Lanes @(
+        (New-LaneDefinition -Name "exact-a" -Filter "((FullyQualifiedName=Suite.A))&(VerificationTier!=Stress)"),
+        (New-LaneDefinition -Name "exact-b" -Filter "((FullyQualifiedName=Suite.B))&(VerificationTier!=Stress)"))
+    $exactInclude = Invoke-Script -ScriptPath $partitionScriptPath -Arguments $partitionArguments
+    Assert-True -Condition ($exactInclude.ExitCode -eq 0) -Message "Exact VSTest equality predicates must produce an exhaustive disjoint partition. Actual: $($exactInclude.Output)"
+    $exactIncludeInventory = Get-Content -LiteralPath $expectedPath -Raw | ConvertFrom-Json
+    Assert-True -Condition (@($exactIncludeInventory.tests | Where-Object { $_.lane -ceq "exact-a" -and $_.fullyQualifiedName -ceq "Suite.A" }).Count -eq 1) -Message "Exact equality must select the whole Suite.A fully-qualified name."
+    Assert-True -Condition (@($exactIncludeInventory.tests | Where-Object { $_.lane -ceq "exact-b" -and $_.fullyQualifiedName -ceq "Suite.B" }).Count -eq 1) -Message "Exact equality must select the whole Suite.B fully-qualified name."
+
+    Write-LaneDefinitions -Path $laneDefinitionsPath -Lanes @(
+        (New-LaneDefinition -Name "exact-a" -Filter "((FullyQualifiedName=Suite.A))&(VerificationTier!=Stress)"),
+        (New-LaneDefinition -Name "exact-remainder" -Filter "(FullyQualifiedName!=Suite.A)&(VerificationTier!=Stress)"))
+    $exactExclude = Invoke-Script -ScriptPath $partitionScriptPath -Arguments $partitionArguments
+    Assert-True -Condition ($exactExclude.ExitCode -eq 0) -Message "Exact VSTest inequality predicates must preserve the complementary partition. Actual: $($exactExclude.Output)"
+    $exactExcludeInventory = Get-Content -LiteralPath $expectedPath -Raw | ConvertFrom-Json
+    Assert-True -Condition (@($exactExcludeInventory.tests | Where-Object { $_.lane -ceq "exact-remainder" -and $_.fullyQualifiedName -ceq "Suite.B" }).Count -eq 1) -Message "Exact inequality must retain only the complementary whole fully-qualified name."
+
+    Write-LaneDefinitions -Path $laneDefinitionsPath -Lanes @(
+        (New-LaneDefinition -Name "renamed" -Filter "((FullyQualifiedName=Suite.A.Renamed))&(VerificationTier!=Stress)"),
+        (New-LaneDefinition -Name "exact-b" -Filter "((FullyQualifiedName=Suite.B))&(VerificationTier!=Stress)"))
+    $renameDrift = Invoke-Script -ScriptPath $partitionScriptPath -Arguments $partitionArguments
+    Assert-True -Condition ($renameDrift.ExitCode -ne 0) -Message "An exact predicate must fail closed when a selected fully-qualified name drifts."
+    Assert-Contains -Actual $renameDrift.Output -Expected "empty_lanes=1" -Message "Exact predicate rename drift must identify the empty selected lane."
+
+    Write-LaneDefinitions -Path $laneDefinitionsPath -Lanes @(
         (New-LaneDefinition -Name "lane-a" -Filter "((FullyQualifiedName~Suite))&(VerificationTier!=Stress)"),
         (New-LaneDefinition -Name "lane-b" -Filter "((FullyQualifiedName~Suite.B))&(VerificationTier!=Stress)"))
     $overlap = Invoke-Script -ScriptPath $partitionScriptPath -Arguments $partitionArguments
@@ -164,12 +188,24 @@ try {
     Assert-True -Condition ($unsupported.ExitCode -ne 0) -Message "A lane predicate outside the exact supported grammar must fail closed."
     Assert-Contains -Actual $unsupported.Output -Expected "contains no fully-qualified-name partition" -Message "Unsupported-predicate diagnostics must be actionable."
 
+    Write-LaneDefinitions -Path $laneDefinitionsPath -Lanes @((New-LaneDefinition -Name "lane-a" -Filter "((FullyQualifiedName==Suite.A))&(VerificationTier!=Stress)"))
+    $malformedOperator = Invoke-Script -ScriptPath $partitionScriptPath -Arguments $partitionArguments
+    Assert-True -Condition ($malformedOperator.ExitCode -ne 0) -Message "Malformed equality operators must fail closed."
+    Assert-Contains -Actual $malformedOperator.Output -Expected "contains no fully-qualified-name partition" -Message "Malformed equality diagnostics must remain actionable."
+
     Write-LaneDefinitions -Path $laneDefinitionsPath -Lanes @(
         (New-LaneDefinition -Name "lane-a" -Filter "((FullyQualifiedName~Suite.A)&(FullyQualifiedName~Never))&(VerificationTier!=Stress)"),
         (New-LaneDefinition -Name "lane-b" -Filter "((FullyQualifiedName~Suite.B))&(VerificationTier!=Stress)"))
     $hostileGrammar = Invoke-Script -ScriptPath $partitionScriptPath -Arguments $partitionArguments
     Assert-True -Condition ($hostileGrammar.ExitCode -ne 0) -Message "A filter that changes the generated OR group into an AND group must fail closed."
     Assert-Contains -Actual $hostileGrammar.Output -Expected "contains an unsupported predicate shape" -Message "Hostile operator placement diagnostics must be actionable."
+
+    Write-LaneDefinitions -Path $laneDefinitionsPath -Lanes @(
+        (New-LaneDefinition -Name "exact-overlap" -Filter "((FullyQualifiedName=Suite.A))&(VerificationTier!=Stress)"),
+        (New-LaneDefinition -Name "substring-overlap" -Filter "((FullyQualifiedName~Suite.A))&(VerificationTier!=Stress)"))
+    $exactOverlap = Invoke-Script -ScriptPath $partitionScriptPath -Arguments $partitionArguments
+    Assert-True -Condition ($exactOverlap.ExitCode -ne 0) -Message "Exact and substring predicates selecting one case must still fail closed for overlap."
+    Assert-Contains -Actual $exactOverlap.Output -Expected "overlap=1" -Message "Exact-predicate overlap diagnostics must remain exact."
 
     $executionTests = @(
         [ordered]@{ id = $testA.id; xunitTestCaseUniqueId = $testA.xunitTestCaseUniqueId; fullyQualifiedName = $testA.fullyQualifiedName; displayName = $testA.displayName; source = $testA.source; lane = "lane-a" },
