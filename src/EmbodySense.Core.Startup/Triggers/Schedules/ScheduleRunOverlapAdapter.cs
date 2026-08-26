@@ -14,19 +14,20 @@ using EmbodySense.Core.Common.Triggers.Schedules.Models;
 
 namespace EmbodySense.Core.Startup.Triggers.Schedules;
 
-/// <summary>Projects exact durable governed-run overlap without deciding schedule policy.</summary>
+/// <summary>Projects exact durable governed-run overlap from a caller-owned borrowed run store without deciding schedule policy.</summary>
 /// <remarks>
 /// The adapter reads the unique nonterminal run for the target loop, validates its complete durable
 /// shape, reconstructs its exact admitted target, and hashes both the query and observed run posture.
-/// A run of another immutable revision is evidence for a clear exact-target result, not an overlap.
+/// A run of another immutable revision is evidence for a clear exact-target result, not an overlap. The adapter
+/// borrows the supplied <see cref="ICustomLoopRunStore"/> and never disposes it; its caller retains ownership.
 /// </remarks>
 public sealed class ScheduleRunOverlapAdapter : IScheduleOverlapPort
 {
     private const string EvidenceDomain = "embodysense-schedule-overlap-evidence-v1";
     private readonly ICustomLoopRunStore _runStore;
 
-    /// <summary>Creates an overlap adapter over the composition-owned durable run store.</summary>
-    /// <param name="runStore">The store that proves the unique current nonterminal run per loop.</param>
+    /// <summary>Creates an overlap adapter over a caller-owned borrowed durable run store.</summary>
+    /// <param name="runStore">The caller-owned store that proves the unique current nonterminal run per loop. It must outlive this adapter because the adapter never disposes it.</param>
     /// <exception cref="ArgumentNullException"><paramref name="runStore"/> is null.</exception>
     public ScheduleRunOverlapAdapter(ICustomLoopRunStore runStore)
     {

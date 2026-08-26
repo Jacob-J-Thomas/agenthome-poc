@@ -5,14 +5,17 @@ using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 
 namespace EmbodySense.Core.Startup.Tests.Triggers.Schedules;
 
-internal sealed class ScheduleOverlapRunStore(CustomLoopRunRecord? run = null, Exception? failure = null) : ICustomLoopRunStore
+internal sealed class ScheduleOverlapRunStore(CustomLoopRunRecord? run = null, Exception? failure = null) : ICustomLoopRunStore, IDisposable
 {
     internal int ReadCount { get; private set; }
+    internal int DisposeCount { get; private set; }
+    internal string? LastRequestedLoopId { get; private set; }
 
     public Task<CustomLoopRunRecord?> GetNonterminalByLoopAsync(string loopId, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         ReadCount++;
+        LastRequestedLoopId = loopId;
         if (failure is not null)
         {
             throw failure;
@@ -38,4 +41,6 @@ internal sealed class ScheduleOverlapRunStore(CustomLoopRunRecord? run = null, E
 
     public Task<CustomLoopRunStoreResult> UpdateAsync(CustomLoopRunRecord run, int expectedLifecycleVersion, CancellationToken cancellationToken = default)
         => throw new NotSupportedException();
+
+    public void Dispose() => DisposeCount++;
 }
