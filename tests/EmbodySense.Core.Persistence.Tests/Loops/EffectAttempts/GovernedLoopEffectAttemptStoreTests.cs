@@ -669,7 +669,7 @@ public sealed class GovernedLoopEffectAttemptStoreTests
     }
 
     [Fact]
-    public async Task Mutation_lock_contention_and_unavailable_roots_fail_closed()
+    public async Task Mutation_lock_retry_exhaustion_and_unavailable_roots_fail_closed()
     {
         using (var workspace = new TestWorkspace())
         {
@@ -680,8 +680,7 @@ public sealed class GovernedLoopEffectAttemptStoreTests
                 FileMode.OpenOrCreate,
                 FileAccess.ReadWrite,
                 FileShare.None);
-            using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-            var result = await new GovernedLoopEffectAttemptStore(paths).BeginAsync(Prepare(), cancellation.Token);
+            var result = await new GovernedLoopEffectAttemptStore(paths).BeginAsync(Prepare());
             Assert.Equal(GovernedLoopEffectAttemptStoreStatus.Unavailable, result.Status);
         }
 
@@ -692,6 +691,31 @@ public sealed class GovernedLoopEffectAttemptStoreTests
         Assert.Equal(
             GovernedLoopEffectAttemptStoreStatus.Unavailable,
             (await new GovernedLoopEffectAttemptStore(unavailablePaths).BeginAsync(Prepare())).Status);
+    }
+
+    [Fact]
+    public async Task Mutation_lock_retry_honors_caller_cancellation_and_later_acquires_after_release()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new GovernedLoopEffectAttemptStore(paths);
+        Directory.CreateDirectory(paths.GovernedLoopEffectAttemptsPath);
+        using var cancellation = new CancellationTokenSource();
+
+        await using (var externalLock = new FileStream(
+            Path.Combine(paths.GovernedLoopEffectAttemptsPath, ".custom-loop-mutations.lock"),
+            FileMode.OpenOrCreate,
+            FileAccess.ReadWrite,
+            FileShare.None))
+        {
+            var pending = store.BeginAsync(Prepare(), cancellation.Token);
+            cancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pending);
+        }
+
+        var acquired = await store.BeginAsync(Prepare());
+        Assert.Equal(GovernedLoopEffectAttemptStoreStatus.Created, acquired.Status);
+        acquired.Lease!.Dispose();
     }
 
     [Fact]
