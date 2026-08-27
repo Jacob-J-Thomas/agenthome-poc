@@ -384,7 +384,7 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
     }
 
     [Fact]
-    public async Task Incomplete_client_frame_is_abandoned_before_a_later_authenticated_cancel()
+    public async Task Incomplete_client_frame_is_abandoned_before_a_later_authenticated_remote_cancel()
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
@@ -399,11 +399,52 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
         await Task.Delay(TimeSpan.FromSeconds(1.2));
         var confirmation = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         using var providerObservation = cancellation.Token.Register(() => confirmation.TrySetResult(registration.TryConfirmProviderInterruption(cancellation.Token)));
+        await using var requester = new CustomLoopWorkspaceExecutionGate(paths);
+        requester.RelinquishWorkspaceHost();
 
-        var result = await owner.RequestCancellationAsync("run-incomplete-client", "cancel-after-incomplete-client");
+        var result = await requester.RequestCancellationAsync("run-incomplete-client", "cancel-after-incomplete-client");
 
         Assert.Equal(CustomLoopAttemptCancellationStatus.ProviderInterruptionConfirmed, result.Status);
+        Assert.Equal(Environment.ProcessId, result.OwnerProcessId);
         Assert.True(await confirmation.Task);
+    }
+
+    [Fact]
+    public async Task Windows_successor_listener_failure_withdraws_the_published_owner_and_faults_the_host()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await using var owner = new CustomLoopWorkspaceExecutionGate(paths);
+        await using var idleReference = new CustomLoopWorkspaceExecutionGate(paths);
+        using var cancellation = new CancellationTokenSource();
+        using var registration = owner.RegisterActiveAttempt("run-successor-listener-failure", cancellation);
+        var descriptor = JsonNode.Parse(await File.ReadAllBytesAsync(paths.CustomLoopCancellationOwnerPath))!.AsObject();
+        using var occupiedSuccessor = new NamedPipeServerStream(descriptor["pipeName"]!.GetValue<string>(), PipeDirection.InOut, 2, PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+        await using var requester = new CustomLoopWorkspaceExecutionGate(paths);
+        requester.RelinquishWorkspaceHost();
+
+        var terminal = await requester.RequestCancellationAsync("run-successor-listener-failure", "cancel-successor-listener-failure");
+        var local = await owner.RequestCancellationAsync("run-successor-listener-failure", "cancel-after-successor-listener-failure");
+        var afterWithdrawal = await requester.RequestCancellationAsync("run-successor-listener-failure", "cancel-after-withdrawal");
+
+        Assert.Equal(CustomLoopAttemptCancellationStatus.OwnerUnavailable, terminal.Status);
+        Assert.False(File.Exists(paths.CustomLoopCancellationOwnerPath));
+        Assert.Equal(CustomLoopAttemptCancellationStatus.OwnerUnavailable, local.Status);
+        Assert.Equal(CustomLoopAttemptCancellationStatus.OwnerUnavailable, afterWithdrawal.Status);
+
+        await using var replacementOwner = new CustomLoopWorkspaceExecutionGate(paths);
+        var replacementResult = replacementOwner.TryAcquire("invoke-after-successor-listener-failure", _firstHash);
+
+        Assert.Equal(CustomLoopExecutionLeaseStatus.Acquired, replacementResult.Status);
+        Assert.NotNull(replacementResult.Lease);
+        using var replacement = replacementResult.Lease;
+        var replacementDescriptor = JsonNode.Parse(await File.ReadAllBytesAsync(paths.CustomLoopCancellationOwnerPath))!.AsObject();
+        Assert.NotEqual(descriptor["ownerId"]!.GetValue<string>(), replacementDescriptor["ownerId"]!.GetValue<string>());
     }
 
     [Fact]

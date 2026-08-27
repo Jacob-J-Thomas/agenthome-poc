@@ -45,6 +45,12 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
     private readonly object _gate = new();
     private long _attemptGeneration;
     private int _disposed;
+    private int _serverResourcesReleased;
+
+    /// <summary>
+    /// Raised after a terminal broker failure has withdrawn this generation's owner descriptor.
+    /// </summary>
+    internal event Action? BrokerFaulted;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="CustomLoopAttemptCancellationHost"/> type.
@@ -70,6 +76,12 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
             throw;
         }
     }
+
+    /// <summary>
+    /// Gets whether this owner generation can still serve authenticated cancellation requests.
+    /// </summary>
+    /// <value><see langword="true"/> while the broker has not exited or faulted.</value>
+    public bool IsAvailable => Volatile.Read(ref _disposed) == 0;
 
     /// <summary>
     /// Registers the single active provider attempt for a run and returns its generation-bound lifetime handle.
@@ -240,29 +252,11 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
             return;
         }
 
-        ActiveAttempt[] attempts;
-        lock (_gate)
-        {
-            attempts = _activeAttempts.Values.ToArray();
-            _activeAttempts.Clear();
-        }
-
-        foreach (var attempt in attempts)
-        {
-            attempt.CompleteOwnerUnavailable();
-        }
+        CompleteActiveAttemptsAsOwnerUnavailable();
 
         _shutdown.Cancel();
         DeleteOwnerDescriptor();
-        _ = _server.ContinueWith(
-            _ =>
-            {
-                _shutdown.Dispose();
-                CryptographicOperations.ZeroMemory(_secret);
-            },
-            CancellationToken.None,
-            TaskContinuationOptions.ExecuteSynchronously,
-            TaskScheduler.Default);
+        ReleaseServerResourcesAfterStop();
     }
 
     private async Task RunServerAsync()
@@ -303,7 +297,12 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException or FormatException)
         {
-            _brokerReady.TrySetException(exception);
+            if (_brokerReady.TrySetException(exception))
+            {
+                return;
+            }
+
+            FaultBroker();
         }
         finally
         {
@@ -320,6 +319,45 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
     private void StopServerAfterFailedReadiness()
     {
         _shutdown.Cancel();
+        ReleaseServerResourcesAfterStop();
+    }
+
+    private void FaultBroker()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            return;
+        }
+
+        CompleteActiveAttemptsAsOwnerUnavailable();
+        _shutdown.Cancel();
+        DeleteOwnerDescriptor();
+        BrokerFaulted?.Invoke();
+        ReleaseServerResourcesAfterStop();
+    }
+
+    private void CompleteActiveAttemptsAsOwnerUnavailable()
+    {
+        ActiveAttempt[] attempts;
+        lock (_gate)
+        {
+            attempts = _activeAttempts.Values.ToArray();
+            _activeAttempts.Clear();
+        }
+
+        foreach (var attempt in attempts)
+        {
+            attempt.CompleteOwnerUnavailable();
+        }
+    }
+
+    private void ReleaseServerResourcesAfterStop()
+    {
+        if (Interlocked.Exchange(ref _serverResourcesReleased, 1) != 0)
+        {
+            return;
+        }
+
         _ = _server.ContinueWith(
             _ =>
             {

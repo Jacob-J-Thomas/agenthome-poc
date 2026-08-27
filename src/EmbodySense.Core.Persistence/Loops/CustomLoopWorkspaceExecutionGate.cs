@@ -52,7 +52,7 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
             lock (_hostsSync)
             {
                 ObjectDisposedException.ThrowIf(_disposed, this);
-                return (_host ??= TryAttachOrAcquireHost()) is not null;
+                return GetAvailableHost() is not null;
             }
         }
     }
@@ -70,7 +70,7 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
         lock (_hostsSync)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            var host = _host ??= TryAttachOrAcquireHost();
+            var host = GetAvailableHost();
             if (host is null)
             {
                 return new CustomLoopExecutionLeaseResult(CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable, null, "custom_workspace_host_busy: another process owns custom-loop hosting for this workspace.");
@@ -121,7 +121,7 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
         lock (_hostsSync)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            var host = _host ??= TryAttachOrAcquireHost();
+            var host = GetAvailableHost();
             if (host is null)
             {
                 return new CustomLoopExecutionLeaseResult(CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable, null, "custom_workspace_host_busy: another process owns custom-loop hosting for this workspace.");
@@ -173,7 +173,7 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
         lock (_hostsSync)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            var host = _host ??= TryAttachOrAcquireHost();
+            var host = GetAvailableHost();
             if (host is null)
             {
                 throw new InvalidOperationException("The active provider attempt cannot register because this process does not own custom-loop hosting.");
@@ -263,6 +263,11 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
     {
         lock (_hostsSync)
         {
+            if (host.IsRetired)
+            {
+                return;
+            }
+
             if (host.Generation == generation && string.Equals(host.ActiveOperationId, operationId, StringComparison.Ordinal))
             {
                 host.ActiveOperationId = null;
@@ -285,6 +290,11 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
     {
         lock (_hostsSync)
         {
+            if (host.IsRetired)
+            {
+                return;
+            }
+
             if (host.BusyOutcomeReservations.TryGetValue(operationId, out var reservation) && reservation.Generation == generation)
             {
                 host.BusyOutcomeReservations.Remove(operationId);
@@ -296,6 +306,11 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
 
     private static void ReleaseReference(string workspaceKey, WorkspaceHost host)
     {
+        if (host.IsRetired)
+        {
+            return;
+        }
+
         host.ReferenceCount--;
         if (host.ReferenceCount != 0)
         {
@@ -310,6 +325,11 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
     {
         if (_hosts.TryGetValue(_workspaceKey, out var existing))
         {
+            if (!existing.IsAvailable)
+            {
+                return null;
+            }
+
             existing.ReferenceCount++;
             return existing;
         }
@@ -338,7 +358,7 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
         WorkspaceHost host;
         try
         {
-            host = new WorkspaceHost(_paths, _workspaceKey, ownership);
+            host = new WorkspaceHost(_paths, _workspaceKey, ownership, RetireFaultedHost);
         }
         catch
         {
@@ -348,6 +368,31 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
 
         _hosts.Add(_workspaceKey, host);
         return host;
+    }
+
+    private WorkspaceHost? GetAvailableHost()
+    {
+        if (_host is { IsAvailable: false } faulted)
+        {
+            _host = null;
+            ReleaseReference(_workspaceKey, faulted);
+        }
+
+        return _host ??= TryAttachOrAcquireHost();
+    }
+
+    private static void RetireFaultedHost(string workspaceKey, WorkspaceHost host)
+    {
+        lock (_hostsSync)
+        {
+            if (!_hosts.TryGetValue(workspaceKey, out var current) || !ReferenceEquals(current, host))
+            {
+                return;
+            }
+
+            _hosts.Remove(workspaceKey);
+            host.Dispose();
+        }
     }
 
     private static string CanonicalWorkspaceKey(string rootPath)

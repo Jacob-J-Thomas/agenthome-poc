@@ -8,16 +8,20 @@ namespace EmbodySense.Core.Persistence.Loops;
 /// </summary>
 internal sealed class WorkspaceHost : IDisposable
 {
+    private int _disposed;
+
     /// <summary>
     /// Initializes a new instance of the <see cref="WorkspaceHost"/> type.
     /// </summary>
     /// <param name="paths">The paths.</param>
     /// <param name="workspaceKey">The workspace key.</param>
     /// <param name="ownership">The ownership.</param>
-    public WorkspaceHost(WorkspacePaths paths, string workspaceKey, FileStream ownership)
+    /// <param name="retireAfterBrokerFault">The callback that retires this host after a terminal broker fault.</param>
+    public WorkspaceHost(WorkspacePaths paths, string workspaceKey, FileStream ownership, Action<string, WorkspaceHost> retireAfterBrokerFault)
     {
         Ownership = ownership;
         CancellationHost = new CustomLoopAttemptCancellationHost(paths, workspaceKey);
+        CancellationHost.BrokerFaulted += () => retireAfterBrokerFault(workspaceKey, this);
     }
 
     /// <summary>
@@ -31,6 +35,12 @@ internal sealed class WorkspaceHost : IDisposable
     /// </summary>
     /// <value>The custom loop attempt cancellation host.</value>
     public CustomLoopAttemptCancellationHost CancellationHost { get; }
+
+    /// <summary>
+    /// Gets whether this workspace host can still serve cancellation requests.
+    /// </summary>
+    /// <value><see langword="true"/> while its cancellation host has not faulted or stopped.</value>
+    public bool IsAvailable => CancellationHost.IsAvailable;
 
     /// <summary>
     /// Gets the reference count.
@@ -69,11 +79,22 @@ internal sealed class WorkspaceHost : IDisposable
     public Dictionary<string, BusyOutcomeReservation> BusyOutcomeReservations { get; } = new(StringComparer.Ordinal);
 
     /// <summary>
+    /// Gets whether this host has been retired and its cross-process ownership released.
+    /// </summary>
+    /// <value><see langword="true"/> after the host is retired or disposed.</value>
+    public bool IsRetired => Volatile.Read(ref _disposed) != 0;
+
+    /// <summary>
     /// Executes the dispose operation.
     /// </summary>
     /// <returns>The operation.</returns>
     public void Dispose()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            return;
+        }
+
         CancellationHost.Dispose();
         Ownership.Dispose();
     }
