@@ -176,6 +176,7 @@ public sealed class BrowserFlowTests
         tracker.BeginExpectedServerRestart();
 
         Assert.True(tracker.ProcessLoadingFailed("captured", canceled: false, "net::ERR_CONNECTION_RESET"));
+        tracker.EndExpectedServerRestart();
         Assert.True(tracker.IsExpectedServerRestartLogEntry("captured", "network", "fetch failed: net::ERR_CONNECTION_RESET", null));
         var context = tracker.ReadLogContext("captured");
         Assert.False(context.CapturedAtRestart);
@@ -185,6 +186,11 @@ public sealed class BrowserFlowTests
         tracker.BeginExpectedServerRestart();
         Assert.False(tracker.ProcessLoadingFailed("non-reset", canceled: false, "fetch failed"));
         Assert.False(tracker.IsExpectedServerRestartLogEntry("non-reset", "network", "fetch failed", null));
+
+        tracker.Track("http-error", RequestUrl);
+        tracker.BeginExpectedServerRestart();
+        Assert.False(tracker.ProcessLoadingFailed("http-error", canceled: false, "500 (Internal Server Error)"));
+        Assert.False(tracker.IsExpectedServerRestartLogEntry("http-error", "network", "500 (Internal Server Error)", null));
 
         tracker.Track("external", "https://example.test/api/loop-runs?maximumCount=50");
         Assert.False(tracker.IsExpectedServerRestartLogEntry("external", "network", "fetch failed: net::ERR_CONNECTION_RESET", "https://example.test/api/loop-runs?maximumCount=50"));
@@ -2155,12 +2161,7 @@ public sealed class BrowserFlowTests
             barrierTimeout.CancelAfter(TimeSpan.FromSeconds(5));
             try
             {
-                _ = await SendCommandAsync("Runtime.evaluate", new
-                {
-                    expression = "true",
-                    awaitPromise = false,
-                    returnByValue = true
-                }, barrierTimeout.Token);
+                _ = await EvaluateAsync("true", barrierTimeout.Token);
                 _requestTracker.FreezeExpectedServerRestart();
             }
             catch
