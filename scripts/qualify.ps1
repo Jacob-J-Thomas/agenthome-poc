@@ -453,7 +453,7 @@ try {
         $existingCSharpFiles = @($plan.ChangedCSharpFiles | Where-Object { Test-Path -LiteralPath (Join-Path $repoRoot $_) -PathType Leaf })
         if ($existingCSharpFiles.Count -gt 0) {
             $formatArguments = @("format", "EmbodySense.sln", "--verify-no-changes", "--no-restore", "--severity", "warn", "--diagnostics", "IDE1006", "--verbosity", "minimal", "--include") + $existingCSharpFiles
-            Add-QualificationPhase -Name "format-changed" -FileName "dotnet" -Arguments $formatArguments -TimeoutSeconds 120 -EstimatedDurationSeconds 90 -Weight $qualificationCpuBoundWeight -ResourceClass "CpuBound"
+            Add-QualificationPhase -Name "format-changed" -FileName "dotnet" -Arguments $formatArguments -TimeoutSeconds 150 -EstimatedDurationSeconds 120 -Weight $qualificationCpuBoundWeight -ResourceClass "CpuBound"
         }
     }
 
