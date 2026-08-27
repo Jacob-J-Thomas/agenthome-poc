@@ -26,6 +26,7 @@ using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Runtime.Models;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Tests.Support;
+using System.IO.Pipes;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -952,6 +953,55 @@ internal static class CustomLoopRuntimeTests
         Assert.Equal("Completed", admittedAfterRelease.ExecutionStatus);
         var receiptPath = Path.Combine(new WorkspacePaths(workspace.RootPath).CustomLoopInvocationOperationsPath, secondInput.OperationId + ".json");
         Assert.True(File.Exists(receiptPath));
+        Assert.Contains("workspaceExecutionBusy", await File.ReadAllTextAsync(receiptPath), StringComparison.Ordinal);
+    }
+
+    internal static async Task Windows_faulted_active_broker_durably_records_and_replays_workspace_busy_outcome()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var firstDefinition = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: false, "create-runtime-faulted-busy-1", "update-runtime-faulted-busy-1");
+        var secondDefinition = await CreateInvocationLoopAsync(workspace, includeInvokingConversation: false, "create-runtime-faulted-busy-2", "update-runtime-faulted-busy-2");
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await using var runtime = await CreateRuntimeAsync(workspace);
+        var first = runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput(firstDefinition.Id, firstDefinition.DefinitionVersion, firstDefinition.ContentHash, "invoke-runtime-faulted-busy-1", "delayed fault owner"));
+        await WaitForAttemptStartAsync(workspace);
+        var descriptor = JsonNode.Parse(await File.ReadAllBytesAsync(paths.CustomLoopCancellationOwnerPath))!.AsObject();
+        var pipeName = descriptor["pipeName"]!.GetValue<string>();
+        using var occupiedSuccessor = new NamedPipeServerStream(pipeName, PipeDirection.InOut, 2, PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+        using var firstClient = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
+        using var secondClient = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
+        await firstClient.ConnectAsync().WaitAsync(TimeSpan.FromSeconds(2));
+        try
+        {
+            await secondClient.ConnectAsync().WaitAsync(TimeSpan.FromSeconds(2));
+        }
+        catch (Exception exception) when (exception is IOException or TimeoutException)
+        {
+            // The first client may already have selected the live listener and faulted the broker.
+        }
+
+        Assert.True(SpinWait.SpinUntil(() => !File.Exists(paths.CustomLoopCancellationOwnerPath), TimeSpan.FromSeconds(10)), "The faulted broker did not withdraw its descriptor.");
+        var busyInput = new LoopRunInvocationInput(secondDefinition.Id, secondDefinition.DefinitionVersion, secondDefinition.ContentHash, "invoke-runtime-faulted-busy-2", "record busy outcome after fault");
+
+        var busy = await runtime.InvokeCustomLoopAsync(busyInput);
+        var replay = await runtime.InvokeCustomLoopAsync(busyInput);
+
+        ReleaseAttempt(workspace);
+        var completed = await first;
+
+        Assert.Equal("WorkspaceExecutionBusy", busy.AdmissionStatus);
+        Assert.False(busy.WasDispatched);
+        Assert.Null(busy.Run);
+        Assert.Equal("WorkspaceExecutionBusy", replay.AdmissionStatus);
+        Assert.False(replay.WasDispatched);
+        Assert.Equal("Completed", completed.ExecutionStatus);
+        var receiptPath = Path.Combine(paths.CustomLoopInvocationOperationsPath, busyInput.OperationId + ".json");
         Assert.Contains("workspaceExecutionBusy", await File.ReadAllTextAsync(receiptPath), StringComparison.Ordinal);
     }
 

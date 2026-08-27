@@ -480,6 +480,10 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
 
         await using var blockedOwner = new CustomLoopWorkspaceExecutionGate(paths);
         Assert.Equal(CustomLoopExecutionLeaseStatus.WorkspaceBusy, blockedOwner.TryAcquire("invoke-overlap-after-successor-failure", _secondHash).Status);
+        var faultedBusyReservation = blockedOwner.TryReserveWorkspaceBusyOutcome("invoke-record-after-successor-failure", _secondHash);
+        Assert.Equal(CustomLoopExecutionLeaseStatus.BusyOutcomeReserved, faultedBusyReservation.Status);
+        Assert.NotNull(faultedBusyReservation.Lease);
+        faultedBusyReservation.Lease.Dispose();
         activeLease.Dispose();
 
         await using var replacementOwner = new CustomLoopWorkspaceExecutionGate(paths);

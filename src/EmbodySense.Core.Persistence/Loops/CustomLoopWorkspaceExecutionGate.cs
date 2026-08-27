@@ -147,13 +147,6 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
                 return new CustomLoopExecutionLeaseResult(CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable, null, "custom_workspace_host_busy: another process owns custom-loop hosting for this workspace.");
             }
 
-            if (!host.IsAvailable)
-            {
-                return host.HasActiveLeases
-                    ? new CustomLoopExecutionLeaseResult(CustomLoopExecutionLeaseStatus.WorkspaceBusy, null, "A terminal broker fault is preserving the active custom-loop execution boundary until its lease completes.")
-                    : new CustomLoopExecutionLeaseResult(CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable, null, "The local custom-loop host broker faulted before a workspace-busy outcome could be reserved; retry after retirement.");
-            }
-
             if (host.BusyOutcomeReservations.TryGetValue(operationId, out var existingReservation))
             {
                 return SameRequest(existingReservation.RequestHash, requestHash)
@@ -161,12 +154,12 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
                     : new CustomLoopExecutionLeaseResult(CustomLoopExecutionLeaseStatus.OperationConflict, null, "The invocation operation id is reserved for different canonical authorized request content.");
             }
 
-            if (host.ActiveOperationId is null)
+            if (host.ActiveOperationId is null && host.IsAvailable)
             {
                 return new CustomLoopExecutionLeaseResult(CustomLoopExecutionLeaseStatus.WorkspaceAvailable, null, "Workspace execution ownership became available before the busy outcome was reserved.");
             }
 
-            if (string.Equals(host.ActiveOperationId, operationId, StringComparison.Ordinal))
+            if (host.ActiveOperationId is not null && string.Equals(host.ActiveOperationId, operationId, StringComparison.Ordinal))
             {
                 var status = SameRequest(host.ActiveRequestHash, requestHash)
                     ? CustomLoopExecutionLeaseStatus.OperationInProgress
@@ -175,6 +168,11 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
                     ? "The same custom-loop operation acquired execution ownership before a busy outcome could be reserved."
                     : "The active operation id is bound to different canonical authorized request content.";
                 return new CustomLoopExecutionLeaseResult(status, null, detail);
+            }
+
+            if (!host.IsAvailable && !host.HasActiveLeases)
+            {
+                return new CustomLoopExecutionLeaseResult(CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable, null, "The local custom-loop host broker faulted before a workspace-busy outcome could be reserved; retry after retirement.");
             }
 
             host.BusyOutcomeGeneration++;
