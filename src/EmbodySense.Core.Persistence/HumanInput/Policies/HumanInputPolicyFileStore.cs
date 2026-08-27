@@ -58,7 +58,12 @@ public sealed class HumanInputPolicyFileStore : IHumanInputPolicySource
             var bytes = await session.TryReadAllBytesBoundAsync(path, _options.MaximumArtifactUtf8Bytes, cancellationToken).ConfigureAwait(false);
             if (bytes is null) return Read(HumanInputPolicySourceReadStatus.NotFound, null, generation.StoreGeneration);
             var policy = HumanInputPolicyArtifactJson.Deserialize(bytes);
-            return Equals(policy.Reference, reference) ? Read(HumanInputPolicySourceReadStatus.Ready, policy, generation.StoreGeneration) : Read(HumanInputPolicySourceReadStatus.Unavailable, null, generation.StoreGeneration);
+            var catalogEntry = generation.Artifacts.SingleOrDefault(entry => Equals(entry.Reference, reference));
+            return Equals(policy.Reference, reference)
+                && catalogEntry is not null
+                && string.Equals(catalogEntry.ContentHash, policy.ContentHash, StringComparison.Ordinal)
+                ? Read(HumanInputPolicySourceReadStatus.Ready, policy, generation.StoreGeneration)
+                : Read(HumanInputPolicySourceReadStatus.Unavailable, null, generation.StoreGeneration);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

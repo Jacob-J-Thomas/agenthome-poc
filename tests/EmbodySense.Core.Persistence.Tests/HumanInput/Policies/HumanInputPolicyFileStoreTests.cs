@@ -78,6 +78,106 @@ public sealed class HumanInputPolicyFileStoreTests
     }
 
     [Fact]
+    public async Task Unix_same_reference_replacement_between_catalog_and_policy_reads_is_unavailable()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var policy = Timeout();
+        var store = new HumanInputPolicyFileStore(paths);
+        Assert.Equal(HumanInputPolicyFileStoreWriteStatus.Committed, (await store.CommitAsync(policy, 0)).Status);
+
+        var policyPath = Path.Combine(PolicyRoot(paths), policy.Reference + ".json");
+        var displacedPath = policyPath + ".displaced";
+        var replacement = HumanInputPolicyArtifactHash.Apply(policy with { ResponseWindowMilliseconds = 120_000 });
+        var observer = new HumanInputPolicyFileStorePathRaceObserver(policyPath, displacedPath, HumanInputPolicyArtifactJson.Serialize(replacement), replacementOpen: 4);
+        try
+        {
+            var read = await new HumanInputPolicyFileStore(paths, new HumanInputPolicyFileStoreOptions { PathObserver = observer }).ReadAsync(policy.Reference);
+
+            Assert.True(observer.Replaced);
+            Assert.Equal(4, observer.PolicyOpenCount);
+            Assert.Equal(HumanInputPolicySourceReadStatus.Unavailable, read.Status);
+            Assert.Null(read.Policy);
+        }
+        finally
+        {
+            if (observer.Replaced)
+            {
+                File.Delete(policyPath);
+                File.Move(displacedPath, policyPath);
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Unix_mutation_lock_disappearance_or_replacement_fails_closed_before_generation_publication(bool createReplacement)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var policy = Timeout();
+        var seed = new HumanInputPolicyFileStore(paths);
+        Assert.Equal(HumanInputPolicyFileStoreWriteStatus.Committed, (await seed.CommitAsync(policy, 0)).Status);
+
+        var root = PolicyRoot(paths);
+        var lockPath = Path.Combine(root, "mutation.lock");
+        var displacedPath = lockPath + ".displaced";
+        var generationPath = Path.Combine(root, "generation");
+        var generationBefore = await File.ReadAllBytesAsync(generationPath);
+        var swapped = false;
+        var options = new HumanInputPolicyFileStoreOptions
+        {
+            PhysicalBoundaryObserver = (part, boundary, _) =>
+            {
+                if (!swapped && part == HumanInputPolicyFileStorePublicationPart.PolicyArtifact && boundary == HumanInputPolicyFileStorePhysicalPersistenceBoundary.TargetProven)
+                {
+                    File.Move(lockPath, displacedPath);
+                    if (createReplacement)
+                    {
+                        File.WriteAllText(lockPath, "replacement lock");
+                    }
+
+                    swapped = true;
+                }
+
+                return ValueTask.CompletedTask;
+            }
+        };
+
+        try
+        {
+            var result = await new HumanInputPolicyFileStore(paths, options).CommitAsync(Failure(), 1);
+
+            Assert.True(swapped);
+            Assert.Equal(HumanInputPolicyFileStoreWriteStatus.Unavailable, result.Status);
+            Assert.Equal(generationBefore, await File.ReadAllBytesAsync(generationPath));
+        }
+        finally
+        {
+            if (swapped)
+            {
+                if (File.Exists(lockPath))
+                {
+                    File.Delete(lockPath);
+                }
+
+                File.Move(displacedPath, lockPath);
+            }
+        }
+    }
+
+    [Fact]
     public async Task Windows_owned_mutation_lock_is_enumerated_through_its_retained_handle()
     {
         if (!OperatingSystem.IsWindows())
