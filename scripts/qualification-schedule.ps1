@@ -1,7 +1,7 @@
 Set-StrictMode -Version Latest
 
 $script:QualificationContractScheduleProfiles = @(
-    [pscustomobject]@{ ScriptName = "verify-bounded-phases.tests.ps1"; EstimatedDurationSeconds = 30; TimeoutSeconds = 90; Weight = 1; ResourceClass = "ProcessLight"; Isolation = "Shared" }
+    [pscustomobject]@{ ScriptName = "verify-bounded-phases.tests.ps1"; EstimatedDurationSeconds = 45; TimeoutSeconds = 90; Weight = 1; ResourceClass = "ProcessLight"; Isolation = "Shared" }
     [pscustomobject]@{ ScriptName = "verify-coverage.tests.ps1"; EstimatedDurationSeconds = 30; TimeoutSeconds = 90; Weight = 1; ResourceClass = "ProcessLight"; Isolation = "Shared" }
     # https://github.com/Jacob-J-Thomas/agenthome-poc/issues/610: recent Windows exclusive samples for parallel were 17.052, 16.769, and 14.791 seconds; retain a 20-second estimate (2.948 seconds above the maximum) while preserving the 90-second child bound.
     [pscustomobject]@{ ScriptName = "verify-parallel.tests.ps1"; EstimatedDurationSeconds = 20; TimeoutSeconds = 90; Weight = 3; ResourceClass = "ProcessHeavy"; Isolation = "Exclusive" }
