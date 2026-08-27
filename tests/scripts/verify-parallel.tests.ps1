@@ -146,6 +146,7 @@ $startupProject = Get-Item -LiteralPath (Join-Path $repoRoot "tests\EmbodySense.
 $startupLanes = @(Get-VerificationTestProjectLanes -TestProject $startupProject)
 $nestedProcessFullyQualifiedNames = @(
     "EmbodySense.Core.Startup.Tests.Runtime.AgentRuntimeFactoryNestedProcessTests.CreateAsync_exposes_authoring_that_observes_the_runtime_materialized_nonterminal_run_until_runtime_disposal",
+    "EmbodySense.Core.Startup.Tests.Loops.Execution.GovernedLoopRuntimeTestsSchedules.Durable_schedule_overlap_retry_runs_through_canonical_local_background_runtime",
     "EmbodySense.Core.Startup.Tests.Loops.Execution.GovernedLoopRuntimeTestsModels.Model_attempt_crash_windows_are_durable_and_never_redispatch_across_external_restart",
     "EmbodySense.Core.Startup.Tests.Loops.Execution.GovernedLoopRuntimeTestsWait.Production_runtime_parks_and_wakes_a_canonical_wait_after_restart",
     "EmbodySense.Core.Startup.Tests.Loops.Execution.GovernedLoopRuntimeTestsWait.Explicit_background_request_activates_once_after_late_workspace_host_reacquisition"
@@ -154,7 +155,7 @@ Assert-True -Condition ((@($startupLanes.Name) -join "|") -ceq "remainder|nested
 $startupRemainderLane = @($startupLanes | Where-Object Name -ceq "remainder")
 $startupNestedProcessLane = @($startupLanes | Where-Object Name -ceq "nested-process")
 Assert-True -Condition ($startupRemainderLane.Count -eq 1 -and $startupNestedProcessLane.Count -eq 1) -Message "Startup lane identities must remain unique."
-Assert-True -Condition ((@($startupNestedProcessLane[0].IncludeFullyQualifiedName) -join "|") -ceq ($nestedProcessFullyQualifiedNames -join "|")) -Message "The nested-process lane must own exactly the approved restart fixtures."
+Assert-True -Condition ((@($startupNestedProcessLane[0].IncludeFullyQualifiedName) -join "|") -ceq ($nestedProcessFullyQualifiedNames -join "|")) -Message "The nested-process lane must own exactly the approved full-capacity restart and held-attempt fixtures."
 Assert-True -Condition (@($startupNestedProcessLane[0].ExcludeFullyQualifiedName).Count -eq 0 -and @($startupRemainderLane[0].IncludeFullyQualifiedName).Count -eq 0 -and (@($startupRemainderLane[0].ExcludeFullyQualifiedName) -join "|") -ceq ($nestedProcessFullyQualifiedNames -join "|")) -Message "The remainder lane must be the exact complement of the nested-process fixtures."
 $startupNestedProcessFilter = Get-VerificationTestLaneFilter -Lane $startupNestedProcessLane[0]
 $startupRemainderFilter = Get-VerificationTestLaneFilter -Lane $startupRemainderLane[0]
