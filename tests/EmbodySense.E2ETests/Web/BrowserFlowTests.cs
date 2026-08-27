@@ -80,6 +80,18 @@ public sealed class BrowserFlowTests
     }
 
     [Fact]
+    public void Restart_diagnostic_classifier_allows_only_captured_same_authority_resets()
+    {
+        const string TargetAuthority = "127.0.0.1:5001";
+
+        Assert.True(ExpectedServerRestartDiagnosticClassifier.IsExpectedNetworkFailure(true, false, "https://127.0.0.1:5001/api/loop-runs?maximumCount=50", "net::ERR_CONNECTION_RESET", TargetAuthority, capturedAtRestart: true));
+        Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedNetworkFailure(true, false, "https://127.0.0.1:5001/api/loop-runs?maximumCount=50", "net::ERR_CONNECTION_REFUSED", TargetAuthority, capturedAtRestart: true));
+        Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedNetworkFailure(true, false, "https://127.0.0.1:5001/api/loop-runs?maximumCount=50", "fetch failed", TargetAuthority, capturedAtRestart: true));
+        Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedNetworkFailure(true, false, "https://example.test/api/loop-runs?maximumCount=50", "net::ERR_CONNECTION_RESET", TargetAuthority, capturedAtRestart: true));
+        Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedNetworkFailure(true, false, "https://127.0.0.1:5001/api/loop-runs?maximumCount=50", "500 (Internal Server Error)", TargetAuthority, capturedAtRestart: true));
+    }
+
+    [Fact]
     public void Restart_log_classifier_matches_connection_reset_route_and_keeps_other_errors_visible()
     {
         const string TargetAuthority = "127.0.0.1:5001";
@@ -94,6 +106,184 @@ public sealed class BrowserFlowTests
         Assert.True(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "fetch failed: net::ERR_CONNECTION_RESET", "https://127.0.0.1:5001/", "https://127.0.0.1:5001/api/session", TargetAuthority));
         Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "WebSocket failed: net::ERR_CONNECTION_RESET", null, "https://127.0.0.1:5001/api/loops", TargetAuthority));
         Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "WebSocket failed: net::ERR_CONNECTION_RESET", null, "ws://example.test/hubs/session", TargetAuthority));
+    }
+
+    [Fact]
+    public void Restart_log_classifier_allows_captured_reset_but_keeps_unrelated_diagnostics_visible()
+    {
+        const string TargetAuthority = "127.0.0.1:5001";
+
+        Assert.True(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "fetch failed: net::ERR_CONNECTION_RESET", "https://127.0.0.1:5001/api/loop-runs?maximumCount=50", null, TargetAuthority, capturedAtRestart: true));
+        Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "fetch failed", "https://127.0.0.1:5001/api/loop-runs?maximumCount=50", null, TargetAuthority, capturedAtRestart: true));
+        Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "fetch failed: net::ERR_CONNECTION_RESET", "https://example.test/api/loop-runs?maximumCount=50", null, TargetAuthority, capturedAtRestart: true));
+        Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "fetch failed: net::ERR_CONNECTION_RESET", "https://example.test/api/loop-runs?maximumCount=50", "https://127.0.0.1:5001/api/loop-runs?maximumCount=50", TargetAuthority, capturedAtRestart: true));
+        Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "500 (Internal Server Error)", "https://127.0.0.1:5001/api/loop-runs?maximumCount=50", null, TargetAuthority, capturedAtRestart: true));
+    }
+
+    [Fact]
+    public async Task Restart_request_tracking_finishes_a_started_failure_before_begin_can_capture_it()
+    {
+        const string TargetAuthority = "127.0.0.1:5001";
+        var tracker = new ExpectedServerRestartRequestTracker(TargetAuthority);
+        using var failureStarted = new ManualResetEventSlim();
+        using var releaseFailure = new ManualResetEventSlim();
+        var failureTask = Task.Run(() => tracker.ExecuteAtomicallyForTest(() =>
+        {
+            tracker.Track("request-1", "https://127.0.0.1:5001/api/loop-runs?maximumCount=50");
+            failureStarted.Set();
+            Assert.True(releaseFailure.Wait(TimeSpan.FromSeconds(5)));
+            Assert.False(tracker.ProcessLoadingFailed("request-1", canceled: false, "net::ERR_CONNECTION_RESET"));
+        }));
+
+        Assert.True(failureStarted.Wait(TimeSpan.FromSeconds(5)));
+        using var beginStarted = new ManualResetEventSlim();
+        var beginTask = Task.Run(() =>
+        {
+            beginStarted.Set();
+            tracker.BeginExpectedServerRestart();
+        });
+        Assert.True(beginStarted.Wait(TimeSpan.FromSeconds(5)));
+        releaseFailure.Set();
+        await failureTask;
+        await beginTask;
+
+        var context = tracker.ReadLogContext("request-1");
+        Assert.False(context.BeganDuringOutage);
+        Assert.False(context.CapturedAtRestart);
+        Assert.False(tracker.ProcessLoadingFailed("request-1", canceled: false, "net::ERR_CONNECTION_RESET"));
+    }
+
+    [Fact]
+    public void Restart_request_tracking_removes_canceled_captured_requests_before_later_diagnostics()
+    {
+        var tracker = new ExpectedServerRestartRequestTracker("127.0.0.1:5001");
+        tracker.Track("request-1", "https://127.0.0.1:5001/api/loop-runs?maximumCount=50");
+        tracker.BeginExpectedServerRestart();
+
+        Assert.True(tracker.ProcessLoadingFailed("request-1", canceled: true, "net::ERR_CONNECTION_RESET"));
+        var context = tracker.ReadLogContext("request-1");
+        Assert.False(context.CapturedAtRestart);
+        Assert.False(tracker.ProcessLoadingFailed("request-1", canceled: false, "net::ERR_CONNECTION_RESET"));
+    }
+
+    [Fact]
+    public void Restart_request_tracking_correlates_loading_failed_before_late_log_without_widening_diagnostics()
+    {
+        const string TargetAuthority = "127.0.0.1:5001";
+        const string RequestUrl = "https://127.0.0.1:5001/api/loop-runs?maximumCount=50";
+        var tracker = new ExpectedServerRestartRequestTracker(TargetAuthority);
+        tracker.Track("captured", RequestUrl);
+        tracker.BeginExpectedServerRestart();
+
+        Assert.True(tracker.ProcessLoadingFailed("captured", canceled: false, "net::ERR_CONNECTION_RESET"));
+        Assert.False(tracker.IsExpectedServerRestartLogEntry("captured", "network", "fetch failed", null));
+        tracker.EndExpectedServerRestart();
+        Assert.True(tracker.IsExpectedServerRestartLogEntry("captured", "network", "fetch failed: net::ERR_CONNECTION_RESET", null));
+        var context = tracker.ReadLogContext("captured");
+        Assert.False(context.CapturedAtRestart);
+        Assert.False(tracker.IsExpectedServerRestartLogEntry("captured", "network", "fetch failed: net::ERR_CONNECTION_RESET", null));
+
+        tracker.Track("non-reset", RequestUrl);
+        tracker.BeginExpectedServerRestart();
+        Assert.False(tracker.ProcessLoadingFailed("non-reset", canceled: false, "fetch failed"));
+        Assert.False(tracker.IsExpectedServerRestartLogEntry("non-reset", "network", "fetch failed", null));
+
+        tracker.Track("http-error", RequestUrl);
+        tracker.BeginExpectedServerRestart();
+        Assert.False(tracker.ProcessLoadingFailed("http-error", canceled: false, "500 (Internal Server Error)"));
+        Assert.False(tracker.IsExpectedServerRestartLogEntry("http-error", "network", "500 (Internal Server Error)", null));
+
+        tracker.Track("external", "https://example.test/api/loop-runs?maximumCount=50");
+        Assert.False(tracker.IsExpectedServerRestartLogEntry("external", "network", "fetch failed: net::ERR_CONNECTION_RESET", "https://example.test/api/loop-runs?maximumCount=50"));
+    }
+
+    [Fact]
+    public void Restart_request_tracking_correlates_log_before_loading_failed_and_cleans_after_both_channels()
+    {
+        const string TargetAuthority = "127.0.0.1:5001";
+        const string RequestUrl = "https://127.0.0.1:5001/api/session";
+        var tracker = new ExpectedServerRestartRequestTracker(TargetAuthority);
+        tracker.Track("request-1", RequestUrl);
+        tracker.BeginExpectedServerRestart();
+
+        Assert.True(tracker.IsExpectedServerRestartLogEntry("request-1", "network", "fetch failed: net::ERR_CONNECTION_RESET", RequestUrl));
+        Assert.True(tracker.ProcessLoadingFailed("request-1", canceled: false, "net::ERR_CONNECTION_RESET"));
+        var context = tracker.ReadLogContext("request-1");
+        Assert.False(context.BeganDuringOutage);
+        Assert.False(context.CapturedAtRestart);
+    }
+
+    [Fact]
+    public void Restart_request_tracking_freezes_only_requests_drained_before_the_barrier()
+    {
+        const string TargetAuthority = "127.0.0.1:5001";
+        const string RequestUrl = "https://127.0.0.1:5001/api/loop-runs?maximumCount=50";
+        var tracker = new ExpectedServerRestartRequestTracker(TargetAuthority);
+        tracker.PrepareExpectedServerRestart();
+        tracker.Track("queued-before-barrier", RequestUrl);
+        tracker.FreezeExpectedServerRestart();
+
+        Assert.True(tracker.ProcessLoadingFailed("queued-before-barrier", canceled: false, "net::ERR_CONNECTION_RESET"));
+
+        tracker.Track("started-after-barrier", RequestUrl);
+        Assert.False(tracker.ProcessLoadingFailed("started-after-barrier", canceled: false, "net::ERR_CONNECTION_RESET"));
+    }
+
+    [Fact]
+    public void Restart_request_tracking_aborts_preparing_state_fail_closed()
+    {
+        var tracker = new ExpectedServerRestartRequestTracker("127.0.0.1:5001");
+        tracker.PrepareExpectedServerRestart();
+        tracker.Track("request-1", "https://127.0.0.1:5001/api/loop-runs?maximumCount=50");
+        tracker.AbortExpectedServerRestart();
+
+        Assert.False(tracker.IsExpectedServerRestart());
+        Assert.False(tracker.ProcessLoadingFailed("request-1", canceled: false, "net::ERR_CONNECTION_RESET"));
+    }
+
+    [Fact]
+    public async Task Restart_receive_barrier_freezes_before_await_continuation_can_track_new_request()
+    {
+        const string TargetAuthority = "127.0.0.1:5001";
+        const string RequestUrl = "https://127.0.0.1:5001/api/loop-runs?maximumCount=50";
+        var tracker = new ExpectedServerRestartRequestTracker(TargetAuthority);
+        var responseHandlers = new PendingBrowserCommandResponses();
+        tracker.PrepareExpectedServerRestart();
+        using var responseEntered = new ManualResetEventSlim();
+        using var releaseResponse = new ManualResetEventSlim();
+        responseHandlers.Add(1, _ => tracker.ExecuteAtomicallyForTest(() =>
+        {
+            responseEntered.Set();
+            Assert.True(releaseResponse.Wait(TimeSpan.FromSeconds(5)));
+            tracker.FreezeExpectedServerRestart();
+        }));
+
+        using var response = JsonDocument.Parse("{}");
+        var responseTask = Task.Run(() => responseHandlers.Handle(1, response.RootElement));
+        Assert.True(responseEntered.Wait(TimeSpan.FromSeconds(5)));
+        var continuationTask = Task.Run(() => tracker.Track("post-barrier", RequestUrl));
+        releaseResponse.Set();
+        await responseTask;
+        await continuationTask;
+
+        Assert.False(tracker.ProcessLoadingFailed("post-barrier", canceled: false, "net::ERR_CONNECTION_RESET"));
+    }
+
+    [Fact]
+    public void Restart_request_tracking_clears_late_diagnostic_correlation_when_redirect_leaves_authority()
+    {
+        const string TargetAuthority = "127.0.0.1:5001";
+        const string TargetUrl = "https://127.0.0.1:5001/api/loop-runs?maximumCount=50";
+        const string ExternalUrl = "https://example.test/api/loop-runs?maximumCount=50";
+        var tracker = new ExpectedServerRestartRequestTracker(TargetAuthority);
+        tracker.Track("redirected", TargetUrl);
+        tracker.BeginExpectedServerRestart();
+        Assert.True(tracker.IsExpectedServerRestartLogEntry("redirected", "network", "fetch failed: net::ERR_CONNECTION_RESET", TargetUrl));
+
+        tracker.Track("redirected", ExternalUrl);
+
+        Assert.False(tracker.ProcessLoadingFailed("redirected", canceled: false, "net::ERR_CONNECTION_RESET"));
+        Assert.False(tracker.IsExpectedServerRestartLogEntry("redirected", "network", "fetch failed: net::ERR_CONNECTION_RESET", ExternalUrl));
     }
 
     [InstalledBrowserFact]
@@ -125,7 +315,7 @@ public sealed class BrowserFlowTests
             await ClickAsync(browser, "#chatNav");
 
             app.AssertHealthy();
-            browser.BeginExpectedServerRestart();
+            await browser.BeginExpectedServerRestartAsync();
             await app.DisposeAsync();
             app = null;
             await browser.WaitForExpressionAsync("/reconnect|retry/i.test(document.getElementById('clientStatus').textContent)");
@@ -287,7 +477,7 @@ public sealed class BrowserFlowTests
             Assert.Equal("Description survives validation correction and reload.", await browser.EvaluateStringAsync("document.getElementById('loopDescription').value"));
             Assert.Equal(0, await GetCustomDefinitionCountAsync(browser));
 
-            browser.BeginExpectedServerRestart();
+            await browser.BeginExpectedServerRestartAsync();
             await app.DisposeAsync();
             retiredServerOutput = app.FormatOutput();
             app = null;
@@ -1814,18 +2004,16 @@ public sealed class BrowserFlowTests
         private readonly BoundedProcessOutput _output;
         private readonly BoundedProcessOutput _error;
         private readonly ConcurrentDictionary<int, TaskCompletionSource<JsonElement>> _pendingCommands = new();
+        private readonly PendingBrowserCommandResponses _pendingResponseHandlers = new();
         private readonly ConcurrentDictionary<int, Task> _pendingSends = new();
-        private readonly ConcurrentDictionary<string, byte> _expectedServerRestartRequests = new(StringComparer.Ordinal);
-        private readonly ConcurrentDictionary<string, string> _requestUrls = new(StringComparer.Ordinal);
         private readonly SemaphoreSlim _sendGate = new(1, 1);
         private readonly object _diagnosticsGate = new();
         private readonly List<string> _diagnostics = [];
         private readonly byte[] _buffer = new byte[65536];
         private readonly Task _readerTask;
-        private readonly string _targetAuthority;
+        private readonly ExpectedServerRestartRequestTracker _requestTracker;
         private Exception? _readerFailure;
         private int _acceptNextJavaScriptDialog;
-        private int _expectedServerRestart;
         private int _nextCommandId;
         private int _disposed;
 
@@ -1836,7 +2024,7 @@ public sealed class BrowserFlowTests
             _userDataDirectory = userDataDirectory;
             _output = output;
             _error = error;
-            _targetAuthority = new Uri(targetUrl).Authority;
+            _requestTracker = new ExpectedServerRestartRequestTracker(new Uri(targetUrl).Authority);
             _readerTask = ReceiveLoopAsync();
         }
 
@@ -2013,20 +2201,30 @@ public sealed class BrowserFlowTests
             }
         }
 
-        public void BeginExpectedServerRestart()
+        public async Task BeginExpectedServerRestartAsync(CancellationToken cancellationToken = default)
         {
-            _expectedServerRestartRequests.Clear();
-            Interlocked.Exchange(ref _expectedServerRestart, 1);
+            _requestTracker.PrepareExpectedServerRestart();
+            using var barrierTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            barrierTimeout.CancelAfter(TimeSpan.FromSeconds(5));
+            try
+            {
+                _ = await EvaluateAsync("true", barrierTimeout.Token, responseHandler: FreezeExpectedServerRestartAtBarrierResponse);
+            }
+            catch
+            {
+                _requestTracker.AbortExpectedServerRestart();
+                throw;
+            }
         }
 
         public void MarkExpectedReplacementServerStarting()
         {
-            Interlocked.CompareExchange(ref _expectedServerRestart, 2, 1);
+            _requestTracker.MarkExpectedReplacementServerStarting();
         }
 
         public void EndExpectedServerRestart()
         {
-            Interlocked.Exchange(ref _expectedServerRestart, 0);
+            _requestTracker.EndExpectedServerRestart();
         }
 
         public async Task AssertHealthyAsync(params (string UrlFragment, int StatusCode)[] expectedHttpFailures)
@@ -2123,7 +2321,7 @@ public sealed class BrowserFlowTests
             TryDeleteDirectory(_userDataDirectory);
         }
 
-        private async Task<JsonElement> EvaluateAsync(string expression, CancellationToken cancellationToken, bool userGesture = false)
+        private async Task<JsonElement> EvaluateAsync(string expression, CancellationToken cancellationToken, bool userGesture = false, Action<JsonElement>? responseHandler = null)
         {
             var response = await SendCommandAsync("Runtime.evaluate", new
             {
@@ -2131,7 +2329,7 @@ public sealed class BrowserFlowTests
                 awaitPromise = true,
                 returnByValue = true,
                 userGesture
-            }, cancellationToken);
+            }, cancellationToken, responseHandler);
             if (response.TryGetProperty("exceptionDetails", out var exceptionDetails))
             {
                 throw new InvalidOperationException("Browser evaluation failed: " + exceptionDetails.GetRawText());
@@ -2149,7 +2347,19 @@ public sealed class BrowserFlowTests
             return remoteObject.TryGetProperty("value", out var value) ? value.Clone() : default;
         }
 
-        private async Task<JsonElement> SendCommandAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
+        private void FreezeExpectedServerRestartAtBarrierResponse(JsonElement response)
+        {
+            if (response.TryGetProperty("exceptionDetails", out _)
+                || !response.TryGetProperty("result", out var commandResult)
+                || !commandResult.TryGetProperty("result", out _))
+            {
+                throw new InvalidOperationException("Browser restart receive-loop barrier command failed: " + response.GetRawText());
+            }
+
+            _requestTracker.FreezeExpectedServerRestart();
+        }
+
+        private async Task<JsonElement> SendCommandAsync(string method, object? parameters = null, CancellationToken cancellationToken = default, Action<JsonElement>? responseHandler = null)
         {
             cancellationToken.ThrowIfCancellationRequested();
             ThrowIfReaderFailed();
@@ -2166,6 +2376,11 @@ public sealed class BrowserFlowTests
 
             try
             {
+                if (responseHandler is not null)
+                {
+                    _pendingResponseHandlers.Add(commandId, responseHandler);
+                }
+
                 var sendTask = SendPayloadAsync(bytes);
                 _pendingSends[commandId] = sendTask;
                 _ = ObserveSendCompletionAsync(commandId, sendTask);
@@ -2174,11 +2389,13 @@ public sealed class BrowserFlowTests
             catch (OperationCanceledException)
             {
                 _pendingCommands.TryRemove(commandId, out _);
+                _pendingResponseHandlers.Remove(commandId);
                 throw;
             }
             catch (Exception exception) when (exception is WebSocketException or IOException or InvalidOperationException or ObjectDisposedException)
             {
                 _pendingCommands.TryRemove(commandId, out _);
+                _pendingResponseHandlers.Remove(commandId);
                 throw new InvalidOperationException("Browser DevTools command send failed." + Environment.NewLine + FormatOutput(), exception);
             }
 
@@ -2189,6 +2406,7 @@ public sealed class BrowserFlowTests
             catch
             {
                 _pendingCommands.TryRemove(commandId, out _);
+                _pendingResponseHandlers.Remove(commandId);
                 throw;
             }
         }
@@ -2235,7 +2453,15 @@ public sealed class BrowserFlowTests
                     {
                         if (_pendingCommands.TryRemove(commandId, out var completion))
                         {
-                            completion.TrySetResult(root.Clone());
+                            try
+                            {
+                                _pendingResponseHandlers.Handle(commandId, root);
+                                completion.TrySetResult(root.Clone());
+                            }
+                            catch (Exception exception)
+                            {
+                                completion.TrySetException(exception);
+                            }
                         }
 
                         continue;
@@ -2261,6 +2487,7 @@ public sealed class BrowserFlowTests
                 {
                     if (_pendingCommands.TryRemove(pending.Key, out var completion))
                     {
+                        _pendingResponseHandlers.Remove(pending.Key);
                         completion.TrySetException(completionFailure);
                     }
                 }
@@ -2308,6 +2535,21 @@ public sealed class BrowserFlowTests
             var method = methodValue.GetString();
             if (!message.TryGetProperty("params", out var parameters))
             {
+                return;
+            }
+
+            if (method == "Network.loadingFailed")
+            {
+                var requestId = parameters.TryGetProperty("requestId", out var requestIdValue) && requestIdValue.ValueKind == JsonValueKind.String
+                    ? requestIdValue.GetString()
+                    : null;
+                var canceled = parameters.TryGetProperty("canceled", out var canceledValue) && canceledValue.ValueKind == JsonValueKind.True;
+                var errorText = parameters.TryGetProperty("errorText", out var errorTextValue) ? errorTextValue.GetString() : null;
+                if (!_requestTracker.ProcessLoadingFailed(requestId, canceled, errorText))
+                {
+                    AddDiagnostic("network load failed: " + parameters.GetRawText());
+                }
+
                 return;
             }
 
@@ -2367,16 +2609,6 @@ public sealed class BrowserFlowTests
                 return;
             }
 
-            if (method == "Network.loadingFailed"
-                && (!parameters.TryGetProperty("canceled", out var cancelled) || cancelled.ValueKind != JsonValueKind.True))
-            {
-                if (IsExpectedServerRestartNetworkFailure(parameters))
-                {
-                    return;
-                }
-
-                AddDiagnostic("network load failed: " + parameters.GetRawText());
-            }
         }
 
         private void CaptureRequestUrl(string? method, JsonElement parameters)
@@ -2392,9 +2624,7 @@ public sealed class BrowserFlowTests
                 && request.TryGetProperty("url", out var requestUrl)
                 && requestUrl.ValueKind == JsonValueKind.String)
             {
-                var url = requestUrl.GetString()!;
-                _requestUrls[requestId] = url;
-                CaptureExpectedServerRestartRequest(requestId, url);
+                _requestTracker.Track(requestId, requestUrl.GetString()!);
                 return;
             }
 
@@ -2402,16 +2632,13 @@ public sealed class BrowserFlowTests
                 && parameters.TryGetProperty("url", out var websocketUrl)
                 && websocketUrl.ValueKind == JsonValueKind.String)
             {
-                var url = websocketUrl.GetString()!;
-                _requestUrls[requestId] = url;
-                CaptureExpectedServerRestartRequest(requestId, url);
+                _requestTracker.Track(requestId, websocketUrl.GetString()!);
                 return;
             }
 
             if (method is "Network.loadingFinished" or "Network.webSocketClosed")
             {
-                _requestUrls.TryRemove(requestId, out _);
-                _expectedServerRestartRequests.TryRemove(requestId, out _);
+                _requestTracker.Complete(requestId);
             }
         }
 
@@ -2420,99 +2647,24 @@ public sealed class BrowserFlowTests
             var requestId = entry.TryGetProperty("networkRequestId", out var requestIdValue) && requestIdValue.ValueKind == JsonValueKind.String
                 ? requestIdValue.GetString()
                 : null;
-            var beganDuringOutage = requestId is not null && _expectedServerRestartRequests.ContainsKey(requestId);
-            if (Volatile.Read(ref _expectedServerRestart) == 0 && !beganDuringOutage)
-            {
-                return false;
-            }
-
             var source = entry.TryGetProperty("source", out var sourceValue) ? sourceValue.GetString() : null;
             var text = entry.TryGetProperty("text", out var textValue) ? textValue.GetString() : null;
             var url = entry.TryGetProperty("url", out var urlValue) ? urlValue.GetString() : null;
-            var correlatedRequestUrl = requestId is not null && _requestUrls.TryGetValue(requestId, out var capturedRequestUrl)
-                ? capturedRequestUrl
-                : null;
-            if (!string.Equals(source, "network", StringComparison.Ordinal)
-                || !ContainsTargetAuthority(text) && !ContainsTargetAuthority(url) && !ContainsTargetAuthority(correlatedRequestUrl))
-            {
-                return false;
-            }
-
-            var expected = ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(
-                Volatile.Read(ref _expectedServerRestart) != 0,
-                beganDuringOutage,
-                source,
-                text,
-                url,
-                correlatedRequestUrl,
-                _targetAuthority);
-            if (expected && requestId is not null)
-            {
-                _expectedServerRestartRequests.TryRemove(requestId, out _);
-            }
-
-            return expected;
+            return _requestTracker.IsExpectedServerRestartLogEntry(requestId, source, text, url);
         }
 
         private bool IsExpectedServerRestartHttpResponse(JsonElement response, double statusCode)
         {
             return statusCode == 401
-                && Volatile.Read(ref _expectedServerRestart) != 0
+                && _requestTracker.IsExpectedServerRestart()
                 && response.TryGetProperty("url", out var url)
                 && url.ValueKind == JsonValueKind.String
                 && ContainsTargetAuthority(url.GetString());
         }
 
-        private bool IsExpectedServerRestartNetworkFailure(JsonElement parameters)
-        {
-            if (!parameters.TryGetProperty("requestId", out var requestIdValue)
-                || requestIdValue.ValueKind != JsonValueKind.String
-                || !_requestUrls.TryRemove(requestIdValue.GetString()!, out var requestUrl))
-            {
-                return false;
-            }
-
-            var beganDuringOutage = _expectedServerRestartRequests.ContainsKey(requestIdValue.GetString()!);
-            if (Volatile.Read(ref _expectedServerRestart) == 0 && !beganDuringOutage
-                || !Uri.TryCreate(requestUrl, UriKind.Absolute, out var uri)
-                || !string.Equals(uri.Authority, _targetAuthority, StringComparison.OrdinalIgnoreCase)
-                || !ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartUrl(requestUrl, _targetAuthority))
-            {
-                return false;
-            }
-
-            var errorText = parameters.TryGetProperty("errorText", out var errorTextValue) ? errorTextValue.GetString() : null;
-            // Intentional server termination can surface ERR_CONNECTION_RESET; strict handling remains tracked by #418.
-            var expected = ExpectedServerRestartDiagnosticClassifier.IsExpectedNetworkFailure(
-                Volatile.Read(ref _expectedServerRestart) != 0,
-                beganDuringOutage,
-                requestUrl,
-                errorText,
-                _targetAuthority);
-            if (expected)
-            {
-                _expectedServerRestartRequests.TryRemove(requestIdValue.GetString()!, out _);
-            }
-
-            return expected;
-        }
-
-        private void CaptureExpectedServerRestartRequest(string requestId, string url)
-        {
-            if (Volatile.Read(ref _expectedServerRestart) == 1 && IsExpectedServerRestartUrl(url))
-            {
-                _expectedServerRestartRequests.TryAdd(requestId, 0);
-            }
-        }
-
         private bool ContainsTargetAuthority(string? value)
         {
-            return value?.Contains(_targetAuthority, StringComparison.OrdinalIgnoreCase) == true;
-        }
-
-        private bool IsExpectedServerRestartUrl(string? value)
-        {
-            return ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartUrl(value, _targetAuthority);
+            return value?.Contains(_requestTracker.TargetAuthority, StringComparison.OrdinalIgnoreCase) == true;
         }
 
         private async Task AcceptJavaScriptDialogAsync()
