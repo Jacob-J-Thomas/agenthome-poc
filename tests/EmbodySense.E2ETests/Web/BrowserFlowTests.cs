@@ -240,6 +240,51 @@ public sealed class BrowserFlowTests
         Assert.False(tracker.ProcessLoadingFailed("request-1", canceled: false, "net::ERR_CONNECTION_RESET"));
     }
 
+    [Fact]
+    public async Task Restart_receive_barrier_freezes_before_await_continuation_can_track_new_request()
+    {
+        const string TargetAuthority = "127.0.0.1:5001";
+        const string RequestUrl = "https://127.0.0.1:5001/api/loop-runs?maximumCount=50";
+        var tracker = new ExpectedServerRestartRequestTracker(TargetAuthority);
+        var responseHandlers = new PendingBrowserCommandResponses();
+        tracker.PrepareExpectedServerRestart();
+        using var responseEntered = new ManualResetEventSlim();
+        using var releaseResponse = new ManualResetEventSlim();
+        responseHandlers.Add(1, _ => tracker.ExecuteAtomicallyForTest(() =>
+        {
+            responseEntered.Set();
+            Assert.True(releaseResponse.Wait(TimeSpan.FromSeconds(5)));
+            tracker.FreezeExpectedServerRestart();
+        }));
+
+        using var response = JsonDocument.Parse("{}");
+        var responseTask = Task.Run(() => responseHandlers.Handle(1, response.RootElement));
+        Assert.True(responseEntered.Wait(TimeSpan.FromSeconds(5)));
+        var continuationTask = Task.Run(() => tracker.Track("post-barrier", RequestUrl));
+        releaseResponse.Set();
+        await responseTask;
+        await continuationTask;
+
+        Assert.False(tracker.ProcessLoadingFailed("post-barrier", canceled: false, "net::ERR_CONNECTION_RESET"));
+    }
+
+    [Fact]
+    public void Restart_request_tracking_clears_late_diagnostic_correlation_when_redirect_leaves_authority()
+    {
+        const string TargetAuthority = "127.0.0.1:5001";
+        const string TargetUrl = "https://127.0.0.1:5001/api/loop-runs?maximumCount=50";
+        const string ExternalUrl = "https://example.test/api/loop-runs?maximumCount=50";
+        var tracker = new ExpectedServerRestartRequestTracker(TargetAuthority);
+        tracker.Track("redirected", TargetUrl);
+        tracker.BeginExpectedServerRestart();
+        Assert.True(tracker.IsExpectedServerRestartLogEntry("redirected", "network", "fetch failed: net::ERR_CONNECTION_RESET", TargetUrl));
+
+        tracker.Track("redirected", ExternalUrl);
+
+        Assert.False(tracker.ProcessLoadingFailed("redirected", canceled: false, "net::ERR_CONNECTION_RESET"));
+        Assert.False(tracker.IsExpectedServerRestartLogEntry("redirected", "network", "fetch failed: net::ERR_CONNECTION_RESET", ExternalUrl));
+    }
+
     [InstalledBrowserFact]
     public async Task Default_chat_recovers_in_place_after_process_restart_and_preserves_unsaved_draft()
     {
@@ -1958,6 +2003,7 @@ public sealed class BrowserFlowTests
         private readonly BoundedProcessOutput _output;
         private readonly BoundedProcessOutput _error;
         private readonly ConcurrentDictionary<int, TaskCompletionSource<JsonElement>> _pendingCommands = new();
+        private readonly PendingBrowserCommandResponses _pendingResponseHandlers = new();
         private readonly ConcurrentDictionary<int, Task> _pendingSends = new();
         private readonly SemaphoreSlim _sendGate = new(1, 1);
         private readonly object _diagnosticsGate = new();
@@ -2161,8 +2207,7 @@ public sealed class BrowserFlowTests
             barrierTimeout.CancelAfter(TimeSpan.FromSeconds(5));
             try
             {
-                _ = await EvaluateAsync("true", barrierTimeout.Token);
-                _requestTracker.FreezeExpectedServerRestart();
+                _ = await EvaluateAsync("true", barrierTimeout.Token, responseHandler: FreezeExpectedServerRestartAtBarrierResponse);
             }
             catch
             {
@@ -2275,7 +2320,7 @@ public sealed class BrowserFlowTests
             TryDeleteDirectory(_userDataDirectory);
         }
 
-        private async Task<JsonElement> EvaluateAsync(string expression, CancellationToken cancellationToken, bool userGesture = false)
+        private async Task<JsonElement> EvaluateAsync(string expression, CancellationToken cancellationToken, bool userGesture = false, Action<JsonElement>? responseHandler = null)
         {
             var response = await SendCommandAsync("Runtime.evaluate", new
             {
@@ -2283,7 +2328,7 @@ public sealed class BrowserFlowTests
                 awaitPromise = true,
                 returnByValue = true,
                 userGesture
-            }, cancellationToken);
+            }, cancellationToken, responseHandler);
             if (response.TryGetProperty("exceptionDetails", out var exceptionDetails))
             {
                 throw new InvalidOperationException("Browser evaluation failed: " + exceptionDetails.GetRawText());
@@ -2301,7 +2346,19 @@ public sealed class BrowserFlowTests
             return remoteObject.TryGetProperty("value", out var value) ? value.Clone() : default;
         }
 
-        private async Task<JsonElement> SendCommandAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
+        private void FreezeExpectedServerRestartAtBarrierResponse(JsonElement response)
+        {
+            if (response.TryGetProperty("exceptionDetails", out _)
+                || !response.TryGetProperty("result", out var commandResult)
+                || !commandResult.TryGetProperty("result", out _))
+            {
+                throw new InvalidOperationException("Browser restart receive-loop barrier command failed: " + response.GetRawText());
+            }
+
+            _requestTracker.FreezeExpectedServerRestart();
+        }
+
+        private async Task<JsonElement> SendCommandAsync(string method, object? parameters = null, CancellationToken cancellationToken = default, Action<JsonElement>? responseHandler = null)
         {
             cancellationToken.ThrowIfCancellationRequested();
             ThrowIfReaderFailed();
@@ -2318,6 +2375,11 @@ public sealed class BrowserFlowTests
 
             try
             {
+                if (responseHandler is not null)
+                {
+                    _pendingResponseHandlers.Add(commandId, responseHandler);
+                }
+
                 var sendTask = SendPayloadAsync(bytes);
                 _pendingSends[commandId] = sendTask;
                 _ = ObserveSendCompletionAsync(commandId, sendTask);
@@ -2326,11 +2388,13 @@ public sealed class BrowserFlowTests
             catch (OperationCanceledException)
             {
                 _pendingCommands.TryRemove(commandId, out _);
+                _pendingResponseHandlers.Remove(commandId);
                 throw;
             }
             catch (Exception exception) when (exception is WebSocketException or IOException or InvalidOperationException or ObjectDisposedException)
             {
                 _pendingCommands.TryRemove(commandId, out _);
+                _pendingResponseHandlers.Remove(commandId);
                 throw new InvalidOperationException("Browser DevTools command send failed." + Environment.NewLine + FormatOutput(), exception);
             }
 
@@ -2341,6 +2405,7 @@ public sealed class BrowserFlowTests
             catch
             {
                 _pendingCommands.TryRemove(commandId, out _);
+                _pendingResponseHandlers.Remove(commandId);
                 throw;
             }
         }
@@ -2387,7 +2452,15 @@ public sealed class BrowserFlowTests
                     {
                         if (_pendingCommands.TryRemove(commandId, out var completion))
                         {
-                            completion.TrySetResult(root.Clone());
+                            try
+                            {
+                                _pendingResponseHandlers.Handle(commandId, root);
+                                completion.TrySetResult(root.Clone());
+                            }
+                            catch (Exception exception)
+                            {
+                                completion.TrySetException(exception);
+                            }
                         }
 
                         continue;
@@ -2413,6 +2486,7 @@ public sealed class BrowserFlowTests
                 {
                     if (_pendingCommands.TryRemove(pending.Key, out var completion))
                     {
+                        _pendingResponseHandlers.Remove(pending.Key);
                         completion.TrySetException(completionFailure);
                     }
                 }

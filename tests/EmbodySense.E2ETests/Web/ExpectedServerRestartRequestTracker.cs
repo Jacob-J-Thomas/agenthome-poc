@@ -64,7 +64,7 @@ internal sealed class ExpectedServerRestartRequestTracker
     {
         lock (_gate)
         {
-            if (Volatile.Read(ref _expectedServerRestart) == Preparing)
+            if (Volatile.Read(ref _expectedServerRestart) != Idle)
             {
                 _expectedServerRestartRequests.Clear();
                 _capturedExpectedServerRestartRequests.Clear();
@@ -103,6 +103,7 @@ internal sealed class ExpectedServerRestartRequestTracker
             if (!IsTargetAuthority(url))
             {
                 RemoveUnderLock(requestId);
+                _terminalCorrelations.Remove(requestId);
                 return;
             }
 
