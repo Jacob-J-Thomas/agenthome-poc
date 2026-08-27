@@ -58,7 +58,7 @@ A dependency should identify a necessary delivered prerequisite, not merely a pr
 
 ## Autonomous delivery circuit breakers
 
-Each Bolt follows `$run-agentic-pr-pipeline`:
+Each Bolt follows `$aidlc-pipeline`:
 
 1. Record the change contract, intended base, authority, and required executable gates.
 2. Implement the smallest coherent patch and pass repository gates before model review.
