@@ -999,6 +999,142 @@ internal static class GovernedLoopRuntimeTests
         }
     }
 
+    internal static async Task Durable_schedule_overlap_retry_runs_through_canonical_local_background_runtime()
+    {
+        using var fixture = await GovernedRuntimeFixture.CreateAsync(scheduleTrigger: true, pauseProvider: true);
+        fixture.EnableInMemoryProviderBarrier();
+        var scheduledAtUtc = DateTimeOffset.UtcNow.AddMinutes(-2).ToUniversalTime();
+        var workerNow = scheduledAtUtc.AddMinutes(2);
+        var first = ScheduleScenario.Create(
+            fixture,
+            scheduledAtUtc,
+            "hold the durable overlap blocker",
+            "governed-overlap-retry-a",
+            ScheduleOverlapPolicy.DeferOne);
+        var second = ScheduleScenario.Create(
+            fixture,
+            scheduledAtUtc,
+            "retain one durable overlap retry",
+            "governed-overlap-retry-b",
+            ScheduleOverlapPolicy.DeferOne);
+
+        await QueueScheduleAsync(fixture.Paths, first, workerNow);
+        await QueueScheduleAsync(fixture.Paths, second, workerNow.AddTicks(1));
+
+        var dispatchNow = workerNow.AddSeconds(1);
+        var queue = new TriggerQueueStore(
+            fixture.Paths,
+            TriggerQueueQuota.Runtime,
+            timeProvider: new FixedTriggerTimeProvider(dispatchNow));
+        Assert.Equal(2, (await queue.GetSnapshotAsync(dispatchNow)).QueuedEntries);
+        await using var runtime = await fixture.CreateRuntimeAsync();
+        var generation = (await queue.GetSnapshotAsync(dispatchNow)).Generation;
+        var blockerTask = runtime
+            .CreateTriggerWorkerRuntime(new ExactTriggerAuthorizer(), new FixedTriggerTimeProvider(dispatchNow))
+            .RunOnceAsync(new TriggerWorkerSelectionInput(
+                "overlap-retry-worker-a",
+                generation,
+                dispatchNow,
+                TimeSpan.FromSeconds(30),
+                [],
+                2));
+        TriggerWorkerRunResponse blocked;
+        TriggerWorkerRunResponse? blocker = null;
+        var providerEntered = false;
+        try
+        {
+            await fixture.WaitForInMemoryProviderAsync(blockerTask);
+            providerEntered = true;
+            generation = (await queue.GetSnapshotAsync(dispatchNow)).Generation;
+            blocked = await runtime
+                .CreateTriggerWorkerRuntime(new ExactTriggerAuthorizer(), new FixedTriggerTimeProvider(dispatchNow))
+                .RunOnceAsync(new TriggerWorkerSelectionInput(
+                    "overlap-retry-worker-b",
+                    generation,
+                    dispatchNow,
+                    TimeSpan.FromSeconds(30),
+                    [],
+                    2));
+        }
+        finally
+        {
+            fixture.ReleaseInMemoryProvider();
+            if (providerEntered)
+            {
+                try
+                {
+                    blocker = await blockerTask.WaitAsync(TimeSpan.FromSeconds(10));
+                }
+                catch (TimeoutException)
+                {
+                    throw new Xunit.Sdk.XunitException("The blocking trigger worker did not complete within the test deadline after its provider attempt was released.");
+                }
+            }
+            else
+            {
+                _ = blockerTask.ContinueWith(
+                    static completed => _ = completed.Exception,
+                    CancellationToken.None,
+                    TaskContinuationOptions.ExecuteSynchronously | TaskContinuationOptions.OnlyOnFaulted,
+                    TaskScheduler.Default);
+            }
+        }
+
+        var completedBlocker = blocker ?? throw new Xunit.Sdk.XunitException("The blocking trigger worker completed without a response.");
+        Assert.Equal("Dispatched", completedBlocker.Entry!.State);
+        Assert.Equal("Terminal", completedBlocker.Entry.DispatchOutcome);
+        Assert.Equal("DispatchRejected", blocked.Entry!.State);
+        Assert.Equal("Rejected", blocked.Entry.DispatchOutcome);
+        Assert.Null(blocked.Entry.GovernedRunId);
+        Assert.Contains("OverlapDeferred", blocked.Entry.DispatchDetail, StringComparison.Ordinal);
+        Assert.Equal(1, fixture.ProviderAttempts);
+
+        using var runs = new CustomLoopRunStore(fixture.Paths);
+        var deferred = Assert.IsType<ScheduleRunAdmissionEvidence>(
+            await runs.GetScheduleAdmissionAsync(second.CreateEnvelope().DeliveryId));
+        Assert.True(ScheduleRunAdmissionEvidenceValidator.IsValid(deferred));
+        Assert.Equal(ScheduleRunAdmissionDisposition.OverlapDeferred, deferred.Attempts[^1].Disposition);
+        Assert.Equal(completedBlocker.Entry.GovernedRunId, deferred.Attempts[^1].BlockingRunId);
+        Assert.Single(await runs.ListRecentAsync(10));
+
+        await using var background = runtime.CreateGovernedLoopLocalBackgroundRuntime(
+            first,
+            first,
+            first,
+            new ExactTriggerAuthorizer(),
+            new UnusedSleepPosture(),
+            new UnusedWakeContinuation(),
+            new UnusedWakeVerification(),
+            new GovernedLoopLocalWorkRunnerOptions(
+                "overlap-retry-background-worker",
+                TimeSpan.FromSeconds(30),
+                2,
+                3),
+            new GovernedLoopLocalCoordinatorOptions(
+                "overlap-retry-background-coordinator",
+                "overlap-retry-background-owner",
+                TimeSpan.FromSeconds(1),
+                TimeSpan.FromSeconds(1),
+                TimeSpan.FromSeconds(5),
+                1),
+            new FixedTriggerTimeProvider(dispatchNow.AddMinutes(1)));
+        var retried = Assert.IsType<GovernedLoopLocalWorkResult>(
+            await background.RunOnceAsync(GovernedLoopLocalWorkFamily.Trigger));
+        var exhausted = Assert.IsType<GovernedLoopLocalWorkResult>(
+            await background.RunOnceAsync(GovernedLoopLocalWorkFamily.Trigger));
+        var refreshed = Assert.IsType<ScheduleRunAdmissionEvidence>(
+            await runs.GetScheduleAdmissionAsync(second.CreateEnvelope().DeliveryId));
+
+        Assert.Equal(GovernedLoopLocalWorkResultStatus.Completed, retried.Status);
+        Assert.Equal("schedule-retry-materialized", retried.ReasonCode);
+        Assert.Equal(GovernedLoopLocalWorkResultStatus.Empty, exhausted.Status);
+        Assert.Equal(2, fixture.ProviderAttempts);
+        Assert.Equal(2, (await runs.ListRecentAsync(10)).Count);
+        Assert.Single(refreshed.Attempts, attempt => attempt.Disposition == ScheduleRunAdmissionDisposition.RunCreated);
+        Assert.Equal(ScheduleRunAdmissionDisposition.RunCreated, refreshed.Attempts[^1].Disposition);
+        Assert.Equal(completedBlocker.Entry.GovernedRunId, refreshed.Attempts[0].BlockingRunId);
+    }
+
     internal static async Task Concurrent_cross_schedule_defer_one_observations_retain_one_atomic_deferral_across_restart()
     {
         using var fixture = await GovernedRuntimeFixture.CreateAsync(scheduleTrigger: true, pauseProvider: true);
@@ -2781,6 +2917,7 @@ internal static class GovernedLoopRuntimeTests
         private readonly string _providerReleasePath;
         private readonly string _codexPath;
         private readonly ModelProfileRuntimeProvider? _additionalModelProfileProvider;
+        private readonly TestExactProviderControl? _testExactProviderControl;
 
         private GovernedRuntimeFixture(
             TestWorkspace workspace,
@@ -2789,7 +2926,8 @@ internal static class GovernedLoopRuntimeTests
             AuthorityGrantReference? restrictedGrant,
             string codexPath,
             DateTimeOffset? waitDeadlineUtc,
-            ModelProfileRuntimeProvider? additionalModelProfileProvider)
+            ModelProfileRuntimeProvider? additionalModelProfileProvider,
+            TestExactProviderControl? testExactProviderControl)
         {
             _workspace = workspace;
             Publication = publication;
@@ -2798,6 +2936,7 @@ internal static class GovernedLoopRuntimeTests
             _codexPath = codexPath;
             WaitDeadlineUtc = waitDeadlineUtc;
             _additionalModelProfileProvider = additionalModelProfileProvider;
+            _testExactProviderControl = testExactProviderControl;
             Paths = new WorkspacePaths(workspace.RootPath);
             _providerCounterPath = workspace.File("governed-provider-attempts.txt");
             _providerStartedPath = workspace.File("governed-provider-started.marker");
@@ -2897,7 +3036,15 @@ internal static class GovernedLoopRuntimeTests
                         AuthorityGrantCompletionConstraintKind.None,
                         modelProfileCapabilityId)
                     : null;
-                return new GovernedRuntimeFixture(workspace, publication, grant, restricted, codexPath, waitDeadlineUtc, testProfile?.Provider);
+                return new GovernedRuntimeFixture(
+                    workspace,
+                    publication,
+                    grant,
+                    restricted,
+                    codexPath,
+                    waitDeadlineUtc,
+                    testProfile?.Provider,
+                    testProfile?.Control);
             }
             catch
             {
@@ -2941,6 +3088,15 @@ internal static class GovernedLoopRuntimeTests
         }
 
         public void ReleaseProvider() => File.WriteAllText(_providerReleasePath, "release");
+
+        internal void EnableInMemoryProviderBarrier()
+            => (_testExactProviderControl ?? throw new InvalidOperationException("The exact test provider is not configured.")).EnableInMemoryBarrier();
+
+        internal Task WaitForInMemoryProviderAsync(Task blockerTask)
+            => (_testExactProviderControl ?? throw new InvalidOperationException("The exact test provider is not configured.")).WaitForInMemoryBarrierAsync(blockerTask);
+
+        internal void ReleaseInMemoryProvider()
+            => (_testExactProviderControl ?? throw new InvalidOperationException("The exact test provider is not configured.")).ReleaseInMemoryBarrier();
 
         public AuthorityGrantReference MissingGrantReference()
             => new(GrantId("governed-absent-grant"), GrantRevision(1), "sha256:" + Hash64('f'));
@@ -3051,14 +3207,17 @@ internal static class GovernedLoopRuntimeTests
         {
             internal static CapabilityDescriptor TemplateDescriptor { get; } = CreateDescriptor();
 
-            private TestExactModelProfile(ModelProfileRuntimeProvider provider)
+            private TestExactModelProfile(ModelProfileRuntimeProvider provider, TestExactProviderControl control)
             {
                 Provider = provider;
+                Control = control;
             }
 
             internal CapabilityDescriptor Descriptor => TemplateDescriptor;
 
             internal ModelProfileRuntimeProvider Provider { get; }
+
+            internal TestExactProviderControl Control { get; }
 
             internal static Task<TestExactModelProfile> CreateAsync(string workspacePath)
             {
@@ -3107,7 +3266,7 @@ internal static class GovernedLoopRuntimeTests
                         metadata,
                         sourceRevisionHash,
                         admissionAdapterRegistry,
-                        control))));
+                        control)), control));
             }
 
             private static CapabilityDescriptor CreateDescriptor()
@@ -3293,6 +3452,9 @@ internal static class GovernedLoopRuntimeTests
             private const string PreTransportCounterFileName = "governed-provider-pretransport-attempts.txt";
             private const string StartedFileName = "governed-provider-started.marker";
             private const string ReleaseFileName = "governed-provider-release.marker";
+            private TaskCompletionSource? _inMemoryProviderEntered;
+            private TaskCompletionSource? _inMemoryProviderRelease;
+            private int _inMemoryBarrierState;
 
             public int FailFirstAttempts { get; } = failFirstAttempts;
 
@@ -3312,6 +3474,48 @@ internal static class GovernedLoopRuntimeTests
 
                 return new TestExactProviderControl(workspacePath, pauseProvider, failFirstAttempts, failBeforeProviderTransportAttempts);
             }
+
+            internal void EnableInMemoryBarrier()
+            {
+                if (!pauseProvider)
+                {
+                    throw new InvalidOperationException("The exact provider must be configured for a paused test.");
+                }
+
+                _inMemoryProviderEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                _inMemoryProviderRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                Volatile.Write(ref _inMemoryBarrierState, 1);
+            }
+
+            internal async Task WaitForInMemoryBarrierAsync(Task blockerTask)
+            {
+                var providerEntered = (_inMemoryProviderEntered ?? throw new InvalidOperationException("The in-memory provider barrier was not enabled.")).Task;
+                Task completed;
+                try
+                {
+                    completed = await Task.WhenAny(providerEntered, blockerTask).WaitAsync(TimeSpan.FromSeconds(10));
+                }
+                catch (TimeoutException)
+                {
+                    if (blockerTask.IsCompleted)
+                    {
+                        await blockerTask;
+                    }
+
+                    throw new Xunit.Sdk.XunitException($"The blocking provider attempt did not reach the in-memory entry barrier within the test deadline. BlockerStatus={blockerTask.Status}.");
+                }
+
+                if (ReferenceEquals(completed, providerEntered))
+                {
+                    await providerEntered;
+                    return;
+                }
+
+                await blockerTask;
+                throw new Xunit.Sdk.XunitException("The blocking trigger worker completed before its provider attempt reached the in-memory entry barrier.");
+            }
+
+            internal void ReleaseInMemoryBarrier() => _inMemoryProviderRelease?.TrySetResult();
 
             public bool ConsumePreTransportFailure()
             {
@@ -3338,6 +3542,19 @@ internal static class GovernedLoopRuntimeTests
             public async Task WaitForReleaseAsync(CancellationToken cancellationToken)
             {
                 if (!pauseProvider || File.Exists(Path.Combine(workspacePath, ReleaseFileName)))
+                {
+                    return;
+                }
+
+                var inMemoryBarrierState = Interlocked.CompareExchange(ref _inMemoryBarrierState, 2, 1);
+                if (inMemoryBarrierState == 1)
+                {
+                    _inMemoryProviderEntered!.TrySetResult();
+                    await _inMemoryProviderRelease!.Task.WaitAsync(cancellationToken);
+                    return;
+                }
+
+                if (inMemoryBarrierState == 2)
                 {
                     return;
                 }
