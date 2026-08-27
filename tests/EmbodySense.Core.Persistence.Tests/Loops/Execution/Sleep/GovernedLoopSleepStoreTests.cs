@@ -1170,7 +1170,8 @@ public sealed class GovernedLoopSleepStoreTests
             "sleep-store/publication",
             "post-gate publication",
             children,
-            TimeSpan.FromSeconds(30));
+            TimeSpan.FromSeconds(30),
+            Verification.CrossProcessReadinessDiagnostics.CoverageChildTeardownTimeout);
         await AssertProcessSucceededAsync(first);
         await AssertProcessSucceededAsync(second);
         var results = new[] { await File.ReadAllTextAsync(firstOutput), await File.ReadAllTextAsync(secondOutput) };

@@ -49,12 +49,13 @@ public sealed class CrossProcessReadinessDiagnosticsTests
             "verification/completion",
             "post-gate decision",
             [child],
+            TimeSpan.FromMilliseconds(100),
             TimeSpan.FromMilliseconds(100));
         var failure = await Assert.ThrowsAsync<FailException>(() => wait.WaitAsync(TimeSpan.FromSeconds(10)));
 
-        Assert.Contains("verification/completion children did not complete post-gate decision", failure.Message, StringComparison.Ordinal);
+        Assert.Contains("verification/completion children did not finish post-gate decision teardown", failure.Message, StringComparison.Ordinal);
         Assert.Contains("completed(ready=True,result=True)", failure.Message, StringComparison.Ordinal);
-        Assert.Contains("verification/completion/post-gate decision-timeout/completed", failure.Message, StringComparison.Ordinal);
+        Assert.Contains("verification/completion/post-gate decision-teardown-timeout/completed", failure.Message, StringComparison.Ordinal);
         Assert.True(process.HasExited, "The completion diagnostic did not terminate the retained child tree.");
     }
 

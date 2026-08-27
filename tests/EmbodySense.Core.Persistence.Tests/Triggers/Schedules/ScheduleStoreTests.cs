@@ -1254,7 +1254,8 @@ public sealed class ScheduleStoreTests
             $"schedule-store/{operation}",
             "post-gate decision",
             children,
-            TimeSpan.FromSeconds(30));
+            TimeSpan.FromSeconds(30),
+            Verification.CrossProcessReadinessDiagnostics.CoverageChildTeardownTimeout);
         await AssertProcessSucceededAsync(first);
         await AssertProcessSucceededAsync(second);
         return [await File.ReadAllTextAsync(firstOutput), await File.ReadAllTextAsync(secondOutput)];
