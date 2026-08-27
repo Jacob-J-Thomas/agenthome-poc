@@ -143,16 +143,33 @@ Assert-True -Condition ($preflightScheduleProfile.EstimatedDurationSeconds -eq 2
 Assert-True -Condition (@($script:QualificationContractScheduleProfiles | Where-Object { $_.ScriptName -cnotin @("verify-parallel.tests.ps1", "verify-preflight-overlap.tests.ps1") -and ($_.Weight -ne 1 -or $_.ResourceClass -cne "ProcessLight" -or $_.Isolation -cne "Shared") }).Count -eq 0) -Message "Measured source/temp-only verifier contracts must retain one-unit shared process-light posture."
 Assert-Equal -Actual (@($script:QualificationContractScheduleProfiles | Where-Object { $_.Isolation -ceq "Exclusive" } | Select-Object -ExpandProperty ScriptName | Sort-Object) -join "|") -Expected "verify-parallel.tests.ps1|verify-preflight-overlap.tests.ps1" -Message "Qualification must isolate every contract that recursively schedules its own child process topology."
 
-foreach ($maximumWorkers in 1..4) {
-    $qualificationWorkerCount = Get-QualificationWorkerCount -MaximumWorkers $maximumWorkers -HardwareProcessorCount 4
-    $qualificationResourceCapacity = Get-QualificationResourceCapacity -WorkerCount $qualificationWorkerCount
-    $capacityAwarePersistenceProfile = Get-QualificationTestScheduleProfile -ProjectName "EmbodySense.Core.Persistence.Tests" -ResourceCapacity $qualificationResourceCapacity
-    $capacityAwareStartupProfile = Get-QualificationTestScheduleProfile -ProjectName "EmbodySense.Core.Startup.Tests" -ResourceCapacity $qualificationResourceCapacity
-    Assert-Equal -Actual $qualificationWorkerCount -Expected $maximumWorkers -Message "Qualification must retain its supported $maximumWorkers-worker posture."
-    Assert-Equal -Actual $capacityAwarePersistenceProfile.Weight -Expected ([Math]::Min($persistenceScheduleProfile.Weight, $qualificationResourceCapacity)) -Message "Persistence must reserve a valid protected weight for the $maximumWorkers-worker qualification posture."
-    Assert-Equal -Actual $capacityAwareStartupProfile.Weight -Expected ([Math]::Min($startupScheduleProfile.Weight, $qualificationResourceCapacity)) -Message "Startup must reserve a valid protected weight for the $maximumWorkers-worker qualification posture."
-    Assert-True -Condition ($capacityAwarePersistenceProfile.Isolation -ceq "Exclusive" -and $capacityAwareStartupProfile.Isolation -ceq "Exclusive" -and $capacityAwarePersistenceProfile.ExclusiveOrder -eq 1 -and $capacityAwareStartupProfile.ExclusiveOrder -eq 2) -Message "Every supported worker posture must retain the ordered protected Persistence and Startup waves."
+foreach ($unsupportedMaximumWorkers in 1..3) {
+    try {
+        Get-QualificationWorkerCount -MaximumWorkers $unsupportedMaximumWorkers -HardwareProcessorCount 4 | Out-Null
+        throw "Expected unsupported low-worker qualification failure."
+    }
+    catch {
+        Assert-True -Condition ($_.Exception.Message.IndexOf("requires exactly four effective workers", [StringComparison]::Ordinal) -ge 0) -Message "Qualification must reject an explicit $unsupportedMaximumWorkers-worker posture before phase execution."
+    }
 }
+foreach ($unsupportedHardwareProcessorCount in 1..3) {
+    try {
+        Get-QualificationWorkerCount -MaximumWorkers 4 -HardwareProcessorCount $unsupportedHardwareProcessorCount | Out-Null
+        throw "Expected unsupported low-core qualification failure."
+    }
+    catch {
+        Assert-True -Condition ($_.Exception.Message.IndexOf("requires exactly four effective workers", [StringComparison]::Ordinal) -ge 0) -Message "Qualification must reject a $unsupportedHardwareProcessorCount-core host before phase execution."
+    }
+}
+$qualificationWorkerCount = Get-QualificationWorkerCount -MaximumWorkers 4 -HardwareProcessorCount 4
+$qualificationResourceCapacity = Get-QualificationResourceCapacity -WorkerCount $qualificationWorkerCount
+$capacityAwarePersistenceProfile = Get-QualificationTestScheduleProfile -ProjectName "EmbodySense.Core.Persistence.Tests" -ResourceCapacity $qualificationResourceCapacity
+$capacityAwareStartupProfile = Get-QualificationTestScheduleProfile -ProjectName "EmbodySense.Core.Startup.Tests" -ResourceCapacity $qualificationResourceCapacity
+Assert-Equal -Actual $qualificationWorkerCount -Expected 4 -Message "Qualification must admit the exact four-worker posture."
+Assert-Equal -Actual (Get-QualificationWorkerCount -MaximumWorkers 4 -HardwareProcessorCount 8) -Expected 4 -Message "Qualification must cap a larger host at the exact four-worker posture."
+Assert-Equal -Actual $capacityAwarePersistenceProfile.Weight -Expected 6 -Message "Persistence must reserve six units on the supported four-worker qualification posture."
+Assert-Equal -Actual $capacityAwareStartupProfile.Weight -Expected 3 -Message "Startup must reserve three units on the supported four-worker qualification posture."
+Assert-True -Condition ($capacityAwarePersistenceProfile.Isolation -ceq "Exclusive" -and $capacityAwareStartupProfile.Isolation -ceq "Exclusive" -and $capacityAwarePersistenceProfile.ExclusiveOrder -eq 1 -and $capacityAwareStartupProfile.ExclusiveOrder -eq 2) -Message "The supported worker posture must retain ordered protected Persistence and Startup waves."
 try {
     Get-QualificationWorkerCount -MaximumWorkers 5 -HardwareProcessorCount 4 | Out-Null
     throw "Expected unsupported qualification worker count failure."
@@ -221,10 +238,25 @@ foreach ($sharedContractProfile in @($script:QualificationContractScheduleProfil
     $broadApplicationVerifierSharedWavePhases += [pscustomobject]@{ Name = "contract-$([IO.Path]::GetFileNameWithoutExtension($sharedContractProfile.ScriptName))"; EstimatedDurationSeconds = $sharedContractProfile.EstimatedDurationSeconds; Weight = $sharedContractProfile.Weight; ResourceClass = $sharedContractProfile.ResourceClass }
 }
 Assert-True -Condition (@($broadApplicationVerifierSharedWavePhases.Name | Where-Object { $_ -in @("tests-EmbodySense.Core.Persistence.Tests", "tests-EmbodySense.Core.Startup.Tests") }).Count -eq 0) -Message "The shared wave must exclude the proven-unsafe Persistence and Startup pair."
-$broadApplicationVerifierSharedWaveSeconds = Get-QualificationEstimatedMakespanSeconds -Phases $broadApplicationVerifierSharedWavePhases -MaximumWorkers 4 -MaximumResourceCapacity 8 -MaximumProcessHeavyWorkers 2 -MaximumCpuBoundWorkers 1
 $broadApplicationVerifierProtectedTestSeconds = (@($broadApplicationVerifierPlan.TestProjects | ForEach-Object { Get-QualificationTestScheduleProfile -ProjectName ([IO.Path]::GetFileNameWithoutExtension($_)) -ResourceCapacity 8 } | Where-Object { $_.Isolation -ceq "Exclusive" } | Sort-Object -Property EstimatedDurationSeconds -Descending | Measure-Object -Property EstimatedDurationSeconds -Sum).Sum)
 $broadApplicationVerifierProtectedOrder = @($broadApplicationVerifierPlan.TestProjects | ForEach-Object { Get-QualificationTestScheduleProfile -ProjectName ([IO.Path]::GetFileNameWithoutExtension($_)) -ResourceCapacity 8 } | Where-Object { $_.Isolation -ceq "Exclusive" } | Sort-Object -Property ExclusiveOrder | Select-Object -ExpandProperty ProjectName)
 $broadApplicationVerifierExclusiveContractSeconds = (@($script:QualificationContractScheduleProfiles | Where-Object { $_.Isolation -ceq "Exclusive" } | Measure-Object -Property EstimatedDurationSeconds -Sum).Sum)
+$broadApplicationVerifierWorkerModels = @(
+    [pscustomobject]@{ Workers = 1; Capacity = 3; SharedSeconds = 1235; ProfileSeconds = 2285; ProtectedCapSeconds = 2415 }
+    [pscustomobject]@{ Workers = 2; Capacity = 4; SharedSeconds = 885; ProfileSeconds = 1935; ProtectedCapSeconds = 2065 }
+    [pscustomobject]@{ Workers = 3; Capacity = 6; SharedSeconds = 550; ProfileSeconds = 1600; ProtectedCapSeconds = 1730 }
+    [pscustomobject]@{ Workers = 4; Capacity = 8; SharedSeconds = 450; ProfileSeconds = 1500; ProtectedCapSeconds = 1630 }
+)
+foreach ($workerModel in $broadApplicationVerifierWorkerModels) {
+    $sharedSeconds = Get-QualificationEstimatedMakespanSeconds -Phases $broadApplicationVerifierSharedWavePhases -MaximumWorkers $workerModel.Workers -MaximumResourceCapacity $workerModel.Capacity -MaximumProcessHeavyWorkers ([Math]::Min(2, $workerModel.Workers)) -MaximumCpuBoundWorkers 1
+    $profileSeconds = 150 + $broadApplicationVerifierProtectedTestSeconds + $sharedSeconds + $broadApplicationVerifierExclusiveContractSeconds
+    $protectedCapSeconds = 150 + $persistenceScheduleProfile.TimeoutSeconds + $startupScheduleProfile.TimeoutSeconds + $sharedSeconds + $broadApplicationVerifierExclusiveContractSeconds
+    Assert-Equal -Actual $sharedSeconds -Expected $workerModel.SharedSeconds -Message "The broad qualification shared wave must retain its checked $($workerModel.Workers)-worker makespan."
+    Assert-Equal -Actual $profileSeconds -Expected $workerModel.ProfileSeconds -Message "The broad qualification profile model must retain its checked $($workerModel.Workers)-worker total."
+    Assert-Equal -Actual $protectedCapSeconds -Expected $workerModel.ProtectedCapSeconds -Message "The broad qualification protected-cap model must retain its checked $($workerModel.Workers)-worker total."
+    Assert-True -Condition (($workerModel.Workers -eq 4) -eq ($protectedCapSeconds -lt 1680)) -Message "Only the exact four-worker broad qualification posture may fit beneath the fixed deadline at protected child caps."
+}
+$broadApplicationVerifierSharedWaveSeconds = Get-QualificationEstimatedMakespanSeconds -Phases $broadApplicationVerifierSharedWavePhases -MaximumWorkers 4 -MaximumResourceCapacity 8 -MaximumProcessHeavyWorkers 2 -MaximumCpuBoundWorkers 1
 $broadApplicationVerifierCriticalPathSeconds = 150 + $broadApplicationVerifierSharedWaveSeconds + $broadApplicationVerifierProtectedTestSeconds + $broadApplicationVerifierExclusiveContractSeconds
 Assert-Equal -Actual $broadApplicationVerifierSharedWaveSeconds -Expected 450 -Message "The complete broad Application-plus-verifier shared wave must retain its calibrated scheduler critical path."
 Assert-Equal -Actual $broadApplicationVerifierProtectedTestSeconds -Expected 860 -Message "The separately bounded Persistence and monolithic Startup waves must retain their evidence-based total estimate."

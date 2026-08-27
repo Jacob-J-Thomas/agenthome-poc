@@ -31,7 +31,12 @@ function Get-QualificationWorkerCount {
         [Parameter(Mandatory = $true)] [ValidateRange(1, [int]::MaxValue)] [int]$HardwareProcessorCount
     )
 
-    return [Math]::Min($MaximumWorkers, [Math]::Min(4, $HardwareProcessorCount))
+    $workerCount = [Math]::Min($MaximumWorkers, [Math]::Min(4, $HardwareProcessorCount))
+    if ($workerCount -ne 4) {
+        throw "Qualification requires exactly four effective workers under the fixed 1680-second deadline. Requested maximum: $MaximumWorkers. Hardware processors: $HardwareProcessorCount. Effective workers: $workerCount."
+    }
+
+    return $workerCount
 }
 
 function Get-QualificationResourceCapacity {
