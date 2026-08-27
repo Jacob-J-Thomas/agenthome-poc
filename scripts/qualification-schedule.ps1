@@ -13,16 +13,16 @@ $script:QualificationContractScheduleProfiles = @(
     [pscustomobject]@{ ScriptName = "verify-promotion-fan-in.tests.ps1"; EstimatedDurationSeconds = 20; TimeoutSeconds = 90; Weight = 1; ResourceClass = "ProcessLight"; Isolation = "Shared" }
 )
 $script:QualificationTestScheduleProfiles = @(
-    # https://github.com/Jacob-J-Thomas/agenthome-poc/issues/610: reserve six of eight units on the four-worker qualification posture for full Persistence. Run the two Windows-dominant full suites in separate bounded waves because hosted run 33033802308 proved their concurrent pair unsafe; smaller supported postures reserve all available units for Persistence.
-    [pscustomobject]@{ ProjectName = "EmbodySense.Core.Persistence.Tests"; EstimatedDurationSeconds = 220; TimeoutSeconds = 270; Weight = 6; ResourceClass = "ProcessHeavy"; Isolation = "Exclusive" }
-    [pscustomobject]@{ ProjectName = "EmbodySense.Core.Startup.Tests"; EstimatedDurationSeconds = 180; TimeoutSeconds = 240; Weight = 3; ResourceClass = "ProcessHeavy"; Isolation = "Exclusive" }
-    [pscustomobject]@{ ProjectName = "EmbodySense.Web.Tests"; EstimatedDurationSeconds = 75; TimeoutSeconds = 150; Weight = 3; ResourceClass = "ProcessHeavy"; Isolation = "Shared" }
-    [pscustomobject]@{ ProjectName = "EmbodySense.IntegrationTests"; EstimatedDurationSeconds = 55; TimeoutSeconds = 120; Weight = 3; ResourceClass = "ProcessHeavy"; Isolation = "Shared" }
-    [pscustomobject]@{ ProjectName = "EmbodySense.Core.Application.Tests"; EstimatedDurationSeconds = 45; TimeoutSeconds = 120; Weight = 3; ResourceClass = "ProcessHeavy"; Isolation = "Shared" }
-    [pscustomobject]@{ ProjectName = "EmbodySense.Core.Clients.Tests"; EstimatedDurationSeconds = 20; TimeoutSeconds = 90; Weight = 1; ResourceClass = "ProcessLight"; Isolation = "Shared" }
-    [pscustomobject]@{ ProjectName = "EmbodySense.Cli.Command.Tests"; EstimatedDurationSeconds = 10; TimeoutSeconds = 60; Weight = 1; ResourceClass = "ProcessLight"; Isolation = "Shared" }
-    [pscustomobject]@{ ProjectName = "EmbodySense.Core.Common.Tests"; EstimatedDurationSeconds = 10; TimeoutSeconds = 60; Weight = 1; ResourceClass = "ProcessLight"; Isolation = "Shared" }
-    [pscustomobject]@{ ProjectName = "EmbodySense.E2ETests"; EstimatedDurationSeconds = 10; TimeoutSeconds = 60; Weight = 1; ResourceClass = "ProcessLight"; Isolation = "Shared" }
+    # https://github.com/Jacob-J-Thomas/agenthome-poc/issues/610: reserve six of eight units on the four-worker qualification posture for full Persistence. Run the two Windows-dominant full suites in the declared protected order because hosted run 33033802308 proved their concurrent pair unsafe; 33035739429 measured Persistence at 258.829 seconds and the 240-second Startup limit invalid, while promotion run 33032062561 measured Startup's canonical lanes at 589.354 seconds.
+    [pscustomobject]@{ ProjectName = "EmbodySense.Core.Persistence.Tests"; EstimatedDurationSeconds = 260; TimeoutSeconds = 270; Weight = 6; ResourceClass = "ProcessHeavy"; Isolation = "Exclusive"; ExclusiveOrder = 1 }
+    [pscustomobject]@{ ProjectName = "EmbodySense.Core.Startup.Tests"; EstimatedDurationSeconds = 600; TimeoutSeconds = 720; Weight = 3; ResourceClass = "ProcessHeavy"; Isolation = "Exclusive"; ExclusiveOrder = 2 }
+    [pscustomobject]@{ ProjectName = "EmbodySense.Web.Tests"; EstimatedDurationSeconds = 75; TimeoutSeconds = 150; Weight = 3; ResourceClass = "ProcessHeavy"; Isolation = "Shared"; ExclusiveOrder = 100 }
+    [pscustomobject]@{ ProjectName = "EmbodySense.IntegrationTests"; EstimatedDurationSeconds = 55; TimeoutSeconds = 120; Weight = 3; ResourceClass = "ProcessHeavy"; Isolation = "Shared"; ExclusiveOrder = 100 }
+    [pscustomobject]@{ ProjectName = "EmbodySense.Core.Application.Tests"; EstimatedDurationSeconds = 45; TimeoutSeconds = 120; Weight = 3; ResourceClass = "ProcessHeavy"; Isolation = "Shared"; ExclusiveOrder = 100 }
+    [pscustomobject]@{ ProjectName = "EmbodySense.Core.Clients.Tests"; EstimatedDurationSeconds = 20; TimeoutSeconds = 90; Weight = 1; ResourceClass = "ProcessLight"; Isolation = "Shared"; ExclusiveOrder = 100 }
+    [pscustomobject]@{ ProjectName = "EmbodySense.Cli.Command.Tests"; EstimatedDurationSeconds = 10; TimeoutSeconds = 60; Weight = 1; ResourceClass = "ProcessLight"; Isolation = "Shared"; ExclusiveOrder = 100 }
+    [pscustomobject]@{ ProjectName = "EmbodySense.Core.Common.Tests"; EstimatedDurationSeconds = 10; TimeoutSeconds = 60; Weight = 1; ResourceClass = "ProcessLight"; Isolation = "Shared"; ExclusiveOrder = 100 }
+    [pscustomobject]@{ ProjectName = "EmbodySense.E2ETests"; EstimatedDurationSeconds = 10; TimeoutSeconds = 60; Weight = 1; ResourceClass = "ProcessLight"; Isolation = "Shared"; ExclusiveOrder = 100 }
 )
 
 function Get-QualificationWorkerCount {
@@ -52,10 +52,6 @@ function Get-QualificationTestScheduleProfile {
     }
 
     $profile = $profiles[0]
-    if ($profile.ProjectName -cne "EmbodySense.Core.Persistence.Tests") {
-        return $profile
-    }
-
     return [pscustomobject]@{
         ProjectName = $profile.ProjectName
         EstimatedDurationSeconds = $profile.EstimatedDurationSeconds
@@ -63,6 +59,7 @@ function Get-QualificationTestScheduleProfile {
         Weight = [Math]::Min($profile.Weight, $ResourceCapacity)
         ResourceClass = $profile.ResourceClass
         Isolation = $profile.Isolation
+        ExclusiveOrder = $profile.ExclusiveOrder
     }
 }
 

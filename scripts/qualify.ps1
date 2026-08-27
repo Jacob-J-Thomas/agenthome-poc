@@ -353,7 +353,7 @@ try {
 
     Reset-VerificationParallelPhaseState
     if ($plan.RequiresBuild) {
-        Add-QualificationPhase -Name "build-release" -FileName "dotnet" -Arguments @("build", "EmbodySense.sln", "--configuration", $Configuration, "/p:RestoreIgnoreFailedSources=true") -TimeoutSeconds 240 -EstimatedDurationSeconds 120 -Weight $qualificationProcessHeavyWeight -ResourceClass "ProcessHeavy"
+        Add-QualificationPhase -Name "build-release" -FileName "dotnet" -Arguments @("build", "EmbodySense.sln", "--configuration", $Configuration, "/p:RestoreIgnoreFailedSources=true") -TimeoutSeconds 240 -EstimatedDurationSeconds 150 -Weight $qualificationProcessHeavyWeight -ResourceClass "ProcessHeavy"
     }
     if ($plan.RequiresFrontend) {
         $frontendArguments = @("-NoProfile")
@@ -404,7 +404,7 @@ try {
         }
         $sharedQualificationTests.Add([pscustomobject]@{ Name = "tests-$projectName"; FileName = "dotnet"; Arguments = @("test", $testProject, "--configuration", $Configuration, "--no-build", "--no-restore", "--settings", "tests/verification-stress.runsettings", "--filter", $testFilter, "--logger", "trx;LogFileName=$projectName.trx", "--results-directory", $projectResultsRoot, "/p:RestoreIgnoreFailedSources=true"); Profile = $testScheduleProfile; Environment = $testEnvironment; TrxPath = $trxPath })
     }
-    foreach ($exclusiveTest in @($exclusiveQualificationTests | Sort-Object { $_.Profile.EstimatedDurationSeconds } -Descending)) {
+    foreach ($exclusiveTest in @($exclusiveQualificationTests | Sort-Object @{ Expression = { $_.Profile.ExclusiveOrder }; Ascending = $true }, @{ Expression = { $_.Profile.EstimatedDurationSeconds }; Descending = $true })) {
         Add-QualificationPhase -Name $exclusiveTest.Name -FileName $exclusiveTest.FileName -Arguments $exclusiveTest.Arguments -TimeoutSeconds $exclusiveTest.Profile.TimeoutSeconds -EstimatedDurationSeconds $exclusiveTest.Profile.EstimatedDurationSeconds -Weight $exclusiveTest.Profile.Weight -ResourceClass $exclusiveTest.Profile.ResourceClass -Environment $exclusiveTest.Environment -TrxPath $exclusiveTest.TrxPath
         Invoke-QualificationWave
     }

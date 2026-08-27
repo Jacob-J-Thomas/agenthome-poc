@@ -23,7 +23,7 @@ jobs:
   qualification:
     if: github.repository == 'Jacob-J-Thomas/agenthome-poc' && github.actor == 'Jacob-J-Thomas' && github.triggering_actor == 'Jacob-J-Thomas'
     runs-on: [agenthome-trusted-ephemeral-macos-arm64]
-    timeout-minutes: 17
+    timeout-minutes: 25
 
     steps:
       - name: Validate immutable inputs
@@ -69,7 +69,7 @@ jobs:
 
       - name: Qualify exact edge
         shell: pwsh
-        run: ./scripts/verify-with-watchdog.ps1 -Qualification -BaseCommit '${{ inputs.base_sha }}' -HeadCommit '${{ inputs.head_sha }}' -Configuration Release -DeadlineSeconds 900
+        run: ./scripts/verify-with-watchdog.ps1 -Qualification -BaseCommit '${{ inputs.base_sha }}' -HeadCommit '${{ inputs.head_sha }}' -Configuration Release -DeadlineSeconds 1350
 
       - name: Upload qualification diagnostics
         if: always()

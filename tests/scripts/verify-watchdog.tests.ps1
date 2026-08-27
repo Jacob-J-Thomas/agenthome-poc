@@ -109,9 +109,10 @@ $expectedQualificationProjects = @(
 Assert-Equal -Actual (@($script:QualificationTestScheduleProfiles.ProjectName | Sort-Object) -join "|") -Expected ($expectedQualificationProjects -join "|") -Message "Qualification scheduling profiles must equal the canonical nine-project inventory."
 $persistenceScheduleProfile = Get-QualificationTestScheduleProfile -ProjectName "EmbodySense.Core.Persistence.Tests"
 $startupScheduleProfile = Get-QualificationTestScheduleProfile -ProjectName "EmbodySense.Core.Startup.Tests"
-Assert-True -Condition ($persistenceScheduleProfile.EstimatedDurationSeconds -gt $startupScheduleProfile.EstimatedDurationSeconds) -Message "Persistence must be the first scheduled qualification suite."
-Assert-True -Condition ($startupScheduleProfile.EstimatedDurationSeconds -gt (Get-QualificationTestScheduleProfile -ProjectName "EmbodySense.Web.Tests").EstimatedDurationSeconds) -Message "Startup must be the second scheduled qualification suite."
-Assert-True -Condition ($persistenceScheduleProfile.TimeoutSeconds -eq 270 -and $startupScheduleProfile.TimeoutSeconds -eq 240) -Message "The two Windows-dominant suites must retain measured bounded child headroom beneath the global watchdog."
+Assert-True -Condition ($persistenceScheduleProfile.EstimatedDurationSeconds -eq 260 -and $startupScheduleProfile.EstimatedDurationSeconds -eq 600) -Message "The protected Persistence and monolithic Startup profiles must retain their evidence-based estimates."
+Assert-True -Condition ($persistenceScheduleProfile.ExclusiveOrder -eq 1 -and $startupScheduleProfile.ExclusiveOrder -eq 2) -Message "Persistence must execute before Startup even though Startup has the longer estimate."
+Assert-True -Condition ($startupScheduleProfile.EstimatedDurationSeconds -gt (Get-QualificationTestScheduleProfile -ProjectName "EmbodySense.Web.Tests").EstimatedDurationSeconds) -Message "Startup must remain the longest protected qualification suite."
+Assert-True -Condition ($persistenceScheduleProfile.TimeoutSeconds -eq 270 -and $startupScheduleProfile.TimeoutSeconds -eq 720) -Message "The two Windows-dominant suites must retain evidence-backed bounded child headroom beneath the global watchdog."
 Assert-True -Condition ($persistenceScheduleProfile.Weight -eq 6 -and $startupScheduleProfile.Weight -eq 3 -and $persistenceScheduleProfile.ResourceClass -ceq "ProcessHeavy" -and $startupScheduleProfile.ResourceClass -ceq "ProcessHeavy" -and $persistenceScheduleProfile.Isolation -ceq "Exclusive" -and $startupScheduleProfile.Isolation -ceq "Exclusive") -Message "Persistence and Startup must retain their measured protected posture in separate qualification waves."
 Assert-True -Condition (@($script:QualificationTestScheduleProfiles | Where-Object { $_.EstimatedDurationSeconds -le 20 -and ($_.Weight -ne 1 -or $_.ResourceClass -cne "ProcessLight") }).Count -eq 0) -Message "Short qualification suites must retain one-unit process-light backfill posture."
 $expectedQualificationContracts = @("verify-bounded-phases.tests.ps1", "verify-coverage.tests.ps1", "verify-parallel.tests.ps1", "verify-preflight-overlap.tests.ps1", "verify-promotion-fan-in.tests.ps1", "verify-sdk-diagnostics.tests.ps1", "verify-test-inventory.tests.ps1", "verify-watchdog.tests.ps1")
@@ -135,7 +136,8 @@ foreach ($maximumWorkers in 1..4) {
     $capacityAwareStartupProfile = Get-QualificationTestScheduleProfile -ProjectName "EmbodySense.Core.Startup.Tests" -ResourceCapacity $qualificationResourceCapacity
     Assert-Equal -Actual $qualificationWorkerCount -Expected $maximumWorkers -Message "Qualification must retain its supported $maximumWorkers-worker posture."
     Assert-Equal -Actual $capacityAwarePersistenceProfile.Weight -Expected ([Math]::Min($persistenceScheduleProfile.Weight, $qualificationResourceCapacity)) -Message "Persistence must reserve a valid protected weight for the $maximumWorkers-worker qualification posture."
-    Assert-True -Condition ($capacityAwarePersistenceProfile.Isolation -ceq "Exclusive" -and $capacityAwareStartupProfile.Isolation -ceq "Exclusive") -Message "Every supported worker posture must retain protected Persistence and Startup isolation."
+    Assert-Equal -Actual $capacityAwareStartupProfile.Weight -Expected ([Math]::Min($startupScheduleProfile.Weight, $qualificationResourceCapacity)) -Message "Startup must reserve a valid protected weight for the $maximumWorkers-worker qualification posture."
+    Assert-True -Condition ($capacityAwarePersistenceProfile.Isolation -ceq "Exclusive" -and $capacityAwareStartupProfile.Isolation -ceq "Exclusive" -and $capacityAwarePersistenceProfile.ExclusiveOrder -eq 1 -and $capacityAwareStartupProfile.ExclusiveOrder -eq 2) -Message "Every supported worker posture must retain the ordered protected Persistence and Startup waves."
 }
 try {
     Get-QualificationWorkerCount -MaximumWorkers 5 -HardwareProcessorCount 4 | Out-Null
@@ -207,12 +209,15 @@ foreach ($sharedContractProfile in @($script:QualificationContractScheduleProfil
 Assert-True -Condition (@($broadApplicationVerifierSharedWavePhases.Name | Where-Object { $_ -in @("tests-EmbodySense.Core.Persistence.Tests", "tests-EmbodySense.Core.Startup.Tests") }).Count -eq 0) -Message "The shared wave must exclude the proven-unsafe Persistence and Startup pair."
 $broadApplicationVerifierSharedWaveSeconds = Get-QualificationEstimatedMakespanSeconds -Phases $broadApplicationVerifierSharedWavePhases -MaximumWorkers 4 -MaximumResourceCapacity 8 -MaximumProcessHeavyWorkers 2 -MaximumCpuBoundWorkers 1
 $broadApplicationVerifierProtectedTestSeconds = (@($broadApplicationVerifierPlan.TestProjects | ForEach-Object { Get-QualificationTestScheduleProfile -ProjectName ([IO.Path]::GetFileNameWithoutExtension($_)) -ResourceCapacity 8 } | Where-Object { $_.Isolation -ceq "Exclusive" } | Sort-Object -Property EstimatedDurationSeconds -Descending | Measure-Object -Property EstimatedDurationSeconds -Sum).Sum)
+$broadApplicationVerifierProtectedOrder = @($broadApplicationVerifierPlan.TestProjects | ForEach-Object { Get-QualificationTestScheduleProfile -ProjectName ([IO.Path]::GetFileNameWithoutExtension($_)) -ResourceCapacity 8 } | Where-Object { $_.Isolation -ceq "Exclusive" } | Sort-Object -Property ExclusiveOrder | Select-Object -ExpandProperty ProjectName)
 $broadApplicationVerifierExclusiveContractSeconds = (@($script:QualificationContractScheduleProfiles | Where-Object { $_.Isolation -ceq "Exclusive" } | Measure-Object -Property EstimatedDurationSeconds -Sum).Sum)
-$broadApplicationVerifierCriticalPathSeconds = 120 + $broadApplicationVerifierSharedWaveSeconds + $broadApplicationVerifierProtectedTestSeconds + $broadApplicationVerifierExclusiveContractSeconds
+$broadApplicationVerifierCriticalPathSeconds = 150 + $broadApplicationVerifierSharedWaveSeconds + $broadApplicationVerifierProtectedTestSeconds + $broadApplicationVerifierExclusiveContractSeconds
 Assert-Equal -Actual $broadApplicationVerifierSharedWaveSeconds -Expected 140 -Message "The complete broad Application-plus-verifier shared wave must retain its checked critical path."
-Assert-Equal -Actual $broadApplicationVerifierProtectedTestSeconds -Expected 400 -Message "The separately bounded Persistence and Startup waves must retain their measured total estimate."
+Assert-Equal -Actual $broadApplicationVerifierProtectedTestSeconds -Expected 860 -Message "The separately bounded Persistence and monolithic Startup waves must retain their evidence-based total estimate."
+Assert-Equal -Actual ($broadApplicationVerifierProtectedOrder -join "|") -Expected "EmbodySense.Core.Persistence.Tests|EmbodySense.Core.Startup.Tests" -Message "The broad Application-plus-verifier model must execute Persistence before Startup in protected waves."
 Assert-Equal -Actual $broadApplicationVerifierExclusiveContractSeconds -Expected 40 -Message "The separate evidence-based exclusive verifier waves must retain their bounded total estimate."
-Assert-True -Condition ($broadApplicationVerifierCriticalPathSeconds -eq 700 -and $broadApplicationVerifierCriticalPathSeconds -lt 900) -Message "The complete broad Application-plus-verifier model must retain two hundred seconds of headroom beneath the exact outer qualification bound."
+Assert-True -Condition ($broadApplicationVerifierCriticalPathSeconds -eq 1190 -and $broadApplicationVerifierCriticalPathSeconds -lt 1350) -Message "The complete broad Application-plus-verifier model must retain one hundred sixty seconds of headroom beneath the exact outer qualification bound."
+Assert-True -Condition ((150 + $persistenceScheduleProfile.TimeoutSeconds + $startupScheduleProfile.TimeoutSeconds + $broadApplicationVerifierSharedWaveSeconds + $broadApplicationVerifierExclusiveContractSeconds) -eq 1320 -and (150 + $persistenceScheduleProfile.TimeoutSeconds + $startupScheduleProfile.TimeoutSeconds + $broadApplicationVerifierSharedWaveSeconds + $broadApplicationVerifierExclusiveContractSeconds) -lt 1350) -Message "Even the two protected child ceilings must leave thirty seconds for qualification watchdog overhead."
 
 $cliCommandPlan = Get-QualificationPlan -ChangedPaths @("src/EmbodySense.Cli.Command/RunCommand.cs")
 $expectedCliCommandConsumers = @(
@@ -849,8 +854,8 @@ Assert-True -Condition $exactPromotionDeadline.Succeeded -Message "Exactly 1500 
 $overPromotionDeadline = Get-VerificationDeadlineDisposition -ElapsedTicks ($promotionDeadlineTicks + 1) -DeadlineTicks $promotionDeadlineTicks -ProcessExited $true -ExitCode 0 -CompletionMarkerCount 1 -ChildTimedOut $false -CancellationRequested $false
 Assert-Equal -Actual $overPromotionDeadline.Code -Expected "deadline-exceeded" -Message "One tick over the bounded promotion deadline must fail."
 
-Assert-VerificationWatchdogDeadlineContract -Qualification $true -VerificationComponent "Full" -DeadlineSeconds 900
-Assert-VerificationWatchdogDeadlineContract -Qualification $true -VerificationComponent "full" -DeadlineSeconds 900
+Assert-VerificationWatchdogDeadlineContract -Qualification $true -VerificationComponent "Full" -DeadlineSeconds 1350
+Assert-VerificationWatchdogDeadlineContract -Qualification $true -VerificationComponent "full" -DeadlineSeconds 1350
 Assert-VerificationWatchdogDeadlineContract -Qualification $false -VerificationComponent "StaticContracts" -DeadlineSeconds 600
 Assert-VerificationWatchdogDeadlineContract -Qualification $false -VerificationComponent "staticcontracts" -DeadlineSeconds 600
 Assert-VerificationWatchdogDeadlineContract -Qualification $false -VerificationComponent "Solution" -DeadlineSeconds 1500
@@ -858,7 +863,7 @@ Assert-VerificationWatchdogDeadlineContract -Qualification $false -VerificationC
 Assert-VerificationWatchdogDeadlineContract -Qualification $false -VerificationComponent "Full" -DeadlineSeconds 600
 Assert-VerificationWatchdogDeadlineContract -Qualification $false -VerificationComponent "Full" -DeadlineSeconds 1200
 foreach ($invalidDeadlineCase in @(
-    [pscustomobject]@{ Qualification = $true; Component = "Full"; DeadlineSeconds = 901; Expected = "Qualification requires the exact 900-second watchdog deadline" }
+    [pscustomobject]@{ Qualification = $true; Component = "Full"; DeadlineSeconds = 1351; Expected = "Qualification requires the exact 1350-second watchdog deadline" }
     [pscustomobject]@{ Qualification = $false; Component = "StaticContracts"; DeadlineSeconds = 601; Expected = "Promotion component 'StaticContracts' requires the exact 600-second watchdog deadline" }
     [pscustomobject]@{ Qualification = $false; Component = "Solution"; DeadlineSeconds = 1501; Expected = "Promotion component 'Solution' requires the exact 1500-second watchdog deadline" }
     [pscustomobject]@{ Qualification = $false; Component = "Full"; DeadlineSeconds = 1201; Expected = "Full verification requires a watchdog deadline between 1 and 1200 seconds" }
@@ -946,12 +951,13 @@ Assert-True -Condition ($qualificationScript.IndexOf('Profile = $testSchedulePro
 Assert-True -Condition ($qualificationScript.IndexOf('if ($testScheduleProfile.Isolation -ceq "Exclusive")', [StringComparison]::Ordinal) -ge 0) -Message "Protected test profiles must be removed from the shared qualification wave."
 $exclusiveTestCollectionInitialization = $qualificationScript.IndexOf('$exclusiveQualificationTests = [Collections.Generic.List[object]]::new()', [StringComparison]::Ordinal)
 $exclusiveTestCollectionPopulation = $qualificationScript.IndexOf('$exclusiveQualificationTests.Add(', [StringComparison]::Ordinal)
-$exclusiveTestLoopStart = $qualificationScript.IndexOf('foreach ($exclusiveTest in @($exclusiveQualificationTests | Sort-Object { $_.Profile.EstimatedDurationSeconds } -Descending))', [StringComparison]::Ordinal)
+$exclusiveTestLoopStart = $qualificationScript.IndexOf('foreach ($exclusiveTest in @($exclusiveQualificationTests | Sort-Object @{ Expression = { $_.Profile.ExclusiveOrder }; Ascending = $true }, @{ Expression = { $_.Profile.EstimatedDurationSeconds }; Descending = $true }))', [StringComparison]::Ordinal)
 $exclusiveTestWaveInvocation = $qualificationScript.IndexOf('Invoke-QualificationWave', $exclusiveTestLoopStart, [StringComparison]::Ordinal)
 $sharedTestPhaseLoopStart = $qualificationScript.IndexOf('foreach ($sharedTest in $sharedQualificationTests)', [StringComparison]::Ordinal)
 $sharedTestPhaseAddition = $qualificationScript.IndexOf('Add-QualificationPhase -Name $sharedTest.Name', [StringComparison]::Ordinal)
 Assert-True -Condition ($exclusiveTestCollectionInitialization -ge 0 -and $exclusiveTestCollectionPopulation -gt $exclusiveTestCollectionInitialization -and $exclusiveTestLoopStart -gt $exclusiveTestCollectionPopulation) -Message "Protected test descriptors must be constructed and populated before StrictMode enumerates them."
 Assert-True -Condition ($exclusiveTestLoopStart -ge 0 -and $exclusiveTestWaveInvocation -gt $exclusiveTestLoopStart -and $sharedTestPhaseLoopStart -gt $exclusiveTestWaveInvocation -and $sharedTestPhaseAddition -gt $exclusiveTestWaveInvocation -and $sharedTestPhaseAddition -lt $qualificationContractStart) -Message "Persistence and Startup must execute in ordered protected waves before shared test or verifier work is enqueued."
+Assert-True -Condition ($qualificationScript.IndexOf('EstimatedDurationSeconds 150 -Weight $qualificationProcessHeavyWeight', [StringComparison]::Ordinal) -ge 0) -Message "The build prerequisite must retain its hosted-evidence-based 150-second estimate."
 Assert-True -Condition ($qualificationScript.IndexOf('Get-QualificationContractScheduleProfile -ScriptName $contractScript', [StringComparison]::Ordinal) -ge 0) -Message "Every verifier contract must use its checked scheduling profile."
 Assert-True -Condition ($qualificationScript.IndexOf('-Weight $contractScheduleProfile.Weight -ResourceClass $contractScheduleProfile.ResourceClass', [StringComparison]::Ordinal) -ge 0) -Message "Verifier contracts must use their measured resource posture."
 Assert-True -Condition ($qualificationScript.IndexOf('$contractScheduleProfile.Isolation -ceq "Exclusive"', [StringComparison]::Ordinal) -ge 0) -Message "Exclusive verifier contracts must be removed from the shared test wave."
@@ -982,7 +988,8 @@ Assert-Contains -Actual $qualificationWorkflow -Expected "github.triggering_acto
 Assert-Contains -Actual $qualificationWorkflow -Expected "name: hosted-qualification" -Message "Manual hosted diagnostics must not publish the former automatic qualification context."
 Assert-Contains -Actual $qualificationWorkflow -Expected "persist-credentials: false" -Message "Hosted exact-head checkout must not persist a GitHub credential."
 Assert-Contains -Actual $qualificationWorkflow -Expected "git merge-base --is-ancestor `$env:BASE_SHA `$env:HEAD_SHA" -Message "Hosted qualification must prove the dispatched exact edge."
-Assert-Contains -Actual $qualificationWorkflow -Expected '-Qualification -BaseCommit ''${{ inputs.base_sha }}'' -HeadCommit ''${{ inputs.head_sha }}'' -Configuration Release -DeadlineSeconds 900' -Message "Hosted diagnostics must use the same bounded qualification child."
+Assert-Contains -Actual $qualificationWorkflow -Expected '-Qualification -BaseCommit ''${{ inputs.base_sha }}'' -HeadCommit ''${{ inputs.head_sha }}'' -Configuration Release -DeadlineSeconds 1350' -Message "Hosted diagnostics must use the same bounded qualification child."
+Assert-Contains -Actual $qualificationWorkflow -Expected "    timeout-minutes: 25" -Message "Hosted qualification must leave bounded setup and diagnostic-upload margin around its 1350-second child watchdog."
 Assert-True -Condition ($qualificationWorkflow.IndexOf('coverage.cobertura.xml', [StringComparison]::Ordinal) -lt 0) -Message "Qualification diagnostics must not imply that coverage was collected."
 Assert-Contains -Actual $trustedLocalQualificationWorkflow -Expected "workflow_dispatch:" -Message "Trusted local qualification must require an explicit dispatch."
 Assert-True -Condition ($trustedLocalQualificationWorkflow.IndexOf("pull_request:", [StringComparison]::Ordinal) -lt 0 -and $trustedLocalQualificationWorkflow.IndexOf("push:", [StringComparison]::Ordinal) -lt 0) -Message "The ephemeral local runner must never accept automatic pull-request or push work."
@@ -992,8 +999,8 @@ Assert-Contains -Actual $trustedLocalQualificationWorkflow -Expected "runs-on: [
 Assert-Contains -Actual $trustedLocalQualificationWorkflow -Expected "permissions:`n  contents: read" -Message "The local lane must retain read-only repository permission."
 Assert-Contains -Actual $trustedLocalQualificationWorkflow -Expected "persist-credentials: false" -Message "The exact checkout must not persist a GitHub credential on the host."
 Assert-Contains -Actual $trustedLocalQualificationWorkflow -Expected "git merge-base --is-ancestor `$env:BASE_SHA `$env:HEAD_SHA" -Message "The local lane must prove the dispatched exact edge."
-Assert-Contains -Actual $trustedLocalQualificationWorkflow -Expected '-Qualification -BaseCommit ''${{ inputs.base_sha }}'' -HeadCommit ''${{ inputs.head_sha }}'' -Configuration Release -DeadlineSeconds 900' -Message "The local lane must use the same bounded qualification child."
-Assert-Contains -Actual $trustedLocalQualificationWorkflow -Expected "    timeout-minutes: 17" -Message "The local lane must leave two minutes of setup and diagnostic-upload margin around its fifteen-minute child watchdog."
+Assert-Contains -Actual $trustedLocalQualificationWorkflow -Expected '-Qualification -BaseCommit ''${{ inputs.base_sha }}'' -HeadCommit ''${{ inputs.head_sha }}'' -Configuration Release -DeadlineSeconds 1350' -Message "The local lane must use the same bounded qualification child."
+Assert-Contains -Actual $trustedLocalQualificationWorkflow -Expected "    timeout-minutes: 25" -Message "The local lane must leave bounded setup and diagnostic-upload margin around its 1350-second child watchdog."
 Assert-True -Condition ($trustedLocalQualificationWorkflow.IndexOf("verify.ps1", [StringComparison]::Ordinal) -lt 0) -Message "The local development lane must not impersonate exhaustive promotion."
 Assert-True -Condition ($trustedLocalQualificationWorkflow.IndexOf("name: verify", [StringComparison]::Ordinal) -lt 0 -and $trustedLocalQualificationWorkflow.IndexOf("name: browser-e2e", [StringComparison]::Ordinal) -lt 0) -Message "The local lane must not publish protected promotion context names."
 Assert-True -Condition ($workflow.IndexOf('run: ./scripts/verify.ps1 -Configuration Release', [StringComparison]::Ordinal) -lt 0) -Message "Standard CI must not bypass the external watchdog."
