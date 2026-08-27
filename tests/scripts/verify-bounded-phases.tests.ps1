@@ -362,15 +362,85 @@ try {
         Assert-Contains -Actual (Get-Content -LiteralPath $failedLog -Raw) -Expected "failure-evidence" -Message "A failed sequential phase must retain available diagnostics."
     }
 
-    $timeoutScript = Join-Path $phaseBehaviorRoot "timeout.ps1"
-    [IO.File]::WriteAllText($timeoutScript, "Write-Output 'timeout-evidence'; Start-Sleep -Seconds 5", [Text.UTF8Encoding]::new($false))
-    $timeoutLog = Join-Path $phaseBehaviorRoot "timeout.log"
-    try {
-        Invoke-VerificationPhase -Name "phase-timeout" -FileName $powerShellExecutable -Arguments @("-NoProfile", "-File", $timeoutScript) -TimeoutSeconds 1 -WorkingDirectory $repoRoot -OutputPath $timeoutLog
-        throw "Expected sequential phase timeout."
+    $redirectedTimeoutChildScript = Join-Path $phaseBehaviorRoot "redirected-timeout-child.ps1"
+    $redirectedTimeoutRunnerScript = Join-Path $phaseBehaviorRoot "redirected-timeout-runner.ps1"
+    $redirectedTimeoutReadyMarker = Join-Path $phaseBehaviorRoot "redirected-timeout-ready.marker"
+    $redirectedTimeoutCompletedMarker = Join-Path $phaseBehaviorRoot "redirected-timeout-completed.marker"
+    $redirectedTimeoutLog = Join-Path $phaseBehaviorRoot "redirected-timeout.log"
+    $redirectedTimeoutReadinessSeconds = $functionalChildTimeoutSeconds - 5
+    Assert-True -Condition ($redirectedTimeoutReadinessSeconds -eq 25) -Message "The redirected-output timeout runner must retain Windows startup headroom inside the functional child bound."
+    @'
+param([Parameter(Mandatory = $true)] [string]$ReadyMarker)
+
+[Console]::Out.WriteLine("redirected-timeout-evidence")
+[Console]::Out.Flush()
+[IO.File]::WriteAllText($ReadyMarker, "ready", [Text.UTF8Encoding]::new($false))
+while ($true) {
+    Start-Sleep -Seconds 1
+}
+'@ | Set-Content -LiteralPath $redirectedTimeoutChildScript -Encoding utf8NoBOM
+    @'
+param(
+    [Parameter(Mandatory = $true)] [string]$PhaseScriptPath,
+    [Parameter(Mandatory = $true)] [string]$PowerShellExecutable,
+    [Parameter(Mandatory = $true)] [string]$RepositoryRoot,
+    [Parameter(Mandatory = $true)] [string]$ChildScriptPath,
+    [Parameter(Mandatory = $true)] [string]$ReadyMarker,
+    [Parameter(Mandatory = $true)] [string]$TimeoutLog,
+    [Parameter(Mandatory = $true)] [string]$CompletedMarker,
+    [Parameter(Mandatory = $true)] [int]$TimeoutSeconds
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+. $PhaseScriptPath
+try {
+    Invoke-VerificationPhase -Name "phase-redirected-timeout" -FileName $PowerShellExecutable -Arguments @("-NoProfile", "-File", $ChildScriptPath, "-ReadyMarker", $ReadyMarker) -TimeoutSeconds $TimeoutSeconds -WorkingDirectory $RepositoryRoot -OutputPath $TimeoutLog
+    throw "Expected redirected-output phase timeout."
+}
+catch {
+    if ($_.Exception.Message.IndexOf("timed out after $TimeoutSeconds seconds", [StringComparison]::Ordinal) -lt 0) {
+        throw
     }
-    catch {
-        Assert-Contains -Actual (Get-Content -LiteralPath $timeoutLog -Raw) -Expected "timeout-evidence" -Message "A timed-out sequential phase must retain available diagnostics."
+}
+
+if (-not (Test-Path -LiteralPath $TimeoutLog -PathType Leaf)) {
+    throw "The timed-out phase did not retain its redirected output log."
+}
+if ((Get-Content -LiteralPath $TimeoutLog -Raw).IndexOf("redirected-timeout-evidence", [StringComparison]::Ordinal) -lt 0) {
+    throw "The timed-out phase log did not retain flushed redirected output."
+}
+[IO.File]::WriteAllText($CompletedMarker, "passed", [Text.UTF8Encoding]::new($false))
+'@ | Set-Content -LiteralPath $redirectedTimeoutRunnerScript -Encoding utf8NoBOM
+    $redirectedTimeoutRunnerArguments = @("-NoProfile")
+    if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) { $redirectedTimeoutRunnerArguments += @("-ExecutionPolicy", "Bypass") }
+    $redirectedTimeoutRunnerArguments += @("-File", $redirectedTimeoutRunnerScript, "-PhaseScriptPath", $phaseScriptPath, "-PowerShellExecutable", $powerShellExecutable, "-RepositoryRoot", $repoRoot, "-ChildScriptPath", $redirectedTimeoutChildScript, "-ReadyMarker", $redirectedTimeoutReadyMarker, "-TimeoutLog", $redirectedTimeoutLog, "-CompletedMarker", $redirectedTimeoutCompletedMarker, "-TimeoutSeconds", $functionalChildTimeoutSeconds)
+    $redirectedTimeoutRunner = [Diagnostics.Process]::new()
+    $redirectedTimeoutRunnerStarted = $false
+    try {
+        $redirectedTimeoutRunner.StartInfo = New-VerificationProcessStartInfo -FileName $powerShellExecutable -Arguments $redirectedTimeoutRunnerArguments -WorkingDirectory $repoRoot
+        $redirectedTimeoutStopwatch = [Diagnostics.Stopwatch]::StartNew()
+        $redirectedTimeoutRunnerStarted = $redirectedTimeoutRunner.Start()
+        Assert-True -Condition $redirectedTimeoutRunnerStarted -Message "The redirected-output timeout runner must start."
+        $readinessStopwatch = [Diagnostics.Stopwatch]::StartNew()
+        while (-not (Test-Path -LiteralPath $redirectedTimeoutReadyMarker -PathType Leaf) -and $readinessStopwatch.Elapsed -lt [TimeSpan]::FromSeconds($redirectedTimeoutReadinessSeconds)) {
+            Start-Sleep -Milliseconds 100
+        }
+        $readinessStopwatch.Stop()
+        Assert-True -Condition (Test-Path -LiteralPath $redirectedTimeoutReadyMarker -PathType Leaf) -Message "The redirected-output timeout child must publish its ready marker before the bounded readiness deadline."
+        Assert-True -Condition $redirectedTimeoutRunner.WaitForExit(45000) -Message "The redirected-output timeout runner must complete within its bounded parent wait."
+        $redirectedTimeoutStopwatch.Stop()
+        Assert-True -Condition ($redirectedTimeoutRunner.ExitCode -eq 0) -Message "The redirected-output timeout runner must authenticate the expected phase timeout."
+        Assert-True -Condition (Test-Path -LiteralPath $redirectedTimeoutCompletedMarker -PathType Leaf) -Message "The redirected-output timeout runner must publish completion only after validating retained phase evidence."
+        Assert-Contains -Actual (Get-Content -LiteralPath $redirectedTimeoutLog -Raw) -Expected "redirected-timeout-evidence" -Message "A functional timed-out sequential phase must retain flushed redirected diagnostics."
+        Assert-True -Condition ($redirectedTimeoutStopwatch.Elapsed -ge [TimeSpan]::FromSeconds($functionalChildTimeoutSeconds) -and $redirectedTimeoutStopwatch.Elapsed -lt [TimeSpan]::FromSeconds(45)) -Message "The redirected-output timeout proof must consume its functional bound but remain inside its honest 45-second qualification estimate. Actual: $([Math]::Round($redirectedTimeoutStopwatch.Elapsed.TotalSeconds, 3))."
+    }
+    finally {
+        if ($redirectedTimeoutRunnerStarted -and -not $redirectedTimeoutRunner.HasExited) {
+            Stop-VerificationProcessTree $redirectedTimeoutRunner
+            [void]$redirectedTimeoutRunner.WaitForExit(5000)
+        }
+        $redirectedTimeoutRunner.Dispose()
     }
 }
 finally {
@@ -467,7 +537,8 @@ $qualificationJobConcurrencyIndex = $qualificationWorkflow.IndexOf("    concurre
 Assert-True -Condition ($qualificationJobIndex -ge 0 -and $qualificationJobConcurrencyIndex -gt $qualificationJobIndex) -Message "Hosted diagnostic serialization must remain job-scoped."
 Assert-True -Condition ($qualificationWorkflow.IndexOf("`nconcurrency:", [StringComparison]::Ordinal) -lt 0) -Message "Hosted diagnostics must not introduce workflow-scoped cancellation."
 Assert-Contains -Actual $qualificationWorkflow -Expected "git merge-base --is-ancestor `$env:BASE_SHA `$env:HEAD_SHA" -Message "Hosted qualification must authenticate its exact edge before execution."
-Assert-Contains -Actual $qualificationWorkflow -Expected '-Qualification -BaseCommit ''${{ inputs.base_sha }}'' -HeadCommit ''${{ inputs.head_sha }}'' -Configuration Release -DeadlineSeconds 480' -Message "Qualification must bind the dispatched exact edge under one eight-minute watchdog."
+Assert-Contains -Actual $qualificationWorkflow -Expected '-Qualification -BaseCommit ''${{ inputs.base_sha }}'' -HeadCommit ''${{ inputs.head_sha }}'' -Configuration Release -DeadlineSeconds 1680' -Message "Qualification must bind the dispatched exact edge under one 1680-second watchdog."
+Assert-Contains -Actual $qualificationWorkflow -Expected "    timeout-minutes: 30" -Message "Hosted qualification must leave at least two minutes of setup and diagnostic-upload margin around its 1680-second child watchdog."
 Assert-True -Condition ($qualificationWorkflow.IndexOf("run: ./scripts/verify.ps1", [StringComparison]::Ordinal) -lt 0) -Message "Qualification cannot bypass the watchdog."
 Assert-True -Condition ($qualificationWorkflow.IndexOf("coverage.cobertura.xml", [StringComparison]::Ordinal) -lt 0) -Message "Qualification must not claim or upload absent coverage evidence."
 Assert-Contains -Actual $codeqlWorkflow -Expected "types: [opened, synchronize, reopened, edited]" -Message "CodeQL must observe a retargeted pull request edge."

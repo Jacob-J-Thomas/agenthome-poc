@@ -25,8 +25,6 @@ $testResultsRoot = Join-Path $resultsRoot "Tests"
 $planPath = Join-Path $resultsRoot "qualification-plan.json"
 $powerShellExecutable = (Get-Process -Id $PID).Path
 $runningOnWindows = [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)
-$qualificationWorkerCount = [Math]::Min($MaximumWorkers, [Math]::Min(4, [Math]::Max(1, [Environment]::ProcessorCount)))
-$qualificationResourceCapacity = [Math]::Max(3, 2 * $qualificationWorkerCount)
 $qualificationProcessHeavyWeight = 3
 $qualificationCpuBoundWeight = 3
 
@@ -35,6 +33,9 @@ $qualificationCpuBoundWeight = 3
 . (Join-Path $PSScriptRoot "verification-phase.ps1")
 . (Join-Path $PSScriptRoot "verification-parallel.ps1")
 . (Join-Path $PSScriptRoot "verification-temp.ps1")
+$qualificationHardwareProcessorCount = [Environment]::ProcessorCount
+$qualificationWorkerCount = Get-QualificationWorkerCount -MaximumWorkers $MaximumWorkers -HardwareProcessorCount $qualificationHardwareProcessorCount
+$qualificationResourceCapacity = Get-QualificationResourceCapacity -WorkerCount $qualificationWorkerCount
 $qualificationRunnerTemp = if (-not [string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) { $env:RUNNER_TEMP } elseif ($runningOnWindows) { [IO.Path]::GetTempPath() } else { "/tmp" }
 $qualificationPhysicalTempRoot = Resolve-VerificationPhysicalTempRoot -RunnerTemp $qualificationRunnerTemp -SystemTempPath ([IO.Path]::GetTempPath())
 $qualificationFixtureRunIdentity = [Guid]::NewGuid().ToString("N")
@@ -352,7 +353,7 @@ try {
 
     Reset-VerificationParallelPhaseState
     if ($plan.RequiresBuild) {
-        Add-QualificationPhase -Name "build-release" -FileName "dotnet" -Arguments @("build", "EmbodySense.sln", "--configuration", $Configuration, "/p:RestoreIgnoreFailedSources=true") -TimeoutSeconds 240 -EstimatedDurationSeconds 120 -Weight $qualificationProcessHeavyWeight -ResourceClass "ProcessHeavy"
+        Add-QualificationPhase -Name "build-release" -FileName "dotnet" -Arguments @("build", "EmbodySense.sln", "--configuration", $Configuration, "/p:RestoreIgnoreFailedSources=true") -TimeoutSeconds 240 -EstimatedDurationSeconds 150 -Weight $qualificationProcessHeavyWeight -ResourceClass "ProcessHeavy"
     }
     if ($plan.RequiresFrontend) {
         $frontendArguments = @("-NoProfile")
@@ -362,6 +363,54 @@ try {
     }
 
     Invoke-QualificationWave
+
+    if ($plan.RequiresDrawioValidation) {
+        foreach ($drawioPath in @($plan.ChangedPaths | Where-Object { $_.EndsWith(".drawio", [StringComparison]::OrdinalIgnoreCase) })) {
+            if (-not (Test-QualificationCommitPath -Path $drawioPath -Commit $HeadCommit)) {
+                continue
+            }
+            try {
+                [void][xml](Get-QualificationBlobContent -Path $drawioPath -Commits @($HeadCommit))
+            }
+            catch {
+                throw "Qualification rejected malformed draw.io XML '$drawioPath': $($_.Exception.Message)"
+            }
+        }
+    }
+    $exclusiveQualificationTests = [Collections.Generic.List[object]]::new()
+    $sharedQualificationTests = [Collections.Generic.List[object]]::new()
+    foreach ($testSelection in $plan.TestSelections) {
+        $testProject = $testSelection.Project
+        $projectName = [IO.Path]::GetFileNameWithoutExtension($testProject)
+        $projectResultsRoot = Join-Path $testResultsRoot $projectName
+        $trxPath = Join-Path $projectResultsRoot "$projectName.trx"
+        $projectFixtureRoot = Get-VerificationLaneFixturePath -PhysicalTempRoot $qualificationPhysicalTempRoot -RunIdentity $qualificationFixtureRunIdentity -LaneIdentity $projectName
+        if (Test-Path -LiteralPath $projectFixtureRoot) {
+            throw "Qualification lane temporary path collision for '$projectName': $projectFixtureRoot"
+        }
+        New-Item -ItemType Directory -Path $projectFixtureRoot | Out-Null
+        $qualificationFixtureRoots.Add($projectFixtureRoot)
+        $testFilter = Get-QualificationTestFilter -ProjectName $projectName -Namespaces @($testSelection.Namespaces) -Classes @($testSelection.Classes)
+        $testEnvironment = @{
+            EMBODYSENSE_CAPABILITY_CATALOG_TRUST_ROOT = Join-Path $projectFixtureRoot "catalog-trust"
+            TEMP = $projectFixtureRoot
+            TMP = $projectFixtureRoot
+            TMPDIR = $projectFixtureRoot
+        }
+        $testScheduleProfile = Get-QualificationTestScheduleProfile -ProjectName $projectName -ResourceCapacity $qualificationResourceCapacity
+        if ($testScheduleProfile.Isolation -ceq "Exclusive") {
+            $exclusiveQualificationTests.Add([pscustomobject]@{ Name = "tests-$projectName"; FileName = "dotnet"; Arguments = @("test", $testProject, "--configuration", $Configuration, "--no-build", "--no-restore", "--settings", "tests/verification-stress.runsettings", "--filter", $testFilter, "--logger", "trx;LogFileName=$projectName.trx", "--results-directory", $projectResultsRoot, "/p:RestoreIgnoreFailedSources=true"); Profile = $testScheduleProfile; Environment = $testEnvironment; TrxPath = $trxPath })
+            continue
+        }
+        $sharedQualificationTests.Add([pscustomobject]@{ Name = "tests-$projectName"; FileName = "dotnet"; Arguments = @("test", $testProject, "--configuration", $Configuration, "--no-build", "--no-restore", "--settings", "tests/verification-stress.runsettings", "--filter", $testFilter, "--logger", "trx;LogFileName=$projectName.trx", "--results-directory", $projectResultsRoot, "/p:RestoreIgnoreFailedSources=true"); Profile = $testScheduleProfile; Environment = $testEnvironment; TrxPath = $trxPath })
+    }
+    foreach ($exclusiveTest in @($exclusiveQualificationTests | Sort-Object @{ Expression = { $_.Profile.ExclusiveOrder }; Ascending = $true }, @{ Expression = { $_.Profile.EstimatedDurationSeconds }; Descending = $true })) {
+        Add-QualificationPhase -Name $exclusiveTest.Name -FileName $exclusiveTest.FileName -Arguments $exclusiveTest.Arguments -TimeoutSeconds $exclusiveTest.Profile.TimeoutSeconds -EstimatedDurationSeconds $exclusiveTest.Profile.EstimatedDurationSeconds -Weight $exclusiveTest.Profile.Weight -ResourceClass $exclusiveTest.Profile.ResourceClass -Environment $exclusiveTest.Environment -TrxPath $exclusiveTest.TrxPath
+        Invoke-QualificationWave
+    }
+    foreach ($sharedTest in $sharedQualificationTests) {
+        Add-QualificationPhase -Name $sharedTest.Name -FileName $sharedTest.FileName -Arguments $sharedTest.Arguments -TimeoutSeconds $sharedTest.Profile.TimeoutSeconds -EstimatedDurationSeconds $sharedTest.Profile.EstimatedDurationSeconds -Weight $sharedTest.Profile.Weight -ResourceClass $sharedTest.Profile.ResourceClass -Environment $sharedTest.Environment -TrxPath $sharedTest.TrxPath
+    }
 
     $exclusiveQualificationContracts = [Collections.Generic.List[object]]::new()
     if ($plan.RequiresVerifierContracts) {
@@ -393,41 +442,6 @@ try {
         Add-QualificationPhase -Name "github-yaml-format" -FileName "npx" -Arguments @("prettier", "--check", "--end-of-line", "auto", ".github/workflows/*.{yml,yaml}", ".github/dependabot.yml") -TimeoutSeconds 60 -EstimatedDurationSeconds 10 -Weight 1 -ResourceClass "Ordinary"
     }
 
-    if ($plan.RequiresDrawioValidation) {
-        foreach ($drawioPath in @($plan.ChangedPaths | Where-Object { $_.EndsWith(".drawio", [StringComparison]::OrdinalIgnoreCase) })) {
-            if (-not (Test-QualificationCommitPath -Path $drawioPath -Commit $HeadCommit)) {
-                continue
-            }
-            try {
-                [void][xml](Get-QualificationBlobContent -Path $drawioPath -Commits @($HeadCommit))
-            }
-            catch {
-                throw "Qualification rejected malformed draw.io XML '$drawioPath': $($_.Exception.Message)"
-            }
-        }
-    }
-
-    foreach ($testSelection in $plan.TestSelections) {
-        $testProject = $testSelection.Project
-        $projectName = [IO.Path]::GetFileNameWithoutExtension($testProject)
-        $projectResultsRoot = Join-Path $testResultsRoot $projectName
-        $trxPath = Join-Path $projectResultsRoot "$projectName.trx"
-        $projectFixtureRoot = Get-VerificationLaneFixturePath -PhysicalTempRoot $qualificationPhysicalTempRoot -RunIdentity $qualificationFixtureRunIdentity -LaneIdentity $projectName
-        if (Test-Path -LiteralPath $projectFixtureRoot) {
-            throw "Qualification lane temporary path collision for '$projectName': $projectFixtureRoot"
-        }
-        New-Item -ItemType Directory -Path $projectFixtureRoot | Out-Null
-        $qualificationFixtureRoots.Add($projectFixtureRoot)
-        $testFilter = Get-QualificationTestFilter -ProjectName $projectName -Namespaces @($testSelection.Namespaces) -Classes @($testSelection.Classes)
-        $testEnvironment = @{
-            EMBODYSENSE_CAPABILITY_CATALOG_TRUST_ROOT = Join-Path $projectFixtureRoot "catalog-trust"
-            TEMP = $projectFixtureRoot
-            TMP = $projectFixtureRoot
-            TMPDIR = $projectFixtureRoot
-        }
-        $testScheduleProfile = Get-QualificationTestScheduleProfile -ProjectName $projectName
-        Add-QualificationPhase -Name "tests-$projectName" -FileName "dotnet" -Arguments @("test", $testProject, "--configuration", $Configuration, "--no-build", "--no-restore", "--settings", "tests/verification-stress.runsettings", "--filter", $testFilter, "--logger", "trx;LogFileName=$projectName.trx", "--results-directory", $projectResultsRoot, "/p:RestoreIgnoreFailedSources=true") -TimeoutSeconds $testScheduleProfile.TimeoutSeconds -EstimatedDurationSeconds $testScheduleProfile.EstimatedDurationSeconds -Weight $testScheduleProfile.Weight -ResourceClass $testScheduleProfile.ResourceClass -Environment $testEnvironment -TrxPath $trxPath
-    }
     $integrationSelection = @($plan.TestSelections | Where-Object { $_.Project -ceq "tests/EmbodySense.IntegrationTests/EmbodySense.IntegrationTests.csproj" })
     $integrationRunsUnfiltered = $integrationSelection.Count -eq 1 -and @($integrationSelection[0].Namespaces).Count -eq 0 -and @($integrationSelection[0].Classes).Count -eq 0
     $integrationProjectAvailable = $availableTestProjects -ccontains "tests/EmbodySense.IntegrationTests/EmbodySense.IntegrationTests.csproj"
@@ -439,7 +453,7 @@ try {
         $existingCSharpFiles = @($plan.ChangedCSharpFiles | Where-Object { Test-Path -LiteralPath (Join-Path $repoRoot $_) -PathType Leaf })
         if ($existingCSharpFiles.Count -gt 0) {
             $formatArguments = @("format", "EmbodySense.sln", "--verify-no-changes", "--no-restore", "--severity", "warn", "--diagnostics", "IDE1006", "--verbosity", "minimal", "--include") + $existingCSharpFiles
-            Add-QualificationPhase -Name "format-changed" -FileName "dotnet" -Arguments $formatArguments -TimeoutSeconds 90 -EstimatedDurationSeconds 45 -Weight $qualificationCpuBoundWeight -ResourceClass "CpuBound"
+            Add-QualificationPhase -Name "format-changed" -FileName "dotnet" -Arguments $formatArguments -TimeoutSeconds 150 -EstimatedDurationSeconds 120 -Weight $qualificationCpuBoundWeight -ResourceClass "CpuBound"
         }
     }
 
@@ -448,8 +462,8 @@ try {
     foreach ($exclusiveContract in $exclusiveQualificationContracts) {
         $profile = $exclusiveContract.Profile
         Add-QualificationPhase -Name "contract-$([IO.Path]::GetFileNameWithoutExtension($exclusiveContract.ScriptName))" -FileName $powerShellExecutable -Arguments $exclusiveContract.Arguments -TimeoutSeconds $profile.TimeoutSeconds -EstimatedDurationSeconds $profile.EstimatedDurationSeconds -Weight $profile.Weight -ResourceClass $profile.ResourceClass
+        Invoke-QualificationWave
     }
-    Invoke-QualificationWave
 }
 finally {
     Pop-Location

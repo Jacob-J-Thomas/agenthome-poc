@@ -24,8 +24,8 @@ jobs:
       cancel-in-progress: false
     runs-on: windows-latest
     # Tool setup and diagnostic upload are outside the repository qualification budget.
-    # The watchdog owns the exact inclusive 480-second child deadline.
-    timeout-minutes: 10
+    # The watchdog owns the exact inclusive 1680-second child deadline.
+    timeout-minutes: 30
 
     steps:
       - name: Validate immutable inputs
@@ -71,7 +71,7 @@ jobs:
 
       - name: Qualify exact edge
         shell: pwsh
-        run: ./scripts/verify-with-watchdog.ps1 -Qualification -BaseCommit '${{ inputs.base_sha }}' -HeadCommit '${{ inputs.head_sha }}' -Configuration Release -DeadlineSeconds 480
+        run: ./scripts/verify-with-watchdog.ps1 -Qualification -BaseCommit '${{ inputs.base_sha }}' -HeadCommit '${{ inputs.head_sha }}' -Configuration Release -DeadlineSeconds 1680
 
       - name: Upload qualification diagnostics
         if: always()
