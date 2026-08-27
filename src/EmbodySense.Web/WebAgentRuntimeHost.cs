@@ -218,6 +218,25 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         Volatile.Write(ref _governedLoopBackgroundPosture, (int)posture);
     }
 
+    /// <summary>
+    /// Signals process shutdown to host-owned governed operations before their retained runtime is drained or released.
+    /// </summary>
+    /// <remarks>
+    /// The signal is idempotent and intentionally separate from <see cref="DisposeAsync"/> so the hosted lifetime can
+    /// cancel approval and provider work before it begins draining the canonical background coordinator.
+    /// </remarks>
+    internal void SignalHostShutdown()
+    {
+        try
+        {
+            _hostLifetimeCancellation.Cancel();
+        }
+        catch (ObjectDisposedException) when (Volatile.Read(ref _disposed) != 0)
+        {
+            // A concurrent or prior host disposal already delivered the shutdown signal.
+        }
+    }
+
     internal async Task<AgentRuntimeGovernedLoopBackgroundStartResult> StartGovernedLoopLocalBackgroundForProcessAsync()
     {
         if (!_statusReader.Read(_options.WorkingDirectory).IsInitialized)
@@ -994,8 +1013,10 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     /// is instead represented by a cancellation event when its event write succeeds.
     /// </exception>
     /// <remarks>
-    /// Static commands are handled before workspace initialization is required. A cancelled model turn marks
-    /// the retained runtime for disposal so its session is not reused after an ambiguous cancellation boundary.
+    /// Static commands are handled before workspace initialization is required. A cancelled model turn before its
+    /// irreversible provider transport-write boundary marks the retained runtime for disposal so its session is not
+    /// reused after an ambiguous cancellation boundary. Once that boundary has been crossed, transport failures
+    /// quarantine the provider attempt for review without claiming that runtime disposal can undo the dispatched request.
     /// Expected Codex compatibility failures are projected as bounded failure events.
     /// </remarks>
     public async Task<AgentRuntimeTurnResult> SendMessageAsync(
@@ -1142,7 +1163,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
             return;
         }
 
-        _hostLifetimeCancellation.Cancel();
+        SignalHostShutdown();
         var stop = await StopGovernedLoopLocalBackgroundForProcessAsync().ConfigureAwait(false);
         SetGovernedLoopBackgroundPosture(stop.Readiness switch
         {

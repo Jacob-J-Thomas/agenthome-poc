@@ -369,6 +369,33 @@ public sealed class CustomLoopRunStoreTests
     }
 
     [Fact]
+    public async Task Empty_pending_schedule_admission_page_does_not_create_custom_run_or_schedule_storage()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        using var store = new CustomLoopRunStore(paths);
+
+        Assert.Empty(await store.ListPendingScheduleAdmissionsAsync(null, 10));
+
+        Assert.False(Directory.Exists(paths.CustomLoopRunsPath));
+        Assert.False(Directory.Exists(paths.CustomLoopScheduleAdmissionsPath));
+    }
+
+    [Fact]
+    public async Task Empty_existing_schedule_admission_root_does_not_create_custom_run_storage()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        Directory.CreateDirectory(paths.CustomLoopScheduleAdmissionsPath);
+        using var store = new CustomLoopRunStore(paths);
+
+        Assert.Empty(await store.ListPendingScheduleAdmissionsAsync(null, 10));
+
+        Assert.False(Directory.Exists(paths.CustomLoopRunsPath));
+        Assert.True(Directory.Exists(paths.CustomLoopScheduleAdmissionsPath));
+    }
+
+    [Fact]
     public async Task Scheduled_defer_one_admissions_retain_one_deferred_occurrence_and_replay_each_outcome()
     {
         using var workspace = new TestWorkspace();

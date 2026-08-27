@@ -19,6 +19,15 @@ using EmbodySense.Core.Common.Triggers;
 using EmbodySense.Core.Common.Triggers.Models;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Triggers;
+using EmbodySense.Core.Persistence.Loops;
+using EmbodySense.Core.Persistence.Loops.Execution.Sleep;
+using EmbodySense.Core.Application.Loops.Sleep.Models;
+using EmbodySense.Core.Common.Loops.Execution.Sleep;
+using EmbodySense.Core.Common.Loops.Execution.Sleep.Models;
+using EmbodySense.Core.Startup.Loops;
+using EmbodySense.Core.Startup.Loops.Execution.Models;
+using EmbodySense.Core.Startup.Loops.Models;
+using EmbodySense.Core.Startup.Loops.Execution.Sleep.Models;
 using EmbodySense.Core.Startup.Capabilities;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Tests.Support;
@@ -56,6 +65,52 @@ public sealed class WebGovernedLoopBackgroundLifetimeTests
             Assert.Equal(WebGovernedLoopBackgroundPosture.Unavailable, before.BackgroundPosture);
             Assert.True(initialized.IsSuccessStatusCode);
             Assert.Equal(WebGovernedLoopBackgroundPosture.Ready, (await WaitForPostureAsync(client, WebGovernedLoopBackgroundPosture.Ready)).BackgroundPosture);
+        }
+        finally
+        {
+            await app.StopAsync();
+        }
+    }
+
+    [Fact]
+    public async Task Hosted_lifetime_latches_a_terminal_start_failure_until_process_restart()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await WorkspaceInitializer.ForWeb().InitializeAsync(workspace.RootPath);
+        var coordinatorStore = new GovernedLoopCoordinatorEvidenceStore(paths);
+        var acquisition = await coordinatorStore.TryAcquireAsync(ExpiredPeerAcquisition());
+        var snapshot = Assert.IsType<GovernedLoopCoordinatorSnapshot>(acquisition!.Snapshot);
+        var terminalAtUtc = snapshot.LatestLifecycle.UpdatedAtUtc.AddTicks(1);
+        var failed = GovernedLoopSleepContractHash.Apply(snapshot.LatestLifecycle with
+        {
+            LifecycleVersion = snapshot.LatestLifecycle.LifecycleVersion + 1,
+            Status = GovernedLoopCoordinatorStatus.Failed,
+            UpdatedAtUtc = terminalAtUtc,
+            TerminalAtUtc = terminalAtUtc,
+            ContentHash = string.Empty
+        });
+        var mutation = await coordinatorStore.AppendLifecycleAsync(new GovernedLoopCoordinatorLifecycleMutationRequest(
+            snapshot.Ownership,
+            snapshot.Ownership.ContentHash,
+            snapshot.LatestLifecycle.LifecycleVersion,
+            snapshot.LatestLifecycle.ContentHash,
+            failed));
+        Assert.Equal(GovernedLoopCoordinatorLifecycleMutationStatus.Appended, mutation!.Status);
+
+        var codexPath = await WebBackgroundLifetimeCodexExecutable.CreateAsync(workspace);
+        await using var app = CreateApp(workspace.RootPath, codexPath, out var options);
+        await app.StartAsync();
+
+        try
+        {
+            using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
+            Assert.Equal(WebGovernedLoopBackgroundPosture.Degraded, (await WaitForPostureAsync(client, WebGovernedLoopBackgroundPosture.Degraded)).BackgroundPosture);
+
+            Directory.Delete(workspace.File(".agent", "loops", "execution", "coordinator"), recursive: true);
+            await Task.Delay(1000);
+
+            Assert.Equal(WebGovernedLoopBackgroundPosture.Degraded, (await ReadStatusAsync(client)).BackgroundPosture);
         }
         finally
         {
@@ -123,6 +178,39 @@ public sealed class WebGovernedLoopBackgroundLifetimeTests
             await app.DisposeAsync();
 
             Assert.Single(await File.ReadAllLinesAsync(WebBackgroundLifetimeCodexExecutable.StartedPath(workspace)));
+        }
+        finally
+        {
+            await app.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task Shutdown_cancels_a_held_governed_approval_before_disposing_the_pinned_runtime()
+    {
+        using var workspace = new TestWorkspace();
+        var codexPath = await FakeCodexExecutable.CreateBrowserApprovalAsync(workspace);
+        await WorkspaceInitializer.ForWeb().InitializeAsync(workspace.RootPath);
+        await File.WriteAllTextAsync(workspace.File("approval-note.txt"), "shutdown approval evidence");
+        await using var app = CreateApp(workspace.RootPath, codexPath, out var options);
+        await app.StartAsync();
+
+        try
+        {
+            var runtimeHost = app.Services.GetRequiredService<WebAgentRuntimeHost>();
+            var approvals = app.Services.GetRequiredService<WebApprovalCoordinator>();
+            approvals.RegisterOwnerConnection("connection-1");
+            var definition = await CreateInvocationLoopAsync(workspace, [LoopToolAssignment.Read]);
+            var input = new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "shutdown-held-approval", "browser-approval");
+
+            var invocation = runtimeHost.InvokeLoopAsync(input, "connection-1");
+            await WaitForPendingAsync(approvals, "connection-1");
+            await app.StopAsync().WaitAsync(TimeSpan.FromSeconds(30));
+
+            Assert.Empty(approvals.GetPending("connection-1"));
+            var response = await invocation.WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.Contains(response.ExecutionStatus, new[] { "Cancelled", "NeedsReview", "Failed" });
+            Assert.Equal(WebGovernedLoopBackgroundPosture.Stopped, runtimeHost.GetStatus().BackgroundPosture);
         }
         finally
         {
@@ -265,6 +353,70 @@ public sealed class WebGovernedLoopBackgroundLifetimeTests
 
         Assert.Equal(TriggerQueueAdmissionStatus.Queued, admission.Status);
         return deliveryId!.Value;
+    }
+
+    private static async Task<LoopDefinitionSnapshot> CreateInvocationLoopAsync(TestWorkspace workspace, IReadOnlyList<LoopToolAssignment>? toolAssignments = null)
+    {
+        var facade = new LoopAuthoringFacade(workspace.RootPath, new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath)));
+        var created = Assert.IsType<LoopDefinitionSnapshot>((await facade.CreateAsync("create-shutdown-approval-loop")).Definition);
+        var input = new LoopDefinitionInput(
+            "Shutdown approval loop",
+            "Verifies host-lifetime cancellation of a held governed approval.",
+            new LoopTriggerPolicy(LoopTriggerPromptSource.Invocation, string.Empty, false),
+            [new LoopInferenceStep(created.InferenceSteps.Single().Id, "Read", "Read the approved evidence.", new LoopNodeContextPolicy(LoopContextPolicyMode.Inherit, null))],
+            toolAssignments ?? [],
+            new LoopExitPolicy(0, created.ExitPolicy.DecisionInstruction, new LoopNodeContextPolicy(LoopContextPolicyMode.Inherit, null)));
+        var updated = await facade.UpdateAsync(created.Id, created.DefinitionVersion, "update-shutdown-approval-loop", input);
+        return Assert.IsType<LoopDefinitionSnapshot>(updated.Definition);
+    }
+
+    private static async Task WaitForPendingAsync(WebApprovalCoordinator approvals, string ownerConnectionId)
+    {
+        for (var attempt = 0; attempt < 200; attempt++)
+        {
+            if (approvals.GetPending(ownerConnectionId).Count > 0)
+            {
+                return;
+            }
+
+            await Task.Delay(25);
+        }
+
+        throw new TimeoutException("The governed approval was not queued.");
+    }
+
+    private static GovernedLoopCoordinatorAcquisitionRequest ExpiredPeerAcquisition()
+    {
+        var observedAtUtc = DateTimeOffset.UtcNow.AddMinutes(-2).ToUniversalTime();
+        var ownership = GovernedLoopSleepContractHash.Apply(new GovernedLoopCoordinatorOwnership(
+            GovernedLoopCoordinatorOwnership.CurrentSchemaVersion,
+            "local-background",
+            "expired-peer",
+            1,
+            observedAtUtc,
+            string.Empty));
+        var lifecycle = GovernedLoopSleepContractHash.Apply(new GovernedLoopCoordinatorLifecycle(
+            GovernedLoopCoordinatorLifecycle.CurrentSchemaVersion,
+            1,
+            ownership,
+            GovernedLoopCoordinatorStatus.Starting,
+            observedAtUtc,
+            null,
+            string.Empty));
+        var heartbeat = GovernedLoopSleepContractHash.Apply(new GovernedLoopCoordinatorHeartbeat(
+            GovernedLoopCoordinatorHeartbeat.CurrentSchemaVersion,
+            1,
+            ownership,
+            observedAtUtc,
+            observedAtUtc.AddMinutes(1),
+            string.Empty));
+        return new GovernedLoopCoordinatorAcquisitionRequest(
+            GovernedLoopCoordinatorPriorEvidenceExpectation.NotFound,
+            null,
+            null,
+            ownership,
+            lifecycle,
+            heartbeat);
     }
 
     private static async Task<TriggerQueueEntry> WaitForTriggerStateAsync(TriggerQueueStore queue, string deliveryId, TriggerQueueEntryState state)

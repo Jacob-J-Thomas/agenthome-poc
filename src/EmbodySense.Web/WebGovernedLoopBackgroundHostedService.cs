@@ -17,6 +17,7 @@ internal sealed class WebGovernedLoopBackgroundHostedService : BackgroundService
     private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
     private int _stopRequested;
     private bool _startCompleted;
+    private bool _startRetryBlocked;
 
     internal WebGovernedLoopBackgroundHostedService(WebAgentRuntimeHost host)
     {
@@ -25,6 +26,7 @@ internal sealed class WebGovernedLoopBackgroundHostedService : BackgroundService
 
     public override async Task StopAsync(CancellationToken cancellationToken)
     {
+        _host.SignalHostShutdown();
         Interlocked.Exchange(ref _stopRequested, 1);
         _host.SetGovernedLoopBackgroundPosture(WebGovernedLoopBackgroundPosture.Draining);
         await _lifecycleGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
@@ -78,12 +80,18 @@ internal sealed class WebGovernedLoopBackgroundHostedService : BackgroundService
 
     private async Task ReconcileAsync()
     {
+        if (_startRetryBlocked)
+        {
+            return;
+        }
+
         if (!_startCompleted)
         {
             var start = await _host.StartGovernedLoopLocalBackgroundForProcessAsync().ConfigureAwait(false);
             _host.SetGovernedLoopBackgroundPosture(ToPosture(start.Readiness));
             _startCompleted = start.Readiness == AgentRuntimeGovernedLoopBackgroundReadiness.Ready
                 && start.Ownership == AgentRuntimeGovernedLoopBackgroundOwnership.Local;
+            _startRetryBlocked = !start.RetryAllowed;
             return;
         }
 
