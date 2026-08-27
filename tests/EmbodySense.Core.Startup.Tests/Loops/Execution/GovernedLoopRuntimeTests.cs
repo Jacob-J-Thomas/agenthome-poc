@@ -1027,7 +1027,8 @@ internal static class GovernedLoopRuntimeTests
             TriggerQueueQuota.Runtime,
             timeProvider: new FixedTriggerTimeProvider(dispatchNow));
         Assert.Equal(2, (await queue.GetSnapshotAsync(dispatchNow)).QueuedEntries);
-        await using var runtime = await fixture.CreateRuntimeAsync();
+        var firstWorkerAdmission = new SignalingModelExecutionBoundaryObserver(GovernedModelPrimaryExecutionBoundary.ReservationRetained);
+        await using var runtime = await fixture.CreateRuntimeAsync(governedModelExecutionObserver: firstWorkerAdmission);
         var generation = (await queue.GetSnapshotAsync(dispatchNow)).Generation;
         var blockerTask = runtime
             .CreateTriggerWorkerRuntime(new ExactTriggerAuthorizer(), new FixedTriggerTimeProvider(dispatchNow))
@@ -1043,6 +1044,7 @@ internal static class GovernedLoopRuntimeTests
         var providerEntered = false;
         try
         {
+            await firstWorkerAdmission.WaitForObservationAsync(blockerTask);
             await fixture.WaitForInMemoryProviderAsync(blockerTask);
             providerEntered = true;
             generation = (await queue.GetSnapshotAsync(dispatchNow)).Generation;
