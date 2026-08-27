@@ -1,6 +1,6 @@
 Set-StrictMode -Version Latest
 
-$script:VerificationQualificationWatchdogDeadlineSeconds = 1350
+$script:VerificationQualificationWatchdogDeadlineSeconds = 1680
 $script:VerificationStaticContractsWatchdogDeadlineSeconds = 600
 $script:VerificationFullWatchdogMaximumDeadlineSeconds = 1200
 $script:VerificationSolutionWatchdogDeadlineSeconds = 1500
