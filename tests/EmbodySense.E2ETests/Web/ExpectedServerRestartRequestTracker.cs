@@ -123,10 +123,7 @@ internal sealed class ExpectedServerRestartRequestTracker
         lock (_gate)
         {
             RemoveUnderLock(requestId);
-            if (_terminalCorrelations.TryGetValue(requestId, out var correlation) && correlation.LogObserved)
-            {
-                _terminalCorrelations.Remove(requestId);
-            }
+            _terminalCorrelations.Remove(requestId);
         }
     }
 
@@ -263,10 +260,16 @@ internal sealed class ExpectedServerRestartRequestTracker
 
             if (hasTerminalCorrelation)
             {
-                _terminalCorrelations[requestId] = terminalCorrelation with { LogObserved = true };
-                if (terminalCorrelation.FailureObserved)
+                if (expected)
                 {
-                    _terminalCorrelations.Remove(requestId);
+                    if (terminalCorrelation.FailureObserved)
+                    {
+                        _terminalCorrelations.Remove(requestId);
+                    }
+                    else
+                    {
+                        _terminalCorrelations[requestId] = terminalCorrelation with { LogObserved = true };
+                    }
                 }
             }
             else if (_requestUrls.ContainsKey(requestId))
@@ -276,7 +279,7 @@ internal sealed class ExpectedServerRestartRequestTracker
                     beganDuringOutage,
                     capturedAtRestart,
                     FailureObserved: false,
-                    LogObserved: true,
+                    LogObserved: expected,
                     _restartGeneration);
                 TrimTerminalCorrelationsUnderLock();
             }

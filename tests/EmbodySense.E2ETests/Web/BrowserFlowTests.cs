@@ -176,6 +176,7 @@ public sealed class BrowserFlowTests
         tracker.BeginExpectedServerRestart();
 
         Assert.True(tracker.ProcessLoadingFailed("captured", canceled: false, "net::ERR_CONNECTION_RESET"));
+        Assert.False(tracker.IsExpectedServerRestartLogEntry("captured", "network", "fetch failed", null));
         tracker.EndExpectedServerRestart();
         Assert.True(tracker.IsExpectedServerRestartLogEntry("captured", "network", "fetch failed: net::ERR_CONNECTION_RESET", null));
         var context = tracker.ReadLogContext("captured");
