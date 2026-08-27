@@ -4,6 +4,22 @@ using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using EmbodySense.Core.Application.Capabilities;
+using EmbodySense.Core.Application.Triggers;
+using EmbodySense.Core.Application.Triggers.Models;
+using EmbodySense.Core.Common.Authority;
+using EmbodySense.Core.Common.Authority.Grants;
+using EmbodySense.Core.Common.Authority.Grants.Models;
+using EmbodySense.Core.Common.Authority.Models;
+using EmbodySense.Core.Common.Capabilities;
+using EmbodySense.Core.Common.Capabilities.Models;
+using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
+using EmbodySense.Core.Common.Loops.Revisions;
+using EmbodySense.Core.Common.Triggers;
+using EmbodySense.Core.Common.Triggers.Models;
+using EmbodySense.Core.Common.Workspace;
+using EmbodySense.Core.Persistence.Triggers;
+using EmbodySense.Core.Startup.Capabilities;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Tests.Support;
 using EmbodySense.Web;
@@ -48,7 +64,7 @@ public sealed class WebGovernedLoopBackgroundLifetimeTests
     }
 
     [Fact]
-    public async Task Background_lifetime_remains_ready_after_the_only_browser_connection_disconnects()
+    public async Task Background_worker_processes_governed_trigger_after_the_only_browser_connection_disconnects()
     {
         using var workspace = new TestWorkspace();
         var codexPath = await WebBackgroundLifetimeCodexExecutable.CreateAsync(workspace);
@@ -68,7 +84,16 @@ public sealed class WebGovernedLoopBackgroundLifetimeTests
             await socket.ConnectAsync(ToHubUri(options.Url), CancellationToken.None);
             await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "test disconnect", CancellationToken.None);
 
-            Assert.Equal(WebGovernedLoopBackgroundPosture.Ready, (await WaitForPostureAsync(client, WebGovernedLoopBackgroundPosture.Ready)).BackgroundPosture);
+            var queue = new TriggerQueueStore(new WorkspacePaths(workspace.RootPath), TriggerQueueQuota.Runtime);
+            var deliveryId = await AdmitGovernedBackgroundTriggerAsync(workspace, queue);
+            var completed = await WaitForTriggerStateAsync(queue, deliveryId, TriggerQueueEntryState.DispatchRejected);
+
+            Assert.Equal(TriggerQueueEntryState.DispatchRejected, completed.State);
+            Assert.Equal(TriggerDispatchOutcome.Rejected, completed.Dispatch?.Outcome);
+            Assert.NotNull(completed.Dispatch?.OperationId);
+            Assert.NotNull(completed.WorkerLease?.ReleasedAtUtc);
+            Assert.Contains("governed publication", completed.Dispatch?.Detail, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal(WebGovernedLoopBackgroundPosture.Ready, (await ReadStatusAsync(client)).BackgroundPosture);
         }
         finally
         {
@@ -158,6 +183,104 @@ public sealed class WebGovernedLoopBackgroundLifetimeTests
         }
 
         throw new TimeoutException($"The tracked Codex process did not write {count} line(s) to `{path}`.");
+    }
+
+    private static async Task<string> AdmitGovernedBackgroundTriggerAsync(TestWorkspace workspace, TriggerQueueStore queue)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var deliveryText = "web-background-delivery";
+        var deduplicationText = "web-background-deduplication";
+        Assert.True(TriggerDeliveryId.TryParse(deliveryText, out var deliveryId));
+        Assert.True(TriggerDeduplicationId.TryParse(deduplicationText, out var deduplicationId));
+        Assert.True(TriggerDeliveryFactory.TryCreateRedeliveryEvidence(1, 1, deliveryId, out var redelivery, out _));
+
+        var descriptor = Assert.Single(BuiltInCapabilityCatalog.Descriptors, item => item.Id.Value == "org.embodysense/triggers/time");
+        Assert.True(CapabilityDescriptorIdentity.TryCreate(descriptor, out var descriptorIdentity, out _));
+        var adapter = new TriggerAdapterReference(descriptorIdentity!, descriptor.Implementation);
+        var revision = GovernedLoopRevisionReference.Create(1, "web-background-graph", "revision-1", new string('a', 64));
+        var publication = GovernedLoopRevisionPublicationPinFactory.Create(1, revision, "web-background-publish", new string('b', 64));
+        Assert.True(AuthorityGrantId.TryParse("web-background-grant", out var grantId, out _));
+        Assert.True(AuthorityGrantRevision.TryParse("1", out var grantRevision, out _));
+        Assert.True(TriggerDeliveryFactory.TryCreateGovernedLoopReference(
+            publication,
+            new AuthorityGrantReference(grantId!, grantRevision!, "sha256:" + new string('c', 64)),
+            out var loop,
+            out _));
+        Assert.True(AuthorityActorId.TryParse("owner", out var actorId, out _));
+        var workspaceId = CapabilityWorkspaceScopeId.Create(workspace.RootPath)["workspace-sha256:".Length..];
+        Assert.True(TriggerDeliveryFactory.TryCreateActorContext(actorId, "web", workspaceId, "default-assistant", out var actorContext, out _));
+        Assert.True(AuthorityProfileId.TryParse("trigger-operator", out var profileId, out _));
+        Assert.True(AuthorityProfileRevision.TryParse("1", out var profileRevision, out _));
+        var profile = new AuthorityProfileReference(profileId!, profileRevision!);
+        Assert.True(AuthorityBoundaryReceiptFactory.TryCreate(
+            1,
+            AuthorityBoundaryDecision.Direct,
+            [new AuthorityBoundaryCondition(AuthorityBoundaryDecision.Direct, AuthorityBoundaryReason.NoBoundary)],
+            [profile],
+            now.AddSeconds(-1),
+            out var boundaryReceipt,
+            out _));
+        var authority = new TriggerAuthorityEvidence(profile, boundaryReceipt!);
+        Assert.True(TriggerDeliveryFactory.TryCreateTemporalEvidence(
+            now.AddSeconds(-2),
+            now.AddSeconds(-1),
+            now.AddSeconds(-3),
+            null,
+            null,
+            null,
+            null,
+            out var temporal,
+            out _));
+        Assert.True(TriggerDeliveryFactory.TryCreateInlinePayload("background-work"u8.ToArray(), out var payload, out _));
+        Assert.True(TriggerDeliveryFactory.TryCreateEnvelope(
+            1,
+            deliveryId,
+            deduplicationId,
+            TriggerKind.Webhook,
+            adapter,
+            loop,
+            actorContext,
+            authority,
+            temporal,
+            payload,
+            redelivery,
+            false,
+            null,
+            TriggerAdmissionStatus.Unknown,
+            TriggerAdmissionReason.Unknown,
+            out var envelope,
+            out _));
+        Assert.True(TriggerDeliveryAdmissionRequestFactory.TryCreate(
+            envelope,
+            envelope!.Loop,
+            envelope.Adapter,
+            true,
+            envelope.ActorContext,
+            envelope.Authority,
+            now,
+            out var deliveryRequest,
+            out _));
+        var admission = await new TriggerQueueAdmissionService(new TriggerDeliveryAdmissionService(queue), queue).AdmitAsync(
+            TriggerQueueAdmissionRequestFactory.Create(deliveryRequest!, TriggerQueueAdmissionMode.Queued, TriggerQueuePriority.Normal));
+
+        Assert.Equal(TriggerQueueAdmissionStatus.Queued, admission.Status);
+        return deliveryId!.Value;
+    }
+
+    private static async Task<TriggerQueueEntry> WaitForTriggerStateAsync(TriggerQueueStore queue, string deliveryId, TriggerQueueEntryState state)
+    {
+        for (var attempt = 0; attempt < 80; attempt++)
+        {
+            var entry = (await queue.GetSnapshotAsync(DateTimeOffset.UtcNow)).Entries.SingleOrDefault(item => item.DeliveryId.Value == deliveryId);
+            if (entry?.State == state)
+            {
+                return entry;
+            }
+
+            await Task.Delay(50);
+        }
+
+        throw new TimeoutException($"The governed background delivery `{deliveryId}` did not reach `{state}`.");
     }
 
     private static string SessionCookie(HttpResponseMessage response)
