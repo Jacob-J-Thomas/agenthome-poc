@@ -39,14 +39,17 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
     private readonly byte[] _secret;
     private readonly string _pipeName;
     private readonly Action? _brokerFaulted;
+    private readonly ICustomLoopCancellationBrokerLifecycleObserver? _brokerLifecycleObserver;
     private readonly CancellationTokenSource _shutdown = new();
     private readonly TaskCompletionSource<bool> _brokerReady = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    private readonly Task _server;
+    private readonly object _descriptorGate = new();
+    private Task? _server;
     private readonly Dictionary<string, ActiveAttempt> _activeAttempts = new(StringComparer.Ordinal);
     private readonly object _gate = new();
     private long _attemptGeneration;
     private int _disposed;
-    private int _serverResourcesReleased;
+    private int _serverResourceReleaseRequested;
+    private int _serverResourceReleaseAttached;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="CustomLoopAttemptCancellationHost"/> type.
@@ -54,7 +57,8 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
     /// <param name="paths">The paths.</param>
     /// <param name="workspaceKey">The workspace key.</param>
     /// <param name="brokerFaulted">The callback invoked after a terminal broker failure withdraws the descriptor.</param>
-    public CustomLoopAttemptCancellationHost(WorkspacePaths paths, string workspaceKey, Action? brokerFaulted = null)
+    /// <param name="brokerLifecycleObserver">The optional in-process observer for bounded broker lifecycle transitions.</param>
+    public CustomLoopAttemptCancellationHost(WorkspacePaths paths, string workspaceKey, Action? brokerFaulted = null, ICustomLoopCancellationBrokerLifecycleObserver? brokerLifecycleObserver = null)
     {
         _paths = paths;
         _ownerId = "owner-" + Guid.NewGuid().ToString("N");
@@ -62,11 +66,22 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
         _encodedSecret = Convert.ToBase64String(_secret);
         _pipeName = "es-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(workspaceKey + "\n" + _ownerId))).ToLowerInvariant()[..16];
         _brokerFaulted = brokerFaulted;
-        _server = RunServerAsync();
+        _brokerLifecycleObserver = brokerLifecycleObserver;
+        var server = RunServerAsync();
+        Volatile.Write(ref _server, server);
+        if (Volatile.Read(ref _serverResourceReleaseRequested) != 0)
+        {
+            AttachServerResourceRelease(server);
+        }
+
         try
         {
             _brokerReady.Task.WaitAsync(_connectionIoTimeout).GetAwaiter().GetResult();
-            WriteOwnerDescriptor();
+            _brokerLifecycleObserver?.OnBrokerReadyBeforeOwnerDescriptorPublication(_pipeName);
+            if (!TryPublishOwnerDescriptor())
+            {
+                StopServerAfterFailedReadiness();
+            }
         }
         catch
         {
@@ -245,15 +260,19 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
     /// </summary>
     public void Dispose()
     {
-        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        lock (_descriptorGate)
         {
-            return;
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            {
+                return;
+            }
+
+            CompleteActiveAttemptsAsOwnerUnavailable();
+
+            _shutdown.Cancel();
+            DeleteOwnerDescriptor();
         }
 
-        CompleteActiveAttemptsAsOwnerUnavailable();
-
-        _shutdown.Cancel();
-        DeleteOwnerDescriptor();
         ReleaseServerResourcesAfterStop();
     }
 
@@ -322,14 +341,19 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
 
     private void FaultBroker()
     {
-        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        lock (_descriptorGate)
         {
-            return;
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            {
+                return;
+            }
+
+            CompleteActiveAttemptsAsOwnerUnavailable();
+            _shutdown.Cancel();
+            DeleteOwnerDescriptor();
         }
 
-        CompleteActiveAttemptsAsOwnerUnavailable();
-        _shutdown.Cancel();
-        DeleteOwnerDescriptor();
+        NotifyBrokerFaulted();
         _brokerFaulted?.Invoke();
         ReleaseServerResourcesAfterStop();
     }
@@ -351,12 +375,26 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
 
     private void ReleaseServerResourcesAfterStop()
     {
-        if (Interlocked.Exchange(ref _serverResourcesReleased, 1) != 0)
+        if (Interlocked.Exchange(ref _serverResourceReleaseRequested, 1) != 0)
         {
             return;
         }
 
-        _ = _server.ContinueWith(
+        var server = Volatile.Read(ref _server);
+        if (server is not null)
+        {
+            AttachServerResourceRelease(server);
+        }
+    }
+
+    private void AttachServerResourceRelease(Task server)
+    {
+        if (Interlocked.Exchange(ref _serverResourceReleaseAttached, 1) != 0)
+        {
+            return;
+        }
+
+        _ = server.ContinueWith(
             _ =>
             {
                 _shutdown.Dispose();
@@ -385,6 +423,18 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
         return new CustomLoopAttemptCancellationResult(status, detail, _ownerId, Environment.ProcessId);
     }
 
+    private void NotifyBrokerFaulted()
+    {
+        try
+        {
+            _brokerLifecycleObserver?.OnBrokerFaulted();
+        }
+        catch (Exception)
+        {
+            // An observer cannot prevent the faulted owner from retiring its descriptor, lock, and active attempts.
+        }
+    }
+
     private bool IsAuthenticated(CancellationWireRequest request)
     {
         if (request.SchemaVersion != 1
@@ -398,6 +448,27 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
 
         var expected = ComputeAuthenticationTag(_encodedSecret, _ownerId, request.RunId, request.OperationId);
         return CryptographicOperations.FixedTimeEquals(Encoding.ASCII.GetBytes(expected), Encoding.ASCII.GetBytes(request.AuthenticationTag));
+    }
+
+    private bool TryPublishOwnerDescriptor()
+    {
+        lock (_descriptorGate)
+        {
+            if (!IsAvailable)
+            {
+                DeleteOwnerDescriptor();
+                return false;
+            }
+
+            WriteOwnerDescriptor();
+            if (IsAvailable)
+            {
+                return true;
+            }
+
+            DeleteOwnerDescriptor();
+            return false;
+        }
     }
 
     private void WriteOwnerDescriptor()

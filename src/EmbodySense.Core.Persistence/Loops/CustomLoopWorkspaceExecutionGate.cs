@@ -22,6 +22,7 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
 
     private readonly WorkspacePaths _paths;
     private readonly string _workspaceKey;
+    private readonly ICustomLoopCancellationBrokerLifecycleObserver? _brokerLifecycleObserver;
     private WorkspaceHost? _host;
     private bool _disposed;
 
@@ -30,10 +31,21 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
     /// </summary>
     /// <param name="paths">The paths.</param>
     public CustomLoopWorkspaceExecutionGate(WorkspacePaths paths)
+        : this(paths, null)
+    {
+    }
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="CustomLoopWorkspaceExecutionGate"/> class with a local broker lifecycle observer.
+    /// </summary>
+    /// <param name="paths">The paths.</param>
+    /// <param name="brokerLifecycleObserver">The optional in-process observer for bounded broker lifecycle transitions.</param>
+    public CustomLoopWorkspaceExecutionGate(WorkspacePaths paths, ICustomLoopCancellationBrokerLifecycleObserver? brokerLifecycleObserver)
     {
         ArgumentNullException.ThrowIfNull(paths);
         _paths = paths;
         _workspaceKey = CanonicalWorkspaceKey(paths.RootPath);
+        _brokerLifecycleObserver = brokerLifecycleObserver;
 
         lock (_hostsSync)
         {
@@ -74,6 +86,13 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
             if (host is null)
             {
                 return new CustomLoopExecutionLeaseResult(CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable, null, "custom_workspace_host_busy: another process owns custom-loop hosting for this workspace.");
+            }
+
+            if (!host.IsAvailable)
+            {
+                return host.HasActiveLeases
+                    ? new CustomLoopExecutionLeaseResult(CustomLoopExecutionLeaseStatus.WorkspaceBusy, null, "A terminal broker fault is preserving the active custom-loop execution boundary until its lease completes.")
+                    : new CustomLoopExecutionLeaseResult(CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable, null, "The local custom-loop host broker faulted before execution ownership could be acquired; retry after retirement.");
             }
 
             if (host.BusyOutcomeReservations.TryGetValue(operationId, out var busyReservation))
@@ -126,6 +145,13 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
             if (host is null)
             {
                 return new CustomLoopExecutionLeaseResult(CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable, null, "custom_workspace_host_busy: another process owns custom-loop hosting for this workspace.");
+            }
+
+            if (!host.IsAvailable)
+            {
+                return host.HasActiveLeases
+                    ? new CustomLoopExecutionLeaseResult(CustomLoopExecutionLeaseStatus.WorkspaceBusy, null, "A terminal broker fault is preserving the active custom-loop execution boundary until its lease completes.")
+                    : new CustomLoopExecutionLeaseResult(CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable, null, "The local custom-loop host broker faulted before a workspace-busy outcome could be reserved; retry after retirement.");
             }
 
             if (host.BusyOutcomeReservations.TryGetValue(operationId, out var existingReservation))
@@ -379,7 +405,7 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
         WorkspaceHost host;
         try
         {
-            host = new WorkspaceHost(_paths, _workspaceKey, ownership, RetireFaultedHost);
+            host = new WorkspaceHost(_paths, _workspaceKey, ownership, RetireFaultedHost, _brokerLifecycleObserver);
         }
         catch
         {

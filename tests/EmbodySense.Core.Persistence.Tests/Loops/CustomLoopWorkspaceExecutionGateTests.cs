@@ -384,6 +384,43 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
     }
 
     [Fact]
+    public async Task Windows_initial_post_ready_broker_fault_cannot_publish_an_owner_descriptor()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        WindowsBrokerFaultLifecycleObserver? observer = null;
+        Action<string> afterBrokerReady = pipeName =>
+        {
+            using var occupiedSuccessor = new NamedPipeServerStream(pipeName, PipeDirection.InOut, 2, PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+            using var firstClient = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
+            using var secondClient = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
+            firstClient.ConnectAsync().WaitAsync(TimeSpan.FromSeconds(2)).GetAwaiter().GetResult();
+            try
+            {
+                secondClient.ConnectAsync().WaitAsync(TimeSpan.FromSeconds(2)).GetAwaiter().GetResult();
+            }
+            catch (Exception exception) when (exception is IOException or TimeoutException)
+            {
+                // The first client may already have selected the live listener and faulted the broker.
+            }
+
+            Assert.True(observer!.BrokerFaulted.Task.Wait(TimeSpan.FromSeconds(10)), "The deterministic post-ready broker fault did not complete.");
+        };
+        using (observer = new WindowsBrokerFaultLifecycleObserver(afterBrokerReady))
+        {
+            await using var gate = new CustomLoopWorkspaceExecutionGate(paths, observer);
+
+            Assert.True(observer!.BrokerFaulted.Task.IsCompletedSuccessfully);
+            Assert.False(File.Exists(paths.CustomLoopCancellationOwnerPath));
+        }
+    }
+
+    [Fact]
     public async Task Incomplete_client_frame_is_abandoned_before_a_later_authenticated_remote_cancel()
     {
         using var workspace = new TestWorkspace();
@@ -462,6 +499,50 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
 
         Assert.Equal(CustomLoopAttemptCancellationStatus.ProviderInterruptionConfirmed, routedThroughReplacement.Status);
         Assert.True(await replacementConfirmation.Task);
+    }
+
+    [Fact]
+    public async Task Windows_faulted_idle_host_returns_unavailable_before_fault_retirement_and_retries_afterward()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        using var observer = new WindowsBrokerFaultLifecycleObserver(blockFaultRetirement: true);
+        await using var owner = new CustomLoopWorkspaceExecutionGate(paths, observer);
+        var descriptor = JsonNode.Parse(await File.ReadAllBytesAsync(paths.CustomLoopCancellationOwnerPath))!.AsObject();
+        using var occupiedSuccessor = new NamedPipeServerStream(descriptor["pipeName"]!.GetValue<string>(), PipeDirection.InOut, 2, PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+        using var firstClient = new NamedPipeClientStream(".", descriptor["pipeName"]!.GetValue<string>(), PipeDirection.InOut, PipeOptions.Asynchronous);
+        using var secondClient = new NamedPipeClientStream(".", descriptor["pipeName"]!.GetValue<string>(), PipeDirection.InOut, PipeOptions.Asynchronous);
+
+        await firstClient.ConnectAsync().WaitAsync(TimeSpan.FromSeconds(2));
+        try
+        {
+            await secondClient.ConnectAsync().WaitAsync(TimeSpan.FromSeconds(2));
+        }
+        catch (Exception exception) when (exception is IOException or TimeoutException)
+        {
+            // The first client may already have selected the live listener and faulted the broker.
+        }
+
+        Assert.True(await observer.BrokerFaulted.Task.WaitAsync(TimeSpan.FromSeconds(10)), "The broker fault did not reach the retirement barrier.");
+        try
+        {
+            Assert.False(File.Exists(paths.CustomLoopCancellationOwnerPath));
+            Assert.Equal(CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable, owner.TryAcquire("invoke-faulted-idle-host", _firstHash).Status);
+            Assert.Equal(CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable, owner.TryReserveWorkspaceBusyOutcome("invoke-faulted-idle-host", _firstHash).Status);
+        }
+        finally
+        {
+            observer.ContinueFaultRetirement();
+        }
+
+        Assert.True(SpinWait.SpinUntil(() => owner.IsWorkspaceHostAvailable, TimeSpan.FromSeconds(10)), "The faulted idle host was not retired after the acquire barrier released.");
+        using var replacement = owner.TryAcquire("invoke-after-faulted-idle-host", _secondHash).Lease;
+        Assert.NotNull(replacement);
     }
 
     [Fact]

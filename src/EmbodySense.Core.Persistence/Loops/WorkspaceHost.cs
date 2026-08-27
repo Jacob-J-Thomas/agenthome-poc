@@ -21,12 +21,13 @@ internal sealed class WorkspaceHost : IDisposable
     /// <param name="workspaceKey">The workspace key.</param>
     /// <param name="ownership">The ownership.</param>
     /// <param name="retireAfterBrokerFault">The callback that retires this host after a terminal broker fault.</param>
-    public WorkspaceHost(WorkspacePaths paths, string workspaceKey, FileStream ownership, Action<string, WorkspaceHost> retireAfterBrokerFault)
+    /// <param name="brokerLifecycleObserver">The optional in-process observer for bounded broker lifecycle transitions.</param>
+    public WorkspaceHost(WorkspacePaths paths, string workspaceKey, FileStream ownership, Action<string, WorkspaceHost> retireAfterBrokerFault, ICustomLoopCancellationBrokerLifecycleObserver? brokerLifecycleObserver)
     {
         _workspaceKey = workspaceKey;
         _retireAfterBrokerFault = retireAfterBrokerFault;
         Ownership = ownership;
-        CancellationHost = new CustomLoopAttemptCancellationHost(paths, workspaceKey, HandleBrokerFault);
+        CancellationHost = new CustomLoopAttemptCancellationHost(paths, workspaceKey, HandleBrokerFault, brokerLifecycleObserver);
     }
 
     /// <summary>
