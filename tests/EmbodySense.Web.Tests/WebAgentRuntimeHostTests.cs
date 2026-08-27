@@ -956,6 +956,35 @@ public sealed class WebAgentRuntimeHostTests
     }
 
     [Fact]
+    public async Task DisposeAsync_cancels_an_active_default_turn_and_rejects_a_new_turn_after_shutdown_signal()
+    {
+        using var workspace = new TestWorkspace();
+        var codexPath = await CreateFakeCodexExecutableAsync(workspace, turnDelayMilliseconds: 30_000);
+        var options = WebRunOptions.FromArguments(["--workdir", workspace.RootPath, "--model", "gpt-test", "--codex-path", codexPath]);
+        var host = CreateHost(options, new WebApprovalCoordinator());
+        await host.InitializeWorkspaceAsync();
+
+        var send = host.SendMessageAsync("held default turn", (_, _) => Task.CompletedTask);
+        await WaitForMarkerAsync(workspace.File("host-dispose-custom-loop.marker"));
+        var dispose = host.DisposeAsync().AsTask();
+        var postSignal = host.SendMessageAsync("must not create another provider", (_, _) => Task.CompletedTask);
+
+        try
+        {
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => postSignal);
+            await dispose.WaitAsync(TimeSpan.FromSeconds(10));
+        }
+        finally
+        {
+            await File.WriteAllTextAsync(workspace.File("host-dispose-custom-loop.release"), "released");
+            await dispose;
+        }
+
+        var sendException = await Record.ExceptionAsync(async () => await send);
+        Assert.True(sendException is null or OperationCanceledException, sendException?.ToString());
+    }
+
+    [Fact]
     public async Task Owner_disconnect_returns_a_zero_execution_tool_rejection_and_the_custom_run_continues()
     {
         using var workspace = new TestWorkspace();

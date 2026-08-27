@@ -9,12 +9,17 @@ using EmbodySense.Core.Common.LocalWorkspace.Actions;
 using EmbodySense.Core.Common.Loops.Execution.Effects;
 using EmbodySense.Core.Application.CommandActions.Models;
 using EmbodySense.Core.Application.CommandActions;
+using EmbodySense.Core.Application.Capabilities;
+using EmbodySense.Core.Application.Capabilities.Models;
+using EmbodySense.Core.Common.Capabilities;
+using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Common.CommandActions;
 using EmbodySense.Core.Common.CommandActions.Models;
+using EmbodySense.Core.Persistence.Capabilities;
 
 namespace EmbodySense.Core.Startup.Loops;
 
-/// <summary>Composes the exact schema-1 executable catalog from Application-owned contracts.</summary>
+/// <summary>Composes the exact schema-1 executable catalog from Application-owned contracts and current capability evidence.</summary>
 internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
 {
     private const string ConversationTurnCapabilityId = "org.embodysense/conversation-turn";
@@ -31,7 +36,10 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
         Array.AsReadOnly(new[] { GovernedLoopControlCondition.Success, GovernedLoopControlCondition.Failure });
     private static readonly GovernedLoopValueKindSet _textKind =
         GovernedLoopValueKindSet.Create([GovernedLoopValueKind.Text]);
-    private readonly GovernedLoopNodeCatalogSnapshot _snapshot;
+    private readonly GovernedLoopNodeCatalogSnapshot _initialSnapshot;
+    private readonly IReadOnlyList<CommandActionRegistration> _commandActions;
+    private readonly ICapabilityCatalogStore? _capabilityCatalog;
+    private readonly ICommandActionNativeHost? _commandActionNativeHost;
 
     internal BuiltInGovernedLoopNodeCatalog() : this(Array.Empty<CommandActionRegistration>(), null)
     {
@@ -39,7 +47,9 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
 
     internal BuiltInGovernedLoopNodeCatalog(
         IEnumerable<CommandActionRegistration> commandActions,
-        Func<CommandActionRegistration, bool>? isCommandActionExecutable = null)
+        Func<CommandActionRegistration, bool>? isCommandActionExecutable = null,
+        ICapabilityCatalogStore? capabilityCatalog = null,
+        ICommandActionNativeHost? commandActionNativeHost = null)
     {
         ArgumentNullException.ThrowIfNull(commandActions);
         var registrations = commandActions.Take(257).ToArray();
@@ -47,19 +57,96 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
         {
             throw new ArgumentException("The finite command Action catalog is too large.", nameof(commandActions));
         }
-        _snapshot = CreateSnapshot(registrations, isCommandActionExecutable);
+        _commandActions = Array.AsReadOnly(registrations);
+        _capabilityCatalog = capabilityCatalog;
+        _commandActionNativeHost = commandActionNativeHost;
+        _initialSnapshot = CreateSnapshot(registrations, isCommandActionExecutable);
     }
 
     /// <inheritdoc />
-    public Task<GovernedLoopNodeCatalogSnapshot> GetSnapshotAsync(CancellationToken cancellationToken = default)
+    public async Task<GovernedLoopNodeCatalogSnapshot> GetSnapshotAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        return Task.FromResult(_snapshot);
+        if (_capabilityCatalog is null)
+        {
+            return _initialSnapshot;
+        }
+
+        try
+        {
+            var entries = new List<CapabilityCatalogEntry>();
+            string? cursor = null;
+            long? catalogRevision = null;
+            for (var pageNumber = 0; pageNumber < CapabilityCatalogLimits.MaximumEntries / CapabilityCatalogLimits.MaximumPageSize + 1; pageNumber++)
+            {
+                var read = await _capabilityCatalog.ReadAsync(cursor, CapabilityCatalogLimits.MaximumPageSize, cancellationToken).ConfigureAwait(false);
+                if (read.Status != CapabilityCatalogReadStatus.Available || read.Page is null)
+                {
+                    return UnavailableSnapshot();
+                }
+
+                catalogRevision ??= read.Page.CatalogRevision;
+                if (catalogRevision != read.Page.CatalogRevision)
+                {
+                    return UnavailableSnapshot();
+                }
+
+                entries.AddRange(read.Page.Entries);
+                if (read.Page.NextCursor is null)
+                {
+                    cursor = null;
+                    break;
+                }
+
+                if (string.Equals(cursor, read.Page.NextCursor, StringComparison.Ordinal))
+                {
+                    return UnavailableSnapshot();
+                }
+
+                cursor = read.Page.NextCursor;
+            }
+
+            if (cursor is not null || entries.Count > CapabilityCatalogLimits.MaximumEntries)
+            {
+                return UnavailableSnapshot();
+            }
+
+            var current = entries.ToDictionary(entry => entry.Descriptor.Id.Value, StringComparer.Ordinal);
+            var executableCommandActions = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var registration in _commandActions)
+            {
+                if (!HasCurrentExecutableCapabilities(registration.Template.Capability.Id.Value, current)
+                    || _commandActionNativeHost is null)
+                {
+                    continue;
+                }
+
+                var availability = await _commandActionNativeHost.CheckExecutableAvailabilityAsync(registration, cancellationToken).ConfigureAwait(false);
+                if (availability.Status == CapabilityExecutableAvailabilityStatus.Available)
+                {
+                    executableCommandActions.Add(registration.Template.ContentHash);
+                }
+            }
+
+            return CreateSnapshot(
+                _commandActions,
+                registration => executableCommandActions.Contains(registration.Template.ContentHash),
+                capabilityId => HasCurrentExecutableCapabilities(capabilityId, current));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return UnavailableSnapshot();
+        }
     }
 
     private static GovernedLoopNodeCatalogSnapshot CreateSnapshot(
         IReadOnlyList<CommandActionRegistration> commandActions,
-        Func<CommandActionRegistration, bool>? isCommandActionExecutable)
+        Func<CommandActionRegistration, bool>? isCommandActionExecutable,
+        Func<string, bool>? isCapabilityExecutable = null)
     {
         var graphCompatibleCommandActions = commandActions
             .Select(registration => new
@@ -77,6 +164,12 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
             .Append(GovernedLoopHumanInputNodeCatalogContract.Descriptor)
             .Concat(GovernedLoopFailNodeCatalogContract.Descriptors)
             .Concat(graphCompatibleCommandActions.Select(candidate => CommandAction(candidate.Registration, candidate.PayloadCharacters, isCommandActionExecutable?.Invoke(candidate.Registration) == true)))
+            .Select(descriptor => isCapabilityExecutable is null
+                ? descriptor
+                : descriptor with
+                {
+                    IsExecutable = descriptor.IsExecutable && descriptor.RequiredCapabilityIds.All(isCapabilityExecutable)
+                })
             .OrderBy(DescriptorKey, StringComparer.Ordinal)
             .ToArray();
         if (descriptors.Length != 26 + graphCompatibleCommandActions.Length
@@ -91,6 +184,23 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
             SourceEvidenceId,
             Array.AsReadOnly(descriptors));
     }
+
+    private static bool HasCurrentExecutableCapabilities(
+        string capabilityId,
+        IReadOnlyDictionary<string, CapabilityCatalogEntry> current)
+        => current.TryGetValue(capabilityId, out var entry)
+            && CapabilityDescriptorIdentity.TryCreate(entry.Descriptor, out var descriptorIdentity, out _)
+            && entry.Lifecycle.SchemaVersion == CapabilityLifecycleSnapshot.CurrentSchemaVersion
+            && Equals(entry.Lifecycle.DescriptorIdentity, descriptorIdentity)
+            && entry.Lifecycle.Declaration == CapabilityDeclarationState.Declared
+            && entry.Lifecycle.Installation == CapabilityInstallationState.Installed
+            && entry.Lifecycle.Enablement == CapabilityEnablementState.Enabled
+            && entry.Lifecycle.Health == CapabilityHealthState.Healthy
+            && entry.Lifecycle.Retirement is CapabilityRetirementState.Active or CapabilityRetirementState.Deprecated
+            && entry.Lifecycle.Trust == CapabilityTrustState.Verified;
+
+    private static GovernedLoopNodeCatalogSnapshot UnavailableSnapshot()
+        => new(false, SourceEvidenceId, Array.Empty<GovernedLoopNodeCatalogDescriptor>());
 
     private static IReadOnlyList<GovernedLoopNodeCatalogDescriptor> BaselineDescriptors()
         => Array.AsReadOnly(new[]

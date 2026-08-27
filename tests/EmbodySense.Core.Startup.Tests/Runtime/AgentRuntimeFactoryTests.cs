@@ -1502,6 +1502,38 @@ public sealed class AgentRuntimeFactoryTests
     }
 
     [Fact]
+    public async Task Pinned_runtime_refreshes_graph_catalog_after_current_capability_lifecycle_changes()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        await using var runtime = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Web);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var service = new CapabilityCatalogService(new CapabilityCatalogStore(paths, new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath)));
+
+        var initial = await runtime.GovernedLoopGraphAuthoring.ReadCatalogAsync();
+        var schedule = Assert.Single(initial.NodeDescriptors, node => node.Descriptor.TypeId == "schedule-trigger");
+        Assert.True(schedule.IsExecutable);
+
+        var read = await service.ReadAsync(null, CapabilityCatalogLimits.MaximumPageSize);
+        var revision = Assert.IsType<long>(read.Page?.CatalogRevision);
+        Assert.True(CapabilityId.TryParse("org.embodysense/triggers/time", out var capabilityId, out _));
+        revision = RequireApplied(await service.DisableAsync(capabilityId!, revision, "disable-pinned-runtime-schedule"));
+
+        var disabled = await runtime.GovernedLoopGraphAuthoring.ReadCatalogAsync();
+        Assert.False(Assert.Single(disabled.NodeDescriptors, node => node.Descriptor.TypeId == "schedule-trigger").IsExecutable);
+
+        revision = RequireApplied(await service.EnableAsync(capabilityId!, revision, "enable-pinned-runtime-schedule"));
+        var reenabled = await runtime.GovernedLoopGraphAuthoring.ReadCatalogAsync();
+        Assert.True(Assert.Single(reenabled.NodeDescriptors, node => node.Descriptor.TypeId == "schedule-trigger").IsExecutable);
+
+        static long RequireApplied(CapabilityCatalogMutationResult result)
+        {
+            Assert.Equal(CapabilityCatalogMutationStatus.Applied, result.Status);
+            return Assert.IsType<long>(result.CatalogRevision);
+        }
+    }
+
+    [Fact]
     public async Task Command_catalog_keeps_a_registered_template_visible_but_disabled_without_isolation()
     {
         using var workspace = new TestWorkspace();

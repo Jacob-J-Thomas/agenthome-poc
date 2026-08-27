@@ -767,7 +767,9 @@ public sealed class AgentRuntimeFactory
             }
             var graphCatalog = new BuiltInGovernedLoopNodeCatalog(
                 governedCommandActionRegistrations?.Registrations ?? [],
-                registration => executableCommandActions.Contains(registration.Template.ContentHash));
+                registration => executableCommandActions.Contains(registration.Template.ContentHash),
+                modelProfileCapabilityCatalog,
+                governedCommandActionNativeHost);
             var graphAuthority = new GovernedLoopAuthoritySnapshotProvider(governedRoleSource);
             var graphAuthoringFacade = new GovernedLoopGraphAuthoringFacade(
                 workspaceId,

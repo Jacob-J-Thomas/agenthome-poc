@@ -29,6 +29,7 @@ internal sealed class WebGovernedLoopBackgroundHostedService : BackgroundService
         _host.SignalHostShutdown();
         Interlocked.Exchange(ref _stopRequested, 1);
         _host.SetGovernedLoopBackgroundPosture(WebGovernedLoopBackgroundPosture.Draining);
+        await _host.WaitForConversationTurnsAsync().ConfigureAwait(false);
         await _lifecycleGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
         try
         {
@@ -106,17 +107,31 @@ internal sealed class WebGovernedLoopBackgroundHostedService : BackgroundService
 
     private async Task DrainAndReleaseAsync()
     {
+        var stop = await _host.StopGovernedLoopLocalBackgroundForProcessAsync().ConfigureAwait(false);
+        _host.SetGovernedLoopBackgroundPosture(ToPosture(stop.Readiness));
+        if (stop.Readiness != AgentRuntimeGovernedLoopBackgroundReadiness.Stopped)
+        {
+            // Keep the complete runtime composition pinned while the Startup coordinator parks the admitted one-shot
+            // or confirms an unavailable boundary. The completion task releases and projects the terminal posture only
+            // after that stop task reaches its safe boundary.
+            _ = ObserveDeferredStopReleaseAsync();
+            return;
+        }
+
+        await _host.ReleaseGovernedLoopLocalBackgroundForProcessAsync().ConfigureAwait(false);
+        _host.SetGovernedLoopBackgroundPosture(ToPosture(stop.Readiness));
+    }
+
+    private async Task ObserveDeferredStopReleaseAsync()
+    {
         try
         {
-            var stop = await _host.StopGovernedLoopLocalBackgroundForProcessAsync().ConfigureAwait(false);
-            _host.SetGovernedLoopBackgroundPosture(ToPosture(stop.Readiness));
-            // Startup owns the fixed drain bound and its DisposeAsync contract parks an incomplete stop while
-            // preserving durable evidence. Do not poll without a process-shutdown bound when a one-shot remains stuck.
+            await _host.BeginGovernedLoopLocalBackgroundStopReleaseAsync().ConfigureAwait(false);
         }
-        finally
+        catch
         {
-            await _host.ReleaseGovernedLoopLocalBackgroundForProcessAsync().ConfigureAwait(false);
-            _host.SetGovernedLoopBackgroundPosture(WebGovernedLoopBackgroundPosture.Stopped);
+            // A failed terminal read remains fail closed; do not project Stopped after an unproven cleanup boundary.
+            _host.SetGovernedLoopBackgroundPosture(WebGovernedLoopBackgroundPosture.Unavailable);
         }
     }
 

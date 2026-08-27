@@ -638,6 +638,16 @@ public sealed class AgentRuntime : IAsyncDisposable
         CancellationToken cancellationToken = default)
         => _governedBackgroundRuntimeHost.StopAsync(cancellationToken);
 
+    /// <summary>Waits for a previously requested local background stop to reach its exact safe boundary.</summary>
+    /// <remarks>
+    /// A bounded stop request may return <see cref="AgentRuntimeGovernedLoopBackgroundStopStatus.Draining"/> while one
+    /// admitted one-shot still runs. This wait does not dispose the runtime; callers must retain this runtime and its
+    /// stores until the returned result is terminal, then dispose the runtime through its normal lifetime owner.
+    /// </remarks>
+    /// <returns>The terminal stop result, or the already-stopped result when no stop is retained.</returns>
+    public Task<AgentRuntimeGovernedLoopBackgroundStopResult> WaitForGovernedLoopLocalBackgroundStopAsync()
+        => _governedBackgroundRuntimeHost.WaitForStopCompletionAsync();
+
     /// <summary>
     /// Attempts to handle a runtime command that does not require an initialized runtime instance.
     /// </summary>
