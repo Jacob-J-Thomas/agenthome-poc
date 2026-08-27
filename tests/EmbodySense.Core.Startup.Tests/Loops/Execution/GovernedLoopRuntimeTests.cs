@@ -1038,12 +1038,14 @@ internal static class GovernedLoopRuntimeTests
                 TimeSpan.FromSeconds(30),
                 [],
                 2));
-        await fixture.WaitForInMemoryProviderAsync();
-
-        generation = (await queue.GetSnapshotAsync(dispatchNow)).Generation;
         TriggerWorkerRunResponse blocked;
+        TriggerWorkerRunResponse? blocker = null;
+        var providerEntered = false;
         try
         {
+            await fixture.WaitForInMemoryProviderAsync(blockerTask);
+            providerEntered = true;
+            generation = (await queue.GetSnapshotAsync(dispatchNow)).Generation;
             blocked = await runtime
                 .CreateTriggerWorkerRuntime(new ExactTriggerAuthorizer(), new FixedTriggerTimeProvider(dispatchNow))
                 .RunOnceAsync(new TriggerWorkerSelectionInput(
@@ -1057,11 +1059,30 @@ internal static class GovernedLoopRuntimeTests
         finally
         {
             fixture.ReleaseInMemoryProvider();
+            if (providerEntered)
+            {
+                try
+                {
+                    blocker = await blockerTask.WaitAsync(TimeSpan.FromSeconds(10));
+                }
+                catch (TimeoutException)
+                {
+                    throw new Xunit.Sdk.XunitException("The blocking trigger worker did not complete within the test deadline after its provider attempt was released.");
+                }
+            }
+            else
+            {
+                _ = blockerTask.ContinueWith(
+                    static completed => _ = completed.Exception,
+                    CancellationToken.None,
+                    TaskContinuationOptions.ExecuteSynchronously | TaskContinuationOptions.OnlyOnFaulted,
+                    TaskScheduler.Default);
+            }
         }
 
-        var blocker = await blockerTask;
-        Assert.Equal("Dispatched", blocker.Entry!.State);
-        Assert.Equal("Terminal", blocker.Entry.DispatchOutcome);
+        var completedBlocker = blocker ?? throw new Xunit.Sdk.XunitException("The blocking trigger worker completed without a response.");
+        Assert.Equal("Dispatched", completedBlocker.Entry!.State);
+        Assert.Equal("Terminal", completedBlocker.Entry.DispatchOutcome);
         Assert.Equal("DispatchRejected", blocked.Entry!.State);
         Assert.Equal("Rejected", blocked.Entry.DispatchOutcome);
         Assert.Null(blocked.Entry.GovernedRunId);
@@ -1073,7 +1094,7 @@ internal static class GovernedLoopRuntimeTests
             await runs.GetScheduleAdmissionAsync(second.CreateEnvelope().DeliveryId));
         Assert.True(ScheduleRunAdmissionEvidenceValidator.IsValid(deferred));
         Assert.Equal(ScheduleRunAdmissionDisposition.OverlapDeferred, deferred.Attempts[^1].Disposition);
-        Assert.Equal(blocker.Entry.GovernedRunId, deferred.Attempts[^1].BlockingRunId);
+        Assert.Equal(completedBlocker.Entry.GovernedRunId, deferred.Attempts[^1].BlockingRunId);
         Assert.Single(await runs.ListRecentAsync(10));
 
         await using var background = runtime.CreateGovernedLoopLocalBackgroundRuntime(
@@ -1111,7 +1132,7 @@ internal static class GovernedLoopRuntimeTests
         Assert.Equal(2, (await runs.ListRecentAsync(10)).Count);
         Assert.Single(refreshed.Attempts, attempt => attempt.Disposition == ScheduleRunAdmissionDisposition.RunCreated);
         Assert.Equal(ScheduleRunAdmissionDisposition.RunCreated, refreshed.Attempts[^1].Disposition);
-        Assert.Equal(blocker.Entry.GovernedRunId, refreshed.Attempts[0].BlockingRunId);
+        Assert.Equal(completedBlocker.Entry.GovernedRunId, refreshed.Attempts[0].BlockingRunId);
     }
 
     internal static async Task Concurrent_cross_schedule_defer_one_observations_retain_one_atomic_deferral_across_restart()
@@ -3071,8 +3092,8 @@ internal static class GovernedLoopRuntimeTests
         internal void EnableInMemoryProviderBarrier()
             => (_testExactProviderControl ?? throw new InvalidOperationException("The exact test provider is not configured.")).EnableInMemoryBarrier();
 
-        internal Task WaitForInMemoryProviderAsync()
-            => (_testExactProviderControl ?? throw new InvalidOperationException("The exact test provider is not configured.")).WaitForInMemoryBarrierAsync();
+        internal Task WaitForInMemoryProviderAsync(Task blockerTask)
+            => (_testExactProviderControl ?? throw new InvalidOperationException("The exact test provider is not configured.")).WaitForInMemoryBarrierAsync(blockerTask);
 
         internal void ReleaseInMemoryProvider()
             => (_testExactProviderControl ?? throw new InvalidOperationException("The exact test provider is not configured.")).ReleaseInMemoryBarrier();
@@ -3466,8 +3487,33 @@ internal static class GovernedLoopRuntimeTests
                 Volatile.Write(ref _inMemoryBarrierState, 1);
             }
 
-            internal Task WaitForInMemoryBarrierAsync()
-                => (_inMemoryProviderEntered ?? throw new InvalidOperationException("The in-memory provider barrier was not enabled.")).Task;
+            internal async Task WaitForInMemoryBarrierAsync(Task blockerTask)
+            {
+                var providerEntered = (_inMemoryProviderEntered ?? throw new InvalidOperationException("The in-memory provider barrier was not enabled.")).Task;
+                Task completed;
+                try
+                {
+                    completed = await Task.WhenAny(providerEntered, blockerTask).WaitAsync(TimeSpan.FromSeconds(10));
+                }
+                catch (TimeoutException)
+                {
+                    if (blockerTask.IsCompleted)
+                    {
+                        await blockerTask;
+                    }
+
+                    throw new Xunit.Sdk.XunitException($"The blocking provider attempt did not reach the in-memory entry barrier within the test deadline. BlockerStatus={blockerTask.Status}.");
+                }
+
+                if (ReferenceEquals(completed, providerEntered))
+                {
+                    await providerEntered;
+                    return;
+                }
+
+                await blockerTask;
+                throw new Xunit.Sdk.XunitException("The blocking trigger worker completed before its provider attempt reached the in-memory entry barrier.");
+            }
 
             internal void ReleaseInMemoryBarrier() => _inMemoryProviderRelease?.TrySetResult();
 
