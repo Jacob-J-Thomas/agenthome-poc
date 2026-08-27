@@ -28,7 +28,9 @@ using EmbodySense.Core.Application.Memory;
 using EmbodySense.Core.Application.LocalWorkspace;
 using EmbodySense.Core.Application.Inference.Profiles;
 using EmbodySense.Core.Application.Runtime.State;
+using EmbodySense.Core.Application.Triggers;
 using EmbodySense.Core.Application.Triggers.Models;
+using EmbodySense.Core.Application.Triggers.Schedules;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops.Models;
@@ -67,6 +69,8 @@ using EmbodySense.Core.Startup.Loops.GraphAuthoring;
 using EmbodySense.Core.Startup.Loops.InvocationPreparation;
 using EmbodySense.Core.Startup.ContextualRoles;
 using EmbodySense.Core.Startup.Runtime.Models;
+using EmbodySense.Core.Startup.Triggers;
+using EmbodySense.Core.Startup.Triggers.Schedules;
 using EmbodySense.Core.Startup.Workspace;
 
 namespace EmbodySense.Core.Startup.Runtime;
@@ -87,6 +91,7 @@ public sealed class AgentRuntimeFactory
     private readonly ICapabilityCatalogTrustProvider _capabilityTrustProvider;
     private readonly IAgentRuntimeAuthenticatedWakeVerifier? _authenticatedWakeVerifier;
     private readonly IGovernedModelPrimaryExecutionBoundaryObserver? _governedModelExecutionObserver;
+    private readonly IGovernedLoopLocalCoordinatorBoundaryObserver? _governedLoopLocalCoordinatorBoundaryObserver;
     private readonly IReadOnlyList<ModelProfileRuntimeProvider> _additionalModelProfileProviders;
     private readonly CommandActionRuntimeProvider? _commandActionRuntimeProvider;
     private readonly CustomLoopRunStoreProvider? _customLoopRunStoreProvider;
@@ -170,7 +175,8 @@ public sealed class AgentRuntimeFactory
             _additionalModelProfileProviders,
             verifier,
             _commandActionRuntimeProvider,
-            _customLoopRunStoreProvider);
+            _customLoopRunStoreProvider,
+            _governedLoopLocalCoordinatorBoundaryObserver);
     }
 
     /// <summary>Returns an equivalent factory with one explicit server-owned structured command Action provider.</summary>
@@ -188,7 +194,8 @@ public sealed class AgentRuntimeFactory
             _additionalModelProfileProviders,
             _authenticatedWakeVerifier,
             provider,
-            _customLoopRunStoreProvider);
+            _customLoopRunStoreProvider,
+            _governedLoopLocalCoordinatorBoundaryObserver);
     }
 
     /// <summary>
@@ -208,7 +215,29 @@ public sealed class AgentRuntimeFactory
             _additionalModelProfileProviders,
             _authenticatedWakeVerifier,
             _commandActionRuntimeProvider,
-            provider);
+            provider,
+            _governedLoopLocalCoordinatorBoundaryObserver);
+    }
+
+    /// <summary>Returns an equivalent factory with one diagnostic observer for local coordinator heartbeat boundaries.</summary>
+    /// <remarks>The observer cannot grant ownership, delay durable mutations, or alter runtime control flow.</remarks>
+    /// <param name="observer">The non-authoritative observer composed into the canonical local coordinator.</param>
+    /// <returns>A factory preserving the existing runtime composition with the supplied diagnostic observer.</returns>
+    public AgentRuntimeFactory WithGovernedLoopLocalCoordinatorBoundaryObserver(
+        IGovernedLoopLocalCoordinatorBoundaryObserver observer)
+    {
+        ArgumentNullException.ThrowIfNull(observer);
+        return new AgentRuntimeFactory(
+            _approvalPrompt,
+            _conversationPublicationObserver,
+            _codexRuntimeStatus,
+            _capabilityTrustProvider,
+            _governedModelExecutionObserver,
+            _additionalModelProfileProviders,
+            _authenticatedWakeVerifier,
+            _commandActionRuntimeProvider,
+            _customLoopRunStoreProvider,
+            observer);
     }
 
     internal AgentRuntimeFactory(
@@ -220,7 +249,8 @@ public sealed class AgentRuntimeFactory
         IReadOnlyList<ModelProfileRuntimeProvider>? additionalModelProfileProviders = null,
         IAgentRuntimeAuthenticatedWakeVerifier? authenticatedWakeVerifier = null,
         CommandActionRuntimeProvider? commandActionRuntimeProvider = null,
-        CustomLoopRunStoreProvider? customLoopRunStoreProvider = null)
+        CustomLoopRunStoreProvider? customLoopRunStoreProvider = null,
+        IGovernedLoopLocalCoordinatorBoundaryObserver? governedLoopLocalCoordinatorBoundaryObserver = null)
     {
         ArgumentNullException.ThrowIfNull(approvalPrompt);
         if (codexRuntimeStatus is not null && codexRuntimeStatus.Compatibility != CodexRuntimeCompatibility.Compatible)
@@ -239,6 +269,7 @@ public sealed class AgentRuntimeFactory
         _capabilityTrustProvider = capabilityTrustProvider ?? FileCapabilityCatalogTrustProvider.CreateDefault();
         _authenticatedWakeVerifier = authenticatedWakeVerifier;
         _governedModelExecutionObserver = governedModelExecutionObserver;
+        _governedLoopLocalCoordinatorBoundaryObserver = governedLoopLocalCoordinatorBoundaryObserver;
         var additionalProviders = (additionalModelProfileProviders ?? [])
             .Take(33)
             .ToArray();
@@ -338,7 +369,7 @@ public sealed class AgentRuntimeFactory
         var customExecutionGate = new CustomLoopWorkspaceExecutionGate(paths);
         CustomLoopRunStore? customRunStore = null;
         var ownsCustomRunStore = _customLoopRunStoreProvider is null;
-        GovernedLoopWaitRuntimeHost? governedWaitRuntimeHost = null;
+        GovernedLoopBackgroundRuntimeHost? governedBackgroundRuntimeHost = null;
         GovernedLoopSleepService? governedSleep = null;
         try
         {
@@ -660,14 +691,12 @@ public sealed class AgentRuntimeFactory
             governedRetryNodeRelay.Bind(governedRetry);
             governedWaitContinuationRelay.Bind(governedWait);
             governedWaitContinuationRelay.BindRetry(governedRetry);
-            governedWaitRuntimeHost = new GovernedLoopWaitRuntimeHost(
-                scheduleStore,
-                governedSleepStore,
+            governedBackgroundRuntimeHost = new GovernedLoopBackgroundRuntimeHost(
                 coordinatorEvidenceStore,
-                governedSleep,
                 governedWait,
                 governedRetry,
-                operationalClock);
+                operationalClock,
+                _governedLoopLocalCoordinatorBoundaryObserver);
             var governedMaterializer = new GovernedLoopSequentialRunMaterializer(
                 customRunStore,
                 auditLog,
@@ -701,7 +730,7 @@ public sealed class AgentRuntimeFactory
             var operationalPosture = new GovernedLoopOperationalPostureService(
                 workspaceId,
                 triggerWorkspaceId,
-                GovernedLoopWaitRuntimeHost.CoordinatorId,
+                GovernedLoopBackgroundRuntimeHost.CoordinatorId,
                 new TriggerQueueOperationalPostureAdapter(triggerQueueStore, triggerWorkspaceId),
                 scheduleStore,
                 governedSleepStore,
@@ -782,7 +811,7 @@ public sealed class AgentRuntimeFactory
                 legacyRunner,
                 governedRunner,
                 customRuntimeContext,
-                governedWaitRuntimeHost,
+                governedBackgroundRuntimeHost,
                 customExecutionAvailable,
                 customExecutionReacquisitionAllowed,
                 customRecoveryRequired,
@@ -808,6 +837,36 @@ public sealed class AgentRuntimeFactory
                 workspaceId,
                 customModelSnapshot,
                 governedRoleStore);
+            var triggerAuthorizer = new TriggerWorkerCurrentEvidenceAuthorizer(
+                workspaceId,
+                governedBindingSource,
+                governedGrantResolver,
+                new AuthorityGrantProfileSource(governedAuthorityStore),
+                modelProfileCapabilityCatalog,
+                capabilityAuthority,
+                operationalClock);
+            var triggerWorker = new TriggerWorkerService(
+                triggerQueueStore,
+                new TriggerWorkerCurrentEvidenceAuthorizerAdapter(triggerAuthorizer),
+                new TriggerCustomLoopDispatcher(customLoops, governedLoops),
+                new ScheduleTriggerDispatchReadinessService(scheduleStore),
+                operationalClock);
+            var localBackgroundWork = new GovernedLoopLocalWorkRunner(
+                new GovernedLoopBackgroundWorkSource(scheduleStore, governedSleepStore),
+                new GovernedLoopWaitAndTriggerOneShotServices(
+                    customRunStore,
+                    scheduleStore,
+                    triggerQueueStore,
+                    triggerWorker,
+                    governedSleep,
+                    GovernedLoopLocalWorkRunnerOptions.MaximumCandidateReadLimit),
+                new GovernedLoopLocalWorkRunnerOptions(
+                    "agent-runtime-trigger-" + Guid.NewGuid().ToString("N"),
+                    TimeSpan.FromSeconds(30),
+                    1,
+                    GovernedLoopLocalWorkRunnerOptions.MaximumCandidateReadLimit),
+                operationalClock);
+            governedBackgroundRuntimeHost.BindBackgroundWork(localBackgroundWork);
             var runtime = new AgentRuntime(
                 paths,
                 runtimeSurface,
@@ -828,7 +887,8 @@ public sealed class AgentRuntimeFactory
                 modelProfileCatalogFacade,
                 defaultConversationReviews,
                 codexRuntimeStatus,
-                governedWaitRuntimeHost,
+                triggerAuthorizer,
+                governedBackgroundRuntimeHost,
                 governedSleep);
             customRunStore = null;
             return runtime;
@@ -837,9 +897,9 @@ public sealed class AgentRuntimeFactory
         {
             try
             {
-                if (governedWaitRuntimeHost is not null)
+                if (governedBackgroundRuntimeHost is not null)
                 {
-                    await governedWaitRuntimeHost.DisposeAsync();
+                    await governedBackgroundRuntimeHost.DisposeAsync();
                 }
             }
             finally

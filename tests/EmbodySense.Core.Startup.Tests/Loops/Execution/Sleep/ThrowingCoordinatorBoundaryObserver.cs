@@ -8,7 +8,13 @@ internal sealed class ThrowingCoordinatorBoundaryObserver : IGovernedLoopLocalCo
 
     internal int Calls => Volatile.Read(ref _calls);
 
-    public void OnHeartbeatDue()
+    public void OnHeartbeatDue() => Throw();
+
+    public void OnOwnershipLost() => Throw();
+
+    public void OnForeignSessionMutationSuppressed() => Throw();
+
+    private void Throw()
     {
         Interlocked.Increment(ref _calls);
         throw new IOException("hostile diagnostic observer");

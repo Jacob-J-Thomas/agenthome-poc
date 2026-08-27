@@ -11,7 +11,11 @@ using EmbodySense.Core.Persistence.Triggers.Models;
 namespace EmbodySense.Core.Persistence.Loops.Execution.Sleep;
 
 /// <summary>Persists fenced local coordinator ownership and append-only lifecycle, heartbeat, and failure evidence.</summary>
-/// <remarks>Every mutation publishes one complete immutable generation under a cross-process lease. Ownership history is never replaced; a successor is appended only after exact prior hashes and exclusive lease expiry are proven.</remarks>
+/// <remarks>
+/// Every mutation publishes one complete immutable generation under a cross-process lease. Ownership history is never
+/// replaced; a successor requires exact prior hashes plus either exclusive-lease expiry or the exact same owner's
+/// durable stopped lifecycle while that owner still holds the lease.
+/// </remarks>
 public sealed class GovernedLoopCoordinatorEvidenceStore : IGovernedLoopCoordinatorEvidencePort
 {
     private const int SchemaVersion = 1;
@@ -129,6 +133,7 @@ public sealed class GovernedLoopCoordinatorEvidenceStore : IGovernedLoopCoordina
             }
 
             var currentOwnership = entry.Ownerships[^1];
+            var currentLifecycle = LatestLifecycle(entry, currentOwnership);
             var currentHeartbeat = LatestHeartbeat(entry, currentOwnership);
             if (!string.Equals(currentOwnership.ContentHash, request.ExpectedOwnershipHash, StringComparison.Ordinal)
                 || !string.Equals(currentHeartbeat.ContentHash, request.ExpectedHeartbeatHash, StringComparison.Ordinal))
@@ -136,14 +141,24 @@ public sealed class GovernedLoopCoordinatorEvidenceStore : IGovernedLoopCoordina
                 return Acquisition(GovernedLoopCoordinatorAcquisitionStatus.Conflict, Snapshot(entry));
             }
 
-            if (request.ProposedOwnership.AcquiredAtUtc < currentHeartbeat.LeaseExpiresAtUtc)
+            var terminalSameOwnerRestart = request.PriorEvidenceExpectation == GovernedLoopCoordinatorPriorEvidenceExpectation.TerminalSameOwner;
+            if (!terminalSameOwnerRestart && request.ProposedOwnership.AcquiredAtUtc < currentHeartbeat.LeaseExpiresAtUtc)
             {
                 return Acquisition(GovernedLoopCoordinatorAcquisitionStatus.LeaseNotExpired, Snapshot(entry));
             }
 
-            if (!GovernedLoopSleepContractValidator.ValidateHandoff(currentOwnership, currentHeartbeat, request.ProposedOwnership).IsValid)
+            var transitionIsValid = terminalSameOwnerRestart
+                ? GovernedLoopSleepContractValidator.ValidateTerminalSameOwnerRestart(
+                    currentOwnership,
+                    currentLifecycle,
+                    currentHeartbeat,
+                    request.ProposedOwnership).IsValid
+                : GovernedLoopSleepContractValidator.ValidateHandoff(currentOwnership, currentHeartbeat, request.ProposedOwnership).IsValid;
+            if (!transitionIsValid)
             {
-                return Acquisition(GovernedLoopCoordinatorAcquisitionStatus.Corrupt);
+                return Acquisition(terminalSameOwnerRestart
+                    ? GovernedLoopCoordinatorAcquisitionStatus.Conflict
+                    : GovernedLoopCoordinatorAcquisitionStatus.Corrupt);
             }
 
             var compacted = CompactHeartbeats(entry, requiredSlots: 4, retireCurrentHead: true);

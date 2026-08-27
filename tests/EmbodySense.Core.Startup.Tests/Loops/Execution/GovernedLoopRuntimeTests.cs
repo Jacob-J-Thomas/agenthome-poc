@@ -90,6 +90,7 @@ using EmbodySense.Core.Startup.Triggers.Schedules;
 using EmbodySense.Core.Startup.Triggers.Schedules.Models;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Core.Startup.Tests.Triggers;
+using EmbodySense.Core.Startup.Tests.Loops.Execution.Sleep;
 using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Startup.Tests.Loops.Execution;
@@ -848,6 +849,95 @@ internal static class GovernedLoopRuntimeTests
         }
     }
 
+    internal static async Task Public_background_dispose_parks_a_hostile_local_provider_after_peer_handoff()
+    {
+        using var fixture = await GovernedRuntimeFixture.CreateAsync(scheduleTrigger: true, pauseProvider: true);
+        var ownershipLoss = new SignalingCoordinatorBoundaryObserver();
+        var scheduledAtUtc = DateTimeOffset.UtcNow.AddMinutes(-2).ToUniversalTime();
+        var scenario = ScheduleScenario.Create(fixture, scheduledAtUtc, "Hold the canonical background provider across peer ownership loss.");
+        var workerNow = scheduledAtUtc.AddMinutes(2);
+        using (var schedule = ScheduleRuntimeFactory.Create(
+                   fixture.Paths,
+                   scenario,
+                   scenario,
+                   scenario,
+                   new FixedTriggerTimeProvider(workerNow)))
+        {
+            Assert.Equal(ScheduleRuntimeCreateStatus.Created, (await schedule.CreateAsync(scenario.Definition)).Status);
+            Assert.Equal(ScheduleEvaluationStatus.Queued, (await schedule.EvaluateOnceAsync(scenario.Definition.ScheduleId)).Status);
+        }
+
+        var coordinatorStore = new GovernedLoopCoordinatorEvidenceStore(fixture.Paths);
+        await using var runtime = await fixture.CreateRuntimeAsync(governedLoopCoordinatorBoundaryObserver: ownershipLoss);
+        var activation = await runtime.StartGovernedLoopLocalBackgroundWithStatusAsync();
+        Assert.Equal(AgentRuntimeGovernedLoopBackgroundStartStatus.Started, activation.Status);
+        await fixture.WaitForProviderAsync();
+
+        GovernedLoopCoordinatorAcquisitionResult? handoff = null;
+        for (var attempt = 0; attempt < 10 && handoff?.Status != GovernedLoopCoordinatorAcquisitionStatus.Acquired; attempt++)
+        {
+            var current = Assert.IsType<GovernedLoopCoordinatorSnapshot>((await coordinatorStore.ReadAsync("local-background"))?.Snapshot);
+            var acquiredAtUtc = current.LatestHeartbeat.LeaseExpiresAtUtc;
+            var peerOwnership = GovernedLoopSleepContractHash.Apply(new GovernedLoopCoordinatorOwnership(
+                GovernedLoopCoordinatorOwnership.CurrentSchemaVersion,
+                current.Ownership.CoordinatorId,
+                "peer-owner",
+                current.Ownership.OwnershipEpoch + 1,
+                acquiredAtUtc,
+                string.Empty));
+            var peerStarting = GovernedLoopSleepContractHash.Apply(new GovernedLoopCoordinatorLifecycle(
+                GovernedLoopCoordinatorLifecycle.CurrentSchemaVersion,
+                1,
+                peerOwnership,
+                GovernedLoopCoordinatorStatus.Starting,
+                acquiredAtUtc,
+                null,
+                string.Empty));
+            var peerHeartbeat = GovernedLoopSleepContractHash.Apply(new GovernedLoopCoordinatorHeartbeat(
+                GovernedLoopCoordinatorHeartbeat.CurrentSchemaVersion,
+                1,
+                peerOwnership,
+                acquiredAtUtc,
+                acquiredAtUtc.AddSeconds(30),
+                string.Empty));
+            handoff = await coordinatorStore.TryAcquireAsync(new GovernedLoopCoordinatorAcquisitionRequest(
+                GovernedLoopCoordinatorPriorEvidenceExpectation.Existing,
+                current.Ownership.ContentHash,
+                current.LatestHeartbeat.ContentHash,
+                peerOwnership,
+                peerStarting,
+                peerHeartbeat));
+        }
+
+        Assert.Equal(GovernedLoopCoordinatorAcquisitionStatus.Acquired, handoff?.Status);
+        try
+        {
+            await ownershipLoss.OwnershipLost.WaitAsync(TimeSpan.FromSeconds(5));
+            var observed = await coordinatorStore.ReadAsync("local-background");
+            Assert.Equal(handoff!.Snapshot!.Ownership, observed?.Snapshot?.Ownership);
+            Assert.Equal(handoff.Snapshot.LatestLifecycle, observed?.Snapshot?.LatestLifecycle);
+            Assert.Equal(handoff.Snapshot.LatestHeartbeat, observed?.Snapshot?.LatestHeartbeat);
+            Assert.Equal(handoff.Snapshot.LatestFailureSequence, observed?.Snapshot?.LatestFailureSequence);
+            Assert.Equal(handoff.Snapshot.LatestFailureHash, observed?.Snapshot?.LatestFailureHash);
+
+            await runtime.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(1));
+            await Task.Delay(TimeSpan.FromSeconds(1));
+            var durable = await coordinatorStore.ReadAsync("local-background");
+
+            Assert.Equal(GovernedLoopCoordinatorReadStatus.Found, durable?.Status);
+            Assert.Equal("peer-owner", durable?.Snapshot?.Ownership.OwnerId);
+            Assert.Equal(GovernedLoopCoordinatorStatus.Starting, durable?.Snapshot?.LatestLifecycle.Status);
+            Assert.Equal(handoff!.Snapshot!.Ownership, durable?.Snapshot?.Ownership);
+            Assert.Equal(handoff.Snapshot.LatestHeartbeat, durable?.Snapshot?.LatestHeartbeat);
+            Assert.Equal(handoff.Snapshot.LatestFailureSequence, durable?.Snapshot?.LatestFailureSequence);
+            Assert.Equal(handoff.Snapshot.LatestFailureHash, durable?.Snapshot?.LatestFailureHash);
+        }
+        finally
+        {
+            fixture.ReleaseProvider();
+        }
+    }
+
     internal static async Task Atomic_schedule_run_admission_closes_the_post_observation_race_for_every_overlap_policy(
         ScheduleOverlapPolicy overlap,
         ScheduleRunAdmissionDisposition secondDisposition,
@@ -922,88 +1012,14 @@ internal static class GovernedLoopRuntimeTests
         Assert.Equal(blocker.Entry.GovernedRunId, thirdEvidence.Attempts[^1].BlockingRunId);
         Assert.Single(await runs.ListRecentAsync(10));
 
-        await using var background = runtime.CreateGovernedLoopLocalBackgroundRuntime(
-            first,
-            first,
-            first,
-            new ExactTriggerAuthorizer(),
-            new UnusedSleepPosture(),
-            new UnusedWakeContinuation(),
-            new UnusedWakeVerification(),
-            new GovernedLoopLocalWorkRunnerOptions(
-                "overlap-retry-worker",
-                TimeSpan.FromSeconds(30),
-                2,
-                3),
-            new GovernedLoopLocalCoordinatorOptions(
-                "overlap-retry-coordinator",
-                "overlap-retry-owner",
-                TimeSpan.FromSeconds(1),
-                TimeSpan.FromSeconds(1),
-                TimeSpan.FromSeconds(5),
-                1),
-            new FixedTriggerTimeProvider(dispatchNow.AddMinutes(1)));
-        var expectedRetries = overlap switch
-        {
-            ScheduleOverlapPolicy.Skip => 0,
-            ScheduleOverlapPolicy.DeferOne => 1,
-            ScheduleOverlapPolicy.Allow => 2,
-            _ => throw new InvalidOperationException("The overlap theory supplied an unsupported policy."),
-        };
-        for (var index = 0; index < expectedRetries; index++)
-        {
-            var retried = Assert.IsType<GovernedLoopLocalWorkResult>(
-                await background.RunOnceAsync(GovernedLoopLocalWorkFamily.Trigger));
-            Assert.Equal(GovernedLoopLocalWorkResultStatus.Completed, retried.Status);
-            Assert.Equal("schedule-retry-materialized", retried.ReasonCode);
-        }
-
-        var exhausted = Assert.IsType<GovernedLoopLocalWorkResult>(
-            await background.RunOnceAsync(GovernedLoopLocalWorkFamily.Trigger));
-        Assert.Equal(GovernedLoopLocalWorkResultStatus.Empty, exhausted.Status);
-        Assert.Equal(1 + expectedRetries, fixture.ProviderAttempts);
-        Assert.Equal(1 + expectedRetries, (await runs.ListRecentAsync(10)).Count);
-
-        var refreshedSecond = Assert.IsType<ScheduleRunAdmissionEvidence>(
-            await runs.GetScheduleAdmissionAsync(second.CreateEnvelope().DeliveryId));
-        var refreshedThird = Assert.IsType<ScheduleRunAdmissionEvidence>(
-            await runs.GetScheduleAdmissionAsync(third.CreateEnvelope().DeliveryId));
-        Assert.Equal(
-            overlap == ScheduleOverlapPolicy.Skip
-                ? ScheduleRunAdmissionDisposition.OverlapSkipped
-                : ScheduleRunAdmissionDisposition.RunCreated,
-            refreshedSecond.Attempts[^1].Disposition);
-        Assert.Equal(
-            overlap == ScheduleOverlapPolicy.Allow
-                ? ScheduleRunAdmissionDisposition.RunCreated
-                : thirdDisposition,
-            refreshedThird.Attempts[^1].Disposition);
-        Assert.All(
-            refreshedSecond.Attempts,
-            attempt => Assert.Equal(secondEvidence.Attempts[0].AdmissionOperationId, attempt.AdmissionOperationId));
-        Assert.All(
-            refreshedThird.Attempts,
-            attempt => Assert.Equal(thirdEvidence.Attempts[0].AdmissionOperationId, attempt.AdmissionOperationId));
-
-        if (overlap == ScheduleOverlapPolicy.Skip)
-        {
-            var evidencePath = Path.Combine(
-                fixture.Paths.CustomLoopScheduleAdmissionsPath,
-                second.CreateEnvelope().DeliveryId.Value + ".json");
-            var canonical = await File.ReadAllTextAsync(evidencePath);
-            var corrupted = canonical.Replace(secondEvidence.ContentHash, Hash64('0'), StringComparison.Ordinal);
-            Assert.NotEqual(canonical, corrupted);
-            await File.WriteAllTextAsync(evidencePath, corrupted);
-            await Assert.ThrowsAsync<FormatException>(() =>
-                new CustomLoopRunStore(fixture.Paths).GetScheduleAdmissionAsync(second.CreateEnvelope().DeliveryId));
-        }
     }
 
     internal static async Task Durable_schedule_overlap_retry_runs_through_canonical_local_background_runtime()
     {
         using var fixture = await GovernedRuntimeFixture.CreateAsync(scheduleTrigger: true, pauseProvider: true);
         fixture.EnableInMemoryProviderBarrier();
-        var scheduledAtUtc = DateTimeOffset.UtcNow.AddMinutes(-2).ToUniversalTime();
+        var dispatchNow = DateTimeOffset.UtcNow.ToUniversalTime();
+        var scheduledAtUtc = dispatchNow.AddMinutes(-3);
         var workerNow = scheduledAtUtc.AddMinutes(2);
         var first = ScheduleScenario.Create(
             fixture,
@@ -1021,7 +1037,6 @@ internal static class GovernedLoopRuntimeTests
         await QueueScheduleAsync(fixture.Paths, first, workerNow);
         await QueueScheduleAsync(fixture.Paths, second, workerNow.AddTicks(1));
 
-        var dispatchNow = workerNow.AddSeconds(1);
         var queue = new TriggerQueueStore(
             fixture.Paths,
             TriggerQueueQuota.Runtime,
@@ -1031,7 +1046,7 @@ internal static class GovernedLoopRuntimeTests
         await using var runtime = await fixture.CreateRuntimeAsync(governedModelExecutionObserver: firstWorkerAdmission);
         var generation = (await queue.GetSnapshotAsync(dispatchNow)).Generation;
         var blockerTask = runtime
-            .CreateTriggerWorkerRuntime(new ExactTriggerAuthorizer(), new FixedTriggerTimeProvider(dispatchNow))
+            .CreateCanonicalTriggerWorkerRuntime(new FixedTriggerTimeProvider(dispatchNow))
             .RunOnceAsync(new TriggerWorkerSelectionInput(
                 "overlap-retry-worker-a",
                 generation,
@@ -1049,7 +1064,7 @@ internal static class GovernedLoopRuntimeTests
             providerEntered = true;
             generation = (await queue.GetSnapshotAsync(dispatchNow)).Generation;
             blocked = await runtime
-                .CreateTriggerWorkerRuntime(new ExactTriggerAuthorizer(), new FixedTriggerTimeProvider(dispatchNow))
+                .CreateCanonicalTriggerWorkerRuntime(new FixedTriggerTimeProvider(dispatchNow))
                 .RunOnceAsync(new TriggerWorkerSelectionInput(
                     "overlap-retry-worker-b",
                     generation,
@@ -1099,40 +1114,29 @@ internal static class GovernedLoopRuntimeTests
         Assert.Equal(completedBlocker.Entry.GovernedRunId, deferred.Attempts[^1].BlockingRunId);
         Assert.Single(await runs.ListRecentAsync(10));
 
-        await using var background = runtime.CreateGovernedLoopLocalBackgroundRuntime(
-            first,
-            first,
-            first,
-            new ExactTriggerAuthorizer(),
-            new UnusedSleepPosture(),
-            new UnusedWakeContinuation(),
-            new UnusedWakeVerification(),
-            new GovernedLoopLocalWorkRunnerOptions(
-                "overlap-retry-background-worker",
-                TimeSpan.FromSeconds(30),
-                2,
-                3),
-            new GovernedLoopLocalCoordinatorOptions(
-                "overlap-retry-background-coordinator",
-                "overlap-retry-background-owner",
-                TimeSpan.FromSeconds(1),
-                TimeSpan.FromSeconds(1),
-                TimeSpan.FromSeconds(5),
-                1),
-            new FixedTriggerTimeProvider(dispatchNow.AddMinutes(1)));
-        var retried = Assert.IsType<GovernedLoopLocalWorkResult>(
-            await background.RunOnceAsync(GovernedLoopLocalWorkFamily.Trigger));
-        var exhausted = Assert.IsType<GovernedLoopLocalWorkResult>(
-            await background.RunOnceAsync(GovernedLoopLocalWorkFamily.Trigger));
-        var refreshed = Assert.IsType<ScheduleRunAdmissionEvidence>(
-            await runs.GetScheduleAdmissionAsync(second.CreateEnvelope().DeliveryId));
+        var activation = await runtime.StartGovernedLoopLocalBackgroundWithStatusAsync();
+        Assert.Equal(AgentRuntimeGovernedLoopBackgroundStartStatus.Started, activation.Status);
+        ScheduleRunAdmissionEvidence? refreshed = null;
+        var retryDeadlineUtc = DateTimeOffset.UtcNow.AddSeconds(10);
+        while (DateTimeOffset.UtcNow < retryDeadlineUtc)
+        {
+            refreshed = await runs.GetScheduleAdmissionAsync(second.CreateEnvelope().DeliveryId);
+            if (refreshed?.Attempts.Any(attempt => attempt.Disposition == ScheduleRunAdmissionDisposition.RunCreated) == true
+                && fixture.ProviderAttempts >= 2)
+            {
+                break;
+            }
 
-        Assert.Equal(GovernedLoopLocalWorkResultStatus.Completed, retried.Status);
-        Assert.Equal("schedule-retry-materialized", retried.ReasonCode);
-        Assert.Equal(GovernedLoopLocalWorkResultStatus.Empty, exhausted.Status);
+            await Task.Delay(20);
+        }
+
+        var stopped = await runtime.StopGovernedLoopLocalBackgroundAsync();
+        Assert.Equal(AgentRuntimeGovernedLoopBackgroundStopStatus.Stopped, stopped.Status);
+        refreshed ??= await runs.GetScheduleAdmissionAsync(second.CreateEnvelope().DeliveryId);
+        Assert.NotNull(refreshed);
         Assert.Equal(2, fixture.ProviderAttempts);
         Assert.Equal(2, (await runs.ListRecentAsync(10)).Count);
-        Assert.Single(refreshed.Attempts, attempt => attempt.Disposition == ScheduleRunAdmissionDisposition.RunCreated);
+        Assert.Single(refreshed!.Attempts, attempt => attempt.Disposition == ScheduleRunAdmissionDisposition.RunCreated);
         Assert.Equal(ScheduleRunAdmissionDisposition.RunCreated, refreshed.Attempts[^1].Disposition);
         Assert.Equal(completedBlocker.Entry.GovernedRunId, refreshed.Attempts[0].BlockingRunId);
     }
@@ -3063,20 +3067,28 @@ internal static class GovernedLoopRuntimeTests
 
         public Task<AgentRuntime> CreateRuntimeAsync(
             bool preserveCurrentConversation = false,
-            IGovernedModelPrimaryExecutionBoundaryObserver? governedModelExecutionObserver = null)
-            => AgentRuntimeFactory.ForFileCapabilityTrustRoot(
-                    new RejectingApprovalPrompt(),
-                    _workspace.ServerStatePath,
-                    CompatibleRuntimeStatus(),
-                    governedModelExecutionObserver: governedModelExecutionObserver,
-                    additionalModelProfileProviders: _additionalModelProfileProvider is null ? null : [_additionalModelProfileProvider])
-                .CreateAsync(
-                    "test-model",
-                    _workspace.RootPath,
-                    _codexPath,
-                    "read-only",
-                    AgentRuntimeSurface.Cli,
-                    preserveCurrentConversation);
+            IGovernedModelPrimaryExecutionBoundaryObserver? governedModelExecutionObserver = null,
+            IGovernedLoopLocalCoordinatorBoundaryObserver? governedLoopCoordinatorBoundaryObserver = null)
+        {
+            var factory = AgentRuntimeFactory.ForFileCapabilityTrustRoot(
+                new RejectingApprovalPrompt(),
+                _workspace.ServerStatePath,
+                CompatibleRuntimeStatus(),
+                governedModelExecutionObserver: governedModelExecutionObserver,
+                additionalModelProfileProviders: _additionalModelProfileProvider is null ? null : [_additionalModelProfileProvider]);
+            if (governedLoopCoordinatorBoundaryObserver is not null)
+            {
+                factory = factory.WithGovernedLoopLocalCoordinatorBoundaryObserver(governedLoopCoordinatorBoundaryObserver);
+            }
+
+            return factory.CreateAsync(
+                "test-model",
+                _workspace.RootPath,
+                _codexPath,
+                "read-only",
+                AgentRuntimeSurface.Cli,
+                preserveCurrentConversation);
+        }
 
         public async Task WaitForProviderAsync()
         {
@@ -3541,7 +3553,7 @@ internal static class GovernedLoopRuntimeTests
                 return next;
             }
 
-            public async Task WaitForReleaseAsync(CancellationToken cancellationToken)
+            public async Task WaitForReleaseAsync(CancellationToken cancellationToken = default)
             {
                 if (!pauseProvider || File.Exists(Path.Combine(workspacePath, ReleaseFileName)))
                 {

@@ -29,7 +29,7 @@ public sealed class GovernedLoopCoordinatorEvidenceContractTests
         Assert.Equal(["Renewed", "Duplicate", "OwnershipLost", "Conflict", "Corrupt", "Unavailable"], Enum.GetNames<GovernedLoopCoordinatorHeartbeatMutationStatus>());
         Assert.Equal(["Appended", "Duplicate", "OwnershipLost", "Conflict", "Corrupt", "Unavailable"], Enum.GetNames<GovernedLoopCoordinatorLifecycleMutationStatus>());
         Assert.Equal(["Appended", "Duplicate", "OwnershipLost", "Conflict", "Corrupt", "Unavailable"], Enum.GetNames<GovernedLoopCoordinatorFailureMutationStatus>());
-        Assert.Equal(["NotFound", "Existing"], Enum.GetNames<GovernedLoopCoordinatorPriorEvidenceExpectation>());
+        Assert.Equal(["NotFound", "Existing", "TerminalSameOwner"], Enum.GetNames<GovernedLoopCoordinatorPriorEvidenceExpectation>());
         Assert.Equal(["None", "Existing"], Enum.GetNames<GovernedLoopCoordinatorPriorFailureExpectation>());
     }
 
@@ -114,6 +114,33 @@ public sealed class GovernedLoopCoordinatorEvidenceContractTests
             initial,
             validHandoff.StartingLifecycle,
             validHandoff.InitialHeartbeat)));
+    }
+
+    [Fact]
+    public void Terminal_same_owner_restart_requires_a_durable_stopped_predecessor_without_weakening_handoff_validation()
+    {
+        var initial = Ownership();
+        var terminal = Lifecycle(initial, 2, GovernedLoopCoordinatorStatus.Stopped, _observedAtUtc.AddMinutes(1));
+        var heartbeat = Heartbeat(initial, 2, _observedAtUtc.AddMinutes(1));
+        var restartedOwner = Ownership(epoch: 2, ownerId: initial.OwnerId, acquiredAtUtc: heartbeat.LeaseExpiresAtUtc.AddTicks(1));
+        var restart = new GovernedLoopCoordinatorAcquisitionRequest(
+            GovernedLoopCoordinatorPriorEvidenceExpectation.TerminalSameOwner,
+            initial.ContentHash,
+            heartbeat.ContentHash,
+            restartedOwner,
+            Lifecycle(restartedOwner, 1, GovernedLoopCoordinatorStatus.Starting, restartedOwner.AcquiredAtUtc),
+            Heartbeat(restartedOwner, 1, restartedOwner.AcquiredAtUtc));
+
+        Assert.True(GovernedLoopCoordinatorEvidenceContract.IsValid(restart));
+        Assert.True(GovernedLoopSleepContractValidator.ValidateTerminalSameOwnerRestart(initial, terminal, heartbeat, restartedOwner).IsValid);
+        Assert.False(GovernedLoopSleepContractValidator.ValidateHandoff(initial, heartbeat, restartedOwner).IsValid);
+        var foreignOwner = Ownership(epoch: 2, ownerId: "foreign-owner", acquiredAtUtc: restartedOwner.AcquiredAtUtc);
+        Assert.False(GovernedLoopSleepContractValidator.ValidateTerminalSameOwnerRestart(initial, terminal, heartbeat, foreignOwner).IsValid);
+        Assert.False(GovernedLoopSleepContractValidator.ValidateTerminalSameOwnerRestart(
+            initial,
+            Lifecycle(initial, 2, GovernedLoopCoordinatorStatus.Failed, _observedAtUtc.AddMinutes(1)),
+            heartbeat,
+            restartedOwner).IsValid);
     }
 
     [Fact]
@@ -214,13 +241,16 @@ public sealed class GovernedLoopCoordinatorEvidenceContractTests
         Assert.NotSame(snapshot.Ownership, result.Snapshot!.Ownership);
     }
 
-    private static GovernedLoopCoordinatorOwnership Ownership(long epoch = 1, string ownerId = "owner-1")
+    private static GovernedLoopCoordinatorOwnership Ownership(
+        long epoch = 1,
+        string ownerId = "owner-1",
+        DateTimeOffset? acquiredAtUtc = null)
         => GovernedLoopSleepContractHash.Apply(new GovernedLoopCoordinatorOwnership(
             GovernedLoopCoordinatorOwnership.CurrentSchemaVersion,
             "background-coordinator",
             ownerId,
             epoch,
-            _observedAtUtc,
+            acquiredAtUtc ?? _observedAtUtc,
             string.Empty));
 
     private static GovernedLoopCoordinatorLifecycle Lifecycle(

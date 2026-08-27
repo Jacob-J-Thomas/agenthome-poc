@@ -50,6 +50,67 @@ public sealed class GovernedLoopCoordinatorEvidenceStoreTests
     }
 
     [Fact]
+    public async Task Exact_terminal_same_owner_restart_bypasses_only_its_own_expired_lease_and_persists_a_fenced_successor()
+    {
+        using var workspace = new TestWorkspace();
+        var store = new GovernedLoopCoordinatorEvidenceStore(new WorkspacePaths(workspace.RootPath));
+        var initial = Acquisition();
+        Assert.Equal(GovernedLoopCoordinatorAcquisitionStatus.Acquired, (await store.TryAcquireAsync(initial))!.Status);
+        var owner = initial.ProposedOwnership;
+        var stopping = GovernedLoopSleepContractTestFixture.Lifecycle(
+            GovernedLoopCoordinatorStatus.Stopping,
+            2,
+            owner,
+            initial.StartingLifecycle.UpdatedAtUtc.AddSeconds(1));
+        Assert.Equal(GovernedLoopCoordinatorLifecycleMutationStatus.Appended, (await store.AppendLifecycleAsync(new(
+            owner,
+            owner.ContentHash,
+            initial.StartingLifecycle.LifecycleVersion,
+            initial.StartingLifecycle.ContentHash,
+            stopping)))!.Status);
+        var stopped = GovernedLoopSleepContractTestFixture.Lifecycle(
+            GovernedLoopCoordinatorStatus.Stopped,
+            3,
+            owner,
+            stopping.UpdatedAtUtc.AddSeconds(1));
+        Assert.Equal(GovernedLoopCoordinatorLifecycleMutationStatus.Appended, (await store.AppendLifecycleAsync(new(
+            owner,
+            owner.ContentHash,
+            stopping.LifecycleVersion,
+            stopping.ContentHash,
+            stopped)))!.Status);
+        var successorOwner = GovernedLoopSleepContractTestFixture.Ownership(
+            ownerId: owner.OwnerId,
+            ownershipEpoch: 2,
+            acquiredAtUtc: initial.InitialHeartbeat.LeaseExpiresAtUtc.AddTicks(1));
+        var restart = Acquisition(
+            successorOwner,
+            GovernedLoopCoordinatorPriorEvidenceExpectation.TerminalSameOwner,
+            owner.ContentHash,
+            initial.InitialHeartbeat.ContentHash);
+        var foreignOwner = GovernedLoopSleepContractTestFixture.Ownership(
+            ownerId: "other-owner",
+            ownershipEpoch: 2,
+            acquiredAtUtc: successorOwner.AcquiredAtUtc);
+        var foreignRestart = Acquisition(
+            foreignOwner,
+            GovernedLoopCoordinatorPriorEvidenceExpectation.TerminalSameOwner,
+            owner.ContentHash,
+            initial.InitialHeartbeat.ContentHash);
+
+        var denied = await store.TryAcquireAsync(foreignRestart);
+        var acquired = await store.TryAcquireAsync(restart);
+        var durable = await store.ReadAsync(owner.CoordinatorId);
+
+        Assert.Equal(GovernedLoopCoordinatorAcquisitionStatus.Conflict, denied!.Status);
+        Assert.Equal(GovernedLoopCoordinatorAcquisitionStatus.Acquired, acquired!.Status);
+        Assert.Equal(GovernedLoopCoordinatorReadStatus.Found, durable!.Status);
+        Assert.Equal(successorOwner, durable.Snapshot!.Ownership);
+        Assert.Equal(GovernedLoopCoordinatorStatus.Starting, durable.Snapshot.LatestLifecycle.Status);
+        Assert.Equal(restart.InitialHeartbeat, durable.Snapshot.LatestHeartbeat);
+    }
+
+    [Fact]
     public async Task Heartbeat_lifecycle_and_failure_heads_are_contiguous_replayable_and_conflict_aware()
     {
         using var workspace = new TestWorkspace();

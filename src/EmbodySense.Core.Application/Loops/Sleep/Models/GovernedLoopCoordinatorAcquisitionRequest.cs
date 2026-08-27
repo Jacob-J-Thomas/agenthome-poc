@@ -2,10 +2,10 @@ using EmbodySense.Core.Common.Loops.Execution.Sleep.Models;
 
 namespace EmbodySense.Core.Application.Loops.Sleep.Models;
 
-/// <summary>Requests one atomic initial acquisition or lease-expired ownership handoff.</summary>
+/// <summary>Requests one atomic initial acquisition, lease-expired handoff, or fenced same-owner restart after a stopped lifecycle.</summary>
 /// <param name="PriorEvidenceExpectation">Whether prior evidence must be absent or match exact hashes.</param>
 /// <param name="ExpectedOwnershipHash">The exact prior ownership hash for a handoff.</param>
-/// <param name="ExpectedHeartbeatHash">The exact prior heartbeat hash for a handoff.</param>
+/// <param name="ExpectedHeartbeatHash">The exact prior heartbeat hash for a handoff or same-owner restart.</param>
 /// <param name="ProposedOwnership">The proposed new ownership claim.</param>
 /// <param name="StartingLifecycle">The version-one starting lifecycle committed with ownership.</param>
 /// <param name="InitialHeartbeat">The sequence-one heartbeat committed with ownership.</param>

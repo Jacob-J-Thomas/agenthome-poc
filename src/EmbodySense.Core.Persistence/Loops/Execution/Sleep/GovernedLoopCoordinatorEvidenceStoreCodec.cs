@@ -410,9 +410,18 @@ internal static class GovernedLoopCoordinatorEvidenceStoreCodec
             if (index > 0)
             {
                 var previous = entry.Ownerships[index - 1];
+                var previousLifecycle = entry.Lifecycles.Last(item => SameOwner(item.Ownership, previous));
                 var previousHeartbeat = entry.Heartbeats.LastOrDefault(item => SameOwner(item.Ownership, previous))
                     ?? ToHeartbeat(entry.HeartbeatRetirements.Single(item => SameOwner(item.Ownership, previous)));
-                if (!GovernedLoopSleepContractValidator.ValidateHandoff(previous, previousHeartbeat, ownership).IsValid)
+                var transitionIsValid = string.Equals(previous.OwnerId, ownership.OwnerId, StringComparison.Ordinal)
+                    && previousLifecycle.Status == GovernedLoopCoordinatorStatus.Stopped
+                    ? GovernedLoopSleepContractValidator.ValidateTerminalSameOwnerRestart(
+                        previous,
+                        previousLifecycle,
+                        previousHeartbeat,
+                        ownership).IsValid
+                    : GovernedLoopSleepContractValidator.ValidateHandoff(previous, previousHeartbeat, ownership).IsValid;
+                if (!transitionIsValid)
                 {
                     throw Invalid();
                 }

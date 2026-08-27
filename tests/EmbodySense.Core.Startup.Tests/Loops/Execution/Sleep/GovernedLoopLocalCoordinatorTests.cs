@@ -175,9 +175,11 @@ public sealed class GovernedLoopLocalCoordinatorTests
         releaseFirstWork.TrySetResult();
         var firstStopped = await first.StopAsync();
         var successorStopped = await successor.StopAsync();
+        var firstRestart = await first.StartAsync();
 
         Assert.Equal(GovernedLoopLocalCoordinatorStopStatus.OwnershipLost, firstStopped.Status);
         Assert.Equal(GovernedLoopLocalCoordinatorStopStatus.Stopped, successorStopped.Status);
+        Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.OwnedByLivePeer, firstRestart.Status);
         Assert.Equal(1, firstWork.CallCount);
         Assert.Equal(2, evidence.Snapshot!.Ownership.OwnershipEpoch);
         Assert.Equal("owner-b", evidence.Snapshot.Ownership.OwnerId);
@@ -190,6 +192,7 @@ public sealed class GovernedLoopLocalCoordinatorTests
         var releaseFirstWork = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var evidence = new RecordingCoordinatorEvidencePort();
         var clock = Clock();
+        var observer = new SignalingCoordinatorBoundaryObserver();
         var work = new ScriptedLocalWorkRunner
         {
             Handler = async (_, _) =>
@@ -251,6 +254,38 @@ public sealed class GovernedLoopLocalCoordinatorTests
     }
 
     [Fact]
+    public async Task Confirmed_local_stopped_session_restarts_after_lease_expiry_with_a_fenced_same_owner_successor()
+    {
+        var evidence = new RecordingCoordinatorEvidencePort();
+        var clock = Clock();
+        var work = new ScriptedLocalWorkRunner();
+        await using var coordinator = Coordinator(evidence, work, clock, "owner-a");
+
+        var initial = await coordinator.StartAsync();
+        var stopped = await coordinator.StopAsync();
+        var previous = stopped.Snapshot!;
+        var previousWorkCallCount = work.CallCount;
+        clock.Advance(TimeSpan.FromMinutes(3));
+        var restarted = await coordinator.StartAsync();
+        var snapshot = evidence.Snapshot;
+        await WaitUntilAsync(() => work.CallCount > previousWorkCallCount);
+
+        Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Started, initial.Status);
+        Assert.Equal(GovernedLoopLocalCoordinatorStopStatus.Stopped, stopped.Status);
+        Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Started, restarted.Status);
+        Assert.Equal("owner-a", snapshot!.Ownership.OwnerId);
+        Assert.Equal(previous.Ownership.OwnerId, snapshot.Ownership.OwnerId);
+        Assert.Equal(previous.Ownership.CoordinatorId, snapshot.Ownership.CoordinatorId);
+        Assert.NotEqual(previous.Ownership.ContentHash, snapshot.Ownership.ContentHash);
+        Assert.Equal(2, snapshot.Ownership.OwnershipEpoch);
+        Assert.Equal(GovernedLoopCoordinatorStatus.Running, snapshot.LatestLifecycle.Status);
+        Assert.True(snapshot.LatestHeartbeat.LeaseExpiresAtUtc > snapshot.LatestHeartbeat.RecordedAtUtc);
+        Assert.True(work.CallCount > previousWorkCallCount);
+
+        Assert.Equal(GovernedLoopLocalCoordinatorStopStatus.Stopped, (await coordinator.StopAsync()).Status);
+    }
+
+    [Fact]
     public async Task Shutdown_waits_for_hostile_one_shot_safe_boundary_before_recording_stopped()
     {
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -278,7 +313,7 @@ public sealed class GovernedLoopLocalCoordinatorTests
         await Task.Delay(50);
 
         Assert.False(stopping.IsCompleted);
-        Assert.Equal(GovernedLoopCoordinatorStatus.Running, evidence.Snapshot!.LatestLifecycle.Status);
+        Assert.Equal(GovernedLoopCoordinatorStatus.Stopping, evidence.Snapshot!.LatestLifecycle.Status);
         Assert.DoesNotContain(evidence.Lifecycles, item => item.Status == GovernedLoopCoordinatorStatus.Stopped);
 
         release.TrySetResult();
@@ -304,6 +339,170 @@ public sealed class GovernedLoopLocalCoordinatorTests
         Assert.Single(evidence.Failures);
         Assert.Equal(GovernedLoopCoordinatorFailureKind.CorruptState, evidence.Failures[0].Kind);
         Assert.Equal("schedule-result-corrupt", evidence.Failures[0].DetailEvidenceReference);
+    }
+
+    [Fact]
+    public async Task Completed_failed_session_is_reaped_and_never_reports_ready_already_running_posture()
+    {
+        var evidence = new RecordingCoordinatorEvidencePort();
+        var work = new ScriptedLocalWorkRunner
+        {
+            Handler = static (_, _) => Task.FromResult<GovernedLoopLocalWorkResult?>(null)
+        };
+        await using var coordinator = Coordinator(evidence, work, Clock(), "owner-a");
+
+        Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Started, (await coordinator.StartAsync()).Status);
+        await WaitUntilAsync(() => evidence.Snapshot?.LatestLifecycle.Status == GovernedLoopCoordinatorStatus.Failed);
+        var afterFailure = await coordinator.StartAsync();
+        var durable = evidence.Snapshot;
+
+        Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Failed, afterFailure.Status);
+        Assert.Equal(GovernedLoopCoordinatorStatus.Failed, durable!.LatestLifecycle.Status);
+        Assert.Equal(durable, afterFailure.Snapshot);
+        Assert.Single(evidence.Failures);
+    }
+
+    [Fact]
+    public async Task Durably_failed_uncompleted_session_never_reports_ready_already_running_posture()
+    {
+        var evidence = new RecordingCoordinatorEvidencePort();
+        var blockingEvidence = new BlockingCoordinatorEvidencePort(evidence)
+        {
+            BlockFailureBeforeCommit = false,
+            BlockFailedLifecycleAfterCommit = true
+        };
+        var work = new ScriptedLocalWorkRunner
+        {
+            Handler = static (_, _) => Task.FromResult<GovernedLoopLocalWorkResult?>(null)
+        };
+        await using var coordinator = Coordinator(blockingEvidence, work, Clock(), "owner-a");
+
+        try
+        {
+            Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Started, (await coordinator.StartAsync()).Status);
+            await blockingEvidence.FailedLifecyclePersisted.WaitAsync(TimeSpan.FromSeconds(5));
+            var durable = evidence.Snapshot;
+            var duringFailure = await coordinator.StartAsync();
+
+            Assert.Equal(GovernedLoopCoordinatorStatus.Failed, durable!.LatestLifecycle.Status);
+            Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Failed, duringFailure.Status);
+            Assert.Equal(durable, duringFailure.Snapshot);
+            Assert.Single(evidence.Failures);
+        }
+        finally
+        {
+            blockingEvidence.ReleaseFailedLifecycle();
+        }
+
+        Assert.Equal(GovernedLoopLocalCoordinatorStopStatus.Failed, (await coordinator.StopAsync()).Status);
+    }
+
+    [Fact]
+    public async Task Backpressured_work_after_foreign_heartbeat_never_mutates_peer_evidence()
+    {
+        var workEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var workRelease = new TaskCompletionSource<GovernedLoopLocalWorkResult?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var evidence = new RecordingCoordinatorEvidencePort();
+        var observer = new SignalingCoordinatorBoundaryObserver
+        {
+            ThrowOnOwnershipLost = true,
+            ThrowOnForeignSessionMutationSuppressed = true
+        };
+        var work = new ScriptedLocalWorkRunner
+        {
+            Handler = (_, _) =>
+            {
+                workEntered.TrySetResult();
+                return workRelease.Task;
+            }
+        };
+        await using var coordinator = Coordinator(
+            evidence,
+            work,
+            Clock(),
+            "owner-a",
+            heartbeat: TimeSpan.FromMilliseconds(10),
+            lease: TimeSpan.FromMinutes(1),
+            boundaryObserver: observer);
+
+        try
+        {
+            Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Started, (await coordinator.StartAsync()).Status);
+            await workEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var peer = evidence.ReplaceWithPeerOwnership("peer-owner");
+            var lifecycleCount = evidence.Lifecycles.Count;
+            var heartbeatCount = evidence.Heartbeats.Count;
+            var failureCount = evidence.Failures.Count;
+
+            await observer.OwnershipLost.WaitAsync(TimeSpan.FromSeconds(5));
+            workRelease.TrySetResult(new GovernedLoopLocalWorkResult(
+                GovernedLoopLocalWorkResultStatus.Backpressured,
+                "bounded-pressure"));
+            await observer.ForeignSessionMutationSuppressed.WaitAsync(TimeSpan.FromSeconds(5));
+            var stopped = await coordinator.StopAsync();
+            var durable = evidence.Snapshot;
+
+            Assert.Equal(GovernedLoopLocalCoordinatorStopStatus.OwnershipLost, stopped.Status);
+            Assert.Equal(peer.Ownership, durable!.Ownership);
+            Assert.Equal(peer.LatestLifecycle, durable.LatestLifecycle);
+            Assert.Equal(peer.LatestHeartbeat, durable.LatestHeartbeat);
+            Assert.Equal(peer.LatestFailureSequence, durable.LatestFailureSequence);
+            Assert.Equal(peer.LatestFailureHash, durable.LatestFailureHash);
+            Assert.Equal(lifecycleCount, evidence.Lifecycles.Count);
+            Assert.Equal(heartbeatCount, evidence.Heartbeats.Count);
+            Assert.Equal(failureCount, evidence.Failures.Count);
+        }
+        finally
+        {
+            workRelease.TrySetResult(new GovernedLoopLocalWorkResult(
+                GovernedLoopLocalWorkResultStatus.Backpressured,
+                "bounded-pressure"));
+        }
+    }
+
+    [Fact]
+    public async Task Public_stop_parks_a_session_after_foreign_ownership_is_observed()
+    {
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<GovernedLoopLocalWorkResult?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var evidence = new RecordingCoordinatorEvidencePort();
+        var observer = new SignalingCoordinatorBoundaryObserver();
+        var work = new ScriptedLocalWorkRunner
+        {
+            Handler = (_, _) =>
+            {
+                entered.TrySetResult();
+                return release.Task;
+            }
+        };
+        await using var coordinator = Coordinator(
+            evidence,
+            work,
+            Clock(),
+            "owner-a",
+            heartbeat: TimeSpan.FromMilliseconds(10),
+            lease: TimeSpan.FromMinutes(1),
+            boundaryObserver: observer);
+
+        try
+        {
+            Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Started, (await coordinator.StartAsync()).Status);
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            evidence.ReplaceWithPeerOwnership("peer-owner");
+            await observer.OwnershipLost.WaitAsync(TimeSpan.FromSeconds(5));
+
+            var stopping = coordinator.StopAsync();
+            await Task.Delay(25);
+            Assert.False(stopping.IsCompleted);
+            release.TrySetResult(new GovernedLoopLocalWorkResult(GovernedLoopLocalWorkResultStatus.Empty, "safe-boundary"));
+
+            Assert.Equal(GovernedLoopLocalCoordinatorStopStatus.OwnershipLost, (await stopping).Status);
+            Assert.Equal("peer-owner", evidence.Snapshot!.Ownership.OwnerId);
+        }
+        finally
+        {
+            release.TrySetResult(new GovernedLoopLocalWorkResult(GovernedLoopLocalWorkResultStatus.Empty, "safe-boundary"));
+        }
     }
 
     [Fact]
@@ -598,6 +797,410 @@ public sealed class GovernedLoopLocalCoordinatorTests
     }
 
     [Fact]
+    public async Task Acquisition_without_exact_durable_snapshot_fails_closed_before_work_admission()
+    {
+        var evidence = new RecordingCoordinatorEvidencePort
+        {
+            AcquisitionOverride = GovernedLoopCoordinatorAcquisitionStatus.Acquired
+        };
+        var work = new ScriptedLocalWorkRunner();
+        await using var coordinator = Coordinator(evidence, work, Clock(), "owner-a");
+
+        var result = await coordinator.StartAsync();
+
+        Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Corrupt, result.Status);
+        Assert.Equal(0, work.CallCount);
+    }
+
+    [Fact]
+    public async Task Acquisition_with_a_mismatched_durable_snapshot_fails_closed_before_work_admission()
+    {
+        var evidence = new RecordingCoordinatorEvidencePort();
+        var clock = Clock();
+        await using (var seed = Coordinator(evidence, new ScriptedLocalWorkRunner(), clock, "seed-owner"))
+        {
+            Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Started, (await seed.StartAsync()).Status);
+            Assert.Equal(GovernedLoopLocalCoordinatorStopStatus.Stopped, (await seed.StopAsync()).Status);
+        }
+
+        clock.Advance(TimeSpan.FromMinutes(3));
+        evidence.AcquisitionOverride = GovernedLoopCoordinatorAcquisitionStatus.Acquired;
+        var work = new ScriptedLocalWorkRunner();
+        await using var coordinator = Coordinator(evidence, work, clock, "owner-a");
+
+        var result = await coordinator.StartAsync();
+
+        Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Corrupt, result.Status);
+        Assert.Equal(0, work.CallCount);
+    }
+
+    [Fact]
+    public async Task Null_acquisition_result_is_projected_as_corrupt_without_admitting_work()
+    {
+        var evidence = new RecordingCoordinatorEvidencePort { ReturnNullAcquisition = true };
+        var work = new ScriptedLocalWorkRunner();
+        await using var coordinator = Coordinator(evidence, work, Clock(), "owner-a");
+
+        var result = await coordinator.StartAsync();
+
+        Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Corrupt, result.Status);
+        Assert.Equal(0, work.CallCount);
+    }
+
+    [Fact]
+    public async Task Coordinator_read_exception_is_projected_as_unavailable()
+    {
+        var evidence = new RecordingCoordinatorEvidencePort { ThrowOnRead = true };
+        await using var coordinator = Coordinator(evidence, new ScriptedLocalWorkRunner(), Clock(), "owner-a");
+
+        var result = await coordinator.StartAsync();
+
+        Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Unavailable, result.Status);
+    }
+
+    [Fact]
+    public async Task Coordinator_read_cancellation_is_rethrown_before_acquisition()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var evidence = new RecordingCoordinatorEvidencePort
+        {
+            CancelOnRead = true,
+            CancelSourceOnRead = cancellation
+        };
+        await using var coordinator = Coordinator(evidence, new ScriptedLocalWorkRunner(), Clock(), "owner-a");
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => coordinator.StartAsync(cancellation.Token));
+    }
+
+    [Fact]
+    public async Task Coordinator_acquisition_exception_is_reconciled_as_unavailable()
+    {
+        var evidence = new RecordingCoordinatorEvidencePort { ThrowOnAcquire = true };
+        await using var coordinator = Coordinator(evidence, new ScriptedLocalWorkRunner(), Clock(), "owner-a");
+
+        var result = await coordinator.StartAsync();
+
+        Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Unavailable, result.Status);
+    }
+
+    [Fact]
+    public async Task Coordinator_acquisition_cancellation_is_rethrown_when_evidence_did_not_commit()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var evidence = new RecordingCoordinatorEvidencePort
+        {
+            CancelOnAcquire = true,
+            CancelSourceOnAcquire = cancellation
+        };
+        await using var coordinator = Coordinator(evidence, new ScriptedLocalWorkRunner(), Clock(), "owner-a");
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => coordinator.StartAsync(cancellation.Token));
+    }
+
+    [Fact]
+    public async Task Coordinator_acquisition_cancellation_after_durable_commit_reconciles_exact_evidence()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var evidence = new RecordingCoordinatorEvidencePort
+        {
+            CancelAfterAcquire = true,
+            CancelSourceOnAcquire = cancellation
+        };
+        var work = new ScriptedLocalWorkRunner
+        {
+            Handler = static (_, _) => Task.FromResult<GovernedLoopLocalWorkResult?>(
+                new GovernedLoopLocalWorkResult(GovernedLoopLocalWorkResultStatus.Backpressured, "bounded-pressure"))
+        };
+        await using var coordinator = Coordinator(evidence, work, Clock(), "owner-a");
+
+        var started = await coordinator.StartAsync(cancellation.Token);
+        var stopped = await coordinator.StopAsync();
+
+        Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Started, started.Status);
+        Assert.Equal(GovernedLoopLocalCoordinatorStopStatus.Stopped, stopped.Status);
+        Assert.NotEmpty(evidence.Lifecycles);
+    }
+
+    [Fact]
+    public async Task Null_lifecycle_result_fails_start_closed_after_acquisition()
+    {
+        var evidence = new RecordingCoordinatorEvidencePort { ReturnNullLifecycle = true };
+        await using var coordinator = Coordinator(evidence, new ScriptedLocalWorkRunner(), Clock(), "owner-a");
+
+        var result = await coordinator.StartAsync();
+
+        Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Corrupt, result.Status);
+        Assert.Equal(0, evidence.Lifecycles.Count(item => item.Status == GovernedLoopCoordinatorStatus.Running));
+    }
+
+    [Fact]
+    public async Task Start_rechecks_an_uncompleted_session_when_durable_evidence_becomes_corrupt()
+    {
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<GovernedLoopLocalWorkResult?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var evidence = new RecordingCoordinatorEvidencePort();
+        var work = new ScriptedLocalWorkRunner
+        {
+            Handler = (_, _) =>
+            {
+                entered.TrySetResult();
+                return release.Task;
+            }
+        };
+        await using var coordinator = Coordinator(evidence, work, Clock(), "owner-a");
+
+        try
+        {
+            Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Started, (await coordinator.StartAsync()).Status);
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            evidence.ReturnMalformedRead = true;
+
+            var result = await coordinator.StartAsync();
+
+            Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Corrupt, result.Status);
+        }
+        finally
+        {
+            evidence.ReturnMalformedRead = false;
+            release.TrySetResult(new GovernedLoopLocalWorkResult(GovernedLoopLocalWorkResultStatus.Empty, "safe-boundary"));
+        }
+
+        Assert.Equal(GovernedLoopLocalCoordinatorStopStatus.Stopped, (await coordinator.StopAsync()).Status);
+    }
+
+    [Fact]
+    public async Task Start_rechecks_an_uncompleted_session_when_durable_evidence_is_terminal_stopped()
+    {
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<GovernedLoopLocalWorkResult?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var evidence = new RecordingCoordinatorEvidencePort();
+        var work = new ScriptedLocalWorkRunner
+        {
+            Handler = (_, _) =>
+            {
+                entered.TrySetResult();
+                return release.Task;
+            }
+        };
+        await using var coordinator = Coordinator(evidence, work, Clock(), "owner-a");
+
+        try
+        {
+            Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Started, (await coordinator.StartAsync()).Status);
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            evidence.SetLifecycleStatus(GovernedLoopCoordinatorStatus.Stopped);
+
+            var result = await coordinator.StartAsync();
+
+            Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Unavailable, result.Status);
+        }
+        finally
+        {
+            release.TrySetResult(new GovernedLoopLocalWorkResult(GovernedLoopLocalWorkResultStatus.Empty, "safe-boundary"));
+        }
+
+        Assert.Equal(GovernedLoopLocalCoordinatorStopStatus.Failed, (await coordinator.StopAsync()).Status);
+    }
+
+    [Fact]
+    public async Task Null_failure_result_fails_closed_without_fabricating_terminal_lifecycle()
+    {
+        var evidence = new RecordingCoordinatorEvidencePort { ReturnNullFailure = true };
+        var work = new ScriptedLocalWorkRunner
+        {
+            Handler = static (_, _) => Task.FromResult<GovernedLoopLocalWorkResult?>(
+                new GovernedLoopLocalWorkResult(GovernedLoopLocalWorkResultStatus.Backpressured, "bounded-pressure"))
+        };
+        await using var coordinator = Coordinator(evidence, work, Clock(), "owner-a");
+
+        Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Started, (await coordinator.StartAsync()).Status);
+        await WaitUntilAsync(() => work.CallCount > 0);
+        var result = await coordinator.StopAsync();
+
+        Assert.Equal(GovernedLoopLocalCoordinatorStopStatus.Failed, result.Status);
+        Assert.DoesNotContain(evidence.Lifecycles, item => item.Status == GovernedLoopCoordinatorStatus.Stopped);
+    }
+
+    [Fact]
+    public async Task Failure_evidence_snapshot_mismatch_fails_closed_without_stopped_evidence()
+    {
+        var evidence = new RecordingCoordinatorEvidencePort
+        {
+            FailureOverride = GovernedLoopCoordinatorFailureMutationStatus.Appended,
+            ReturnMismatchedFailureSnapshot = true
+        };
+        var work = new ScriptedLocalWorkRunner
+        {
+            Handler = static (_, _) => Task.FromResult<GovernedLoopLocalWorkResult?>(
+                new GovernedLoopLocalWorkResult(GovernedLoopLocalWorkResultStatus.Corrupt, "mismatched-failure-snapshot"))
+        };
+        await using var coordinator = Coordinator(evidence, work, Clock(), "owner-a");
+
+        Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Started, (await coordinator.StartAsync()).Status);
+        await WaitUntilAsync(() => evidence.Snapshot?.LatestLifecycle.Status == GovernedLoopCoordinatorStatus.Failed);
+
+        var result = await coordinator.StopAsync();
+
+        Assert.Equal(GovernedLoopLocalCoordinatorStopStatus.Failed, result.Status);
+        Assert.DoesNotContain(evidence.Lifecycles, item => item.Status == GovernedLoopCoordinatorStatus.Stopped);
+    }
+
+    [Fact]
+    public async Task Start_rechecks_a_completed_session_when_durable_evidence_becomes_corrupt()
+    {
+        var evidence = new RecordingCoordinatorEvidencePort();
+        var work = new ScriptedLocalWorkRunner
+        {
+            Handler = static (_, _) => Task.FromResult<GovernedLoopLocalWorkResult?>(null)
+        };
+        await using var coordinator = Coordinator(evidence, work, Clock(), "owner-a");
+
+        Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Started, (await coordinator.StartAsync()).Status);
+        await WaitUntilAsync(() => evidence.Snapshot?.LatestLifecycle.Status == GovernedLoopCoordinatorStatus.Failed);
+        evidence.ReturnMalformedRead = true;
+
+        var result = await coordinator.StartAsync();
+
+        Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Corrupt, result.Status);
+        evidence.ReturnMalformedRead = false;
+    }
+
+    [Fact]
+    public async Task Start_reaps_a_completed_session_only_when_the_valid_durable_snapshot_is_unchanged()
+    {
+        var evidence = new RecordingCoordinatorEvidencePort();
+        var work = new ScriptedLocalWorkRunner
+        {
+            Handler = static (_, _) => Task.FromResult<GovernedLoopLocalWorkResult?>(null)
+        };
+        await using var coordinator = Coordinator(evidence, work, Clock(), "owner-a");
+
+        Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Started, (await coordinator.StartAsync()).Status);
+        await WaitUntilAsync(() => evidence.Snapshot?.LatestLifecycle.Status == GovernedLoopCoordinatorStatus.Failed);
+        var current = Assert.IsType<GovernedLoopCoordinatorSnapshot>(evidence.Snapshot);
+        evidence.SetLifecycleVersion(current.LatestLifecycle.LifecycleVersion + 1);
+
+        var result = await coordinator.StartAsync();
+
+        Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Corrupt, result.Status);
+        Assert.Equal(GovernedLoopCoordinatorStatus.Failed, result.Snapshot!.LatestLifecycle.Status);
+        Assert.NotEqual(current.LatestLifecycle.ContentHash, result.Snapshot.LatestLifecycle.ContentHash);
+    }
+
+    [Fact]
+    public async Task Heartbeat_result_mismatch_fails_closed_without_accepting_unfenced_lease()
+    {
+        var evidence = new RecordingCoordinatorEvidencePort
+        {
+            HeartbeatOverride = GovernedLoopCoordinatorHeartbeatMutationStatus.Renewed
+        };
+        await using var coordinator = Coordinator(
+            evidence,
+            new ScriptedLocalWorkRunner(),
+            Clock(),
+            "owner-a",
+            heartbeat: TimeSpan.FromMilliseconds(10));
+
+        Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Started, (await coordinator.StartAsync()).Status);
+        await WaitUntilAsync(() => evidence.Snapshot?.LatestLifecycle.Status == GovernedLoopCoordinatorStatus.Failed);
+        var result = await coordinator.StopAsync();
+
+        Assert.Equal(GovernedLoopLocalCoordinatorStopStatus.Failed, result.Status);
+        Assert.Contains(evidence.Failures, item => item.DetailEvidenceReference == "heartbeat-result-mismatch");
+    }
+
+    [Theory]
+    [InlineData(false, GovernedLoopCoordinatorFailureKind.Unexpected)]
+    [InlineData(true, GovernedLoopCoordinatorFailureKind.CorruptState)]
+    public async Task Invalid_one_shot_execution_is_retained_as_bounded_failure(
+        bool invalidStatus,
+        GovernedLoopCoordinatorFailureKind expectedKind)
+    {
+        var evidence = new RecordingCoordinatorEvidencePort();
+        var work = new ScriptedLocalWorkRunner
+        {
+            Handler = invalidStatus
+                ? static (_, _) => Task.FromResult<GovernedLoopLocalWorkResult?>(
+                    new GovernedLoopLocalWorkResult((GovernedLoopLocalWorkResultStatus)99, "invalid-status"))
+                : static (_, _) => throw new IOException("runner failed")
+        };
+        await using var coordinator = Coordinator(evidence, work, Clock(), "owner-a");
+
+        Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Started, (await coordinator.StartAsync()).Status);
+        await WaitUntilAsync(() => evidence.Snapshot?.LatestLifecycle.Status == GovernedLoopCoordinatorStatus.Failed);
+        var result = await coordinator.StopAsync();
+
+        Assert.Equal(GovernedLoopLocalCoordinatorStopStatus.Failed, result.Status);
+        Assert.Contains(evidence.Failures, item => item.Kind == expectedKind);
+    }
+
+    [Fact]
+    public async Task Heartbeat_clock_failure_fails_closed_without_stopped_evidence()
+    {
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<GovernedLoopLocalWorkResult?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var evidence = new RecordingCoordinatorEvidencePort();
+        var clock = Clock();
+        var observer = new SignalingCoordinatorBoundaryObserver();
+        var work = new ScriptedLocalWorkRunner
+        {
+            Handler = (_, _) =>
+            {
+                entered.TrySetResult();
+                return release.Task;
+            }
+        };
+        await using var coordinator = Coordinator(
+            evidence,
+            work,
+            clock,
+            "owner-a",
+            heartbeat: TimeSpan.FromMilliseconds(10),
+            boundaryObserver: observer);
+
+        try
+        {
+            Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Started, (await coordinator.StartAsync()).Status);
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            clock.ThrowOnNext = true;
+            await observer.HeartbeatDue.WaitAsync(TimeSpan.FromSeconds(5));
+            release.TrySetResult(new GovernedLoopLocalWorkResult(GovernedLoopLocalWorkResultStatus.Empty, "safe-boundary"));
+            await WaitUntilAsync(() => evidence.Snapshot?.LatestLifecycle.Status == GovernedLoopCoordinatorStatus.Failed);
+            var result = await coordinator.StopAsync();
+
+            Assert.Equal(GovernedLoopLocalCoordinatorStopStatus.Failed, result.Status);
+            Assert.Contains(evidence.Failures, item => item.DetailEvidenceReference == "heartbeat-clock-unavailable");
+        }
+        finally
+        {
+            release.TrySetResult(new GovernedLoopLocalWorkResult(GovernedLoopLocalWorkResultStatus.Empty, "safe-boundary"));
+        }
+    }
+
+    [Fact]
+    public async Task Work_admission_expiry_fails_closed_before_running_expired_work()
+    {
+        var evidence = new RecordingCoordinatorEvidencePort();
+        var clock = Clock();
+        await using var coordinator = Coordinator(
+            evidence,
+            new ScriptedLocalWorkRunner(),
+            clock,
+            "owner-a",
+            cycle: TimeSpan.FromMilliseconds(20),
+            heartbeat: TimeSpan.FromMilliseconds(50),
+            lease: TimeSpan.FromMilliseconds(100));
+
+        Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Started, (await coordinator.StartAsync()).Status);
+        clock.Advance(TimeSpan.FromSeconds(1));
+        await WaitUntilAsync(() => evidence.Snapshot?.LatestLifecycle.Status == GovernedLoopCoordinatorStatus.Failed);
+        var result = await coordinator.StopAsync();
+
+        Assert.Equal(GovernedLoopLocalCoordinatorStopStatus.Failed, result.Status);
+        Assert.Contains(evidence.Failures, item => item.DetailEvidenceReference == "work-admission-lease-expired");
+    }
+
+    [Fact]
     public async Task Dispose_is_idempotent_and_rejects_later_start_or_stop_calls()
     {
         var coordinator = Coordinator(
@@ -711,6 +1314,7 @@ public sealed class GovernedLoopLocalCoordinatorTests
 
         Assert.Equal(expectedStatus, result.Status);
         Assert.NotEqual(GovernedLoopCoordinatorStatus.Stopped, evidence.Snapshot!.LatestLifecycle.Status);
+        Assert.Equal("owner-a", evidence.Snapshot.Ownership.OwnerId);
     }
 
     [Theory]
@@ -761,27 +1365,138 @@ public sealed class GovernedLoopLocalCoordinatorTests
         Assert.Contains(evidence.Failures, item => item.Kind == expectedKind);
     }
 
+    [Fact]
+    public async Task Failure_evidence_ownership_race_never_mutates_the_winning_owner_lifecycle()
+    {
+        var workEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseWork = new TaskCompletionSource<GovernedLoopLocalWorkResult?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var evidence = new RecordingCoordinatorEvidencePort();
+        var work = new ScriptedLocalWorkRunner
+        {
+            Handler = (_, _) =>
+            {
+                workEntered.TrySetResult();
+                return releaseWork.Task;
+            }
+        };
+        await using var coordinator = Coordinator(evidence, work, Clock(), "owner-a");
+
+        try
+        {
+            Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Started, (await coordinator.StartAsync()).Status);
+            await workEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var peer = evidence.ReplaceWithPeerOwnership("peer-owner");
+            var installed = evidence.Snapshot;
+
+            Assert.Equal(peer.Ownership, installed!.Ownership);
+            Assert.Equal(peer.LatestLifecycle, installed.LatestLifecycle);
+            Assert.Equal(peer.LatestHeartbeat, installed.LatestHeartbeat);
+            Assert.Equal(peer.LatestFailureSequence, installed.LatestFailureSequence);
+            Assert.Equal(peer.LatestFailureHash, installed.LatestFailureHash);
+            Assert.Equal("peer-owner", installed.Ownership.OwnerId);
+            Assert.Equal(2, installed.Ownership.OwnershipEpoch);
+            Assert.Equal(GovernedLoopCoordinatorStatus.Starting, installed.LatestLifecycle.Status);
+
+            releaseWork.TrySetResult(new GovernedLoopLocalWorkResult(
+                GovernedLoopLocalWorkResultStatus.Corrupt,
+                "hostile-result"));
+            var result = await coordinator.StopAsync();
+            var durable = evidence.Snapshot;
+
+            Assert.Equal(GovernedLoopLocalCoordinatorStopStatus.OwnershipLost, result.Status);
+            Assert.Equal(peer.Ownership, durable!.Ownership);
+            Assert.Equal(peer.LatestLifecycle, durable.LatestLifecycle);
+            Assert.Equal(peer.LatestHeartbeat, durable.LatestHeartbeat);
+            Assert.Equal(peer.LatestFailureSequence, durable.LatestFailureSequence);
+            Assert.Equal(peer.LatestFailureHash, durable.LatestFailureHash);
+            Assert.Equal("peer-owner", durable.Ownership.OwnerId);
+            Assert.Equal(2, durable.Ownership.OwnershipEpoch);
+            Assert.Equal(GovernedLoopCoordinatorStatus.Starting, durable.LatestLifecycle.Status);
+            Assert.DoesNotContain(evidence.Lifecycles, item => item.Status == GovernedLoopCoordinatorStatus.Failed);
+        }
+        finally
+        {
+            releaseWork.TrySetResult(new GovernedLoopLocalWorkResult(
+                GovernedLoopLocalWorkResultStatus.Corrupt,
+                "hostile-result"));
+        }
+    }
+
     [Theory]
-    [InlineData(GovernedLoopCoordinatorFailureMutationStatus.OwnershipLost)]
-    [InlineData(GovernedLoopCoordinatorFailureMutationStatus.Conflict)]
-    public async Task Failure_evidence_ownership_race_never_mutates_the_winning_owner_lifecycle(
-        GovernedLoopCoordinatorFailureMutationStatus failureStatus)
+    [InlineData(GovernedLoopCoordinatorFailureMutationStatus.Corrupt, GovernedLoopLocalCoordinatorStopStatus.Failed)]
+    [InlineData(GovernedLoopCoordinatorFailureMutationStatus.Unavailable, GovernedLoopLocalCoordinatorStopStatus.Failed)]
+    public async Task Failure_evidence_store_errors_fail_closed_without_stopped_evidence(
+        GovernedLoopCoordinatorFailureMutationStatus failureStatus,
+        GovernedLoopLocalCoordinatorStopStatus expectedStatus)
     {
         var evidence = new RecordingCoordinatorEvidencePort { FailureOverride = failureStatus };
         var work = new ScriptedLocalWorkRunner
         {
-            Handler = (_, _) => Task.FromResult<GovernedLoopLocalWorkResult?>(
+            Handler = static (_, _) => Task.FromResult<GovernedLoopLocalWorkResult?>(
                 new GovernedLoopLocalWorkResult(GovernedLoopLocalWorkResultStatus.Corrupt, "hostile-result"))
         };
         await using var coordinator = Coordinator(evidence, work, Clock(), "owner-a");
-        await coordinator.StartAsync();
-        await WaitUntilAsync(() => work.CallCount > 0);
 
+        Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Started, (await coordinator.StartAsync()).Status);
+        await WaitUntilAsync(() => work.CallCount > 0);
         var result = await coordinator.StopAsync();
 
-        Assert.Equal(GovernedLoopLocalCoordinatorStopStatus.OwnershipLost, result.Status);
-        Assert.Equal(GovernedLoopCoordinatorStatus.Running, evidence.Snapshot!.LatestLifecycle.Status);
-        Assert.DoesNotContain(evidence.Lifecycles, item => item.Status == GovernedLoopCoordinatorStatus.Failed);
+        Assert.Equal(expectedStatus, result.Status);
+        Assert.DoesNotContain(evidence.Lifecycles, item => item.Status == GovernedLoopCoordinatorStatus.Stopped);
+    }
+
+    [Fact]
+    public async Task Failed_durable_lifecycle_blocks_a_new_public_start()
+    {
+        var evidence = new RecordingCoordinatorEvidencePort();
+        var clock = Clock();
+        await using (var first = Coordinator(evidence, new ScriptedLocalWorkRunner(), clock, "owner-a"))
+        {
+            Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Started, (await first.StartAsync()).Status);
+            await first.StopAsync();
+        }
+
+        evidence.SetLifecycleStatus(GovernedLoopCoordinatorStatus.Failed);
+        clock.Advance(TimeSpan.FromMinutes(3));
+        await using var second = Coordinator(evidence, new ScriptedLocalWorkRunner(), clock, "owner-b");
+
+        var result = await second.StartAsync();
+
+        Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Failed, result.Status);
+        Assert.Equal(GovernedLoopCoordinatorStatus.Failed, result.Snapshot!.LatestLifecycle.Status);
+    }
+
+    [Fact]
+    public async Task Lifecycle_version_exhaustion_fails_closed_during_public_stop()
+    {
+        var evidence = new RecordingCoordinatorEvidencePort();
+        await using var coordinator = Coordinator(evidence, new ScriptedLocalWorkRunner(), Clock(), "owner-a");
+
+        Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Started, (await coordinator.StartAsync()).Status);
+        evidence.SetLifecycleVersion(GovernedLoopSleepContractLimits.MaxVersion);
+        var result = await coordinator.StopAsync();
+
+        Assert.Equal(GovernedLoopLocalCoordinatorStopStatus.Failed, result.Status);
+        Assert.DoesNotContain(evidence.Lifecycles, item => item.Status == GovernedLoopCoordinatorStatus.Stopped);
+    }
+
+    [Fact]
+    public async Task Invalid_heartbeat_result_fails_closed_without_stopped_evidence()
+    {
+        var evidence = new RecordingCoordinatorEvidencePort { ReturnNullHeartbeat = true };
+        await using var coordinator = Coordinator(
+            evidence,
+            new ScriptedLocalWorkRunner(),
+            Clock(),
+            "owner-a",
+            heartbeat: TimeSpan.FromMilliseconds(10));
+
+        Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Started, (await coordinator.StartAsync()).Status);
+        await WaitUntilAsync(() => evidence.Snapshot?.LatestLifecycle.Status == GovernedLoopCoordinatorStatus.Failed);
+        var result = await coordinator.StopAsync();
+
+        Assert.Equal(GovernedLoopLocalCoordinatorStopStatus.Failed, result.Status);
+        Assert.DoesNotContain(evidence.Lifecycles, item => item.Status == GovernedLoopCoordinatorStatus.Stopped);
     }
 
     [Fact]
