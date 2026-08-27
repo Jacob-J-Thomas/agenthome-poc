@@ -80,6 +80,18 @@ public sealed class BrowserFlowTests
     }
 
     [Fact]
+    public void Restart_diagnostic_classifier_allows_only_captured_same_authority_resets()
+    {
+        const string TargetAuthority = "127.0.0.1:5001";
+
+        Assert.True(ExpectedServerRestartDiagnosticClassifier.IsExpectedNetworkFailure(true, false, "https://127.0.0.1:5001/api/loop-runs?maximumCount=50", "net::ERR_CONNECTION_RESET", TargetAuthority, capturedAtRestart: true));
+        Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedNetworkFailure(true, false, "https://127.0.0.1:5001/api/loop-runs?maximumCount=50", "net::ERR_CONNECTION_REFUSED", TargetAuthority, capturedAtRestart: true));
+        Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedNetworkFailure(true, false, "https://127.0.0.1:5001/api/loop-runs?maximumCount=50", "fetch failed", TargetAuthority, capturedAtRestart: true));
+        Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedNetworkFailure(true, false, "https://example.test/api/loop-runs?maximumCount=50", "net::ERR_CONNECTION_RESET", TargetAuthority, capturedAtRestart: true));
+        Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedNetworkFailure(true, false, "https://127.0.0.1:5001/api/loop-runs?maximumCount=50", "500 (Internal Server Error)", TargetAuthority, capturedAtRestart: true));
+    }
+
+    [Fact]
     public void Restart_log_classifier_matches_connection_reset_route_and_keeps_other_errors_visible()
     {
         const string TargetAuthority = "127.0.0.1:5001";
@@ -94,6 +106,18 @@ public sealed class BrowserFlowTests
         Assert.True(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "fetch failed: net::ERR_CONNECTION_RESET", "https://127.0.0.1:5001/", "https://127.0.0.1:5001/api/session", TargetAuthority));
         Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "WebSocket failed: net::ERR_CONNECTION_RESET", null, "https://127.0.0.1:5001/api/loops", TargetAuthority));
         Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "WebSocket failed: net::ERR_CONNECTION_RESET", null, "ws://example.test/hubs/session", TargetAuthority));
+    }
+
+    [Fact]
+    public void Restart_log_classifier_allows_captured_reset_but_keeps_unrelated_diagnostics_visible()
+    {
+        const string TargetAuthority = "127.0.0.1:5001";
+
+        Assert.True(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "fetch failed: net::ERR_CONNECTION_RESET", "https://127.0.0.1:5001/api/loop-runs?maximumCount=50", null, TargetAuthority, capturedAtRestart: true));
+        Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "fetch failed", "https://127.0.0.1:5001/api/loop-runs?maximumCount=50", null, TargetAuthority, capturedAtRestart: true));
+        Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "fetch failed: net::ERR_CONNECTION_RESET", "https://example.test/api/loop-runs?maximumCount=50", null, TargetAuthority, capturedAtRestart: true));
+        Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "fetch failed: net::ERR_CONNECTION_RESET", "https://example.test/api/loop-runs?maximumCount=50", "https://127.0.0.1:5001/api/loop-runs?maximumCount=50", TargetAuthority, capturedAtRestart: true));
+        Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "500 (Internal Server Error)", "https://127.0.0.1:5001/api/loop-runs?maximumCount=50", null, TargetAuthority, capturedAtRestart: true));
     }
 
     [InstalledBrowserFact]
@@ -1808,6 +1832,7 @@ public sealed class BrowserFlowTests
 
     private sealed class HeadlessBrowserSession : IAsyncDisposable
     {
+        private const int MaxTrackedSameAuthorityRequests = 1024;
         private readonly Process _process;
         private readonly ClientWebSocket _socket;
         private readonly string _userDataDirectory;
@@ -1816,9 +1841,11 @@ public sealed class BrowserFlowTests
         private readonly ConcurrentDictionary<int, TaskCompletionSource<JsonElement>> _pendingCommands = new();
         private readonly ConcurrentDictionary<int, Task> _pendingSends = new();
         private readonly ConcurrentDictionary<string, byte> _expectedServerRestartRequests = new(StringComparer.Ordinal);
+        private readonly ConcurrentDictionary<string, byte> _capturedExpectedServerRestartRequests = new(StringComparer.Ordinal);
         private readonly ConcurrentDictionary<string, string> _requestUrls = new(StringComparer.Ordinal);
         private readonly SemaphoreSlim _sendGate = new(1, 1);
         private readonly object _diagnosticsGate = new();
+        private readonly object _expectedServerRestartRequestsGate = new();
         private readonly List<string> _diagnostics = [];
         private readonly byte[] _buffer = new byte[65536];
         private readonly Task _readerTask;
@@ -2015,18 +2042,36 @@ public sealed class BrowserFlowTests
 
         public void BeginExpectedServerRestart()
         {
-            _expectedServerRestartRequests.Clear();
-            Interlocked.Exchange(ref _expectedServerRestart, 1);
+            lock (_expectedServerRestartRequestsGate)
+            {
+                _expectedServerRestartRequests.Clear();
+                _capturedExpectedServerRestartRequests.Clear();
+                Interlocked.Exchange(ref _expectedServerRestart, 1);
+                foreach (var request in _requestUrls
+                    .ToArray()
+                    .Where(request => IsTargetAuthority(request.Value))
+                    .OrderBy(request => request.Key, StringComparer.Ordinal)
+                    .Take(MaxTrackedSameAuthorityRequests))
+                {
+                    _capturedExpectedServerRestartRequests.TryAdd(request.Key, 0);
+                }
+            }
         }
 
         public void MarkExpectedReplacementServerStarting()
         {
-            Interlocked.CompareExchange(ref _expectedServerRestart, 2, 1);
+            lock (_expectedServerRestartRequestsGate)
+            {
+                Interlocked.CompareExchange(ref _expectedServerRestart, 2, 1);
+            }
         }
 
         public void EndExpectedServerRestart()
         {
-            Interlocked.Exchange(ref _expectedServerRestart, 0);
+            lock (_expectedServerRestartRequestsGate)
+            {
+                Interlocked.Exchange(ref _expectedServerRestart, 0);
+            }
         }
 
         public async Task AssertHealthyAsync(params (string UrlFragment, int StatusCode)[] expectedHttpFailures)
@@ -2367,9 +2412,14 @@ public sealed class BrowserFlowTests
                 return;
             }
 
-            if (method == "Network.loadingFailed"
-                && (!parameters.TryGetProperty("canceled", out var cancelled) || cancelled.ValueKind != JsonValueKind.True))
+            if (method == "Network.loadingFailed")
             {
+                if (parameters.TryGetProperty("canceled", out var cancelled) && cancelled.ValueKind == JsonValueKind.True)
+                {
+                    RemoveTrackedRequest(parameters);
+                    return;
+                }
+
                 if (IsExpectedServerRestartNetworkFailure(parameters))
                 {
                     return;
@@ -2387,31 +2437,29 @@ public sealed class BrowserFlowTests
             }
 
             var requestId = requestIdValue.GetString()!;
-            if (method == "Network.requestWillBeSent"
-                && parameters.TryGetProperty("request", out var request)
-                && request.TryGetProperty("url", out var requestUrl)
-                && requestUrl.ValueKind == JsonValueKind.String)
+            lock (_expectedServerRestartRequestsGate)
             {
-                var url = requestUrl.GetString()!;
-                _requestUrls[requestId] = url;
-                CaptureExpectedServerRestartRequest(requestId, url);
-                return;
-            }
+                if (method == "Network.requestWillBeSent"
+                    && parameters.TryGetProperty("request", out var request)
+                    && request.TryGetProperty("url", out var requestUrl)
+                    && requestUrl.ValueKind == JsonValueKind.String)
+                {
+                    TrackRequestUnderLock(requestId, requestUrl.GetString()!);
+                    return;
+                }
 
-            if (method == "Network.webSocketCreated"
-                && parameters.TryGetProperty("url", out var websocketUrl)
-                && websocketUrl.ValueKind == JsonValueKind.String)
-            {
-                var url = websocketUrl.GetString()!;
-                _requestUrls[requestId] = url;
-                CaptureExpectedServerRestartRequest(requestId, url);
-                return;
-            }
+                if (method == "Network.webSocketCreated"
+                    && parameters.TryGetProperty("url", out var websocketUrl)
+                    && websocketUrl.ValueKind == JsonValueKind.String)
+                {
+                    TrackRequestUnderLock(requestId, websocketUrl.GetString()!);
+                    return;
+                }
 
-            if (method is "Network.loadingFinished" or "Network.webSocketClosed")
-            {
-                _requestUrls.TryRemove(requestId, out _);
-                _expectedServerRestartRequests.TryRemove(requestId, out _);
+                if (method is "Network.loadingFinished" or "Network.webSocketClosed")
+                {
+                    RemoveTrackedRequestUnderLock(requestId);
+                }
             }
         }
 
@@ -2420,8 +2468,19 @@ public sealed class BrowserFlowTests
             var requestId = entry.TryGetProperty("networkRequestId", out var requestIdValue) && requestIdValue.ValueKind == JsonValueKind.String
                 ? requestIdValue.GetString()
                 : null;
-            var beganDuringOutage = requestId is not null && _expectedServerRestartRequests.ContainsKey(requestId);
-            if (Volatile.Read(ref _expectedServerRestart) == 0 && !beganDuringOutage)
+            bool beganDuringOutage;
+            bool capturedAtRestart;
+            string? correlatedRequestUrl;
+            lock (_expectedServerRestartRequestsGate)
+            {
+                beganDuringOutage = requestId is not null && _expectedServerRestartRequests.ContainsKey(requestId);
+                capturedAtRestart = requestId is not null && _capturedExpectedServerRestartRequests.ContainsKey(requestId);
+                correlatedRequestUrl = requestId is not null && _requestUrls.TryGetValue(requestId, out var capturedRequestUrl)
+                    ? capturedRequestUrl
+                    : null;
+            }
+
+            if (Volatile.Read(ref _expectedServerRestart) == 0 && !beganDuringOutage && !capturedAtRestart)
             {
                 return false;
             }
@@ -2429,9 +2488,6 @@ public sealed class BrowserFlowTests
             var source = entry.TryGetProperty("source", out var sourceValue) ? sourceValue.GetString() : null;
             var text = entry.TryGetProperty("text", out var textValue) ? textValue.GetString() : null;
             var url = entry.TryGetProperty("url", out var urlValue) ? urlValue.GetString() : null;
-            var correlatedRequestUrl = requestId is not null && _requestUrls.TryGetValue(requestId, out var capturedRequestUrl)
-                ? capturedRequestUrl
-                : null;
             if (!string.Equals(source, "network", StringComparison.Ordinal)
                 || !ContainsTargetAuthority(text) && !ContainsTargetAuthority(url) && !ContainsTargetAuthority(correlatedRequestUrl))
             {
@@ -2445,10 +2501,14 @@ public sealed class BrowserFlowTests
                 text,
                 url,
                 correlatedRequestUrl,
-                _targetAuthority);
+                _targetAuthority,
+                capturedAtRestart);
             if (expected && requestId is not null)
             {
-                _expectedServerRestartRequests.TryRemove(requestId, out _);
+                lock (_expectedServerRestartRequestsGate)
+                {
+                    _expectedServerRestartRequests.TryRemove(requestId, out _);
+                }
             }
 
             return expected;
@@ -2465,18 +2525,31 @@ public sealed class BrowserFlowTests
 
         private bool IsExpectedServerRestartNetworkFailure(JsonElement parameters)
         {
-            if (!parameters.TryGetProperty("requestId", out var requestIdValue)
-                || requestIdValue.ValueKind != JsonValueKind.String
-                || !_requestUrls.TryRemove(requestIdValue.GetString()!, out var requestUrl))
+            if (!parameters.TryGetProperty("requestId", out var requestIdValue) || requestIdValue.ValueKind != JsonValueKind.String)
             {
                 return false;
             }
 
-            var beganDuringOutage = _expectedServerRestartRequests.ContainsKey(requestIdValue.GetString()!);
-            if (Volatile.Read(ref _expectedServerRestart) == 0 && !beganDuringOutage
+            var requestId = requestIdValue.GetString()!;
+            string? requestUrl;
+            bool beganDuringOutage;
+            bool capturedAtRestart;
+            lock (_expectedServerRestartRequestsGate)
+            {
+                if (!_requestUrls.TryGetValue(requestId, out requestUrl))
+                {
+                    return false;
+                }
+
+                beganDuringOutage = _expectedServerRestartRequests.ContainsKey(requestId);
+                capturedAtRestart = _capturedExpectedServerRestartRequests.ContainsKey(requestId);
+                RemoveTrackedRequestUnderLock(requestId);
+            }
+
+            if (Volatile.Read(ref _expectedServerRestart) == 0 && !beganDuringOutage && !capturedAtRestart
                 || !Uri.TryCreate(requestUrl, UriKind.Absolute, out var uri)
                 || !string.Equals(uri.Authority, _targetAuthority, StringComparison.OrdinalIgnoreCase)
-                || !ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartUrl(requestUrl, _targetAuthority))
+                || !capturedAtRestart && !ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartUrl(requestUrl, _targetAuthority))
             {
                 return false;
             }
@@ -2488,21 +2561,70 @@ public sealed class BrowserFlowTests
                 beganDuringOutage,
                 requestUrl,
                 errorText,
-                _targetAuthority);
+                _targetAuthority,
+                capturedAtRestart);
             if (expected)
             {
-                _expectedServerRestartRequests.TryRemove(requestIdValue.GetString()!, out _);
+                return true;
             }
 
-            return expected;
+            return false;
         }
 
-        private void CaptureExpectedServerRestartRequest(string requestId, string url)
+        private void TrackRequestUnderLock(string requestId, string url)
         {
+            if (!IsTargetAuthority(url))
+            {
+                RemoveTrackedRequestUnderLock(requestId);
+                return;
+            }
+
+            _requestUrls[requestId] = url;
+            TrimTrackedSameAuthorityRequestsUnderLock();
             if (Volatile.Read(ref _expectedServerRestart) == 1 && IsExpectedServerRestartUrl(url))
             {
                 _expectedServerRestartRequests.TryAdd(requestId, 0);
             }
+        }
+
+        private void RemoveTrackedRequestUnderLock(string requestId)
+        {
+            _requestUrls.TryRemove(requestId, out _);
+            _expectedServerRestartRequests.TryRemove(requestId, out _);
+            _capturedExpectedServerRestartRequests.TryRemove(requestId, out _);
+        }
+
+        private void RemoveTrackedRequest(JsonElement parameters)
+        {
+            if (!parameters.TryGetProperty("requestId", out var requestIdValue) || requestIdValue.ValueKind != JsonValueKind.String)
+            {
+                return;
+            }
+
+            lock (_expectedServerRestartRequestsGate)
+            {
+                RemoveTrackedRequestUnderLock(requestIdValue.GetString()!);
+            }
+        }
+
+        private void TrimTrackedSameAuthorityRequestsUnderLock()
+        {
+            var requestIds = _requestUrls
+                .Where(request => IsTargetAuthority(request.Value))
+                .OrderBy(request => request.Key, StringComparer.Ordinal)
+                .Skip(MaxTrackedSameAuthorityRequests)
+                .Select(request => request.Key)
+                .ToArray();
+            foreach (var requestId in requestIds)
+            {
+                RemoveTrackedRequestUnderLock(requestId);
+            }
+        }
+
+        private bool IsTargetAuthority(string? value)
+        {
+            return Uri.TryCreate(value, UriKind.Absolute, out var uri)
+                && string.Equals(uri.Authority, _targetAuthority, StringComparison.OrdinalIgnoreCase);
         }
 
         private bool ContainsTargetAuthority(string? value)
