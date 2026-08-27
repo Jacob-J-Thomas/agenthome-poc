@@ -1,0 +1,78 @@
+name: Unit of Work
+description: Define an independently reviewable delivery outcome composed of bounded Bolts.
+title: "[UOW] "
+labels:
+  - work:uow
+  - type:feature
+  - domain:runtime
+  - status:tracking
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A UOW is an outcome boundary, not a large implementation story. Update the default `type:*` and `domain:*` labels when needed. A UOW normally owns 2–8 Bolts and never more than 12 active Bolts.
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Outcome
+      description: State the independently reviewable user or system result.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance evidence
+      description: List observable proof that lets a human accept this UOW.
+      placeholder: |
+        - [ ] Observable behavior or artifact
+        - [ ] Exact-main certification evidence
+    validations:
+      required: true
+  - type: textarea
+    id: non_goals
+    attributes:
+      label: Non-goals
+      description: Name adjacent outcomes this UOW must not absorb.
+    validations:
+      required: true
+  - type: textarea
+    id: invariants
+    attributes:
+      label: Protected invariants
+      description: Identify authority, persistence, architecture, compatibility, concurrency, or safety properties that must remain true.
+    validations:
+      required: true
+  - type: textarea
+    id: systems
+    attributes:
+      label: Changed systems and known debt
+      description: Bound the intended subsystem reach and link accepted pre-existing or deferred work.
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Native dependencies
+      description: List necessary blockers to add with GitHub's native `blocked by` relationship. Do not encode preferred order as a dependency.
+      placeholder: "Blocked by #... because ..."
+  - type: textarea
+    id: bolts
+    attributes:
+      label: Planned Bolts
+      description: List 2–8 coherent child contracts, or explain why decomposition is still pending. Create native children only after the UOW contract is accepted.
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification and certification
+      description: Name executable local gates, hosted checks, and exact-main evidence.
+    validations:
+      required: true
+  - type: textarea
+    id: authority
+    attributes:
+      label: Authority and circuit breakers
+      description: Record publication, issue-creation, scope-expansion, review-pass, and merge authority. Note any stricter retry budget.
+    validations:
+      required: true

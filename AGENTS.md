@@ -13,6 +13,12 @@ You are working on EmbodySense.
 - If a requested harness capability is broad or ambiguous, perform a read-only design pass first and explicitly tie the design back to the axioms before editing code.
 - Do not reduce "agent tooling" to human-only slash commands unless the user explicitly asks for slash-command tooling. Agent tooling normally means model-accessible, governed capabilities with permissions, approvals, and auditability.
 
+## Delivery work rules
+
+- Use the active native GitHub hierarchy `Campaign -> Phase -> Unit of Work -> Bolt`; Bolts have no sub-issues, review findings remain parentless until human triage, and native dependency relationships are authoritative. Follow `docs/AIDLC_DELIVERY_CONVENTIONS.md`.
+- Implement one coherent Bolt in normally one pull request. Never use a pull request closing keyword for a Campaign, Phase, or Unit of Work, and do not recursively create implementation issues from review comments.
+- Use `$run-agentic-pr-pipeline`: one full review and one targeted re-review by default, a third pass only for a new credible P0/P1, and explicit human authorization for any further pass, scope expansion, replacement attempt beyond the configured budget, or merge.
+
 ## Code style
 
 - Prefer single-line method calls and argument lists.

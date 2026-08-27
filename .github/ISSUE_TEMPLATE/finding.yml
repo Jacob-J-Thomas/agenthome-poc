@@ -1,0 +1,75 @@
+name: Review Finding
+description: Capture one deduplicated root cause for human triage without recursively expanding active work.
+title: "[Finding] "
+labels:
+  - work:finding
+  - type:bug
+  - domain:runtime
+  - status:needs-spec
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Findings remain parentless until human triage. Update the default `type:*` and `domain:*` labels when needed. Do not make this a child of the origin Bolt.
+  - type: input
+    id: origin
+    attributes:
+      label: Origin PR and review
+      description: Link the exact PR, reviewed head or range, and review comment.
+    validations:
+      required: true
+  - type: input
+    id: signature
+    attributes:
+      label: Root-cause signature
+      description: Provide a stable, concise signature that groups duplicate symptoms.
+      placeholder: "component/invariant-that-fails"
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Current-head evidence and impact
+      description: Cite concrete behavior or paths and explain the material cost.
+    validations:
+      required: true
+  - type: textarea
+    id: disposition
+    attributes:
+      label: Why this is outside the origin contract
+      description: Explain why it does not block the current PR and whether it appears pre-existing, deferred, or independently valuable.
+    validations:
+      required: true
+  - type: textarea
+    id: duplicate_search
+    attributes:
+      label: Duplicate search
+      description: List open and recently closed issues checked before creating this Finding.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: State the required outcome without prescribing an unapproved design.
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification expectations
+      description: Name the evidence a promoted Bolt or UOW would need.
+    validations:
+      required: true
+  - type: dropdown
+    id: triage
+    attributes:
+      label: Requested weekend triage
+      options:
+        - Link to existing work
+        - Promote to Bolt
+        - Group into a Unit of Work
+        - Defer
+        - Reject with evidence
+    validations:
+      required: true

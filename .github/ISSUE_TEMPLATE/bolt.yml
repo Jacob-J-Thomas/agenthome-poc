@@ -1,0 +1,79 @@
+name: Bolt
+description: Define the smallest coherent implementation unit, normally delivered by one pull request.
+title: "[Bolt] "
+labels:
+  - work:bolt
+  - type:feature
+  - domain:runtime
+  - status:needs-spec
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A Bolt has one native UOW parent, no sub-issues, and normally one implementation PR. Update the default `type:*` and `domain:*` labels when needed.
+  - type: input
+    id: parent
+    attributes:
+      label: Parent UOW
+      description: Provide the accepted UOW number; add it as the native parent after creation.
+      placeholder: "#123"
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Outcome
+      description: State the one coherent behavior or delivery repair this Bolt owns.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance evidence
+      description: List observable behavior and regression proof.
+      placeholder: |
+        - [ ] Public behavior proves ...
+        - [ ] Failure or recovery path proves ...
+    validations:
+      required: true
+  - type: textarea
+    id: non_goals
+    attributes:
+      label: Non-goals and known debt
+      description: Bound adjacent cleanup, follow-up findings, and pre-existing debt.
+    validations:
+      required: true
+  - type: textarea
+    id: invariants
+    attributes:
+      label: Protected invariants
+      description: Identify properties the patch must preserve.
+    validations:
+      required: true
+  - type: textarea
+    id: surface
+    attributes:
+      label: Intended change surface
+      description: Name the systems and likely paths this Bolt may change. Material expansion pauses for human direction.
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Native dependencies
+      description: List required delivered prerequisites to add with `blocked by`.
+      placeholder: "Blocked by #... because ..."
+  - type: textarea
+    id: verification
+    attributes:
+      label: Required verification
+      description: Name executable gates and any environment-dependent evidence.
+    validations:
+      required: true
+  - type: textarea
+    id: budget
+    attributes:
+      label: Attempt and review budget
+      description: Default to one implementation attempt, one full review, one targeted re-review, and a third pass only for a new P0/P1. Record any stricter rule.
+    validations:
+      required: true
