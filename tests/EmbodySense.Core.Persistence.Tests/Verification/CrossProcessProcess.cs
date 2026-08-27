@@ -29,7 +29,13 @@ internal sealed class CrossProcessProcess : IDisposable
 
     internal int Id => _ownership.Id;
 
-    internal Task WaitForExitAsync() => _ownership.WaitForExitAsync();
+    internal Task WaitForExitAsync(CancellationToken cancellationToken = default) => _ownership.WaitForExitAsync(cancellationToken);
+
+    internal Task<string> ReadStandardOutputToEndAsync(CancellationToken cancellationToken)
+        => _ownership.ReadStandardOutputToEndAsync(cancellationToken);
+
+    internal Task<string> ReadStandardErrorToEndAsync(CancellationToken cancellationToken)
+        => _ownership.ReadStandardErrorToEndAsync(cancellationToken);
 
     public void Dispose()
     {

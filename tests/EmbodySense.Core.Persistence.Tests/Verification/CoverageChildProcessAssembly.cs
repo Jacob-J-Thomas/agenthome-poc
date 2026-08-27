@@ -25,7 +25,6 @@ internal static class CoverageChildProcessAssembly
             ?? throw new DirectoryNotFoundException("The isolated coverage child-process root is unavailable.");
         var collectorDirectory = Path.Combine(isolationRoot, "Collector");
         var runSettingsPath = Path.Combine(isolationRoot, "verification-pull-request.runsettings");
-        var resultsDirectory = Path.Combine(isolationRoot, "Results");
         if (!Directory.Exists(collectorDirectory))
         {
             throw new DirectoryNotFoundException($"The isolated coverage collector is unavailable: `{collectorDirectory}`.");
@@ -35,7 +34,12 @@ internal static class CoverageChildProcessAssembly
             throw new FileNotFoundException("The isolated coverage runsettings file is unavailable.", runSettingsPath);
         }
 
-        var executionDirectory = Path.Combine(isolationRoot, "Invocations", Guid.NewGuid().ToString("N"));
+        var invocationId = Guid.NewGuid().ToString("N");
+        var executionDirectory = Path.Combine(isolationRoot, "Invocations", invocationId);
+        // The parent verifier discovers every report below Results. A distinct child directory
+        // prevents concurrent XPlat collectors from sharing a testhost flush destination while
+        // retaining report provenance and manifest validation for each invocation.
+        var resultsDirectory = Path.Combine(isolationRoot, "Results", invocationId);
         CopyDirectory(isolatedDirectory, executionDirectory);
         var isolatedPath = Path.Combine(executionDirectory, Path.GetFileName(currentAssemblyPath));
         if (!File.Exists(isolatedPath))

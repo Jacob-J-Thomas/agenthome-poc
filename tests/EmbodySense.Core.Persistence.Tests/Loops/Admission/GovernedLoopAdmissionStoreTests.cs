@@ -932,9 +932,11 @@ public sealed class GovernedLoopAdmissionStoreTests
 
             var successful = new ProcessStartInfo("dotnet");
             Verification.CoverageChildProcessAssembly.AddVstestArguments(successful, currentAssemblyPath, CrossProcessHostTestName);
+            var resultsDirectory = successful.ArgumentList.Single(argument => argument.StartsWith("--ResultsDirectory:", StringComparison.Ordinal))["--ResultsDirectory:".Length..];
             Assert.Contains("--Collect:XPlat Code Coverage", successful.ArgumentList);
-            Assert.Contains($"--ResultsDirectory:{workspace.File("Results")}", successful.ArgumentList);
+            Assert.StartsWith(workspace.File("Results") + Path.DirectorySeparatorChar, resultsDirectory, StringComparison.Ordinal);
             Assert.Single(Directory.EnumerateDirectories(workspace.File("Invocations")));
+            Assert.Single(Directory.EnumerateDirectories(workspace.File("Results")));
             Assert.True(Directory.Exists(workspace.File("Results")));
             Assert.Equal(expectedHashes, GetDirectoryHashes(pristineDirectory));
         }
