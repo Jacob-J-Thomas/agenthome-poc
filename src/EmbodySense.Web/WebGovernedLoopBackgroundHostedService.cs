@@ -102,24 +102,13 @@ internal sealed class WebGovernedLoopBackgroundHostedService : BackgroundService
         {
             var stop = await _host.StopGovernedLoopLocalBackgroundForProcessAsync().ConfigureAwait(false);
             _host.SetGovernedLoopBackgroundPosture(ToPosture(stop.Readiness));
-            while (stop.Readiness == AgentRuntimeGovernedLoopBackgroundReadiness.Draining)
-            {
-                await Task.Delay(_reconciliationInterval, CancellationToken.None).ConfigureAwait(false);
-                var status = await _host.ReadGovernedLoopLocalBackgroundForProcessAsync().ConfigureAwait(false);
-                _host.SetGovernedLoopBackgroundPosture(ToPosture(status.Readiness));
-                if (status.Readiness != AgentRuntimeGovernedLoopBackgroundReadiness.Draining)
-                {
-                    break;
-                }
-            }
+            // Startup owns the fixed drain bound and its DisposeAsync contract parks an incomplete stop while
+            // preserving durable evidence. Do not poll without a process-shutdown bound when a one-shot remains stuck.
         }
         finally
         {
             await _host.ReleaseGovernedLoopLocalBackgroundForProcessAsync().ConfigureAwait(false);
-            if (_host.GovernedLoopBackgroundPosture == WebGovernedLoopBackgroundPosture.Draining)
-            {
-                _host.SetGovernedLoopBackgroundPosture(WebGovernedLoopBackgroundPosture.Stopped);
-            }
+            _host.SetGovernedLoopBackgroundPosture(WebGovernedLoopBackgroundPosture.Stopped);
         }
     }
 
