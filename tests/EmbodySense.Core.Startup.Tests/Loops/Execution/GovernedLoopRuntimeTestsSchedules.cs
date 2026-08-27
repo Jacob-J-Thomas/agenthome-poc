@@ -18,6 +18,9 @@ public sealed class GovernedLoopRuntimeTestsSchedules
         ScheduleRunAdmissionDisposition thirdDisposition) => GovernedLoopRuntimeTests.Atomic_schedule_run_admission_closes_the_post_observation_race_for_every_overlap_policy(overlap, secondDisposition, thirdDisposition);
 
     [Fact]
+    public Task Durable_schedule_overlap_retry_runs_through_canonical_local_background_runtime() => GovernedLoopRuntimeTests.Durable_schedule_overlap_retry_runs_through_canonical_local_background_runtime();
+
+    [Fact]
     public Task Concurrent_cross_schedule_defer_one_observations_retain_one_atomic_deferral_across_restart() => GovernedLoopRuntimeTests.Concurrent_cross_schedule_defer_one_observations_retain_one_atomic_deferral_across_restart();
 
     [Fact]
