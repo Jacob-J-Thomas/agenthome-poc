@@ -52,9 +52,18 @@ body:
   - type: textarea
     id: dependencies
     attributes:
-      label: Native dependencies
-      description: List necessary blockers to add with GitHub's native `blocked by` relationship. Do not encode preferred order as a dependency.
-      placeholder: "Blocked by #... because ..."
+      label: Technical prerequisites and intended order
+      description: Reference necessary delivered work and explain the ordering. Do not add a native `blocked by` relationship; queue child Bolts while prerequisites are unmet.
+      placeholder: "After #... because ..."
+  - type: textarea
+    id: human_intervention
+    attributes:
+      label: Human intervention required
+      description: Complete these fields only if the UOW requires an explicit human decision, authority grant, access change, credential, or requested input.
+      placeholder: |
+        - Human action: Approve, decide, grant, provide, or change ...
+        - Human owner: @owner or named authority
+        - Exit evidence: Observable evidence that releases the work
   - type: textarea
     id: bolts
     attributes:

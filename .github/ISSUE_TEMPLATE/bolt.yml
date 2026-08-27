@@ -60,9 +60,18 @@ body:
   - type: textarea
     id: dependencies
     attributes:
-      label: Native dependencies
-      description: List required delivered prerequisites to add with `blocked by`.
-      placeholder: "Blocked by #... because ..."
+      label: Technical prerequisites and intended order
+      description: Reference required delivered work and explain the ordering. Keep this Bolt `status:queued` while a prerequisite is unmet; do not add a native `blocked by` relationship.
+      placeholder: "After #... because ..."
+  - type: textarea
+    id: human_intervention
+    attributes:
+      label: Human intervention required
+      description: Complete these fields only when applying `status:blocked`. Technical prerequisites, failed checks, and retries do not qualify.
+      placeholder: |
+        - Human action: Approve, decide, grant, provide, or change ...
+        - Human owner: @owner or named authority
+        - Exit evidence: Observable evidence that releases the Bolt
   - type: textarea
     id: verification
     attributes:

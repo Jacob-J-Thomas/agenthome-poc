@@ -15,7 +15,7 @@ You are working on EmbodySense.
 
 ## Delivery work rules
 
-- Use the active native GitHub hierarchy `Campaign -> Phase -> Unit of Work -> Bolt`; Bolts have no sub-issues, review findings remain parentless until human triage, and native dependency relationships are authoritative. Follow `docs/AIDLC_DELIVERY_CONVENTIONS.md`.
+- Use the active native GitHub hierarchy `Campaign -> Phase -> Unit of Work -> Bolt`; Bolts have no sub-issues and review findings remain parentless until human triage. Record technical prerequisites in issue contracts and use `status:queued` while they are unmet; reserve `status:blocked` for explicit human intervention and do not use GitHub's native `blocked by` relationship for technical sequencing. Follow `docs/AIDLC_DELIVERY_CONVENTIONS.md`.
 - Implement one coherent Bolt in normally one pull request. Never use a pull request closing keyword for a Campaign, Phase, or Unit of Work, and do not recursively create implementation issues from review comments.
 - Use `$aidlc-pipeline`: one full review and one targeted re-review by default, a third pass only for a new credible P0/P1, and explicit human authorization for any further pass, scope expansion, replacement attempt beyond the configured budget, or merge.
 

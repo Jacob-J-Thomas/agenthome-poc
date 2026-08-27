@@ -32,13 +32,13 @@ Every open governed issue has exactly one label from each dimension:
 - Domain: one `domain:*` label.
 - State: one `status:*` label.
 
-Campaigns, Phases, and active UOWs use `status:tracking`. A Bolt may progress through `status:needs-spec`, `status:queued`, `status:ready`, and `status:in-progress`; `status:deferred` means an owner intentionally postponed it. Closed issues carry no `status:*` label. `type:epic` is retired for active delivery because work level now expresses hierarchy independently from the nature of the work.
+Campaigns, Phases, and active UOWs use `status:tracking`. A Bolt may progress through `status:needs-spec`, `status:queued`, `status:ready`, and `status:in-progress`; `status:deferred` means an owner intentionally postponed it. `status:blocked` means a human decision, authority grant, access change, credential, or requested input is required. Every blocked issue names the human action, the owner or authority, and the evidence that releases the issue. It never means that code, another issue, a check, or a retry must finish first. Closed issues carry no `status:*` label. `type:epic` is retired for active delivery because work level now expresses hierarchy independently from the nature of the work.
 
 ## Admission contracts
 
 ### Unit of Work
 
-A UOW states one independently reviewable outcome, acceptance evidence, explicit non-goals, protected invariants, changed systems, known debt, native dependencies, required verification, and authority boundaries. It may enter tracking with fewer than two Bolts while being decomposed, but it cannot become ready or in progress without a sufficient Bolt plan.
+A UOW states one independently reviewable outcome, acceptance evidence, explicit non-goals, protected invariants, changed systems, known debt, technical prerequisites and intended order, required verification, and authority boundaries. It may enter tracking with fewer than two Bolts while being decomposed, but it cannot begin implementation without a sufficient Bolt plan.
 
 Split a UOW when it exceeds 12 active Bolts, spans independently mergeable outcomes, requires different acceptance evidence, or crosses a material architecture or authority decision. Do not split merely to increase concurrency.
 
@@ -50,11 +50,17 @@ A Bolt owns one root behavior or delivery repair, a bounded changed surface, obs
 
 A review finding is not automatically implementation work. Record one root cause, origin PR and comment, current-head evidence, material impact, duplicate search, why it is outside the current contract, acceptance criteria, and verification expectations. Keep it parentless with `work:finding` until weekend triage either rejects it, links it to existing work, promotes it to a Bolt, or groups it into a UOW.
 
-## Native hierarchy and dependencies
+## Native hierarchy, queueing, and human intervention
 
-GitHub's native parent and dependency relationships are authoritative. Body prose may explain a relationship but cannot replace it. Use parentage for ownership and `blocked by` for execution order; do not encode sequencing only in checklists or issue text.
+GitHub's native parent relationship is authoritative for ownership. Body prose may explain parentage but cannot replace it. Record technical prerequisites and intended order in each UOW or Bolt contract. An unmet technical prerequisite keeps a Bolt `status:queued`; it does not make the issue human-blocked.
 
-A dependency should identify a necessary delivered prerequisite, not merely a preferred order. Cross-phase or out-of-phase blockers require explicit placement and a human-visible reason. Dependency cycles are invalid.
+Do not use GitHub's native `blocked by` relationship for technical sequencing because GitHub projects that relationship as a generic Blocked state. Cross-phase or out-of-phase prerequisites require explicit placement and a human-visible reason in the issue contract. Use `status:blocked` only when progress requires explicit human intervention, and record:
+
+- Human action: the exact decision, authority, access, credential, or input required.
+- Human owner: the person or authority that can provide it.
+- Exit evidence: the observable evidence that releases the issue back to `status:queued`, `status:ready`, or `status:in-progress`.
+
+A failed check, exhausted automated attempt, unavailable implementation dependency, or preferred execution order is not `status:blocked`. Handle it through bounded recovery, `status:queued`, or a `FAILED` handoff as appropriate.
 
 ## Autonomous delivery circuit breakers
 
@@ -68,7 +74,7 @@ Each Bolt follows `$aidlc-pipeline`:
 
 P0/P1 findings normally return to the current PR. Concrete P2/P3 findings default to deduplicated parentless Finding issues when authorized. Unsupported, duplicate, stale, inherited, or already issue-linked observations create no new work.
 
-The implementation loop ends as `READY`, `NEEDS-HUMAN`, `BLOCKED`, or `FAILED`. It does not keep opening replacement PRs or descendant issues to make visible progress. Merge, Phase completion, UOW acceptance, architecture alternatives, and exceptional budget extensions remain human decisions suitable for weekend review.
+The implementation loop ends as `READY`, `QUEUED`, `BLOCKED`, or `FAILED`. `BLOCKED` is the human-intervention handoff and must name the required action, owner, and exit evidence. `QUEUED` covers unmet technical prerequisites or campaign position. It does not keep opening replacement PRs or descendant issues to make visible progress. Merge, Phase completion, UOW acceptance, architecture alternatives, and exceptional budget extensions remain human decisions suitable for weekend review.
 
 ## Pull-request rules
 
@@ -86,5 +92,5 @@ Run the hierarchy audit from an authenticated checkout:
 ./scripts/audit-issue-hierarchy.ps1 -Repository Jacob-J-Thomas/agenthome-poc -Campaign 332 -Phase 523
 ```
 
-The audit reads GitHub state and fails on active hierarchy, label, body-parent, dependency-cycle, or PR-closing violations. It reports non-blocking decomposition warnings separately and never mutates an issue or pull request.
+The audit reads GitHub state and fails on active hierarchy, label, body-parent, native `blocked by`, human-intervention-contract, or PR-closing violations. It reports non-blocking decomposition warnings separately and never mutates an issue or pull request.
 The repository workflow runs it on Saturday for weekend review and supports an explicit manual run; it intentionally does not launch a full-tree API audit for every individual issue edit.

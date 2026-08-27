@@ -81,6 +81,56 @@ function Assert-OneLabel {
     }
 }
 
+function Assert-AllowedStatus {
+    param(
+        [Parameter(Mandatory = $true)][object]$Issue,
+        [Parameter(Mandatory = $true)][string[]]$Allowed
+    )
+
+    $statuses = @(Get-LabelNames -Issue $Issue | Where-Object { $_.StartsWith('status:', [System.StringComparison]::Ordinal) })
+    if ($statuses.Count -eq 1 -and $Allowed -notcontains $statuses[0]) {
+        $errors.Add("#$($Issue.number) has status $($statuses[0]); allowed status labels are: $($Allowed -join ', ').")
+    }
+}
+
+function Get-BodyParentNumber {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Body)
+
+    $nativeParent = [regex]::Match($Body, 'Native parent:\s*#(?<number>\d+)', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if ($nativeParent.Success) {
+        return [int]$nativeParent.Groups['number'].Value
+    }
+
+    $formParent = [regex]::Match($Body, '(?im)^###\s+Parent (?:Campaign|Phase|UOW)\s*$\s*^#(?<number>\d+)\s*$')
+    if ($formParent.Success) {
+        return [int]$formParent.Groups['number'].Value
+    }
+
+    return $null
+}
+
+function Assert-HumanInterventionContract {
+    param([Parameter(Mandatory = $true)][object]$Issue)
+
+    $labels = @(Get-LabelNames -Issue $Issue)
+    if ($labels -notcontains 'status:blocked') {
+        return
+    }
+
+    $section = [regex]::Match([string]$Issue.body, '(?ims)^###\s+Human intervention required\s*$\s*(?<content>.*?)(?=^###\s|\z)')
+    if (-not $section.Success) {
+        $errors.Add("#$($Issue.number) uses status:blocked without a 'Human intervention required' section.")
+        return
+    }
+
+    $content = $section.Groups['content'].Value
+    foreach ($field in @('Human action', 'Human owner', 'Exit evidence')) {
+        if ($content -notmatch "(?im)^\s*-\s*$([regex]::Escape($field)):\s*\S.+$") {
+            $errors.Add("#$($Issue.number) uses status:blocked without a populated '$field' entry.")
+        }
+    }
+}
+
 $campaignIssue = Get-Issue -Number $Campaign
 $phaseIssue = Get-Issue -Number $Phase
 $campaignChildren = @(Get-Children -Number $Campaign)
@@ -95,14 +145,15 @@ if ($campaignLabels -notcontains 'work:campaign') {
 foreach ($prefix in @('work:', 'type:', 'domain:', 'status:')) {
     Assert-OneLabel -Issue $campaignIssue -Prefix $prefix
 }
+Assert-AllowedStatus -Issue $campaignIssue -Allowed @('status:tracking')
 
 $phaseLabels = @(Get-LabelNames -Issue $phaseIssue)
 if ($phaseLabels -notcontains 'work:phase') {
     $errors.Add("Phase #$Phase must have work:phase.")
 }
-$phaseBodyParent = [regex]::Match([string]$phaseIssue.body, 'Native parent:\s*#(?<number>\d+)', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-if ($phaseBodyParent.Success -and [int]$phaseBodyParent.Groups['number'].Value -ne $Campaign) {
-    $errors.Add("Phase #$Phase body names parent #$($phaseBodyParent.Groups['number'].Value), but native parent is Campaign #$Campaign.")
+$phaseBodyParent = Get-BodyParentNumber -Body ([string]$phaseIssue.body)
+if ($null -ne $phaseBodyParent -and $phaseBodyParent -ne $Campaign) {
+    $errors.Add("Phase #$Phase body names parent #$phaseBodyParent, but native parent is Campaign #$Campaign.")
 }
 
 $nodes = [System.Collections.Generic.List[object]]::new()
@@ -151,6 +202,18 @@ foreach ($issue in $nodes) {
         foreach ($prefix in @('work:', 'type:', 'domain:', 'status:')) {
             Assert-OneLabel -Issue $issue -Prefix $prefix
         }
+
+        if ($number -eq $Phase) {
+            Assert-AllowedStatus -Issue $issue -Allowed @('status:tracking')
+        }
+        elseif ($depthByNumber[$key] -eq 1) {
+            Assert-AllowedStatus -Issue $issue -Allowed @('status:tracking')
+        }
+        else {
+            Assert-AllowedStatus -Issue $issue -Allowed @('status:needs-spec', 'status:queued', 'status:ready', 'status:in-progress', 'status:deferred', 'status:blocked')
+        }
+
+        Assert-HumanInterventionContract -Issue $issue
     }
     else {
         $statusLabels = @($labels | Where-Object { $_.StartsWith('status:', [System.StringComparison]::Ordinal) })
@@ -161,9 +224,9 @@ foreach ($issue in $nodes) {
 
     if ($number -ne $Phase) {
         $parent = [int]$parentByNumber[$key]
-        $bodyParent = [regex]::Match([string]$issue.body, 'Native parent:\s*#(?<number>\d+)', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-        if ($bodyParent.Success -and [int]$bodyParent.Groups['number'].Value -ne $parent) {
-            $errors.Add("Issue #$number body names parent #$($bodyParent.Groups['number'].Value), but native parent is #$parent.")
+        $bodyParent = Get-BodyParentNumber -Body ([string]$issue.body)
+        if ($null -ne $bodyParent -and $bodyParent -ne $parent) {
+            $errors.Add("Issue #$number body names parent #$bodyParent, but native parent is #$parent.")
         }
     }
 
@@ -196,8 +259,8 @@ foreach ($uow in $uows) {
     }
 
     $uowLabels = @(Get-LabelNames -Issue $uow)
-    if ($children.Count -eq 0 -and ($uowLabels -contains 'status:ready' -or $uowLabels -contains 'status:in-progress')) {
-        $errors.Add("UOW #$($uow.number) cannot be ready or in progress without a Bolt plan.")
+    if ($children.Count -lt 2 -and ($uowLabels -contains 'status:ready' -or $uowLabels -contains 'status:in-progress')) {
+        $errors.Add("UOW #$($uow.number) cannot be ready or in progress with fewer than two Bolts.")
     }
 
     foreach ($bolt in $children) {
@@ -214,58 +277,12 @@ foreach ($uow in $uows) {
 }
 
 $openNodes = @($nodes | Where-Object { [string]$_.state -eq 'open' })
-$openNumbers = @{}
 foreach ($issue in $openNodes) {
-    $openNumbers[[string]$issue.number] = $true
-}
-
-$adjacency = @{}
-$indegree = @{}
-foreach ($issue in $openNodes) {
-    $key = [string]$issue.number
-    $adjacency[$key] = [System.Collections.Generic.List[int]]::new()
-    $indegree[$key] = 0
-}
-
-foreach ($issue in $openNodes) {
-    $blockedNumber = [int]$issue.number
-    $dependencies = @(Invoke-GhJson -Arguments @('api', "repos/$Repository/issues/$blockedNumber/dependencies/blocked_by?per_page=100"))
+    $issueNumber = [int]$issue.number
+    $dependencies = @(Invoke-GhJson -Arguments @('api', "repos/$Repository/issues/$issueNumber/dependencies/blocked_by?per_page=100"))
     foreach ($dependency in $dependencies) {
-        $blockerKey = [string]$dependency.number
-        $blockedKey = [string]$blockedNumber
-        if (-not $openNumbers.ContainsKey($blockerKey)) {
-            $warnings.Add("Open issue #$blockedNumber is blocked by #$($dependency.number), which is outside the open Phase tree.")
-            continue
-        }
-
-        $adjacency[$blockerKey].Add($blockedNumber)
-        $indegree[$blockedKey] = [int]$indegree[$blockedKey] + 1
+        $errors.Add("#$issueNumber uses native blocked by #$($dependency.number). Record technical prerequisites in the issue contract and use status:queued; reserve status:blocked for human intervention.")
     }
-}
-
-$ready = [System.Collections.Generic.Queue[int]]::new()
-foreach ($issue in $openNodes) {
-    if ([int]$indegree[[string]$issue.number] -eq 0) {
-        $ready.Enqueue([int]$issue.number)
-    }
-}
-
-$visitedDependencyNodes = 0
-while ($ready.Count -gt 0) {
-    $number = $ready.Dequeue()
-    $visitedDependencyNodes++
-    foreach ($blocked in $adjacency[[string]$number]) {
-        $blockedKey = [string]$blocked
-        $indegree[$blockedKey] = [int]$indegree[$blockedKey] - 1
-        if ([int]$indegree[$blockedKey] -eq 0) {
-            $ready.Enqueue($blocked)
-        }
-    }
-}
-
-if ($visitedDependencyNodes -ne $openNodes.Count) {
-    $cycleMembers = @($openNodes | Where-Object { [int]$indegree[[string]$_.number] -gt 0 } | ForEach-Object { "#$($_.number)" })
-    $errors.Add("Open Phase dependency graph contains a cycle involving: $($cycleMembers -join ', ').")
 }
 
 $repositoryParts = $Repository -split '/', 2
@@ -274,8 +291,8 @@ $pullRequestData = Invoke-GhJson -Arguments @('api', 'graphql', '-f', "query=$pu
 foreach ($pullRequest in @($pullRequestData.data.repository.pullRequests.nodes)) {
     foreach ($closingIssue in @($pullRequest.closingIssuesReferences.nodes)) {
         $closingLabels = @(Get-LabelNames -Issue (Get-Issue -Number ([int]$closingIssue.number)))
-        if ($closingLabels -contains 'work:campaign' -or $closingLabels -contains 'work:phase' -or $closingLabels -contains 'work:uow') {
-            $errors.Add("PR #$($pullRequest.number) uses a closing relationship for aggregate issue #$($closingIssue.number). Only Bolts may be closed by PRs.")
+        if ($closingLabels -notcontains 'work:bolt') {
+            $errors.Add("PR #$($pullRequest.number) uses a closing relationship for issue #$($closingIssue.number), which is not labeled work:bolt. Only Bolts may be closed by PRs.")
         }
     }
 }
