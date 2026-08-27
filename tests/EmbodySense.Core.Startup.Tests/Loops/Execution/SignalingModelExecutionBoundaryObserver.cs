@@ -10,7 +10,7 @@ internal sealed class SignalingModelExecutionBoundaryObserver(
 
     public ValueTask ObserveAsync(
         GovernedModelPrimaryExecutionBoundary boundary,
-        CancellationToken _ = default)
+        CancellationToken cancellationToken = default)
     {
         if (boundary == target)
         {
