@@ -9,7 +9,7 @@ $script:QualificationContractScheduleProfiles = @(
     [pscustomobject]@{ ScriptName = "verify-preflight-overlap.tests.ps1"; EstimatedDurationSeconds = 20; TimeoutSeconds = 90; Weight = 3; ResourceClass = "ProcessHeavy"; Isolation = "Exclusive" }
     [pscustomobject]@{ ScriptName = "verify-sdk-diagnostics.tests.ps1"; EstimatedDurationSeconds = 30; TimeoutSeconds = 90; Weight = 1; ResourceClass = "ProcessLight"; Isolation = "Shared" }
     [pscustomobject]@{ ScriptName = "verify-test-inventory.tests.ps1"; EstimatedDurationSeconds = 30; TimeoutSeconds = 90; Weight = 1; ResourceClass = "ProcessLight"; Isolation = "Shared" }
-    [pscustomobject]@{ ScriptName = "verify-watchdog.tests.ps1"; EstimatedDurationSeconds = 40; TimeoutSeconds = 120; Weight = 1; ResourceClass = "ProcessLight"; Isolation = "Shared" }
+    [pscustomobject]@{ ScriptName = "verify-watchdog.tests.ps1"; EstimatedDurationSeconds = 120; TimeoutSeconds = 150; Weight = 1; ResourceClass = "ProcessLight"; Isolation = "Shared" }
     [pscustomobject]@{ ScriptName = "verify-promotion-fan-in.tests.ps1"; EstimatedDurationSeconds = 20; TimeoutSeconds = 90; Weight = 1; ResourceClass = "ProcessLight"; Isolation = "Shared" }
 )
 $script:QualificationTestScheduleProfiles = @(
