@@ -366,6 +366,30 @@ function Assert-VerificationCoverageCollectorPath {
     }
 }
 
+function Assert-VerificationCoverageChildCollectorPath {
+    param(
+        [Parameter(Mandatory = $true)] [string]$Path,
+        [Parameter(Mandatory = $true)] [string]$CollectorRoot,
+        [Parameter(Mandatory = $true)] [string]$Description
+    )
+
+    if (-not (Test-VerificationCoverageDescendantPath -Path $Path -Root $CollectorRoot)) {
+        throw "$Description is outside its exact collector root: $Path"
+    }
+
+    $relativePath = [IO.Path]::GetRelativePath([IO.Path]::GetFullPath($CollectorRoot), [IO.Path]::GetFullPath($Path))
+    $segments = @($relativePath.Split([char[]]@([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar), [StringSplitOptions]::RemoveEmptyEntries))
+    $collectorId = [Guid]::Empty
+    if ($segments.Count -eq 2 -and [Guid]::TryParseExact($segments[0], "D", [ref]$collectorId) -and $segments[1] -ceq "coverage.cobertura.xml") {
+        return
+    }
+
+    $invocationId = [Guid]::Empty
+    if ($segments.Count -ne 3 -or -not [Guid]::TryParseExact($segments[0], "N", [ref]$invocationId) -or -not [Guid]::TryParseExact($segments[1], "D", [ref]$collectorId) -or $segments[2] -cne "coverage.cobertura.xml") {
+        throw "$Description is outside its exact invocation GUID and collector GUID path: $Path"
+    }
+}
+
 function Assert-VerificationCoverageLaneProvenance {
     param(
         [Parameter(Mandatory = $true)] [string]$LaneName,
@@ -436,7 +460,8 @@ function Assert-VerificationCoverageChildProvenance {
         }
     }
 
-    Assert-VerificationCoverageCollectorPath -Path $ReportPath -CollectorRoot $fullChildRoot -Description "Coverage child-process report"
+    [void](Assert-VerificationCoverageOrdinaryPath -Path $ReportPath -Root $fullChildRoot -PathType Leaf -Description "Coverage child-process report")
+    Assert-VerificationCoverageChildCollectorPath -Path $ReportPath -CollectorRoot $fullChildRoot -Description "Coverage child-process report"
 }
 
 function Get-VerificationCoverageEvidence {

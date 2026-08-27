@@ -27,6 +27,11 @@ internal sealed class CrossProcessProcessOwnership : IDisposable
     private readonly StreamReader? _standardOutput;
     private readonly StreamReader? _standardError;
     private readonly StreamWriter? _standardInput;
+    private readonly object _streamReadGate = new();
+
+    private int _activeStreamReads;
+    private bool _streamDisposalRequested;
+    private bool _streamsDisposed;
 
     private CrossProcessProcessOwnership(
         Process process,
@@ -90,17 +95,31 @@ internal sealed class CrossProcessProcessOwnership : IDisposable
         }
     }
 
-    internal async Task WaitForExitAsync()
+    internal async Task WaitForExitAsync(CancellationToken cancellationToken = default)
     {
-        if (_nativeProcessHandle is null)
+        var nativeProcessHandle = _nativeProcessHandle;
+        if (nativeProcessHandle is null)
         {
-            await _process.WaitForExitAsync();
+            await _process.WaitForExitAsync(cancellationToken);
             return;
         }
 
-        while (!HasExited)
+        var nativeHandleReferenceAdded = false;
+        try
         {
-            await Task.Delay(10);
+            nativeProcessHandle.DangerousAddRef(ref nativeHandleReferenceAdded);
+            var nativeHandle = nativeProcessHandle.DangerousGetHandle();
+            while (GetExitCode(nativeHandle) == StillActive)
+            {
+                await Task.Delay(10, cancellationToken);
+            }
+        }
+        finally
+        {
+            if (nativeHandleReferenceAdded)
+            {
+                nativeProcessHandle.DangerousRelease();
+            }
         }
     }
 
@@ -111,7 +130,12 @@ internal sealed class CrossProcessProcessOwnership : IDisposable
             return _process.HasExited ? unchecked((uint)_process.ExitCode) : StillActive;
         }
 
-        if (!GetExitCodeProcess(_nativeProcessHandle.DangerousGetHandle(), out var exitCode))
+        return GetExitCode(_nativeProcessHandle.DangerousGetHandle());
+    }
+
+    private static uint GetExitCode(IntPtr nativeProcessHandle)
+    {
+        if (!GetExitCodeProcess(nativeProcessHandle, out var exitCode))
         {
             throw LastWin32Exception("The cross-process child exit code could not be read.");
         }
@@ -149,11 +173,23 @@ internal sealed class CrossProcessProcessOwnership : IDisposable
     public void Dispose()
     {
         _standardInput?.Dispose();
-        _standardOutput?.Dispose();
-        _standardError?.Dispose();
         _job?.Dispose();
         _nativeProcessHandle?.Dispose();
+        lock (_streamReadGate)
+        {
+            _streamDisposalRequested = true;
+            if (_activeStreamReads == 0)
+            {
+                DisposeStreamsNoLock();
+            }
+        }
     }
+
+    internal Task<string> ReadStandardOutputToEndAsync(CancellationToken cancellationToken)
+        => ReadStreamToEndAsync(StandardOutput, cancellationToken);
+
+    internal Task<string> ReadStandardErrorToEndAsync(CancellationToken cancellationToken)
+        => ReadStreamToEndAsync(StandardError, cancellationToken);
 
     private static CrossProcessProcess StartManaged(ProcessStartInfo startInfo)
     {
@@ -340,6 +376,47 @@ internal sealed class CrossProcessProcessOwnership : IDisposable
             startInfo.RedirectStandardOutput ? process.StandardOutput : null,
             startInfo.RedirectStandardError ? process.StandardError : null,
             startInfo.RedirectStandardInput ? process.StandardInput : null);
+
+    private async Task<string> ReadStreamToEndAsync(StreamReader reader, CancellationToken cancellationToken)
+    {
+        lock (_streamReadGate)
+        {
+            if (_streamDisposalRequested)
+            {
+                throw new ObjectDisposedException(nameof(CrossProcessProcessOwnership));
+            }
+
+            _activeStreamReads++;
+        }
+
+        try
+        {
+            return await reader.ReadToEndAsync(cancellationToken);
+        }
+        finally
+        {
+            lock (_streamReadGate)
+            {
+                _activeStreamReads--;
+                if (_streamDisposalRequested && _activeStreamReads == 0)
+                {
+                    DisposeStreamsNoLock();
+                }
+            }
+        }
+    }
+
+    private void DisposeStreamsNoLock()
+    {
+        if (_streamsDisposed)
+        {
+            return;
+        }
+
+        _standardOutput?.Dispose();
+        _standardError?.Dispose();
+        _streamsDisposed = true;
+    }
 
     private static SafeFileHandle CreateConfiguredJob()
     {

@@ -124,11 +124,9 @@ internal static class CrossProcessReadinessDiagnostics
             return $"{operation}/{stage}/{child.Label}: pid={child.Process.Id} state=still-running exit=<unavailable> ready={File.Exists(child.ReadyPath)} result={File.Exists(child.ResultPath)} stdout=<unavailable> stderr=<unavailable>";
         }
 
-        var outputReader = child.Process.StandardOutput;
-        var errorReader = child.Process.StandardError;
         using var cancellation = new CancellationTokenSource();
-        var outputTask = ReadChildStreamAsync(outputReader, cancellation.Token);
-        var errorTask = ReadChildStreamAsync(errorReader, cancellation.Token);
+        var outputTask = ReadChildStreamAsync(child.Process.ReadStandardOutputToEndAsync(cancellation.Token));
+        var errorTask = ReadChildStreamAsync(child.Process.ReadStandardErrorToEndAsync(cancellation.Token));
         var drainTask = Task.WhenAll(outputTask, errorTask);
         try
         {
@@ -137,18 +135,16 @@ internal static class CrossProcessReadinessDiagnostics
         catch (TimeoutException)
         {
             cancellation.Cancel();
-            outputReader.Dispose();
-            errorReader.Dispose();
         }
 
         return $"{operation}/{stage}/{child.Label}: pid={child.Process.Id} state=exited exit={child.Process.ExitCode} ready={File.Exists(child.ReadyPath)} result={File.Exists(child.ResultPath)} stdout={GetChildStreamEvidence(outputTask)} stderr={GetChildStreamEvidence(errorTask)}";
     }
 
-    private static async Task<string> ReadChildStreamAsync(StreamReader reader, CancellationToken cancellationToken)
+    private static async Task<string> ReadChildStreamAsync(Task<string> readTask)
     {
         try
         {
-            return await reader.ReadToEndAsync(cancellationToken);
+            return await readTask;
         }
         catch (OperationCanceledException)
         {

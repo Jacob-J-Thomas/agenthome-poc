@@ -409,6 +409,21 @@ try {
         Write-CoverageManifest -TestResults @($canonicalOnlyFixture.Result, $canonicalOnlyFixture.Result) -Isolations @() -MinimumWriteTimeUtc $minimumWriteTimeUtc -VerificationResultsPath $canonicalOnlyFixture.ResultsRoot -ManifestPath $canonicalOnlyFixture.ManifestPath
     }
 
+    $childProvenanceResultsRoot = Join-Path $canonicalOnlyRepository "verification-results"
+    $childProvenanceRoot = Join-Path $childProvenanceResultsRoot "CoverageIsolation\Fixture.Tests\canonical\bin\Release\Results"
+    $childInvocationId = [Guid]::NewGuid().ToString("N")
+    $childCollectorId = [Guid]::NewGuid().ToString("D")
+    $childProvenancePath = Join-Path $childProvenanceRoot "$childInvocationId\$childCollectorId\coverage.cobertura.xml"
+    New-Item -ItemType Directory -Path (Split-Path -Parent $childProvenancePath) -Force | Out-Null
+    Set-Content -LiteralPath $childProvenancePath -Value "<coverage />" -Encoding UTF8
+    Assert-VerificationCoverageChildProvenance -ProjectName "Fixture.Tests" -ChildResultsRoot $childProvenanceRoot -ReportPath $childProvenancePath -ResultsRoot $childProvenanceResultsRoot -RepositoryRoot $canonicalOnlyRepository
+    $invalidChildProvenancePath = Join-Path $childProvenanceRoot "not-an-invocation\$childCollectorId\coverage.cobertura.xml"
+    New-Item -ItemType Directory -Path (Split-Path -Parent $invalidChildProvenancePath) -Force | Out-Null
+    Set-Content -LiteralPath $invalidChildProvenancePath -Value "<coverage />" -Encoding UTF8
+    Invoke-ExpectedFailure -ExpectedMessage "outside its exact invocation GUID and collector GUID path" -Action {
+        Assert-VerificationCoverageChildProvenance -ProjectName "Fixture.Tests" -ChildResultsRoot $childProvenanceRoot -ReportPath $invalidChildProvenancePath -ResultsRoot $childProvenanceResultsRoot -RepositoryRoot $canonicalOnlyRepository
+    }
+
     $validAliasRepository = New-FixtureRepository -ScenarioRoot $scenarioRoot -Name "manifest-generator-alias"
     $validAliasFixture = New-CoverageManifestLaneFixture -RepositoryRoot $validAliasRepository -Packages $manifestGeneratorPackages -LastWriteTimeUtc $freshWriteTimeUtc -IncludeAlias
     Write-CoverageManifest -TestResults @($validAliasFixture.Result) -Isolations @() -MinimumWriteTimeUtc $minimumWriteTimeUtc -VerificationResultsPath $validAliasFixture.ResultsRoot -ManifestPath $validAliasFixture.ManifestPath | Out-Null
@@ -440,7 +455,7 @@ try {
     [IO.File]::WriteAllText($validAliasFixture.ManifestPath, ($validAliasManifest | ConvertTo-Json -Depth 6), [Text.UTF8Encoding]::new($false))
     $reclassifiedAliasResult = Invoke-CoverageVerification -RepositoryRoot $validAliasRepository -MinimumWriteTimeUtc $minimumWriteTimeUtc -ResultsRoot $validAliasFixture.ResultsRoot -ManifestPath $validAliasFixture.ManifestPath
     Assert-True -Condition ($reclassifiedAliasResult.ExitCode -ne 0) -Message "A staging alias reclassified as a child report must fail closed."
-    Assert-Contains -Actual $reclassifiedAliasResult.Output -Expected "outside its exact collector root" -Message "Child report provenance must reject a reclassified staging alias before aggregation."
+    Assert-Contains -Actual $reclassifiedAliasResult.Output -Expected "outside its admitted root" -Message "Child report provenance must reject a reclassified staging alias before aggregation."
 
     $duplicateLaneRepository = New-FixtureRepository -ScenarioRoot $scenarioRoot -Name "manifest-consumer-duplicate-lane"
     $duplicateLaneFixture = New-CoverageManifestLaneFixture -RepositoryRoot $duplicateLaneRepository -Packages $manifestGeneratorPackages -LastWriteTimeUtc $freshWriteTimeUtc
