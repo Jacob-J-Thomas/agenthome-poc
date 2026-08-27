@@ -39,6 +39,7 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
     private readonly byte[] _secret;
     private readonly string _pipeName;
     private readonly CancellationTokenSource _shutdown = new();
+    private readonly TaskCompletionSource<bool> _brokerReady = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly Task _server;
     private readonly Dictionary<string, ActiveAttempt> _activeAttempts = new(StringComparer.Ordinal);
     private readonly object _gate = new();
@@ -57,9 +58,17 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
         _secret = RandomNumberGenerator.GetBytes(32);
         _encodedSecret = Convert.ToBase64String(_secret);
         _pipeName = "es-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(workspaceKey + "\n" + _ownerId))).ToLowerInvariant()[..16];
-        // TODO(https://github.com/Jacob-J-Thomas/agenthome-poc/issues/535): Publish this descriptor only after the exact named-pipe generation reaches a bounded listener-ready boundary.
-        WriteOwnerDescriptor();
-        _server = Task.Run(RunServerAsync);
+        _server = RunServerAsync();
+        try
+        {
+            _brokerReady.Task.WaitAsync(_connectionIoTimeout).GetAwaiter().GetResult();
+            WriteOwnerDescriptor();
+        }
+        catch
+        {
+            StopServerAfterFailedReadiness();
+            throw;
+        }
     }
 
     /// <summary>
@@ -258,28 +267,68 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
 
     private async Task RunServerAsync()
     {
-        while (!_shutdown.IsCancellationRequested)
+        NamedPipeServerStream? listener = null;
+        try
         {
-            try
+            listener = CreateServer();
+            var listenerConnection = listener.WaitForConnectionAsync(_shutdown.Token);
+            _brokerReady.TrySetResult(true);
+            while (!_shutdown.IsCancellationRequested)
             {
-                var options = PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly;
-                await using var server = new NamedPipeServerStream(_pipeName, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, options);
-                await server.WaitForConnectionAsync(_shutdown.Token);
-                await HandleConnectionAsync(server, _shutdown.Token);
-            }
-            catch (OperationCanceledException) when (_shutdown.IsCancellationRequested)
-            {
-                return;
-            }
-            catch (OperationCanceledException)
-            {
-                // An incomplete client frame or blocked response is abandoned at its bounded I/O deadline.
-            }
-            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException or FormatException)
-            {
-                // A malformed or disconnected caller cannot terminate the bounded owner broker.
+                await listenerConnection;
+                var connected = listener;
+                listener = CreateServer();
+                listenerConnection = listener.WaitForConnectionAsync(_shutdown.Token);
+                try
+                {
+                    await HandleConnectionAsync(connected, _shutdown.Token);
+                }
+                catch (OperationCanceledException) when (!_shutdown.IsCancellationRequested)
+                {
+                    // An incomplete client frame or blocked response is abandoned at its bounded I/O deadline.
+                }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException or FormatException)
+                {
+                    // A malformed or disconnected caller cannot terminate the bounded owner broker.
+                }
+                finally
+                {
+                    connected.Dispose();
+                }
             }
         }
+        catch (OperationCanceledException) when (_shutdown.IsCancellationRequested)
+        {
+            _brokerReady.TrySetCanceled(_shutdown.Token);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException or FormatException)
+        {
+            _brokerReady.TrySetException(exception);
+        }
+        finally
+        {
+            listener?.Dispose();
+        }
+    }
+
+    private NamedPipeServerStream CreateServer()
+    {
+        var options = PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly;
+        return new NamedPipeServerStream(_pipeName, PipeDirection.InOut, 2, PipeTransmissionMode.Byte, options);
+    }
+
+    private void StopServerAfterFailedReadiness()
+    {
+        _shutdown.Cancel();
+        _ = _server.ContinueWith(
+            _ =>
+            {
+                _shutdown.Dispose();
+                CryptographicOperations.ZeroMemory(_secret);
+            },
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
     }
 
     private async Task HandleConnectionAsync(Stream stream, CancellationToken cancellationToken)
