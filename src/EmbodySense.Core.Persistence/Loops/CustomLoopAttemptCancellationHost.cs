@@ -38,6 +38,7 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
     private readonly string _encodedSecret;
     private readonly byte[] _secret;
     private readonly string _pipeName;
+    private readonly Action? _brokerFaulted;
     private readonly CancellationTokenSource _shutdown = new();
     private readonly TaskCompletionSource<bool> _brokerReady = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly Task _server;
@@ -48,22 +49,19 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
     private int _serverResourcesReleased;
 
     /// <summary>
-    /// Raised after a terminal broker failure has withdrawn this generation's owner descriptor.
-    /// </summary>
-    internal event Action? BrokerFaulted;
-
-    /// <summary>
     /// Initializes a new instance of the <see cref="CustomLoopAttemptCancellationHost"/> type.
     /// </summary>
     /// <param name="paths">The paths.</param>
     /// <param name="workspaceKey">The workspace key.</param>
-    public CustomLoopAttemptCancellationHost(WorkspacePaths paths, string workspaceKey)
+    /// <param name="brokerFaulted">The callback invoked after a terminal broker failure withdraws the descriptor.</param>
+    public CustomLoopAttemptCancellationHost(WorkspacePaths paths, string workspaceKey, Action? brokerFaulted = null)
     {
         _paths = paths;
         _ownerId = "owner-" + Guid.NewGuid().ToString("N");
         _secret = RandomNumberGenerator.GetBytes(32);
         _encodedSecret = Convert.ToBase64String(_secret);
         _pipeName = "es-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(workspaceKey + "\n" + _ownerId))).ToLowerInvariant()[..16];
+        _brokerFaulted = brokerFaulted;
         _server = RunServerAsync();
         try
         {
@@ -332,7 +330,7 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
         CompleteActiveAttemptsAsOwnerUnavailable();
         _shutdown.Cancel();
         DeleteOwnerDescriptor();
-        BrokerFaulted?.Invoke();
+        _brokerFaulted?.Invoke();
         ReleaseServerResourcesAfterStop();
     }
 

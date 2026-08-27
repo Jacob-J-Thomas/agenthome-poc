@@ -421,6 +421,10 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
         var paths = new WorkspacePaths(workspace.RootPath);
         await using var owner = new CustomLoopWorkspaceExecutionGate(paths);
         await using var idleReference = new CustomLoopWorkspaceExecutionGate(paths);
+        var activeResult = owner.TryAcquire("invoke-successor-listener-failure", _firstHash);
+        Assert.Equal(CustomLoopExecutionLeaseStatus.Acquired, activeResult.Status);
+        Assert.NotNull(activeResult.Lease);
+        using var activeLease = activeResult.Lease;
         using var cancellation = new CancellationTokenSource();
         using var registration = owner.RegisterActiveAttempt("run-successor-listener-failure", cancellation);
         var descriptor = JsonNode.Parse(await File.ReadAllBytesAsync(paths.CustomLoopCancellationOwnerPath))!.AsObject();
@@ -437,6 +441,10 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
         Assert.Equal(CustomLoopAttemptCancellationStatus.OwnerUnavailable, local.Status);
         Assert.Equal(CustomLoopAttemptCancellationStatus.OwnerUnavailable, afterWithdrawal.Status);
 
+        await using var blockedOwner = new CustomLoopWorkspaceExecutionGate(paths);
+        Assert.Equal(CustomLoopExecutionLeaseStatus.WorkspaceBusy, blockedOwner.TryAcquire("invoke-overlap-after-successor-failure", _secondHash).Status);
+        activeLease.Dispose();
+
         await using var replacementOwner = new CustomLoopWorkspaceExecutionGate(paths);
         var replacementResult = replacementOwner.TryAcquire("invoke-after-successor-listener-failure", _firstHash);
 
@@ -445,6 +453,15 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
         using var replacement = replacementResult.Lease;
         var replacementDescriptor = JsonNode.Parse(await File.ReadAllBytesAsync(paths.CustomLoopCancellationOwnerPath))!.AsObject();
         Assert.NotEqual(descriptor["ownerId"]!.GetValue<string>(), replacementDescriptor["ownerId"]!.GetValue<string>());
+        using var replacementCancellation = new CancellationTokenSource();
+        using var replacementRegistration = replacementOwner.RegisterActiveAttempt("run-after-successor-listener-failure", replacementCancellation);
+        var replacementConfirmation = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var replacementObservation = replacementCancellation.Token.Register(() => replacementConfirmation.TrySetResult(replacementRegistration.TryConfirmProviderInterruption(replacementCancellation.Token)));
+
+        var routedThroughReplacement = await owner.RequestCancellationAsync("run-after-successor-listener-failure", "cancel-through-replacement");
+
+        Assert.Equal(CustomLoopAttemptCancellationStatus.ProviderInterruptionConfirmed, routedThroughReplacement.Status);
+        Assert.True(await replacementConfirmation.Task);
     }
 
     [Fact]
