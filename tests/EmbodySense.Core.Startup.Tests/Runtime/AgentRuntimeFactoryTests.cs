@@ -91,6 +91,7 @@ using EmbodySense.Core.Startup.Triggers;
 using EmbodySense.Core.Startup.Triggers.Models;
 using EmbodySense.Core.Startup.Tests.Triggers;
 using EmbodySense.Core.Startup.Tests.Loops.Execution.Effects;
+using EmbodySense.Core.Startup.Tests.Loops.Execution.Sleep;
 using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Startup.Tests.Runtime;
@@ -326,6 +327,117 @@ public sealed class AgentRuntimeFactoryTests
     }
 
     [Fact]
+    public async Task Concurrent_background_activation_projects_the_losing_acquisition_as_live_peer()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        await using var first = await CreateRuntimeAsync(workspace);
+        await using var second = await CreateRuntimeAsync(workspace);
+
+        var results = await Task.WhenAll(
+            first.StartGovernedLoopLocalBackgroundWithStatusAsync(),
+            second.StartGovernedLoopLocalBackgroundWithStatusAsync());
+
+        Assert.Single(results, result => result.Status == AgentRuntimeGovernedLoopBackgroundStartStatus.Started);
+        Assert.Single(results, result => result.Status == AgentRuntimeGovernedLoopBackgroundStartStatus.OwnedByLivePeer);
+        Assert.Contains(results, result => result.Ownership == AgentRuntimeGovernedLoopBackgroundOwnership.LivePeer);
+    }
+
+    [Fact]
+    public async Task Concurrent_legacy_background_activation_projects_live_peer_as_available()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        await using var first = await CreateRuntimeAsync(workspace);
+        await using var second = await CreateRuntimeAsync(workspace);
+
+        var results = await Task.WhenAll(
+            first.StartGovernedLoopLocalBackgroundAsync(),
+            second.StartGovernedLoopLocalBackgroundAsync());
+
+        Assert.All(results, result => Assert.True(result.Available));
+        Assert.All(results, result => Assert.Equal("Available", result.Status));
+    }
+
+    [Fact]
+    public async Task Failed_durable_background_evidence_projects_degraded_status_and_requires_repair()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new GovernedLoopCoordinatorEvidenceStore(paths);
+        var acquisition = await store.TryAcquireAsync(ExpiredPeerAcquisition());
+        var snapshot = Assert.IsType<GovernedLoopCoordinatorSnapshot>(acquisition!.Snapshot);
+        var terminalAtUtc = snapshot.LatestLifecycle.UpdatedAtUtc.AddTicks(1);
+        var failed = GovernedLoopSleepContractHash.Apply(snapshot.LatestLifecycle with
+        {
+            LifecycleVersion = snapshot.LatestLifecycle.LifecycleVersion + 1,
+            Status = GovernedLoopCoordinatorStatus.Failed,
+            UpdatedAtUtc = terminalAtUtc,
+            TerminalAtUtc = terminalAtUtc,
+            ContentHash = string.Empty
+        });
+        var mutation = await store.AppendLifecycleAsync(new GovernedLoopCoordinatorLifecycleMutationRequest(
+            snapshot.Ownership,
+            snapshot.Ownership.ContentHash,
+            snapshot.LatestLifecycle.LifecycleVersion,
+            snapshot.LatestLifecycle.ContentHash,
+            failed));
+        Assert.Equal(GovernedLoopCoordinatorLifecycleMutationStatus.Appended, mutation!.Status);
+
+        await using var runtime = await CreateRuntimeAsync(workspace);
+        var status = await runtime.ReadGovernedLoopLocalBackgroundStatusAsync();
+        var typedStart = await runtime.StartGovernedLoopLocalBackgroundWithStatusAsync();
+        var legacyStart = await runtime.StartGovernedLoopLocalBackgroundAsync();
+
+        Assert.Equal(AgentRuntimeGovernedLoopBackgroundReadiness.Degraded, status.Readiness);
+        Assert.Equal(AgentRuntimeGovernedLoopBackgroundOwnership.None, status.Ownership);
+        Assert.Equal(AgentRuntimeGovernedLoopBackgroundStartStatus.RepairRequired, typedStart.Status);
+        Assert.False(typedStart.RetryAllowed);
+        Assert.False(legacyStart.Available);
+        Assert.Equal("Failed", legacyStart.Status);
+    }
+
+    [Fact]
+    public async Task Factory_composes_the_coordinator_boundary_observer_into_background_lifecycle()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var executablePath = await CreateFakeCodexExecutableAsync(workspace);
+        var observer = new SignalingCoordinatorBoundaryObserver();
+        var factory = AgentRuntimeFactory.ForFileCapabilityTrustRoot(
+                new RejectingApprovalPrompt(),
+                workspace.ServerStatePath,
+                CreateCompatibleRuntimeStatus(executablePath))
+            .WithGovernedLoopLocalCoordinatorBoundaryObserver(observer);
+        await using var runtime = await factory.CreateAsync(
+            "test-model",
+            workspace.RootPath,
+            executablePath,
+            "read-only",
+            AgentRuntimeSurface.Cli);
+
+        var start = await runtime.StartGovernedLoopLocalBackgroundWithStatusAsync();
+        await observer.HeartbeatDue.WaitAsync(TimeSpan.FromSeconds(5));
+        var stop = await runtime.StopGovernedLoopLocalBackgroundAsync();
+
+        Assert.Equal(AgentRuntimeGovernedLoopBackgroundStartStatus.Started, start.Status);
+        Assert.Equal(AgentRuntimeGovernedLoopBackgroundStopStatus.Stopped, stop.Status);
+    }
+
+    [Fact]
+    public void Local_coordinator_boundary_observer_configuration_is_immutable()
+    {
+        var factory = new AgentRuntimeFactory(new RejectingApprovalPrompt());
+        var observer = new SignalingCoordinatorBoundaryObserver();
+
+        var configured = factory.WithGovernedLoopLocalCoordinatorBoundaryObserver(observer);
+
+        Assert.NotSame(factory, configured);
+        Assert.Throws<ArgumentNullException>(() => factory.WithGovernedLoopLocalCoordinatorBoundaryObserver(null!));
+    }
+
+    [Fact]
     public async Task StartGovernedLoopLocalBackgroundAsync_immediately_restarts_a_confirmed_local_terminal_owner_with_exact_fenced_evidence()
     {
         using var workspace = new TestWorkspace();
@@ -393,6 +505,75 @@ public sealed class AgentRuntimeFactoryTests
         Assert.Equal(AgentRuntimeGovernedLoopBackgroundReadiness.Unavailable, stop.Readiness);
         Assert.Equal(AgentRuntimeGovernedLoopBackgroundOwnership.Unknown, stop.Ownership);
         Assert.Equal(GovernedLoopCoordinatorReadStatus.Corrupt, durable!.Status);
+    }
+
+    [Fact]
+    public async Task StopGovernedLoopLocalBackgroundAsync_replays_already_stopped_when_a_new_host_confirms_terminal_evidence()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        await using var owner = await CreateRuntimeAsync(workspace);
+        Assert.Equal(AgentRuntimeGovernedLoopBackgroundStartStatus.Started, (await owner.StartGovernedLoopLocalBackgroundWithStatusAsync()).Status);
+        Assert.Equal(AgentRuntimeGovernedLoopBackgroundStopStatus.Stopped, (await owner.StopGovernedLoopLocalBackgroundAsync()).Status);
+
+        await using var replacement = await CreateRuntimeAsync(workspace);
+        var stop = await replacement.StopGovernedLoopLocalBackgroundAsync();
+
+        Assert.Equal(AgentRuntimeGovernedLoopBackgroundStopStatus.AlreadyStopped, stop.Status);
+        Assert.Equal(AgentRuntimeGovernedLoopBackgroundReadiness.Stopped, stop.Readiness);
+        Assert.Equal(AgentRuntimeGovernedLoopBackgroundOwnership.None, stop.Ownership);
+    }
+
+    [Fact]
+    public async Task StopGovernedLoopLocalBackgroundAsync_preserves_a_running_session_failure_when_durable_evidence_becomes_unreadable()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await using var runtime = await CreateRuntimeAsync(workspace);
+
+        var started = await runtime.StartGovernedLoopLocalBackgroundWithStatusAsync();
+        var ledger = Directory.EnumerateFiles(
+                paths.AgentFile(Path.Combine("loops", "execution", "coordinator")),
+                "ledger-*.json")
+            .Order(StringComparer.Ordinal)
+            .Last();
+        await File.WriteAllTextAsync(ledger, "{invalid");
+
+        var stop = await runtime.StopGovernedLoopLocalBackgroundAsync();
+
+        Assert.Equal(AgentRuntimeGovernedLoopBackgroundStartStatus.Started, started.Status);
+        Assert.Contains(stop.Status, new[]
+        {
+            AgentRuntimeGovernedLoopBackgroundStopStatus.Failed,
+            AgentRuntimeGovernedLoopBackgroundStopStatus.Unavailable
+        });
+        Assert.NotEqual(AgentRuntimeGovernedLoopBackgroundStopStatus.Stopped, stop.Status);
+    }
+
+    [Fact]
+    public async Task StartGovernedLoopLocalBackgroundWithStatusAsync_projects_corrupt_durable_evidence_as_repair_required()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new GovernedLoopCoordinatorEvidenceStore(paths);
+        Assert.Equal(GovernedLoopCoordinatorAcquisitionStatus.Acquired, (await store.TryAcquireAsync(ExpiredPeerAcquisition()))!.Status);
+        var ledger = Directory.EnumerateFiles(
+                paths.AgentFile(Path.Combine("loops", "execution", "coordinator")),
+                "ledger-*.json")
+            .Order(StringComparer.Ordinal)
+            .Last();
+        await File.WriteAllTextAsync(ledger, "{invalid");
+        await using var runtime = await CreateRuntimeAsync(workspace);
+
+        var typedStart = await runtime.StartGovernedLoopLocalBackgroundWithStatusAsync();
+        var legacyStart = await runtime.StartGovernedLoopLocalBackgroundAsync();
+
+        Assert.Equal(AgentRuntimeGovernedLoopBackgroundStartStatus.RepairRequired, typedStart.Status);
+        Assert.False(typedStart.RetryAllowed);
+        Assert.False(legacyStart.Available);
+        Assert.Equal("Failed", legacyStart.Status);
     }
 
     [Fact]

@@ -36,6 +36,8 @@ internal sealed class RecordingCoordinatorEvidencePort : IGovernedLoopCoordinato
 
     internal GovernedLoopCoordinatorFailureMutationStatus? FailureOverride { get; set; }
 
+    internal bool ReturnMismatchedFailureSnapshot { get; set; }
+
     internal CoordinatorPostCommitFailureMode FailurePostCommitFailure
     {
         get => _failurePostCommitFailure;
@@ -66,6 +68,28 @@ internal sealed class RecordingCoordinatorEvidencePort : IGovernedLoopCoordinato
 
     internal bool ReturnMalformedRead { get; set; }
 
+    internal bool ThrowOnRead { get; set; }
+
+    internal bool CancelOnRead { get; set; }
+
+    internal CancellationTokenSource? CancelSourceOnRead { get; set; }
+
+    internal bool ThrowOnAcquire { get; set; }
+
+    internal bool CancelOnAcquire { get; set; }
+
+    internal bool CancelAfterAcquire { get; set; }
+
+    internal CancellationTokenSource? CancelSourceOnAcquire { get; set; }
+
+    internal bool ReturnNullAcquisition { get; set; }
+
+    internal bool ReturnNullHeartbeat { get; set; }
+
+    internal bool ReturnNullLifecycle { get; set; }
+
+    internal bool ReturnNullFailure { get; set; }
+
     internal bool ThrowOnHeartbeat { get; set; }
 
     internal GovernedLoopCoordinatorSnapshot? Snapshot
@@ -84,6 +108,17 @@ internal sealed class RecordingCoordinatorEvidencePort : IGovernedLoopCoordinato
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (CancelOnRead)
+        {
+            CancelSourceOnRead?.Cancel();
+            throw new OperationCanceledException(cancellationToken);
+        }
+
+        if (ThrowOnRead)
+        {
+            throw new IOException("simulated coordinator read failure");
+        }
+
         lock (_gate)
         {
             if (ReturnMalformedRead)
@@ -103,6 +138,22 @@ internal sealed class RecordingCoordinatorEvidencePort : IGovernedLoopCoordinato
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (CancelOnAcquire)
+        {
+            CancelSourceOnAcquire?.Cancel();
+            throw new OperationCanceledException(cancellationToken);
+        }
+
+        if (ThrowOnAcquire)
+        {
+            throw new IOException("simulated coordinator acquisition failure");
+        }
+
+        if (ReturnNullAcquisition)
+        {
+            return Task.FromResult<GovernedLoopCoordinatorAcquisitionResult?>(null);
+        }
+
         lock (_gate)
         {
             if (!GovernedLoopCoordinatorEvidenceContract.IsValid(request))
@@ -130,7 +181,14 @@ internal sealed class RecordingCoordinatorEvidencePort : IGovernedLoopCoordinato
                         new GovernedLoopCoordinatorAcquisitionResult(GovernedLoopCoordinatorAcquisitionStatus.Corrupt));
                 }
 
-                return CompleteAcquisition(Acquire(request));
+                var firstAcquired = Acquire(request);
+                if (CancelAfterAcquire)
+                {
+                    CancelSourceOnAcquire?.Cancel();
+                    throw new OperationCanceledException(cancellationToken);
+                }
+
+                return CompleteAcquisition(firstAcquired);
             }
 
             if (IsExact(request))
@@ -174,7 +232,14 @@ internal sealed class RecordingCoordinatorEvidencePort : IGovernedLoopCoordinato
                         : GovernedLoopCoordinatorAcquisitionStatus.Corrupt));
             }
 
-            return CompleteAcquisition(Acquire(request));
+            var acquired = Acquire(request);
+            if (CancelAfterAcquire)
+            {
+                CancelSourceOnAcquire?.Cancel();
+                throw new OperationCanceledException(cancellationToken);
+            }
+
+            return CompleteAcquisition(acquired);
         }
     }
 
@@ -191,6 +256,11 @@ internal sealed class RecordingCoordinatorEvidencePort : IGovernedLoopCoordinato
 
         lock (_gate)
         {
+            if (ReturnNullHeartbeat)
+            {
+                return Task.FromResult<GovernedLoopCoordinatorHeartbeatMutationResult?>(null);
+            }
+
             if (!GovernedLoopCoordinatorEvidenceContract.IsValid(request) || _snapshot is null)
             {
                 return Task.FromResult<GovernedLoopCoordinatorHeartbeatMutationResult?>(
@@ -276,6 +346,11 @@ internal sealed class RecordingCoordinatorEvidencePort : IGovernedLoopCoordinato
         cancellationToken.ThrowIfCancellationRequested();
         lock (_gate)
         {
+            if (ReturnNullLifecycle)
+            {
+                return Task.FromResult<GovernedLoopCoordinatorLifecycleMutationResult?>(null);
+            }
+
             if (!GovernedLoopCoordinatorEvidenceContract.IsValid(request) || _snapshot is null)
             {
                 return Task.FromResult<GovernedLoopCoordinatorLifecycleMutationResult?>(
@@ -361,6 +436,11 @@ internal sealed class RecordingCoordinatorEvidencePort : IGovernedLoopCoordinato
         cancellationToken.ThrowIfCancellationRequested();
         lock (_gate)
         {
+            if (ReturnNullFailure)
+            {
+                return Task.FromResult<GovernedLoopCoordinatorFailureMutationResult?>(null);
+            }
+
             if (!GovernedLoopCoordinatorEvidenceContract.IsValid(request) || _snapshot is null)
             {
                 return Task.FromResult<GovernedLoopCoordinatorFailureMutationResult?>(
@@ -369,13 +449,16 @@ internal sealed class RecordingCoordinatorEvidencePort : IGovernedLoopCoordinato
 
             if (FailureOverride is { } failureOverride)
             {
+                var resultSnapshot = failureOverride is GovernedLoopCoordinatorFailureMutationStatus.Corrupt
+                    or GovernedLoopCoordinatorFailureMutationStatus.Unavailable
+                    ? null
+                    : ReturnMismatchedFailureSnapshot
+                        ? MismatchedFailureSnapshot()
+                        : _snapshot;
                 return Task.FromResult<GovernedLoopCoordinatorFailureMutationResult?>(
                     new GovernedLoopCoordinatorFailureMutationResult(
                         failureOverride,
-                        failureOverride is GovernedLoopCoordinatorFailureMutationStatus.Corrupt
-                            or GovernedLoopCoordinatorFailureMutationStatus.Unavailable
-                                ? null
-                                : _snapshot));
+                        resultSnapshot));
             }
 
             if (!SameOwnership(request.ExpectedOwnership, _snapshot.Ownership))
@@ -525,6 +608,59 @@ internal sealed class RecordingCoordinatorEvidencePort : IGovernedLoopCoordinato
             _snapshot = new GovernedLoopCoordinatorSnapshot(ownership, lifecycle, heartbeat, 0, null);
             _latestFailure = null;
         }
+    }
+
+    internal void SetLifecycleStatus(GovernedLoopCoordinatorStatus status)
+    {
+        lock (_gate)
+        {
+            var current = _snapshot ?? throw new InvalidOperationException("No coordinator evidence exists.");
+            var lifecycle = GovernedLoopSleepContractHash.Apply(current.LatestLifecycle with
+            {
+                Status = status,
+                TerminalAtUtc = status is GovernedLoopCoordinatorStatus.Stopped or GovernedLoopCoordinatorStatus.Failed
+                    ? current.LatestLifecycle.UpdatedAtUtc
+                    : null,
+                ContentHash = string.Empty
+            });
+            _snapshot = new GovernedLoopCoordinatorSnapshot(
+                current.Ownership,
+                lifecycle,
+                current.LatestHeartbeat,
+                current.LatestFailureSequence,
+                current.LatestFailureHash);
+            Lifecycles.Add(lifecycle);
+        }
+    }
+
+    internal void SetLifecycleVersion(long lifecycleVersion)
+    {
+        lock (_gate)
+        {
+            var current = _snapshot ?? throw new InvalidOperationException("No coordinator evidence exists.");
+            var lifecycle = GovernedLoopSleepContractHash.Apply(current.LatestLifecycle with
+            {
+                LifecycleVersion = lifecycleVersion,
+                ContentHash = string.Empty
+            });
+            _snapshot = new GovernedLoopCoordinatorSnapshot(
+                current.Ownership,
+                lifecycle,
+                current.LatestHeartbeat,
+                current.LatestFailureSequence,
+                current.LatestFailureHash);
+        }
+    }
+
+    private GovernedLoopCoordinatorSnapshot MismatchedFailureSnapshot()
+    {
+        var current = _snapshot ?? throw new InvalidOperationException("No coordinator evidence exists.");
+        return new GovernedLoopCoordinatorSnapshot(
+            current.Ownership,
+            current.LatestLifecycle,
+            current.LatestHeartbeat,
+            current.LatestFailureSequence + 1,
+            new string('a', GovernedLoopSleepContractLimits.Sha256HexCharacters));
     }
 
     internal GovernedLoopCoordinatorSnapshot ReplaceWithPeerOwnership(string ownerId)

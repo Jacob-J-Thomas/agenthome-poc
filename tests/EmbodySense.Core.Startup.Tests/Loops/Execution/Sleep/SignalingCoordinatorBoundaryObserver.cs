@@ -14,9 +14,27 @@ internal sealed class SignalingCoordinatorBoundaryObserver : IGovernedLoopLocalC
 
     internal Task OwnershipLost => _ownershipLost.Task;
 
+    internal bool ThrowOnOwnershipLost { get; set; }
+
+    internal bool ThrowOnForeignSessionMutationSuppressed { get; set; }
+
     public void OnHeartbeatDue() => _heartbeatDue.TrySetResult();
 
-    public void OnOwnershipLost() => _ownershipLost.TrySetResult();
+    public void OnOwnershipLost()
+    {
+        _ownershipLost.TrySetResult();
+        if (ThrowOnOwnershipLost)
+        {
+            throw new IOException("hostile ownership observer");
+        }
+    }
 
-    public void OnForeignSessionMutationSuppressed() => _foreignSessionMutationSuppressed.TrySetResult();
+    public void OnForeignSessionMutationSuppressed()
+    {
+        _foreignSessionMutationSuppressed.TrySetResult();
+        if (ThrowOnForeignSessionMutationSuppressed)
+        {
+            throw new IOException("hostile foreign-session observer");
+        }
+    }
 }

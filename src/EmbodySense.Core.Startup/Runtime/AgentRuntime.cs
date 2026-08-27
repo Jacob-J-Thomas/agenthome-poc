@@ -61,7 +61,7 @@ public sealed class AgentRuntime : IAsyncDisposable
     private readonly GovernedLoopInvocationPreparationFacade _governedLoopInvocationPreparation;
     private readonly IModelProfileCatalogFacade _modelProfiles;
     private readonly DefaultConversationTurnReviewService _defaultConversationReviews;
-    private readonly GovernedLoopBackgroundRuntimeHost? _governedBackgroundRuntimeHost;
+    private readonly GovernedLoopBackgroundRuntimeHost _governedBackgroundRuntimeHost;
     private readonly GovernedLoopSleepService? _governedSleep;
     private int _disposed;
 
@@ -85,7 +85,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         IModelProfileCatalogFacade modelProfiles,
         DefaultConversationTurnReviewService defaultConversationReviews,
         CodexRuntimeStatus codexRuntimeStatus,
-        GovernedLoopBackgroundRuntimeHost? governedBackgroundRuntimeHost = null,
+        GovernedLoopBackgroundRuntimeHost governedBackgroundRuntimeHost,
         GovernedLoopSleepService? governedSleep = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
@@ -104,6 +104,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(governedLoopInvocationPreparation);
         ArgumentNullException.ThrowIfNull(modelProfiles);
         ArgumentNullException.ThrowIfNull(defaultConversationReviews);
+        ArgumentNullException.ThrowIfNull(governedBackgroundRuntimeHost);
         ArgumentNullException.ThrowIfNull(codexRuntimeStatus);
 
         Paths = paths;
@@ -510,16 +511,6 @@ public sealed class AgentRuntime : IAsyncDisposable
     public async Task<AgentRuntimeGovernedLoopBackgroundStartResult> StartGovernedLoopLocalBackgroundWithStatusAsync(
         CancellationToken cancellationToken = default)
     {
-        if (_governedBackgroundRuntimeHost is null)
-        {
-            return new AgentRuntimeGovernedLoopBackgroundStartResult(
-                AgentRuntimeGovernedLoopBackgroundStartStatus.Unavailable,
-                AgentRuntimeGovernedLoopBackgroundReadiness.Unavailable,
-                AgentRuntimeGovernedLoopBackgroundOwnership.Unknown,
-                false,
-                "governed_local_background_unavailable: this runtime was not composed with canonical local background support.");
-        }
-
         var activationSequence = _governedBackgroundRuntimeHost.ActivationSequence;
         _governedBackgroundRuntimeHost.RequestActivation();
         var current = await _governedBackgroundRuntimeHost.ReadStatusAsync(cancellationToken);
@@ -584,15 +575,6 @@ public sealed class AgentRuntime : IAsyncDisposable
     public async Task<CustomLoopExecutionActivationResult> StartGovernedLoopLocalBackgroundAsync(
         CancellationToken cancellationToken = default)
     {
-        if (_governedBackgroundRuntimeHost is null)
-        {
-            return new CustomLoopExecutionActivationResult(
-                false,
-                false,
-                "Failed",
-                "governed_local_background_unavailable: this runtime was not composed with canonical local background support.");
-        }
-
         _governedBackgroundRuntimeHost.RequestActivation();
         var availability = await _customLoops.EnsureCustomExecutionAvailableAsync(cancellationToken);
         if (!availability.Available)
@@ -627,11 +609,7 @@ public sealed class AgentRuntime : IAsyncDisposable
     /// <returns>The current typed readiness and active-ownership classification.</returns>
     public Task<AgentRuntimeGovernedLoopBackgroundStatus> ReadGovernedLoopLocalBackgroundStatusAsync(
         CancellationToken cancellationToken = default)
-        => _governedBackgroundRuntimeHost?.ReadStatusAsync(cancellationToken)
-            ?? Task.FromResult(new AgentRuntimeGovernedLoopBackgroundStatus(
-                AgentRuntimeGovernedLoopBackgroundReadiness.Unavailable,
-                AgentRuntimeGovernedLoopBackgroundOwnership.Unknown,
-                "governed_local_background_unavailable: this runtime was not composed with canonical local background support."));
+        => _governedBackgroundRuntimeHost.ReadStatusAsync(cancellationToken);
 
     /// <summary>Requests an idempotent bounded drain of locally owned canonical governed-loop background work.</summary>
     /// <remarks>
@@ -644,12 +622,7 @@ public sealed class AgentRuntime : IAsyncDisposable
     /// <returns>The typed stop outcome or truthful bounded-drain state.</returns>
     public Task<AgentRuntimeGovernedLoopBackgroundStopResult> StopGovernedLoopLocalBackgroundAsync(
         CancellationToken cancellationToken = default)
-        => _governedBackgroundRuntimeHost?.StopAsync(cancellationToken)
-            ?? Task.FromResult(new AgentRuntimeGovernedLoopBackgroundStopResult(
-                AgentRuntimeGovernedLoopBackgroundStopStatus.Unavailable,
-                AgentRuntimeGovernedLoopBackgroundReadiness.Unavailable,
-                AgentRuntimeGovernedLoopBackgroundOwnership.Unknown,
-                "governed_local_background_unavailable: this runtime was not composed with canonical local background support."));
+        => _governedBackgroundRuntimeHost.StopAsync(cancellationToken);
 
     /// <summary>
     /// Attempts to handle a runtime command that does not require an initialized runtime instance.
@@ -677,10 +650,7 @@ public sealed class AgentRuntime : IAsyncDisposable
 
         try
         {
-            if (_governedBackgroundRuntimeHost is not null)
-            {
-                await _governedBackgroundRuntimeHost.DisposeAsync();
-            }
+            await _governedBackgroundRuntimeHost.DisposeAsync();
         }
         finally
         {
