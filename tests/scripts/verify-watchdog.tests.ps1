@@ -109,10 +109,10 @@ $expectedQualificationProjects = @(
 Assert-Equal -Actual (@($script:QualificationTestScheduleProfiles.ProjectName | Sort-Object) -join "|") -Expected ($expectedQualificationProjects -join "|") -Message "Qualification scheduling profiles must equal the canonical nine-project inventory."
 $persistenceScheduleProfile = Get-QualificationTestScheduleProfile -ProjectName "EmbodySense.Core.Persistence.Tests"
 $startupScheduleProfile = Get-QualificationTestScheduleProfile -ProjectName "EmbodySense.Core.Startup.Tests"
-Assert-True -Condition ($persistenceScheduleProfile.EstimatedDurationSeconds -eq 260 -and $startupScheduleProfile.EstimatedDurationSeconds -eq 600) -Message "The protected Persistence and monolithic Startup profiles must retain their evidence-based estimates."
+Assert-True -Condition ($persistenceScheduleProfile.EstimatedDurationSeconds -eq 270 -and $startupScheduleProfile.EstimatedDurationSeconds -eq 600) -Message "The protected Persistence and monolithic Startup profiles must retain their evidence-based estimates."
 Assert-True -Condition ($persistenceScheduleProfile.ExclusiveOrder -eq 1 -and $startupScheduleProfile.ExclusiveOrder -eq 2) -Message "Persistence must execute before Startup even though Startup has the longer estimate."
 Assert-True -Condition ($startupScheduleProfile.EstimatedDurationSeconds -gt (Get-QualificationTestScheduleProfile -ProjectName "EmbodySense.Web.Tests").EstimatedDurationSeconds) -Message "Startup must remain the longest protected qualification suite."
-Assert-True -Condition ($persistenceScheduleProfile.TimeoutSeconds -eq 270 -and $startupScheduleProfile.TimeoutSeconds -eq 720) -Message "The two Windows-dominant suites must retain evidence-backed bounded child headroom beneath the global watchdog."
+Assert-True -Condition ($persistenceScheduleProfile.TimeoutSeconds -eq 300 -and $startupScheduleProfile.TimeoutSeconds -eq 690) -Message "The two Windows-dominant suites must retain evidence-backed bounded child headroom beneath the global watchdog."
 Assert-True -Condition ($persistenceScheduleProfile.Weight -eq 6 -and $startupScheduleProfile.Weight -eq 3 -and $persistenceScheduleProfile.ResourceClass -ceq "ProcessHeavy" -and $startupScheduleProfile.ResourceClass -ceq "ProcessHeavy" -and $persistenceScheduleProfile.Isolation -ceq "Exclusive" -and $startupScheduleProfile.Isolation -ceq "Exclusive") -Message "Persistence and Startup must retain their measured protected posture in separate qualification waves."
 foreach ($sharedQualificationProfileExpectation in @(
     [pscustomobject]@{ ProjectName = "EmbodySense.Core.Application.Tests"; EstimatedDurationSeconds = 360; TimeoutSeconds = 480; Weight = 3; ResourceClass = "ProcessHeavy" }
@@ -242,10 +242,10 @@ $broadApplicationVerifierProtectedTestSeconds = (@($broadApplicationVerifierPlan
 $broadApplicationVerifierProtectedOrder = @($broadApplicationVerifierPlan.TestProjects | ForEach-Object { Get-QualificationTestScheduleProfile -ProjectName ([IO.Path]::GetFileNameWithoutExtension($_)) -ResourceCapacity 8 } | Where-Object { $_.Isolation -ceq "Exclusive" } | Sort-Object -Property ExclusiveOrder | Select-Object -ExpandProperty ProjectName)
 $broadApplicationVerifierExclusiveContractSeconds = (@($script:QualificationContractScheduleProfiles | Where-Object { $_.Isolation -ceq "Exclusive" } | Measure-Object -Property EstimatedDurationSeconds -Sum).Sum)
 $broadApplicationVerifierWorkerModels = @(
-    [pscustomobject]@{ Workers = 1; Capacity = 3; SharedSeconds = 1235; ProfileSeconds = 2285; ProtectedCapSeconds = 2415 }
-    [pscustomobject]@{ Workers = 2; Capacity = 4; SharedSeconds = 885; ProfileSeconds = 1935; ProtectedCapSeconds = 2065 }
-    [pscustomobject]@{ Workers = 3; Capacity = 6; SharedSeconds = 550; ProfileSeconds = 1600; ProtectedCapSeconds = 1730 }
-    [pscustomobject]@{ Workers = 4; Capacity = 8; SharedSeconds = 450; ProfileSeconds = 1500; ProtectedCapSeconds = 1630 }
+    [pscustomobject]@{ Workers = 1; Capacity = 3; SharedSeconds = 1235; ProfileSeconds = 2295; ProtectedCapSeconds = 2415 }
+    [pscustomobject]@{ Workers = 2; Capacity = 4; SharedSeconds = 885; ProfileSeconds = 1945; ProtectedCapSeconds = 2065 }
+    [pscustomobject]@{ Workers = 3; Capacity = 6; SharedSeconds = 550; ProfileSeconds = 1610; ProtectedCapSeconds = 1730 }
+    [pscustomobject]@{ Workers = 4; Capacity = 8; SharedSeconds = 450; ProfileSeconds = 1510; ProtectedCapSeconds = 1630 }
 )
 foreach ($workerModel in $broadApplicationVerifierWorkerModels) {
     $sharedSeconds = Get-QualificationEstimatedMakespanSeconds -Phases $broadApplicationVerifierSharedWavePhases -MaximumWorkers $workerModel.Workers -MaximumResourceCapacity $workerModel.Capacity -MaximumProcessHeavyWorkers ([Math]::Min(2, $workerModel.Workers)) -MaximumCpuBoundWorkers 1
@@ -259,10 +259,10 @@ foreach ($workerModel in $broadApplicationVerifierWorkerModels) {
 $broadApplicationVerifierSharedWaveSeconds = Get-QualificationEstimatedMakespanSeconds -Phases $broadApplicationVerifierSharedWavePhases -MaximumWorkers 4 -MaximumResourceCapacity 8 -MaximumProcessHeavyWorkers 2 -MaximumCpuBoundWorkers 1
 $broadApplicationVerifierCriticalPathSeconds = 150 + $broadApplicationVerifierSharedWaveSeconds + $broadApplicationVerifierProtectedTestSeconds + $broadApplicationVerifierExclusiveContractSeconds
 Assert-Equal -Actual $broadApplicationVerifierSharedWaveSeconds -Expected 450 -Message "The complete broad Application-plus-verifier shared wave must retain its calibrated scheduler critical path."
-Assert-Equal -Actual $broadApplicationVerifierProtectedTestSeconds -Expected 860 -Message "The separately bounded Persistence and monolithic Startup waves must retain their evidence-based total estimate."
+Assert-Equal -Actual $broadApplicationVerifierProtectedTestSeconds -Expected 870 -Message "The separately bounded Persistence and monolithic Startup waves must retain their evidence-based total estimate."
 Assert-Equal -Actual ($broadApplicationVerifierProtectedOrder -join "|") -Expected "EmbodySense.Core.Persistence.Tests|EmbodySense.Core.Startup.Tests" -Message "The broad Application-plus-verifier model must execute Persistence before Startup in protected waves."
 Assert-Equal -Actual $broadApplicationVerifierExclusiveContractSeconds -Expected 40 -Message "The separate evidence-based exclusive verifier waves must retain their bounded total estimate."
-Assert-True -Condition ($broadApplicationVerifierCriticalPathSeconds -eq 1500 -and $broadApplicationVerifierCriticalPathSeconds -le 1630 -and $broadApplicationVerifierCriticalPathSeconds -lt 1680) -Message "The complete broad Application-plus-verifier model must retain bounded headroom beneath the exact outer qualification deadline."
+Assert-True -Condition ($broadApplicationVerifierCriticalPathSeconds -eq 1510 -and $broadApplicationVerifierCriticalPathSeconds -le 1630 -and $broadApplicationVerifierCriticalPathSeconds -lt 1680) -Message "The complete broad Application-plus-verifier model must retain bounded headroom beneath the exact outer qualification deadline."
 Assert-True -Condition ((150 + $persistenceScheduleProfile.TimeoutSeconds + $startupScheduleProfile.TimeoutSeconds + $broadApplicationVerifierSharedWaveSeconds + $broadApplicationVerifierExclusiveContractSeconds) -eq 1630 -and (150 + $persistenceScheduleProfile.TimeoutSeconds + $startupScheduleProfile.TimeoutSeconds + $broadApplicationVerifierSharedWaveSeconds + $broadApplicationVerifierExclusiveContractSeconds) -le 1630 -and (150 + $persistenceScheduleProfile.TimeoutSeconds + $startupScheduleProfile.TimeoutSeconds + $broadApplicationVerifierSharedWaveSeconds + $broadApplicationVerifierExclusiveContractSeconds) -lt 1680) -Message "The protected child ceilings and calibrated shared wave must leave at least fifty seconds for qualification watchdog overhead."
 
 $cliCommandPlan = Get-QualificationPlan -ChangedPaths @("src/EmbodySense.Cli.Command/RunCommand.cs")
