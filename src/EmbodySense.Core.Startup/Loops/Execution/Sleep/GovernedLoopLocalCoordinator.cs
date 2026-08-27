@@ -947,8 +947,7 @@ public sealed class GovernedLoopLocalCoordinator : IAsyncDisposable
         var terminalSameOwnerRestart = current is not null
             && current.LatestLifecycle.Status == GovernedLoopCoordinatorStatus.Stopped
             && string.Equals(current.Ownership.OwnerId, _options.OwnerId, StringComparison.Ordinal)
-            && string.Equals(current.Ownership.ContentHash, _confirmedTerminalOwnershipHash, StringComparison.Ordinal)
-            && acquiredAtUtc < current.LatestHeartbeat.LeaseExpiresAtUtc;
+            && string.Equals(current.Ownership.ContentHash, _confirmedTerminalOwnershipHash, StringComparison.Ordinal);
         if (current is not null
             && acquiredAtUtc < current.LatestHeartbeat.LeaseExpiresAtUtc
             && !terminalSameOwnerRestart)

@@ -254,23 +254,33 @@ public sealed class GovernedLoopLocalCoordinatorTests
     }
 
     [Fact]
-    public async Task Confirmed_local_stopped_session_restarts_immediately_with_a_fenced_same_owner_successor()
+    public async Task Confirmed_local_stopped_session_restarts_after_lease_expiry_with_a_fenced_same_owner_successor()
     {
         var evidence = new RecordingCoordinatorEvidencePort();
-        await using var coordinator = Coordinator(evidence, new ScriptedLocalWorkRunner(), Clock(), "owner-a");
+        var clock = Clock();
+        var work = new ScriptedLocalWorkRunner();
+        await using var coordinator = Coordinator(evidence, work, clock, "owner-a");
 
         var initial = await coordinator.StartAsync();
         var stopped = await coordinator.StopAsync();
+        var previous = stopped.Snapshot!;
+        var previousWorkCallCount = work.CallCount;
+        clock.Advance(TimeSpan.FromMinutes(3));
         var restarted = await coordinator.StartAsync();
         var snapshot = evidence.Snapshot;
+        await WaitUntilAsync(() => work.CallCount > previousWorkCallCount);
 
         Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Started, initial.Status);
         Assert.Equal(GovernedLoopLocalCoordinatorStopStatus.Stopped, stopped.Status);
         Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Started, restarted.Status);
         Assert.Equal("owner-a", snapshot!.Ownership.OwnerId);
+        Assert.Equal(previous.Ownership.OwnerId, snapshot.Ownership.OwnerId);
+        Assert.Equal(previous.Ownership.CoordinatorId, snapshot.Ownership.CoordinatorId);
+        Assert.NotEqual(previous.Ownership.ContentHash, snapshot.Ownership.ContentHash);
         Assert.Equal(2, snapshot.Ownership.OwnershipEpoch);
         Assert.Equal(GovernedLoopCoordinatorStatus.Running, snapshot.LatestLifecycle.Status);
         Assert.True(snapshot.LatestHeartbeat.LeaseExpiresAtUtc > snapshot.LatestHeartbeat.RecordedAtUtc);
+        Assert.True(work.CallCount > previousWorkCallCount);
 
         Assert.Equal(GovernedLoopLocalCoordinatorStopStatus.Stopped, (await coordinator.StopAsync()).Status);
     }

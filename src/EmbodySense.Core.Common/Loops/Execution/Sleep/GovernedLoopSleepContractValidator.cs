@@ -210,7 +210,7 @@ public static class GovernedLoopSleepContractValidator
     }
 
     /// <summary>
-    /// Validates a fenced immediate restart by the exact owner that durably drained its own coordinator to
+    /// Validates a fenced restart by the exact owner that durably drained its own coordinator to
     /// <see cref="GovernedLoopCoordinatorStatus.Stopped"/>. This is intentionally narrower than a handoff: it never
     /// permits a different owner to bypass the live heartbeat lease and it never restarts a failed lifecycle.
     /// </summary>
@@ -243,8 +243,7 @@ public static class GovernedLoopSleepContractValidator
                 || !string.Equals(current.OwnerId, next.OwnerId, StringComparison.Ordinal)
                 || next.OwnershipEpoch != current.OwnershipEpoch + 1
                 || next.AcquiredAtUtc < current.AcquiredAtUtc
-                || next.AcquiredAtUtc < currentLifecycle.UpdatedAtUtc
-                || next.AcquiredAtUtc >= currentHeartbeat.LeaseExpiresAtUtc)
+                || next.AcquiredAtUtc < currentLifecycle.UpdatedAtUtc)
             {
                 Add(errors, GovernedLoopSleepValidationErrorCode.IllegalTransition, "$.next");
             }

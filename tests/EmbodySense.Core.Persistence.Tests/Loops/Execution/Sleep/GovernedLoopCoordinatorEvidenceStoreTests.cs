@@ -50,7 +50,7 @@ public sealed class GovernedLoopCoordinatorEvidenceStoreTests
     }
 
     [Fact]
-    public async Task Exact_terminal_same_owner_restart_bypasses_only_its_own_live_lease_and_persists_a_fenced_successor()
+    public async Task Exact_terminal_same_owner_restart_bypasses_only_its_own_expired_lease_and_persists_a_fenced_successor()
     {
         using var workspace = new TestWorkspace();
         var store = new GovernedLoopCoordinatorEvidenceStore(new WorkspacePaths(workspace.RootPath));
@@ -82,7 +82,7 @@ public sealed class GovernedLoopCoordinatorEvidenceStoreTests
         var successorOwner = GovernedLoopSleepContractTestFixture.Ownership(
             ownerId: owner.OwnerId,
             ownershipEpoch: 2,
-            acquiredAtUtc: stopped.UpdatedAtUtc.AddTicks(1));
+            acquiredAtUtc: initial.InitialHeartbeat.LeaseExpiresAtUtc.AddTicks(1));
         var restart = Acquisition(
             successorOwner,
             GovernedLoopCoordinatorPriorEvidenceExpectation.TerminalSameOwner,
@@ -91,7 +91,7 @@ public sealed class GovernedLoopCoordinatorEvidenceStoreTests
         var foreignOwner = GovernedLoopSleepContractTestFixture.Ownership(
             ownerId: "other-owner",
             ownershipEpoch: 2,
-            acquiredAtUtc: stopped.UpdatedAtUtc.AddTicks(1));
+            acquiredAtUtc: successorOwner.AcquiredAtUtc);
         var foreignRestart = Acquisition(
             foreignOwner,
             GovernedLoopCoordinatorPriorEvidenceExpectation.TerminalSameOwner,

@@ -122,7 +122,7 @@ public sealed class GovernedLoopCoordinatorEvidenceContractTests
         var initial = Ownership();
         var terminal = Lifecycle(initial, 2, GovernedLoopCoordinatorStatus.Stopped, _observedAtUtc.AddMinutes(1));
         var heartbeat = Heartbeat(initial, 2, _observedAtUtc.AddMinutes(1));
-        var restartedOwner = Ownership(epoch: 2, ownerId: initial.OwnerId, acquiredAtUtc: _observedAtUtc.AddMinutes(2));
+        var restartedOwner = Ownership(epoch: 2, ownerId: initial.OwnerId, acquiredAtUtc: heartbeat.LeaseExpiresAtUtc.AddTicks(1));
         var restart = new GovernedLoopCoordinatorAcquisitionRequest(
             GovernedLoopCoordinatorPriorEvidenceExpectation.TerminalSameOwner,
             initial.ContentHash,
@@ -134,6 +134,8 @@ public sealed class GovernedLoopCoordinatorEvidenceContractTests
         Assert.True(GovernedLoopCoordinatorEvidenceContract.IsValid(restart));
         Assert.True(GovernedLoopSleepContractValidator.ValidateTerminalSameOwnerRestart(initial, terminal, heartbeat, restartedOwner).IsValid);
         Assert.False(GovernedLoopSleepContractValidator.ValidateHandoff(initial, heartbeat, restartedOwner).IsValid);
+        var foreignOwner = Ownership(epoch: 2, ownerId: "foreign-owner", acquiredAtUtc: restartedOwner.AcquiredAtUtc);
+        Assert.False(GovernedLoopSleepContractValidator.ValidateTerminalSameOwnerRestart(initial, terminal, heartbeat, foreignOwner).IsValid);
         Assert.False(GovernedLoopSleepContractValidator.ValidateTerminalSameOwnerRestart(
             initial,
             Lifecycle(initial, 2, GovernedLoopCoordinatorStatus.Failed, _observedAtUtc.AddMinutes(1)),
