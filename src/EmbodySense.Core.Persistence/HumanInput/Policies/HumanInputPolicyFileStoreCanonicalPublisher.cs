@@ -25,7 +25,7 @@ internal sealed class HumanInputPolicyFileStoreCanonicalPublisher
         ArgumentException.ThrowIfNullOrWhiteSpace(destinationName);
         ArgumentNullException.ThrowIfNull(content);
 
-        var stagingName = destinationName + ".tmp-" + Guid.NewGuid().ToString("N", System.Globalization.CultureInfo.InvariantCulture);
+        var stagingName = ".tmp-" + Guid.NewGuid().ToString("N", System.Globalization.CultureInfo.InvariantCulture);
         SafeFileHandle? parent = null;
         SafeFileHandle? staging = null;
         var renamed = false;
@@ -47,6 +47,7 @@ internal sealed class HumanInputPolicyFileStoreCanonicalPublisher
             await ObserveAsync(part, HumanInputPolicyFileStorePhysicalPersistenceBoundary.ParentDirectoryFlushed, CancellationToken.None).ConfigureAwait(false);
             await ProveTargetAsync(parent, destinationName, stagingIdentity, content).ConfigureAwait(false);
             await ObserveAsync(part, HumanInputPolicyFileStorePhysicalPersistenceBoundary.TargetProven, CancellationToken.None).ConfigureAwait(false);
+            await ProveTargetAsync(parent, destinationName, stagingIdentity, content).ConfigureAwait(false);
             session.RevalidateBoundDirectory(directory);
         }
         finally

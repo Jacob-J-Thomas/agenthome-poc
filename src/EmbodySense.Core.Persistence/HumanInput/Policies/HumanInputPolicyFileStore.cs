@@ -1,5 +1,6 @@
 using EmbodySense.Core.Application.HumanInput.Policies;
 using EmbodySense.Core.Application.HumanInput.Policies.Models;
+using EmbodySense.Core.Common.HumanInput;
 using EmbodySense.Core.Common.Loops.HumanInput.Policies;
 using EmbodySense.Core.Common.Loops.HumanInput.Policies.Models;
 using EmbodySense.Core.Common.Workspace;
@@ -20,6 +21,10 @@ public sealed class HumanInputPolicyFileStore : IHumanInputPolicySource
 {
     private const int MaximumInterruptedTemporaryArtifacts = 1;
     private const int SupportingFileCount = 3;
+    // The generation serializer emits two 120-character identifiers, one 64-character SHA-256 digest, and fixed JSON punctuation per entry.
+    private const int MaximumGenerationEntryBytes = (HumanInputLimits.MaxIdentifierCharacters * 2) + HumanInputLimits.Sha256HexCharacters + 49;
+    // This includes the schema/store-generation properties, array framing, separators, and the four digits of the maximum generation.
+    private const int MaximumGenerationFixedBytes = 56;
     private readonly string _rootPath;
     private readonly string _generationPath;
     private readonly string _publicationIntentPath;
@@ -198,8 +203,9 @@ public sealed class HumanInputPolicyFileStore : IHumanInputPolicySource
 
     private async Task<(bool Exists, HumanInputPolicyFileStoreGeneration Generation)> ReadStoredGenerationAsync(CapabilityCatalogPathSession session, CancellationToken cancellationToken)
     {
-        var maximumGenerationBytes = checked((_options.MaximumArtifacts * 256) + 128);
-        var bytes = await session.TryReadAllBytesBoundAsync(_generationPath, maximumGenerationBytes, cancellationToken).ConfigureAwait(false);
+        var maximumGenerationBytes = checked((long)MaximumGenerationEntryBytes * _options.MaximumArtifacts + MaximumGenerationFixedBytes);
+        if (maximumGenerationBytes > int.MaxValue) throw new FormatException("The Human Input policy generation bound is unavailable.");
+        var bytes = await session.TryReadAllBytesBoundAsync(_generationPath, checked((int)maximumGenerationBytes), cancellationToken).ConfigureAwait(false);
         if (bytes is null) return (false, new HumanInputPolicyFileStoreGeneration(0, []));
 
         return (true, HumanInputPolicyFileStoreGenerationJson.Deserialize(bytes));
@@ -280,6 +286,17 @@ public sealed class HumanInputPolicyFileStore : IHumanInputPolicySource
     {
         const string TemporaryMarker = ".tmp-";
         destinationName = string.Empty;
+        if (name.StartsWith(TemporaryMarker, StringComparison.Ordinal))
+        {
+            var compactNonce = name.AsSpan(TemporaryMarker.Length);
+            if (compactNonce.Length != 32) return false;
+            foreach (var character in compactNonce)
+            {
+                if (character is < '0' or > '9' and < 'a' or > 'f') return false;
+            }
+            return true;
+        }
+
         var separator = name.LastIndexOf(TemporaryMarker, StringComparison.Ordinal);
         if (separator < 1 || separator + TemporaryMarker.Length + 32 != name.Length) return false;
         var nonce = name.AsSpan(separator + TemporaryMarker.Length);

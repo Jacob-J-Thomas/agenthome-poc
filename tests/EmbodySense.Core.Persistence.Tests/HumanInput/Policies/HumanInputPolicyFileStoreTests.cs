@@ -1,5 +1,6 @@
 using System.Text;
 using EmbodySense.Core.Application.HumanInput.Policies.Models;
+using EmbodySense.Core.Common.HumanInput;
 using EmbodySense.Core.Common.Loops.HumanInput.Policies;
 using EmbodySense.Core.Common.Loops.HumanInput.Policies.Models;
 using EmbodySense.Core.Common.Workspace;
@@ -27,6 +28,33 @@ public sealed class HumanInputPolicyFileStoreTests
         Assert.Equal(policy, read.Policy);
         Assert.Equal(HumanInputPolicyFileStoreWriteStatus.Replayed, replay.Status);
         Assert.Equal(1, replay.StoreGeneration);
+    }
+
+    [Fact]
+    public async Task Maximum_length_policy_and_revision_ids_fit_the_bounded_generation_and_restart_read()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var policy = HumanInputPolicyArtifactHash.Apply(new HumanInputPolicyArtifact(
+            1,
+            new string('a', HumanInputLimits.MaxIdentifierCharacters),
+            new string('b', HumanInputLimits.MaxIdentifierCharacters),
+            HumanInputPolicyKind.ResponseWindow,
+            "workspace-one",
+            "graph-one",
+            "actor-one",
+            3_600_000,
+            HumanInputTerminalDisposition.Unknown,
+            string.Empty));
+        var options = new HumanInputPolicyFileStoreOptions { MaximumArtifacts = 1 };
+
+        var committed = await new HumanInputPolicyFileStore(paths, options).CommitAsync(policy, 0);
+        var read = await new HumanInputPolicyFileStore(paths, options).ReadAsync(policy.Reference);
+
+        Assert.Equal(HumanInputPolicyFileStoreWriteStatus.Committed, committed.Status);
+        Assert.Equal(1, committed.StoreGeneration);
+        Assert.Equal(HumanInputPolicySourceReadStatus.Ready, read.Status);
+        Assert.Equal(policy, read.Policy);
     }
 
     [Fact]
@@ -112,6 +140,94 @@ public sealed class HumanInputPolicyFileStoreTests
                 File.Move(displacedPath, policyPath);
             }
         }
+    }
+
+    [Fact]
+    public async Task Unix_target_replacement_after_the_first_proof_is_unavailable_without_generation_commit()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var seed = Timeout();
+        var policy = Failure();
+        Assert.Equal(HumanInputPolicyFileStoreWriteStatus.Committed, (await new HumanInputPolicyFileStore(paths).CommitAsync(seed, 0)).Status);
+        var root = PolicyRoot(paths);
+        var generationPath = Path.Combine(root, "generation");
+        var generationBefore = await File.ReadAllBytesAsync(generationPath);
+        var artifactPath = Path.Combine(root, policy.Reference + ".json");
+        var displacedPath = artifactPath + ".displaced";
+        var replaced = false;
+        var options = new HumanInputPolicyFileStoreOptions
+        {
+            PhysicalBoundaryObserver = (part, boundary, _) =>
+            {
+                if (!replaced && part == HumanInputPolicyFileStorePublicationPart.PolicyArtifact && boundary == HumanInputPolicyFileStorePhysicalPersistenceBoundary.TargetProven)
+                {
+                    File.Move(artifactPath, displacedPath);
+                    File.WriteAllBytes(artifactPath, HumanInputPolicyArtifactJson.Serialize(HumanInputPolicyArtifactHash.Apply(policy with { AuthorityActorId = "actor-two" })));
+                    replaced = true;
+                }
+
+                return ValueTask.CompletedTask;
+            }
+        };
+
+        var result = await new HumanInputPolicyFileStore(paths, options).CommitAsync(policy, 1);
+
+        Assert.True(replaced);
+        Assert.Equal(HumanInputPolicyFileStoreWriteStatus.Unavailable, result.Status);
+        Assert.Equal(generationBefore, await File.ReadAllBytesAsync(generationPath));
+        Assert.True(File.Exists(Path.Combine(root, "publication.intent")));
+        Assert.Equal(HumanInputPolicySourceReadStatus.Unavailable, (await new HumanInputPolicyFileStore(paths).ReadAsync(policy.Reference)).Status);
+    }
+
+    [Fact]
+    public async Task Unix_in_place_target_overwrite_after_the_first_proof_is_unavailable_without_generation_commit()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var seed = Timeout();
+        var policy = Failure();
+        Assert.Equal(HumanInputPolicyFileStoreWriteStatus.Committed, (await new HumanInputPolicyFileStore(paths).CommitAsync(seed, 0)).Status);
+        var root = PolicyRoot(paths);
+        var generationPath = Path.Combine(root, "generation");
+        var generationBefore = await File.ReadAllBytesAsync(generationPath);
+        var artifactPath = Path.Combine(root, policy.Reference + ".json");
+        var overwritten = false;
+        var options = new HumanInputPolicyFileStoreOptions
+        {
+            PhysicalBoundaryObserver = (part, boundary, _) =>
+            {
+                if (!overwritten && part == HumanInputPolicyFileStorePublicationPart.PolicyArtifact && boundary == HumanInputPolicyFileStorePhysicalPersistenceBoundary.TargetProven)
+                {
+                    var replacement = HumanInputPolicyArtifactJson.Serialize(HumanInputPolicyArtifactHash.Apply(policy with { AuthorityActorId = "actor-two" }));
+                    using var stream = new FileStream(artifactPath, FileMode.Open, FileAccess.Write, FileShare.ReadWrite);
+                    stream.SetLength(replacement.Length);
+                    stream.Write(replacement);
+                    stream.Flush(flushToDisk: true);
+                    overwritten = true;
+                }
+
+                return ValueTask.CompletedTask;
+            }
+        };
+
+        var result = await new HumanInputPolicyFileStore(paths, options).CommitAsync(policy, 1);
+
+        Assert.True(overwritten);
+        Assert.Equal(HumanInputPolicyFileStoreWriteStatus.Unavailable, result.Status);
+        Assert.Equal(generationBefore, await File.ReadAllBytesAsync(generationPath));
+        Assert.True(File.Exists(Path.Combine(root, "publication.intent")));
+        Assert.Equal(HumanInputPolicySourceReadStatus.Unavailable, (await new HumanInputPolicyFileStore(paths).ReadAsync(policy.Reference)).Status);
     }
 
     [Theory]
