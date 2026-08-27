@@ -31,6 +31,233 @@ public sealed class HumanInputPolicyFileStoreTests
     }
 
     [Fact]
+    public async Task Fresh_commit_rejects_a_normally_returning_intent_observer_that_replaces_the_exact_intent()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var policy = Timeout();
+        var intentPath = Path.Combine(PolicyRoot(paths), "publication.intent");
+        var replacement = HumanInputPolicyArtifactHash.Apply(policy with { AuthorityActorId = "actor-two" });
+        var replaced = false;
+        var options = new HumanInputPolicyFileStoreOptions
+        {
+            DurableBoundaryObserver = observed =>
+            {
+                if (!replaced && observed == HumanInputPolicyFileStorePublicationBoundary.IntentPublished)
+                {
+                    var original = Convert.ToBase64String(HumanInputPolicyArtifactJson.Serialize(policy));
+                    var divergent = Convert.ToBase64String(HumanInputPolicyArtifactJson.Serialize(replacement));
+                    File.WriteAllText(intentPath, File.ReadAllText(intentPath).Replace(original, divergent, StringComparison.Ordinal));
+                    replaced = true;
+                }
+            }
+        };
+
+        var result = await new HumanInputPolicyFileStore(paths, options).CommitAsync(policy, 0);
+        var read = await new HumanInputPolicyFileStore(paths).ReadAsync(policy.Reference);
+
+        Assert.True(replaced);
+        Assert.Equal(HumanInputPolicyFileStoreWriteStatus.Unavailable, result.Status);
+        Assert.True(File.Exists(intentPath));
+        Assert.False(File.Exists(Path.Combine(PolicyRoot(paths), policy.Reference + ".json")));
+        Assert.False(File.Exists(Path.Combine(PolicyRoot(paths), "generation")));
+        Assert.Equal(HumanInputPolicySourceReadStatus.Unavailable, read.Status);
+    }
+
+    [Fact]
+    public async Task Fresh_commit_rejects_a_normally_returning_artifact_observer_that_mutates_the_same_reference()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var seed = Timeout();
+        var policy = Failure();
+        Assert.Equal(HumanInputPolicyFileStoreWriteStatus.Committed, (await new HumanInputPolicyFileStore(paths).CommitAsync(seed, 0)).Status);
+        var root = PolicyRoot(paths);
+        var artifactPath = Path.Combine(root, policy.Reference + ".json");
+        var generationPath = Path.Combine(root, "generation");
+        var generationBefore = await File.ReadAllBytesAsync(generationPath);
+        var replacement = HumanInputPolicyArtifactHash.Apply(policy with { AuthorityActorId = "actor-two" });
+        var replaced = false;
+        var options = new HumanInputPolicyFileStoreOptions
+        {
+            DurableBoundaryObserver = observed =>
+            {
+                if (!replaced && observed == HumanInputPolicyFileStorePublicationBoundary.ArtifactPublished)
+                {
+                    File.WriteAllBytes(artifactPath, HumanInputPolicyArtifactJson.Serialize(replacement));
+                    replaced = true;
+                }
+            }
+        };
+
+        var result = await new HumanInputPolicyFileStore(paths, options).CommitAsync(policy, 1);
+        var read = await new HumanInputPolicyFileStore(paths).ReadAsync(policy.Reference);
+
+        Assert.True(replaced);
+        Assert.Equal(HumanInputPolicyFileStoreWriteStatus.Unavailable, result.Status);
+        Assert.Equal(generationBefore, await File.ReadAllBytesAsync(generationPath));
+        Assert.True(File.Exists(Path.Combine(root, "publication.intent")));
+        Assert.Equal(HumanInputPolicySourceReadStatus.Unavailable, read.Status);
+    }
+
+    [Fact]
+    public async Task Fresh_commit_rejects_a_normally_returning_generation_observer_that_mutates_the_same_reference()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var seed = Timeout();
+        var policy = Failure();
+        Assert.Equal(HumanInputPolicyFileStoreWriteStatus.Committed, (await new HumanInputPolicyFileStore(paths).CommitAsync(seed, 0)).Status);
+        var root = PolicyRoot(paths);
+        var generationPath = Path.Combine(root, "generation");
+        var artifactPath = Path.Combine(root, policy.Reference + ".json");
+        var replaced = false;
+        var options = new HumanInputPolicyFileStoreOptions
+        {
+            DurableBoundaryObserver = observed =>
+            {
+                if (!replaced && observed == HumanInputPolicyFileStorePublicationBoundary.GenerationPublished)
+                {
+                    var generation = File.ReadAllText(generationPath);
+                    File.WriteAllText(generationPath, generation.Replace(policy.ContentHash, new string('0', HumanInputLimits.Sha256HexCharacters), StringComparison.Ordinal));
+                    replaced = true;
+                }
+            }
+        };
+
+        var result = await new HumanInputPolicyFileStore(paths, options).CommitAsync(policy, 1);
+        var read = await new HumanInputPolicyFileStore(paths).ReadAsync(policy.Reference);
+
+        Assert.True(replaced);
+        Assert.Equal(HumanInputPolicyFileStoreWriteStatus.Unavailable, result.Status);
+        Assert.True(File.Exists(Path.Combine(root, "publication.intent")));
+        Assert.True(File.Exists(artifactPath));
+        Assert.Equal(HumanInputPolicySourceReadStatus.Unavailable, read.Status);
+    }
+
+    [Fact]
+    public async Task Fresh_commit_rejects_a_normally_returning_retirement_observer_that_mutates_final_artifact()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var policy = Timeout();
+        var artifactPath = Path.Combine(PolicyRoot(paths), policy.Reference + ".json");
+        var replacement = HumanInputPolicyArtifactHash.Apply(policy with { AuthorityActorId = "actor-two" });
+        var replaced = false;
+        var options = new HumanInputPolicyFileStoreOptions
+        {
+            DurableBoundaryObserver = observed =>
+            {
+                if (!replaced && observed == HumanInputPolicyFileStorePublicationBoundary.PublicationIntentRetired)
+                {
+                    File.WriteAllBytes(artifactPath, HumanInputPolicyArtifactJson.Serialize(replacement));
+                    replaced = true;
+                }
+            }
+        };
+
+        var result = await new HumanInputPolicyFileStore(paths, options).CommitAsync(policy, 0);
+        var read = await new HumanInputPolicyFileStore(paths).ReadAsync(policy.Reference);
+
+        Assert.True(replaced);
+        Assert.Equal(HumanInputPolicyFileStoreWriteStatus.Unavailable, result.Status);
+        Assert.False(File.Exists(Path.Combine(PolicyRoot(paths), "publication.intent")));
+        Assert.Equal(HumanInputPolicySourceReadStatus.Unavailable, read.Status);
+    }
+
+    [Fact]
+    public async Task Recovery_rejects_a_normally_returning_artifact_observer_that_mutates_the_same_reference()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var policy = Timeout();
+        var interrupted = false;
+        var interruptionOptions = new HumanInputPolicyFileStoreOptions
+        {
+            DurableBoundaryObserver = observed =>
+            {
+                if (!interrupted && observed == HumanInputPolicyFileStorePublicationBoundary.IntentPublished)
+                {
+                    interrupted = true;
+                    throw new IOException("Simulated process loss after the publication intent.");
+                }
+            }
+        };
+        var first = await new HumanInputPolicyFileStore(paths, interruptionOptions).CommitAsync(policy, 0);
+        var artifactPath = Path.Combine(PolicyRoot(paths), policy.Reference + ".json");
+        var replacement = HumanInputPolicyArtifactHash.Apply(policy with { AuthorityActorId = "actor-two" });
+        var replaced = false;
+        var retryOptions = new HumanInputPolicyFileStoreOptions
+        {
+            DurableBoundaryObserver = observed =>
+            {
+                if (!replaced && observed == HumanInputPolicyFileStorePublicationBoundary.ArtifactPublished)
+                {
+                    File.WriteAllBytes(artifactPath, HumanInputPolicyArtifactJson.Serialize(replacement));
+                    replaced = true;
+                }
+            }
+        };
+
+        var retry = await new HumanInputPolicyFileStore(paths, retryOptions).CommitAsync(policy, 0);
+        var read = await new HumanInputPolicyFileStore(paths).ReadAsync(policy.Reference);
+
+        Assert.True(interrupted);
+        Assert.True(replaced);
+        Assert.Equal(HumanInputPolicyFileStoreWriteStatus.Unavailable, first.Status);
+        Assert.Equal(HumanInputPolicyFileStoreWriteStatus.Unavailable, retry.Status);
+        Assert.True(File.Exists(Path.Combine(PolicyRoot(paths), "publication.intent")));
+        Assert.Equal(HumanInputPolicySourceReadStatus.Unavailable, read.Status);
+    }
+
+    [Fact]
+    public async Task Recovery_rejects_a_normally_returning_generation_observer_that_mutates_the_same_reference()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var seed = Timeout();
+        var policy = Failure();
+        Assert.Equal(HumanInputPolicyFileStoreWriteStatus.Committed, (await new HumanInputPolicyFileStore(paths).CommitAsync(seed, 0)).Status);
+        var interrupted = false;
+        var interruptionOptions = new HumanInputPolicyFileStoreOptions
+        {
+            DurableBoundaryObserver = observed =>
+            {
+                if (!interrupted && observed == HumanInputPolicyFileStorePublicationBoundary.ArtifactPublished)
+                {
+                    interrupted = true;
+                    throw new IOException("Simulated process loss after the policy artifact.");
+                }
+            }
+        };
+        var first = await new HumanInputPolicyFileStore(paths, interruptionOptions).CommitAsync(policy, 1);
+        var generationPath = Path.Combine(PolicyRoot(paths), "generation");
+        var replaced = false;
+        var retryOptions = new HumanInputPolicyFileStoreOptions
+        {
+            DurableBoundaryObserver = observed =>
+            {
+                if (!replaced && observed == HumanInputPolicyFileStorePublicationBoundary.GenerationPublished)
+                {
+                    var generation = File.ReadAllText(generationPath);
+                    File.WriteAllText(generationPath, generation.Replace(policy.ContentHash, new string('0', HumanInputLimits.Sha256HexCharacters), StringComparison.Ordinal));
+                    replaced = true;
+                }
+            }
+        };
+
+        var retry = await new HumanInputPolicyFileStore(paths, retryOptions).CommitAsync(policy, 1);
+        var read = await new HumanInputPolicyFileStore(paths).ReadAsync(policy.Reference);
+
+        Assert.True(interrupted);
+        Assert.True(replaced);
+        Assert.Equal(HumanInputPolicyFileStoreWriteStatus.Unavailable, first.Status);
+        Assert.Equal(HumanInputPolicyFileStoreWriteStatus.Unavailable, retry.Status);
+        Assert.True(File.Exists(Path.Combine(PolicyRoot(paths), "publication.intent")));
+        Assert.Equal(HumanInputPolicySourceReadStatus.Unavailable, read.Status);
+    }
+
+    [Fact]
     public async Task Maximum_length_policy_and_revision_ids_fit_the_bounded_generation_and_restart_read()
     {
         using var workspace = new TestWorkspace();
@@ -445,6 +672,45 @@ public sealed class HumanInputPolicyFileStoreTests
         Assert.Equal(2, replay.StoreGeneration);
         Assert.Equal(HumanInputPolicySourceReadStatus.Ready, recovered.Status);
         Assert.Equal(failure, recovered.Policy);
+    }
+
+    [Fact]
+    public async Task Windows_orphan_recovery_rejects_a_normally_returning_generation_observer_that_mutates_the_same_reference()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var seed = Timeout();
+        var policy = Failure();
+        Assert.Equal(HumanInputPolicyFileStoreWriteStatus.Committed, (await new HumanInputPolicyFileStore(paths).CommitAsync(seed, 0)).Status);
+        var root = PolicyRoot(paths);
+        await File.WriteAllBytesAsync(Path.Combine(root, policy.Reference + ".json"), HumanInputPolicyArtifactJson.Serialize(policy));
+        var generationPath = Path.Combine(root, "generation");
+        var replaced = false;
+        var options = new HumanInputPolicyFileStoreOptions
+        {
+            DurableBoundaryObserver = observed =>
+            {
+                if (!replaced && observed == HumanInputPolicyFileStorePublicationBoundary.GenerationPublished)
+                {
+                    var generation = File.ReadAllText(generationPath);
+                    File.WriteAllText(generationPath, generation.Replace(policy.ContentHash, new string('0', HumanInputLimits.Sha256HexCharacters), StringComparison.Ordinal));
+                    replaced = true;
+                }
+            }
+        };
+
+        var result = await new HumanInputPolicyFileStore(paths, options).CommitAsync(policy, 1);
+        var read = await new HumanInputPolicyFileStore(paths).ReadAsync(policy.Reference);
+
+        Assert.True(replaced);
+        Assert.Equal(HumanInputPolicyFileStoreWriteStatus.Unavailable, result.Status);
+        Assert.False(File.Exists(Path.Combine(root, "publication.intent")));
+        Assert.Equal(HumanInputPolicySourceReadStatus.Unavailable, read.Status);
     }
 
     [Fact]

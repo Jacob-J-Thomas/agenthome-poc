@@ -58,7 +58,7 @@ public sealed class HumanInputPolicyFileStore : IHumanInputPolicySource
             var session = lease.Session;
             await RetireInterruptedTemporaryArtifactsAsync(session, cancellationToken).ConfigureAwait(false);
             if (session.FileExistsBound(_publicationIntentPath)) throw new FormatException("The Human Input policy source has an unfinished publication intent that requires its exact retry.");
-            var generation = await ReadGenerationAsync(session, cancellationToken).ConfigureAwait(false);
+            var generation = (await ReadGenerationStateAsync(session, cancellationToken).ConfigureAwait(false)).Generation;
             var path = PathFor(reference);
             var bytes = await session.TryReadAllBytesBoundAsync(path, _options.MaximumArtifactUtf8Bytes, cancellationToken).ConfigureAwait(false);
             if (bytes is null) return Read(HumanInputPolicySourceReadStatus.NotFound, null, generation.StoreGeneration);
@@ -97,7 +97,8 @@ public sealed class HumanInputPolicyFileStore : IHumanInputPolicySource
             if (recovered is not null) return recovered;
             recovered = await RecoverWindowsArtifactVisibleOrphanAsync(session, artifact, expectedStoreGeneration, cancellationToken).ConfigureAwait(false);
             if (recovered is not null) return recovered;
-            var generation = await ReadGenerationAsync(session, cancellationToken).ConfigureAwait(false);
+            var state = await ReadGenerationStateAsync(session, cancellationToken).ConfigureAwait(false);
+            var generation = state.Generation;
             var path = PathFor(artifact.Reference);
             var existingBytes = await session.TryReadAllBytesBoundAsync(path, _options.MaximumArtifactUtf8Bytes, cancellationToken).ConfigureAwait(false);
             if (existingBytes is not null)
@@ -112,7 +113,7 @@ public sealed class HumanInputPolicyFileStore : IHumanInputPolicySource
             if (bytes.Length > _options.MaximumArtifactUtf8Bytes) return Write(HumanInputPolicyFileStoreWriteStatus.Invalid, generation.StoreGeneration);
             var next = checked(generation.StoreGeneration + 1);
             var nextGeneration = AddArtifact(generation, artifact, next);
-            await PublishAsync(session, new HumanInputPolicyFileStorePublicationIntent(generation.StoreGeneration, artifact), path, bytes, nextGeneration, cancellationToken).ConfigureAwait(false);
+            await PublishAsync(session, new HumanInputPolicyFileStorePublicationIntent(generation.StoreGeneration, artifact), path, bytes, state, nextGeneration, cancellationToken).ConfigureAwait(false);
             return Write(HumanInputPolicyFileStoreWriteStatus.Committed, next);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -132,14 +133,14 @@ public sealed class HumanInputPolicyFileStore : IHumanInputPolicySource
         return new HumanInputPolicyFileStoreLease(session);
     }
 
-    private async Task<HumanInputPolicyFileStoreGeneration> ReadGenerationAsync(CapabilityCatalogPathSession session, CancellationToken cancellationToken)
+    private async Task<(HumanInputPolicyFileStoreGeneration Generation, bool Exists, byte[]? Bytes, IReadOnlyList<HumanInputPolicyFileStoreCatalogEntry> Artifacts)> ReadGenerationStateAsync(CapabilityCatalogPathSession session, CancellationToken cancellationToken)
     {
         var artifacts = await ReadArtifactCatalogAsync(session, cancellationToken).ConfigureAwait(false);
         var stored = await ReadStoredGenerationAsync(session, cancellationToken).ConfigureAwait(false);
         if (!stored.Exists && artifacts.Count != 0) throw new FormatException("The Human Input policy generation is missing.");
-        if (!stored.Exists) return new HumanInputPolicyFileStoreGeneration(0, []);
+        if (!stored.Exists) return (new HumanInputPolicyFileStoreGeneration(0, []), false, null, artifacts);
         if (!CatalogEquals(stored.Generation, artifacts)) throw new FormatException("The Human Input policy generation does not match the immutable artifact catalog.");
-        return stored.Generation;
+        return (stored.Generation, true, stored.Bytes, artifacts);
     }
 
     private async Task<HumanInputPolicyFileStoreWriteResult?> RecoverPublicationAsync(CapabilityCatalogPathSession session, HumanInputPolicyArtifact artifact, long expectedStoreGeneration, CancellationToken cancellationToken)
@@ -147,26 +148,35 @@ public sealed class HumanInputPolicyFileStore : IHumanInputPolicySource
         if (!session.FileExistsBound(_publicationIntentPath)) return null;
 
         var intent = await ReadPublicationIntentAsync(session, cancellationToken).ConfigureAwait(false);
+        var intentBytes = HumanInputPolicyFileStorePublicationIntentJson.Serialize(intent);
         if (!Equals(intent.Artifact, artifact) || intent.ExpectedStoreGeneration != expectedStoreGeneration) return Write(HumanInputPolicyFileStoreWriteStatus.Unavailable, 0);
 
-        var nextGeneration = checked(intent.ExpectedStoreGeneration + 1);
+        var nextGenerationNumber = checked(intent.ExpectedStoreGeneration + 1);
         var path = PathFor(intent.Artifact.Reference);
         var artifactBytes = await session.TryReadAllBytesBoundAsync(path, _options.MaximumArtifactUtf8Bytes, cancellationToken).ConfigureAwait(false);
         var artifacts = await ReadArtifactCatalogAsync(session, cancellationToken).ConfigureAwait(false);
         var stored = await ReadStoredGenerationAsync(session, cancellationToken).ConfigureAwait(false);
         var currentGeneration = stored.Exists ? stored.Generation : new HumanInputPolicyFileStoreGeneration(0, []);
+        HumanInputPolicyFileStoreGeneration? finalGeneration = null;
         if (artifactBytes is not null)
         {
             var existing = HumanInputPolicyArtifactJson.Deserialize(artifactBytes);
-            if (!Equals(existing, intent.Artifact) || artifacts.Count != nextGeneration) return Write(HumanInputPolicyFileStoreWriteStatus.Unavailable, 0);
+            if (!Equals(existing, intent.Artifact) || artifacts.Count != nextGenerationNumber) return Write(HumanInputPolicyFileStoreWriteStatus.Unavailable, 0);
             if (currentGeneration.StoreGeneration == intent.ExpectedStoreGeneration && IsExactAdvance(currentGeneration, artifacts, intent.Artifact))
             {
-                await WriteGenerationAsync(session, new HumanInputPolicyFileStoreGeneration(nextGeneration, artifacts), cancellationToken).ConfigureAwait(false);
+                var publishedGeneration = new HumanInputPolicyFileStoreGeneration(nextGenerationNumber, artifacts);
+                await WriteGenerationAsync(session, publishedGeneration, cancellationToken).ConfigureAwait(false);
                 await ObserveBoundaryAsync(HumanInputPolicyFileStorePublicationBoundary.GenerationPublished, cancellationToken).ConfigureAwait(false);
+                await EnsurePublishedIntentArtifactAndGenerationAsync(session, path, intentBytes, HumanInputPolicyArtifactJson.Serialize(artifact), HumanInputPolicyFileStoreGenerationJson.Serialize(publishedGeneration), artifacts, cancellationToken).ConfigureAwait(false);
+                finalGeneration = publishedGeneration;
             }
-            else if (!stored.Exists || stored.Generation.StoreGeneration != nextGeneration || !CatalogEquals(stored.Generation, artifacts))
+            else if (!stored.Exists || stored.Generation.StoreGeneration != nextGenerationNumber || !CatalogEquals(stored.Generation, artifacts))
             {
                 return Write(HumanInputPolicyFileStoreWriteStatus.Unavailable, 0);
+            }
+            else
+            {
+                finalGeneration = stored.Generation;
             }
         }
         else
@@ -175,40 +185,51 @@ public sealed class HumanInputPolicyFileStore : IHumanInputPolicySource
             var bytes = HumanInputPolicyArtifactJson.Serialize(intent.Artifact);
             await WriteArtifactAsync(session, path, bytes, cancellationToken).ConfigureAwait(false);
             await ObserveBoundaryAsync(HumanInputPolicyFileStorePublicationBoundary.ArtifactPublished, cancellationToken).ConfigureAwait(false);
-            await WriteGenerationAsync(session, AddArtifact(currentGeneration, intent.Artifact, nextGeneration), cancellationToken).ConfigureAwait(false);
+            var publishedGeneration = AddArtifact(currentGeneration, intent.Artifact, nextGenerationNumber);
+            await EnsurePublishedIntentAndArtifactAsync(session, path, intentBytes, bytes, publishedGeneration.Artifacts, stored.Exists, stored.Bytes, cancellationToken).ConfigureAwait(false);
+            await WriteGenerationAsync(session, publishedGeneration, cancellationToken).ConfigureAwait(false);
             await ObserveBoundaryAsync(HumanInputPolicyFileStorePublicationBoundary.GenerationPublished, cancellationToken).ConfigureAwait(false);
+            await EnsurePublishedIntentArtifactAndGenerationAsync(session, path, intentBytes, bytes, HumanInputPolicyFileStoreGenerationJson.Serialize(publishedGeneration), publishedGeneration.Artifacts, cancellationToken).ConfigureAwait(false);
+            finalGeneration = publishedGeneration;
         }
 
         await RetirePublicationIntentAsync(session, cancellationToken).ConfigureAwait(false);
-        return Write(HumanInputPolicyFileStoreWriteStatus.Replayed, nextGeneration);
+        var completedGeneration = finalGeneration ?? throw new IOException("The Human Input policy recovery did not establish a final generation.");
+        await EnsureFinalPublicationStateAsync(session, artifact, HumanInputPolicyArtifactJson.Serialize(artifact), HumanInputPolicyFileStoreGenerationJson.Serialize(completedGeneration), completedGeneration.Artifacts, cancellationToken).ConfigureAwait(false);
+        return Write(HumanInputPolicyFileStoreWriteStatus.Replayed, nextGenerationNumber);
     }
 
-    private async Task PublishAsync(CapabilityCatalogPathSession session, HumanInputPolicyFileStorePublicationIntent intent, string artifactPath, byte[] artifactBytes, HumanInputPolicyFileStoreGeneration nextGeneration, CancellationToken cancellationToken)
+    private async Task PublishAsync(CapabilityCatalogPathSession session, HumanInputPolicyFileStorePublicationIntent intent, string artifactPath, byte[] artifactBytes, (HumanInputPolicyFileStoreGeneration Generation, bool Exists, byte[]? Bytes, IReadOnlyList<HumanInputPolicyFileStoreCatalogEntry> Artifacts) currentState, HumanInputPolicyFileStoreGeneration nextGeneration, CancellationToken cancellationToken)
     {
         var intentBytes = HumanInputPolicyFileStorePublicationIntentJson.Serialize(intent);
         await WritePublicationIntentAsync(session, intentBytes, cancellationToken).ConfigureAwait(false);
         await ObserveBoundaryAsync(HumanInputPolicyFileStorePublicationBoundary.IntentPublished, cancellationToken).ConfigureAwait(false);
+        await EnsurePublishedIntentAndGenerationAsync(session, intentBytes, currentState.Exists, currentState.Bytes, currentState.Artifacts, cancellationToken).ConfigureAwait(false);
         await WriteArtifactAsync(session, artifactPath, artifactBytes, cancellationToken).ConfigureAwait(false);
         await ObserveBoundaryAsync(HumanInputPolicyFileStorePublicationBoundary.ArtifactPublished, cancellationToken).ConfigureAwait(false);
+        await EnsurePublishedIntentAndArtifactAsync(session, artifactPath, intentBytes, artifactBytes, nextGeneration.Artifacts, currentState.Exists, currentState.Bytes, cancellationToken).ConfigureAwait(false);
         await WriteGenerationAsync(session, nextGeneration, cancellationToken).ConfigureAwait(false);
         await ObserveBoundaryAsync(HumanInputPolicyFileStorePublicationBoundary.GenerationPublished, cancellationToken).ConfigureAwait(false);
+        await EnsurePublishedIntentArtifactAndGenerationAsync(session, artifactPath, intentBytes, artifactBytes, HumanInputPolicyFileStoreGenerationJson.Serialize(nextGeneration), nextGeneration.Artifacts, cancellationToken).ConfigureAwait(false);
         await RetirePublicationIntentAsync(session, cancellationToken).ConfigureAwait(false);
+        await EnsureFinalPublicationStateAsync(session, intent.Artifact, artifactBytes, HumanInputPolicyFileStoreGenerationJson.Serialize(nextGeneration), nextGeneration.Artifacts, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<HumanInputPolicyFileStorePublicationIntent> ReadPublicationIntentAsync(CapabilityCatalogPathSession session, CancellationToken cancellationToken)
     {
-        var bytes = await session.ReadAllBytesAsync(_publicationIntentPath, _options.MaximumArtifactUtf8Bytes * 2, cancellationToken).ConfigureAwait(false);
+        var bytes = await session.TryReadAllBytesBoundAsync(_publicationIntentPath, _options.MaximumArtifactUtf8Bytes * 2, cancellationToken).ConfigureAwait(false)
+            ?? throw new FileNotFoundException("The Human Input policy publication intent is missing.", _publicationIntentPath);
         return HumanInputPolicyFileStorePublicationIntentJson.Deserialize(bytes);
     }
 
-    private async Task<(bool Exists, HumanInputPolicyFileStoreGeneration Generation)> ReadStoredGenerationAsync(CapabilityCatalogPathSession session, CancellationToken cancellationToken)
+    private async Task<(bool Exists, HumanInputPolicyFileStoreGeneration Generation, byte[]? Bytes)> ReadStoredGenerationAsync(CapabilityCatalogPathSession session, CancellationToken cancellationToken)
     {
         var maximumGenerationBytes = checked((long)MaximumGenerationEntryBytes * _options.MaximumArtifacts + MaximumGenerationFixedBytes);
         if (maximumGenerationBytes > int.MaxValue) throw new FormatException("The Human Input policy generation bound is unavailable.");
         var bytes = await session.TryReadAllBytesBoundAsync(_generationPath, checked((int)maximumGenerationBytes), cancellationToken).ConfigureAwait(false);
-        if (bytes is null) return (false, new HumanInputPolicyFileStoreGeneration(0, []));
+        if (bytes is null) return (false, new HumanInputPolicyFileStoreGeneration(0, []), null);
 
-        return (true, HumanInputPolicyFileStoreGenerationJson.Deserialize(bytes));
+        return (true, HumanInputPolicyFileStoreGenerationJson.Deserialize(bytes), bytes);
     }
 
     private async Task WriteArtifactAsync(CapabilityCatalogPathSession session, string path, byte[] bytes, CancellationToken cancellationToken)
@@ -254,9 +275,63 @@ public sealed class HumanInputPolicyFileStore : IHumanInputPolicySource
         if (!Equals(existing, artifact)) return Write(HumanInputPolicyFileStoreWriteStatus.Unavailable, 0);
 
         var next = checked(currentGeneration.StoreGeneration + 1);
-        await WriteGenerationAsync(session, new HumanInputPolicyFileStoreGeneration(next, artifacts), cancellationToken).ConfigureAwait(false);
+        var nextGeneration = new HumanInputPolicyFileStoreGeneration(next, artifacts);
+        await WriteGenerationAsync(session, nextGeneration, cancellationToken).ConfigureAwait(false);
         await ObserveBoundaryAsync(HumanInputPolicyFileStorePublicationBoundary.GenerationPublished, cancellationToken).ConfigureAwait(false);
+        await EnsureFinalPublicationStateAsync(session, artifact, bytes, HumanInputPolicyFileStoreGenerationJson.Serialize(nextGeneration), artifacts, cancellationToken).ConfigureAwait(false);
         return Write(HumanInputPolicyFileStoreWriteStatus.Replayed, next);
+    }
+
+    private async Task EnsurePublishedIntentAndGenerationAsync(CapabilityCatalogPathSession session, byte[] intentBytes, bool generationExists, byte[]? generationBytes, IReadOnlyList<HumanInputPolicyFileStoreCatalogEntry> artifacts, CancellationToken cancellationToken)
+    {
+        await EnsureExactFileAsync(session, _publicationIntentPath, intentBytes, "publication intent", cancellationToken).ConfigureAwait(false);
+        await EnsureGenerationStateAsync(session, generationExists, generationBytes, artifacts, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task EnsurePublishedIntentAndArtifactAsync(CapabilityCatalogPathSession session, string artifactPath, byte[] intentBytes, byte[] artifactBytes, IReadOnlyList<HumanInputPolicyFileStoreCatalogEntry> artifacts, bool generationExists, byte[]? generationBytes, CancellationToken cancellationToken)
+    {
+        await EnsureExactFileAsync(session, _publicationIntentPath, intentBytes, "publication intent", cancellationToken).ConfigureAwait(false);
+        await EnsureExactFileAsync(session, artifactPath, artifactBytes, "policy artifact", cancellationToken).ConfigureAwait(false);
+        await EnsureGenerationStateAsync(session, generationExists, generationBytes, artifacts, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task EnsurePublishedIntentArtifactAndGenerationAsync(CapabilityCatalogPathSession session, string artifactPath, byte[] intentBytes, byte[] artifactBytes, byte[] generationBytes, IReadOnlyList<HumanInputPolicyFileStoreCatalogEntry> artifacts, CancellationToken cancellationToken)
+    {
+        await EnsureExactFileAsync(session, _publicationIntentPath, intentBytes, "publication intent", cancellationToken).ConfigureAwait(false);
+        await EnsureExactFileAsync(session, artifactPath, artifactBytes, "policy artifact", cancellationToken).ConfigureAwait(false);
+        await EnsureGenerationStateAsync(session, generationExists: true, generationBytes, artifacts, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task EnsureFinalPublicationStateAsync(CapabilityCatalogPathSession session, HumanInputPolicyArtifact artifact, byte[] artifactBytes, byte[] generationBytes, IReadOnlyList<HumanInputPolicyFileStoreCatalogEntry> artifacts, CancellationToken cancellationToken)
+    {
+        if (session.FileExistsBound(_publicationIntentPath)) throw new IOException("The Human Input policy publication intent remained after its retirement boundary.");
+        await EnsureExactFileAsync(session, PathFor(artifact.Reference), artifactBytes, "policy artifact", cancellationToken).ConfigureAwait(false);
+        await EnsureGenerationStateAsync(session, generationExists: true, generationBytes, artifacts, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task EnsureGenerationStateAsync(CapabilityCatalogPathSession session, bool generationExists, byte[]? generationBytes, IReadOnlyList<HumanInputPolicyFileStoreCatalogEntry> artifacts, CancellationToken cancellationToken)
+    {
+        var observedGenerationBytes = await session.TryReadAllBytesBoundAsync(_generationPath, checked((int)((long)MaximumGenerationEntryBytes * _options.MaximumArtifacts + MaximumGenerationFixedBytes)), cancellationToken).ConfigureAwait(false);
+        if (generationExists)
+        {
+            if (generationBytes is null || observedGenerationBytes is null || !observedGenerationBytes.AsSpan().SequenceEqual(generationBytes))
+            {
+                throw new IOException("The Human Input policy generation diverged after a semantic publication boundary.");
+            }
+        }
+        else if (observedGenerationBytes is not null)
+        {
+            throw new IOException("The Human Input policy generation appeared before its publication boundary.");
+        }
+
+        var observedArtifacts = await ReadArtifactCatalogAsync(session, cancellationToken).ConfigureAwait(false);
+        if (!observedArtifacts.SequenceEqual(artifacts)) throw new IOException("The Human Input policy artifact catalog diverged after a semantic publication boundary.");
+    }
+
+    private async Task EnsureExactFileAsync(CapabilityCatalogPathSession session, string path, byte[] expectedBytes, string description, CancellationToken cancellationToken)
+    {
+        var observedBytes = await session.TryReadAllBytesBoundAsync(path, expectedBytes.Length, cancellationToken).ConfigureAwait(false);
+        if (observedBytes is null || !observedBytes.AsSpan().SequenceEqual(expectedBytes)) throw new IOException($"The Human Input {description} diverged after a semantic publication boundary.");
     }
 
     private async Task RetireInterruptedTemporaryArtifactsAsync(CapabilityCatalogPathSession session, CancellationToken cancellationToken)
