@@ -887,6 +887,7 @@ public sealed class AgentRuntimeFactory
                 modelProfileCatalogFacade,
                 defaultConversationReviews,
                 codexRuntimeStatus,
+                triggerAuthorizer,
                 governedBackgroundRuntimeHost,
                 governedSleep);
             customRunStore = null;

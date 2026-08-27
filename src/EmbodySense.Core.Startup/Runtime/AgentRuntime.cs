@@ -61,6 +61,7 @@ public sealed class AgentRuntime : IAsyncDisposable
     private readonly GovernedLoopInvocationPreparationFacade _governedLoopInvocationPreparation;
     private readonly IModelProfileCatalogFacade _modelProfiles;
     private readonly DefaultConversationTurnReviewService _defaultConversationReviews;
+    private readonly ITriggerWorkerCurrentEvidenceAuthorizer _triggerWorkerCurrentEvidenceAuthorizer;
     private readonly GovernedLoopBackgroundRuntimeHost _governedBackgroundRuntimeHost;
     private readonly GovernedLoopSleepService? _governedSleep;
     private int _disposed;
@@ -85,6 +86,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         IModelProfileCatalogFacade modelProfiles,
         DefaultConversationTurnReviewService defaultConversationReviews,
         CodexRuntimeStatus codexRuntimeStatus,
+        ITriggerWorkerCurrentEvidenceAuthorizer triggerWorkerCurrentEvidenceAuthorizer,
         GovernedLoopBackgroundRuntimeHost governedBackgroundRuntimeHost,
         GovernedLoopSleepService? governedSleep = null)
     {
@@ -104,6 +106,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(governedLoopInvocationPreparation);
         ArgumentNullException.ThrowIfNull(modelProfiles);
         ArgumentNullException.ThrowIfNull(defaultConversationReviews);
+        ArgumentNullException.ThrowIfNull(triggerWorkerCurrentEvidenceAuthorizer);
         ArgumentNullException.ThrowIfNull(governedBackgroundRuntimeHost);
         ArgumentNullException.ThrowIfNull(codexRuntimeStatus);
 
@@ -125,6 +128,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         _governedLoopInvocationPreparation = governedLoopInvocationPreparation;
         _modelProfiles = modelProfiles;
         _defaultConversationReviews = defaultConversationReviews;
+        _triggerWorkerCurrentEvidenceAuthorizer = triggerWorkerCurrentEvidenceAuthorizer;
         _governedBackgroundRuntimeHost = governedBackgroundRuntimeHost;
         _governedSleep = governedSleep;
         _commandService = new RuntimeCommandService(conversationMemory, startupContext);
@@ -413,6 +417,16 @@ public sealed class AgentRuntime : IAsyncDisposable
         var service = CreateTriggerWorkerService(authorizer, store, clock);
         return new TriggerWorkerRuntimeFacade(store, service);
     }
+
+    /// <summary>Creates a one-shot trigger worker using this runtime's factory-owned current-evidence authorizer.</summary>
+    /// <remarks>
+    /// This facade shares the runtime's canonical dispatcher and authority sources. It is intended for an explicit process
+    /// host that needs one bounded dispatch attempt without creating a second trigger composition.
+    /// </remarks>
+    /// <param name="timeProvider">An optional composition-owned UTC clock.</param>
+    /// <returns>A one-shot trigger worker bound to the canonical runtime composition.</returns>
+    public TriggerWorkerRuntimeFacade CreateCanonicalTriggerWorkerRuntime(TimeProvider? timeProvider = null)
+        => CreateTriggerWorkerRuntime(_triggerWorkerCurrentEvidenceAuthorizer, timeProvider);
 
     private TriggerWorkerService CreateTriggerWorkerService(
         ITriggerWorkerCurrentEvidenceAuthorizer authorizer,

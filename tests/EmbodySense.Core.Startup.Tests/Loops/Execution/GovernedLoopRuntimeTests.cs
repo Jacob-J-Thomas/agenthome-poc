@@ -1018,7 +1018,8 @@ internal static class GovernedLoopRuntimeTests
     {
         using var fixture = await GovernedRuntimeFixture.CreateAsync(scheduleTrigger: true, pauseProvider: true);
         fixture.EnableInMemoryProviderBarrier();
-        var scheduledAtUtc = DateTimeOffset.UtcNow.AddMinutes(-2).ToUniversalTime();
+        var dispatchNow = DateTimeOffset.UtcNow.ToUniversalTime();
+        var scheduledAtUtc = dispatchNow.AddMinutes(-3);
         var workerNow = scheduledAtUtc.AddMinutes(2);
         var first = ScheduleScenario.Create(
             fixture,
@@ -1036,7 +1037,6 @@ internal static class GovernedLoopRuntimeTests
         await QueueScheduleAsync(fixture.Paths, first, workerNow);
         await QueueScheduleAsync(fixture.Paths, second, workerNow.AddTicks(1));
 
-        var dispatchNow = workerNow.AddSeconds(1);
         var queue = new TriggerQueueStore(
             fixture.Paths,
             TriggerQueueQuota.Runtime,
@@ -1046,7 +1046,7 @@ internal static class GovernedLoopRuntimeTests
         await using var runtime = await fixture.CreateRuntimeAsync(governedModelExecutionObserver: firstWorkerAdmission);
         var generation = (await queue.GetSnapshotAsync(dispatchNow)).Generation;
         var blockerTask = runtime
-            .CreateTriggerWorkerRuntime(new ExactTriggerAuthorizer(), new FixedTriggerTimeProvider(dispatchNow))
+            .CreateCanonicalTriggerWorkerRuntime(new FixedTriggerTimeProvider(dispatchNow))
             .RunOnceAsync(new TriggerWorkerSelectionInput(
                 "overlap-retry-worker-a",
                 generation,
@@ -1064,7 +1064,7 @@ internal static class GovernedLoopRuntimeTests
             providerEntered = true;
             generation = (await queue.GetSnapshotAsync(dispatchNow)).Generation;
             blocked = await runtime
-                .CreateTriggerWorkerRuntime(new ExactTriggerAuthorizer(), new FixedTriggerTimeProvider(dispatchNow))
+                .CreateCanonicalTriggerWorkerRuntime(new FixedTriggerTimeProvider(dispatchNow))
                 .RunOnceAsync(new TriggerWorkerSelectionInput(
                     "overlap-retry-worker-b",
                     generation,
@@ -1114,40 +1114,29 @@ internal static class GovernedLoopRuntimeTests
         Assert.Equal(completedBlocker.Entry.GovernedRunId, deferred.Attempts[^1].BlockingRunId);
         Assert.Single(await runs.ListRecentAsync(10));
 
-        await using var background = runtime.CreateGovernedLoopLocalBackgroundRuntime(
-            first,
-            first,
-            first,
-            new ExactTriggerAuthorizer(),
-            new UnusedSleepPosture(),
-            new UnusedWakeContinuation(),
-            new UnusedWakeVerification(),
-            new GovernedLoopLocalWorkRunnerOptions(
-                "overlap-retry-background-worker",
-                TimeSpan.FromSeconds(30),
-                2,
-                3),
-            new GovernedLoopLocalCoordinatorOptions(
-                "overlap-retry-background-coordinator",
-                "overlap-retry-background-owner",
-                TimeSpan.FromSeconds(1),
-                TimeSpan.FromSeconds(1),
-                TimeSpan.FromSeconds(5),
-                1),
-            new FixedTriggerTimeProvider(dispatchNow.AddMinutes(1)));
-        var retried = Assert.IsType<GovernedLoopLocalWorkResult>(
-            await background.RunOnceAsync(GovernedLoopLocalWorkFamily.Trigger));
-        var exhausted = Assert.IsType<GovernedLoopLocalWorkResult>(
-            await background.RunOnceAsync(GovernedLoopLocalWorkFamily.Trigger));
-        var refreshed = Assert.IsType<ScheduleRunAdmissionEvidence>(
-            await runs.GetScheduleAdmissionAsync(second.CreateEnvelope().DeliveryId));
+        var activation = await runtime.StartGovernedLoopLocalBackgroundWithStatusAsync();
+        Assert.Equal(AgentRuntimeGovernedLoopBackgroundStartStatus.Started, activation.Status);
+        ScheduleRunAdmissionEvidence? refreshed = null;
+        var retryDeadlineUtc = DateTimeOffset.UtcNow.AddSeconds(10);
+        while (DateTimeOffset.UtcNow < retryDeadlineUtc)
+        {
+            refreshed = await runs.GetScheduleAdmissionAsync(second.CreateEnvelope().DeliveryId);
+            if (refreshed?.Attempts.Any(attempt => attempt.Disposition == ScheduleRunAdmissionDisposition.RunCreated) == true
+                && fixture.ProviderAttempts >= 2)
+            {
+                break;
+            }
 
-        Assert.Equal(GovernedLoopLocalWorkResultStatus.Completed, retried.Status);
-        Assert.Equal("schedule-retry-materialized", retried.ReasonCode);
-        Assert.Equal(GovernedLoopLocalWorkResultStatus.Empty, exhausted.Status);
+            await Task.Delay(20);
+        }
+
+        var stopped = await runtime.StopGovernedLoopLocalBackgroundAsync();
+        Assert.Equal(AgentRuntimeGovernedLoopBackgroundStopStatus.Stopped, stopped.Status);
+        refreshed ??= await runs.GetScheduleAdmissionAsync(second.CreateEnvelope().DeliveryId);
+        Assert.NotNull(refreshed);
         Assert.Equal(2, fixture.ProviderAttempts);
         Assert.Equal(2, (await runs.ListRecentAsync(10)).Count);
-        Assert.Single(refreshed.Attempts, attempt => attempt.Disposition == ScheduleRunAdmissionDisposition.RunCreated);
+        Assert.Single(refreshed!.Attempts, attempt => attempt.Disposition == ScheduleRunAdmissionDisposition.RunCreated);
         Assert.Equal(ScheduleRunAdmissionDisposition.RunCreated, refreshed.Attempts[^1].Disposition);
         Assert.Equal(completedBlocker.Entry.GovernedRunId, refreshed.Attempts[0].BlockingRunId);
     }
@@ -3426,7 +3415,7 @@ internal static class GovernedLoopRuntimeTests
                     throw new LlmInferenceTerminalFailureException("Planned governed provider failure.");
                 }
 
-                await control.WaitForReleaseAsync();
+                await control.WaitForReleaseAsync(cancellationToken);
                 const string Output = "governed response: exactly one bounded output token";
                 if (responseChunkHandler is not null)
                 {
@@ -3564,7 +3553,7 @@ internal static class GovernedLoopRuntimeTests
                 return next;
             }
 
-            public async Task WaitForReleaseAsync()
+            public async Task WaitForReleaseAsync(CancellationToken cancellationToken = default)
             {
                 if (!pauseProvider || File.Exists(Path.Combine(workspacePath, ReleaseFileName)))
                 {
@@ -3587,7 +3576,7 @@ internal static class GovernedLoopRuntimeTests
                 File.WriteAllText(Path.Combine(workspacePath, StartedFileName), "started");
                 while (!File.Exists(Path.Combine(workspacePath, ReleaseFileName)))
                 {
-                    await Task.Delay(20);
+                    await Task.Delay(20, cancellationToken);
                 }
             }
 
