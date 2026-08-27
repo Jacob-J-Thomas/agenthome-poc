@@ -1,23 +1,22 @@
-using System.Threading;
+using EmbodySense.Core.Persistence.Capabilities;
 
 namespace EmbodySense.Core.Persistence.HumanInput.Policies;
 
 internal sealed class HumanInputPolicyFileStoreLease : IAsyncDisposable
 {
-    private readonly FileStream _stream;
-    private readonly SemaphoreSlim _gate;
+    private readonly CapabilityCatalogPathSession _session;
     private int _disposed;
 
-    internal HumanInputPolicyFileStoreLease(FileStream stream, SemaphoreSlim gate)
+    internal HumanInputPolicyFileStoreLease(CapabilityCatalogPathSession session)
     {
-        _stream = stream;
-        _gate = gate;
+        _session = session;
     }
+
+    internal CapabilityCatalogPathSession Session => _session;
 
     public async ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
-        await _stream.DisposeAsync().ConfigureAwait(false);
-        _gate.Release();
+        await _session.DisposeAsync().ConfigureAwait(false);
     }
 }
