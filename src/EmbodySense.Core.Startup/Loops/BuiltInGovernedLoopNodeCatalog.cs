@@ -16,6 +16,7 @@ using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Common.CommandActions;
 using EmbodySense.Core.Common.CommandActions.Models;
 using EmbodySense.Core.Persistence.Capabilities;
+using EmbodySense.Core.Startup.Capabilities;
 
 namespace EmbodySense.Core.Startup.Loops;
 
@@ -115,7 +116,7 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
             var executableCommandActions = new HashSet<string>(StringComparer.Ordinal);
             foreach (var registration in _commandActions)
             {
-                if (!HasCurrentExecutableCapabilities(registration.Template.Capability.Id.Value, current)
+                if (!HasCurrentExecutableCapabilities(registration.Template.Capability.Id.Value, current, registration.Template.Capability)
                     || _commandActionNativeHost is null)
                 {
                     continue;
@@ -187,9 +188,11 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
 
     private static bool HasCurrentExecutableCapabilities(
         string capabilityId,
-        IReadOnlyDictionary<string, CapabilityCatalogEntry> current)
+        IReadOnlyDictionary<string, CapabilityCatalogEntry> current,
+        CapabilityDescriptorIdentity? expectedIdentity = null)
         => current.TryGetValue(capabilityId, out var entry)
             && CapabilityDescriptorIdentity.TryCreate(entry.Descriptor, out var descriptorIdentity, out _)
+            && HasExpectedDescriptorIdentity(capabilityId, descriptorIdentity!, expectedIdentity)
             && entry.Lifecycle.SchemaVersion == CapabilityLifecycleSnapshot.CurrentSchemaVersion
             && Equals(entry.Lifecycle.DescriptorIdentity, descriptorIdentity)
             && entry.Lifecycle.Declaration == CapabilityDeclarationState.Declared
@@ -198,6 +201,22 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
             && entry.Lifecycle.Health == CapabilityHealthState.Healthy
             && entry.Lifecycle.Retirement is CapabilityRetirementState.Active or CapabilityRetirementState.Deprecated
             && entry.Lifecycle.Trust == CapabilityTrustState.Verified;
+
+    private static bool HasExpectedDescriptorIdentity(
+        string capabilityId,
+        CapabilityDescriptorIdentity actualIdentity,
+        CapabilityDescriptorIdentity? expectedIdentity)
+    {
+        if (expectedIdentity is not null)
+        {
+            return Equals(actualIdentity, expectedIdentity);
+        }
+
+        var builtIn = BuiltInCapabilityCatalog.Descriptors.FirstOrDefault(descriptor => descriptor.Id.Value == capabilityId);
+        return builtIn is null
+            || CapabilityDescriptorIdentity.TryCreate(builtIn, out var builtInIdentity, out _)
+                && Equals(actualIdentity, builtInIdentity);
+    }
 
     private static GovernedLoopNodeCatalogSnapshot UnavailableSnapshot()
         => new(false, SourceEvidenceId, Array.Empty<GovernedLoopNodeCatalogDescriptor>());

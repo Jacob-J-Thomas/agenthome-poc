@@ -137,12 +137,14 @@ internal sealed class GovernedLoopBackgroundRuntimeHost : ICustomLoopExecutionAc
 
     internal Task<AgentRuntimeGovernedLoopBackgroundStopResult> WaitForStopCompletionAsync()
     {
-        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         var stopTask = Volatile.Read(ref _stopTask);
         return stopTask is null
             ? Task.FromResult(AlreadyStopped())
             : CompleteStopAsync(stopTask, CancellationToken.None);
     }
+
+    internal Task WaitForDisposeCompletionAsync()
+        => Volatile.Read(ref _disposeCompletion)?.Task ?? Task.CompletedTask;
 
     private async Task<AgentRuntimeGovernedLoopBackgroundStopResult> StopCoreAsync(
         CancellationToken cancellationToken)
@@ -314,7 +316,8 @@ internal sealed class GovernedLoopBackgroundRuntimeHost : ICustomLoopExecutionAc
                 // Keep the complete coordinator composition alive until the exact deferred stop reaches its
                 // terminal safe boundary. The AgentRuntime cannot dispose its runner, stores, or inference
                 // dependencies while this task is still able to call them.
-                await DisposeAfterDrainAsync(stopTask, coordinator).ConfigureAwait(false);
+                _ = DisposeAfterDrainAsync(stopTask, coordinator, completion);
+                return;
             }
             else
             {
@@ -577,16 +580,19 @@ internal sealed class GovernedLoopBackgroundRuntimeHost : ICustomLoopExecutionAc
 
     private static async Task DisposeAfterDrainAsync(
         Task<GovernedLoopLocalCoordinatorStopResult> stopTask,
-        GovernedLoopLocalCoordinator coordinator)
+        GovernedLoopLocalCoordinator coordinator,
+        TaskCompletionSource<bool> completion)
     {
         try
         {
             _ = await stopTask.ConfigureAwait(false);
             await coordinator.DisposeAsync().ConfigureAwait(false);
+            completion.TrySetResult(true);
         }
-        catch
+        catch (Exception exception)
         {
             // A retained coordinator failure is already represented in durable evidence; disposal must not fabricate a terminal posture.
+            completion.TrySetException(exception);
         }
     }
 

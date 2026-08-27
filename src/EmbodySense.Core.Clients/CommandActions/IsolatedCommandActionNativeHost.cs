@@ -92,7 +92,7 @@ public sealed class IsolatedCommandActionNativeHost : ICommandActionNativeHost
             {
                 return Availability(CapabilityExecutableAvailabilityStatus.Unavailable, "The exact activated command artifact is unavailable.");
             }
-            await using var launchFence = await lease.AcquireLaunchFenceAsync(cancellationToken).ConfigureAwait(false);
+            var launchFence = await lease.ExecuteWithLaunchFenceAsync(_ => Task.FromResult("catalog-availability"), cancellationToken).ConfigureAwait(false);
             return launchFence is null
                 ? Availability(CapabilityExecutableAvailabilityStatus.Unavailable, "The exact activated command artifact is no longer current.")
                 : Availability(CapabilityExecutableAvailabilityStatus.Available, "The exact command artifact and isolation controls are available.");

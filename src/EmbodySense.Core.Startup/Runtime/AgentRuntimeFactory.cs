@@ -442,6 +442,8 @@ public sealed class AgentRuntimeFactory
             var modelProfileMetadata = modelProfileRuntime.MetadataSource;
             var modelProfileAdapters = modelProfileRuntime.AdapterRegistry;
             var modelProfileCapabilityCatalog = new CapabilityCatalogStore(paths, _capabilityTrustProvider, authorityTransaction: capabilityAuthority);
+            var graphCapabilityLifecycleStore = new CapabilityLifecycleMutationStore(paths, _capabilityTrustProvider, authorityTransaction: capabilityAuthority);
+            var graphCapabilityCatalog = new CapabilityLifecycleCatalogStore(modelProfileCapabilityCatalog, graphCapabilityLifecycleStore, capabilityAuthority);
             var modelProfileCatalogFacade = new EmbodySense.Core.Startup.Inference.Profiles.ModelProfileCatalogFacade(
                 new EmbodySense.Core.Application.Inference.Profiles.ModelProfileCatalogService(
                     modelProfileCapabilityCatalog,
@@ -768,7 +770,7 @@ public sealed class AgentRuntimeFactory
             var graphCatalog = new BuiltInGovernedLoopNodeCatalog(
                 governedCommandActionRegistrations?.Registrations ?? [],
                 registration => executableCommandActions.Contains(registration.Template.ContentHash),
-                modelProfileCapabilityCatalog,
+                graphCapabilityCatalog,
                 governedCommandActionNativeHost);
             var graphAuthority = new GovernedLoopAuthoritySnapshotProvider(governedRoleSource);
             var graphAuthoringFacade = new GovernedLoopGraphAuthoringFacade(

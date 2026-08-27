@@ -28,6 +28,8 @@ using EmbodySense.Core.Startup.Loops;
 using EmbodySense.Core.Startup.Loops.Execution.Models;
 using EmbodySense.Core.Startup.Loops.Models;
 using EmbodySense.Core.Startup.Loops.Execution.Sleep.Models;
+using EmbodySense.Core.Startup.Runtime;
+using EmbodySense.Core.Startup.Runtime.Models;
 using EmbodySense.Core.Startup.Capabilities;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Tests.Support;
@@ -182,6 +184,56 @@ public sealed class WebGovernedLoopBackgroundLifetimeTests
         finally
         {
             await app.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task Pinned_runtime_quarantines_cancelled_default_provider_without_recreating_background_runtime()
+    {
+        using var workspace = new TestWorkspace();
+        var codexPath = await WebPinnedRuntimeCodexExecutable.CreateAsync(workspace);
+        await WorkspaceInitializer.ForWeb().InitializeAsync(workspace.RootPath);
+        await using var app = CreateApp(workspace.RootPath, codexPath, out var options);
+        await app.StartAsync();
+
+        try
+        {
+            using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
+            Assert.Equal(WebGovernedLoopBackgroundPosture.Ready, (await WaitForPostureAsync(client, WebGovernedLoopBackgroundPosture.Ready)).BackgroundPosture);
+            var runtimeHost = app.Services.GetRequiredService<WebAgentRuntimeHost>();
+            var warm = await runtimeHost.SendMessageAsync("warm pinned provider", (_, _) => Task.CompletedTask);
+            Assert.Equal(AgentRuntimeTurnStatus.MessageCompleted, warm.Status);
+            var instancesPath = workspace.File("pinned-runtime-instances.txt");
+            var initialInstances = await File.ReadAllLinesAsync(instancesPath);
+            Assert.Single(initialInstances);
+
+            var send = runtimeHost.SendMessageAsync("cancel before provider dispatch", (_, _) => Task.CompletedTask);
+            var signalled = false;
+            for (var attempt = 0; attempt < 200 && !send.IsCompleted; attempt++)
+            {
+                signalled |= runtimeHost.CancelCurrentTurn();
+                await Task.Yield();
+            }
+
+            Assert.True(signalled);
+            var cancelled = await send.WaitAsync(TimeSpan.FromSeconds(10));
+
+            Assert.Equal(AgentRuntimeTurnStatus.MessageCancelled, cancelled.Status);
+            Assert.Equal(WebGovernedLoopBackgroundPosture.Ready, runtimeHost.GetStatus().BackgroundPosture);
+
+            var after = await runtimeHost.SendMessageAsync("after pinned quarantine", (_, _) => Task.CompletedTask);
+            Assert.Equal(AgentRuntimeTurnStatus.MessageCompleted, after.Status);
+            var instances = await File.ReadAllLinesAsync(instancesPath);
+            Assert.Equal(2, instances.Length);
+            Assert.NotEqual(instances[0], instances[1]);
+            Assert.Equal(
+                [$"{instances[0]}:warm pinned provider", $"{instances[1]}:after pinned quarantine"],
+                await File.ReadAllLinesAsync(workspace.File("pinned-runtime-turns.txt")));
+            Assert.Equal(WebGovernedLoopBackgroundPosture.Ready, runtimeHost.GetStatus().BackgroundPosture);
+        }
+        finally
+        {
+            await app.StopAsync();
         }
     }
 

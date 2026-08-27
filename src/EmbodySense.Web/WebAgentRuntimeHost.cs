@@ -1099,9 +1099,10 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     /// </exception>
     /// <remarks>
     /// Static commands are handled before workspace initialization is required. A cancelled model turn before its
-    /// irreversible provider transport-write boundary marks the retained runtime for disposal so its session is not
-    /// reused after an ambiguous cancellation boundary. Once that boundary has been crossed, transport failures
-    /// quarantine the provider attempt for review without claiming that runtime disposal can undo the dispatched request.
+    /// irreversible provider transport-write boundary marks an unpinned runtime for disposal so its session is not
+    /// reused after an ambiguous cancellation boundary. A process-pinned runtime retains its complete background
+    /// composition but quarantines only the default-conversation provider transport/session. Once that boundary has been
+    /// crossed, transport failures quarantine the provider attempt for review without claiming that runtime disposal can undo the dispatched request.
     /// Expected Codex compatibility failures are projected as bounded failure events.
     /// </remarks>
     public async Task<AgentRuntimeTurnResult> SendMessageAsync(
@@ -1165,13 +1166,18 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         }
         finally
         {
-            ClearTurnCancellation(turnCancellation);
-            if (discardRuntime)
+            try
             {
-                await DiscardRuntimeAsync();
+                ClearTurnCancellation(turnCancellation);
+                if (discardRuntime)
+                {
+                    await DiscardRuntimeAsync(quarantinePinnedDefaultConversation: true);
+                }
             }
-
-            _turnGate.Release();
+            finally
+            {
+                _turnGate.Release();
+            }
         }
     }
 
@@ -1547,7 +1553,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         return Path.GetFullPath(capabilityTrustRootPath);
     }
 
-    private async Task DiscardRuntimeAsync(bool waitForCustomOperations = false)
+    private async Task DiscardRuntimeAsync(bool waitForCustomOperations = false, bool quarantinePinnedDefaultConversation = false)
     {
         Task? discardCompletion = null;
         await _runtimeGate.WaitAsync(CancellationToken.None);
@@ -1555,6 +1561,11 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         {
             if (_governedLoopBackgroundRuntimePinned)
             {
+                if (quarantinePinnedDefaultConversation && _runtime is not null)
+                {
+                    await _runtime.QuarantineDefaultConversationProviderAsync().ConfigureAwait(false);
+                }
+
                 return;
             }
 

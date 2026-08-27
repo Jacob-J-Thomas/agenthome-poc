@@ -11,6 +11,7 @@ using EmbodySense.Core.Application.Memory;
 using EmbodySense.Core.Application.Runtime.Commands;
 using EmbodySense.Core.Application.Runtime.Models;
 using EmbodySense.Core.Application.Runtime.State;
+using EmbodySense.Core.Application.Inference;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Startup.Loops;
@@ -64,6 +65,7 @@ public sealed class AgentRuntime : IAsyncDisposable
     private readonly ITriggerWorkerCurrentEvidenceAuthorizer _triggerWorkerCurrentEvidenceAuthorizer;
     private readonly GovernedLoopBackgroundRuntimeHost _governedBackgroundRuntimeHost;
     private readonly GovernedLoopSleepService? _governedSleep;
+    private TaskCompletionSource<bool>? _disposeCompletion;
     private int _disposed;
 
     internal AgentRuntime(
@@ -224,6 +226,25 @@ public sealed class AgentRuntime : IAsyncDisposable
 
         ArgumentException.ThrowIfNullOrWhiteSpace(input);
         return await RunModelTurnAsync(input, responseChunkHandler, verboseContextHandler, cancellationToken, requestId);
+    }
+
+    /// <summary>Quarantines only the live default-conversation provider transport while retaining this runtime composition.</summary>
+    /// <remarks>
+    /// This operation is used when a process-pinned runtime must retire an ambiguous default-conversation session without
+    /// disposing its coordinator, stores, or governed-loop dependencies. The next default model turn creates a fresh
+    /// provider transport through the same runtime. Production runtime composition supplies a quarantinable provider.
+    /// </remarks>
+    /// <param name="cancellationToken">The token used while the provider transport is retired.</param>
+    /// <returns>A task that completes after the provider transport is quarantined.</returns>
+    /// <exception cref="InvalidOperationException">The composed provider does not support transport quarantine.</exception>
+    public Task QuarantineDefaultConversationProviderAsync(CancellationToken cancellationToken = default)
+    {
+        if (_inferenceClient is not IQuarantinableInferenceClient quarantinableClient)
+        {
+            throw new InvalidOperationException("The composed default-conversation provider cannot be quarantined.");
+        }
+
+        return quarantinableClient.QuarantineAsync(cancellationToken);
     }
 
     /// <summary>
@@ -664,19 +685,57 @@ public sealed class AgentRuntime : IAsyncDisposable
     /// <summary>
     /// Disposes custom-loop hosting resources and then terminates the owned inference client.
     /// </summary>
+    /// <remarks>
+    /// When the canonical background coordinator is still draining an admitted one-shot, this method returns after the
+    /// durable stop request is bounded and retains the complete runtime composition. A later disposal call waits for the
+    /// deferred safe-boundary cleanup; inference, stores, and loop dependencies are never disposed while the coordinator
+    /// can still call them.
+    /// </remarks>
     /// <returns>A task that represents the asynchronous operation.</returns>
     public async ValueTask DisposeAsync()
     {
+        var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (Interlocked.CompareExchange(ref _disposeCompletion, completion, null) is { } existingCompletion)
+        {
+            await existingCompletion.Task.ConfigureAwait(false);
+            return;
+        }
+
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
         {
             return;
         }
-
         try
         {
-            await _governedBackgroundRuntimeHost.DisposeAsync();
+            Exception? backgroundDisposeFailure = null;
+            try
+            {
+                await _governedBackgroundRuntimeHost.DisposeAsync();
+            }
+            catch (Exception exception)
+            {
+                // The background host retains its completion task even when initiating disposal fails. Continue through
+                // that task so owned stores and inference are still cleaned up and the original failure is surfaced.
+                backgroundDisposeFailure = exception;
+            }
+
+            var backgroundCompletion = _governedBackgroundRuntimeHost.WaitForDisposeCompletionAsync();
+            if (!backgroundCompletion.IsCompleted)
+            {
+                _ = DisposeAfterBackgroundDrainAsync(backgroundCompletion, completion, DisposeOwnedResourcesAsync, backgroundDisposeFailure);
+                return;
+            }
+
+            await DisposeAfterBackgroundDrainAsync(backgroundCompletion, completion, DisposeOwnedResourcesAsync, backgroundDisposeFailure);
+            await completion.Task.ConfigureAwait(false);
         }
-        finally
+        catch (Exception exception)
+        {
+            completion.TrySetException(exception);
+            throw;
+        }
+
+        async Task DisposeOwnedResourcesAsync()
         {
             try
             {
@@ -703,6 +762,43 @@ public sealed class AgentRuntime : IAsyncDisposable
                     }
                 }
             }
+        }
+    }
+
+    private async Task DisposeAfterBackgroundDrainAsync(
+        Task backgroundCompletion,
+        TaskCompletionSource<bool> completion,
+        Func<Task> disposeOwnedResources,
+        Exception? initialFailure = null)
+    {
+        Exception? failure = initialFailure;
+        try
+        {
+            await backgroundCompletion.ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            failure = failure is null || ReferenceEquals(failure, exception)
+                ? exception
+                : new AggregateException(failure, exception);
+        }
+
+        try
+        {
+            await disposeOwnedResources().ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            failure = failure is null ? exception : new AggregateException(failure, exception);
+        }
+
+        if (failure is null)
+        {
+            completion.TrySetResult(true);
+        }
+        else
+        {
+            completion.TrySetException(failure);
         }
     }
 
