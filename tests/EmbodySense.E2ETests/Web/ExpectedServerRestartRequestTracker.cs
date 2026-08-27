@@ -5,12 +5,18 @@ namespace EmbodySense.E2ETests.Web;
 internal sealed class ExpectedServerRestartRequestTracker
 {
     private const int MaxTrackedSameAuthorityRequests = 1024;
+    private const int Idle = 0;
+    private const int Preparing = 1;
+    private const int Active = 2;
+    private const int ReplacementStarting = 3;
     private readonly string _targetAuthority;
     private readonly ConcurrentDictionary<string, byte> _expectedServerRestartRequests = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, byte> _capturedExpectedServerRestartRequests = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string> _requestUrls = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, RestartRequestCorrelation> _terminalCorrelations = new(StringComparer.Ordinal);
     private readonly object _gate = new();
     private int _expectedServerRestart;
+    private long _restartGeneration;
 
     public ExpectedServerRestartRequestTracker(string targetAuthority)
     {
@@ -20,13 +26,28 @@ internal sealed class ExpectedServerRestartRequestTracker
 
     public string TargetAuthority => _targetAuthority;
 
-    public void BeginExpectedServerRestart()
+    public void PrepareExpectedServerRestart()
     {
         lock (_gate)
         {
+            _restartGeneration++;
             _expectedServerRestartRequests.Clear();
             _capturedExpectedServerRestartRequests.Clear();
-            Interlocked.Exchange(ref _expectedServerRestart, 1);
+            _terminalCorrelations.Clear();
+            Interlocked.Exchange(ref _expectedServerRestart, Preparing);
+        }
+    }
+
+    public void FreezeExpectedServerRestart()
+    {
+        lock (_gate)
+        {
+            if (Volatile.Read(ref _expectedServerRestart) != Preparing)
+            {
+                return;
+            }
+
+            _capturedExpectedServerRestartRequests.Clear();
             foreach (var request in _requestUrls
                 .ToArray()
                 .OrderBy(request => request.Key, StringComparer.Ordinal)
@@ -34,14 +55,36 @@ internal sealed class ExpectedServerRestartRequestTracker
             {
                 _capturedExpectedServerRestartRequests.TryAdd(request.Key, 0);
             }
+
+            Interlocked.Exchange(ref _expectedServerRestart, Active);
         }
+    }
+
+    public void AbortExpectedServerRestart()
+    {
+        lock (_gate)
+        {
+            if (Volatile.Read(ref _expectedServerRestart) == Preparing)
+            {
+                _expectedServerRestartRequests.Clear();
+                _capturedExpectedServerRestartRequests.Clear();
+                _terminalCorrelations.Clear();
+                Interlocked.Exchange(ref _expectedServerRestart, Idle);
+            }
+        }
+    }
+
+    public void BeginExpectedServerRestart()
+    {
+        PrepareExpectedServerRestart();
+        FreezeExpectedServerRestart();
     }
 
     public void MarkExpectedReplacementServerStarting()
     {
         lock (_gate)
         {
-            Interlocked.CompareExchange(ref _expectedServerRestart, 2, 1);
+            Interlocked.CompareExchange(ref _expectedServerRestart, ReplacementStarting, Active);
         }
     }
 
@@ -49,7 +92,7 @@ internal sealed class ExpectedServerRestartRequestTracker
     {
         lock (_gate)
         {
-            Interlocked.Exchange(ref _expectedServerRestart, 0);
+            Interlocked.Exchange(ref _expectedServerRestart, Idle);
         }
     }
 
@@ -66,7 +109,7 @@ internal sealed class ExpectedServerRestartRequestTracker
             _requestUrls[requestId] = url;
             TrimUnderLock();
             if (_requestUrls.ContainsKey(requestId)
-                && Volatile.Read(ref _expectedServerRestart) == 1
+                && Volatile.Read(ref _expectedServerRestart) == Active
                 && ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartUrl(url, _targetAuthority))
             {
                 _expectedServerRestartRequests.TryAdd(requestId, 0);
@@ -79,6 +122,10 @@ internal sealed class ExpectedServerRestartRequestTracker
         lock (_gate)
         {
             RemoveUnderLock(requestId);
+            if (_terminalCorrelations.TryGetValue(requestId, out var correlation) && correlation.LogObserved)
+            {
+                _terminalCorrelations.Remove(requestId);
+            }
         }
     }
 
@@ -91,32 +138,60 @@ internal sealed class ExpectedServerRestartRequestTracker
                 return canceled;
             }
 
-            if (!_requestUrls.TryGetValue(requestId, out var requestUrl))
+            var hasCurrentRequest = _requestUrls.TryGetValue(requestId, out var currentRequestUrl);
+            var terminalCorrelation = default(RestartRequestCorrelation);
+            var hasTerminalCorrelation = _terminalCorrelations.TryGetValue(requestId, out terminalCorrelation);
+            if (!hasCurrentRequest && !hasTerminalCorrelation)
             {
                 return canceled;
             }
 
-            var beganDuringOutage = _expectedServerRestartRequests.ContainsKey(requestId);
-            var capturedAtRestart = _capturedExpectedServerRestartRequests.ContainsKey(requestId);
+            var requestUrl = hasCurrentRequest ? currentRequestUrl! : terminalCorrelation.RequestUrl;
+            var beganDuringOutage = (hasCurrentRequest && _expectedServerRestartRequests.ContainsKey(requestId))
+                || (hasTerminalCorrelation && terminalCorrelation.BeganDuringOutage);
+            var capturedAtRestart = (hasCurrentRequest && _capturedExpectedServerRestartRequests.ContainsKey(requestId))
+                || (hasTerminalCorrelation && terminalCorrelation.CapturedAtRestart);
             RemoveUnderLock(requestId);
             if (canceled)
             {
+                _terminalCorrelations.Remove(requestId);
                 return true;
             }
 
-            if (Volatile.Read(ref _expectedServerRestart) == 0 && !beganDuringOutage && !capturedAtRestart
+            var expectedServerRestart = Volatile.Read(ref _expectedServerRestart) is Active or ReplacementStarting;
+            var canCorrelate = expectedServerRestart || beganDuringOutage || capturedAtRestart;
+            if (!canCorrelate
                 || !capturedAtRestart && !ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartUrl(requestUrl, _targetAuthority))
             {
+                _terminalCorrelations.Remove(requestId);
                 return false;
             }
 
-            return ExpectedServerRestartDiagnosticClassifier.IsExpectedNetworkFailure(
-                Volatile.Read(ref _expectedServerRestart) != 0,
+            var expected = ExpectedServerRestartDiagnosticClassifier.IsExpectedNetworkFailure(
+                expectedServerRestart,
                 beganDuringOutage,
                 requestUrl,
                 errorText,
                 _targetAuthority,
                 capturedAtRestart);
+            var logObserved = hasTerminalCorrelation && terminalCorrelation.LogObserved;
+            if (logObserved)
+            {
+                _terminalCorrelations.Remove(requestId);
+            }
+            else
+            {
+                _terminalCorrelations[requestId] = new RestartRequestCorrelation(
+                    requestUrl,
+                    beganDuringOutage,
+                    capturedAtRestart,
+                    FailureObserved: true,
+                    LogObserved: false,
+                    _restartGeneration);
+                TrimTerminalCorrelationsUnderLock();
+            }
+
+            return expected;
         }
     }
 
@@ -124,12 +199,20 @@ internal sealed class ExpectedServerRestartRequestTracker
     {
         lock (_gate)
         {
+            var expectedServerRestart = Volatile.Read(ref _expectedServerRestart) is Active or ReplacementStarting;
             var beganDuringOutage = requestId is not null && _expectedServerRestartRequests.ContainsKey(requestId);
             var capturedAtRestart = requestId is not null && _capturedExpectedServerRestartRequests.ContainsKey(requestId);
             var correlatedRequestUrl = requestId is not null && _requestUrls.TryGetValue(requestId, out var requestUrl)
                 ? requestUrl
                 : null;
-            return (Volatile.Read(ref _expectedServerRestart) != 0, beganDuringOutage, capturedAtRestart, correlatedRequestUrl);
+            if (requestId is not null && _terminalCorrelations.TryGetValue(requestId, out var terminalCorrelation))
+            {
+                beganDuringOutage |= terminalCorrelation.BeganDuringOutage;
+                capturedAtRestart |= terminalCorrelation.CapturedAtRestart;
+                correlatedRequestUrl ??= terminalCorrelation.RequestUrl;
+            }
+
+            return (expectedServerRestart, beganDuringOutage, capturedAtRestart, correlatedRequestUrl);
         }
     }
 
@@ -137,12 +220,21 @@ internal sealed class ExpectedServerRestartRequestTracker
     {
         lock (_gate)
         {
+            var expectedServerRestart = Volatile.Read(ref _expectedServerRestart) is Active or ReplacementStarting;
             var beganDuringOutage = requestId is not null && _expectedServerRestartRequests.ContainsKey(requestId);
             var capturedAtRestart = requestId is not null && _capturedExpectedServerRestartRequests.ContainsKey(requestId);
             var correlatedRequestUrl = requestId is not null && _requestUrls.TryGetValue(requestId, out var requestUrl)
                 ? requestUrl
                 : null;
-            var expectedServerRestart = Volatile.Read(ref _expectedServerRestart) != 0;
+            var terminalCorrelation = default(RestartRequestCorrelation);
+            var hasTerminalCorrelation = requestId is not null && _terminalCorrelations.TryGetValue(requestId, out terminalCorrelation);
+            if (hasTerminalCorrelation)
+            {
+                beganDuringOutage |= terminalCorrelation.BeganDuringOutage;
+                capturedAtRestart |= terminalCorrelation.CapturedAtRestart;
+                correlatedRequestUrl ??= terminalCorrelation.RequestUrl;
+            }
+
             if (!expectedServerRestart && !beganDuringOutage && !capturedAtRestart)
             {
                 return false;
@@ -163,7 +255,32 @@ internal sealed class ExpectedServerRestartRequestTracker
                 correlatedRequestUrl,
                 _targetAuthority,
                 capturedAtRestart);
-            if (expected && requestId is not null)
+            if (requestId is null)
+            {
+                return expected;
+            }
+
+            if (hasTerminalCorrelation)
+            {
+                _terminalCorrelations[requestId] = terminalCorrelation with { LogObserved = true };
+                if (terminalCorrelation.FailureObserved)
+                {
+                    _terminalCorrelations.Remove(requestId);
+                }
+            }
+            else if (_requestUrls.ContainsKey(requestId))
+            {
+                _terminalCorrelations[requestId] = new RestartRequestCorrelation(
+                    correlatedRequestUrl!,
+                    beganDuringOutage,
+                    capturedAtRestart,
+                    FailureObserved: false,
+                    LogObserved: true,
+                    _restartGeneration);
+                TrimTerminalCorrelationsUnderLock();
+            }
+
+            if (expected)
             {
                 _expectedServerRestartRequests.TryRemove(requestId, out _);
             }
@@ -176,7 +293,7 @@ internal sealed class ExpectedServerRestartRequestTracker
     {
         lock (_gate)
         {
-            return Volatile.Read(ref _expectedServerRestart) != 0;
+            return Volatile.Read(ref _expectedServerRestart) is Active or ReplacementStarting;
         }
     }
 
@@ -213,10 +330,31 @@ internal sealed class ExpectedServerRestartRequestTracker
         }
     }
 
+    private void TrimTerminalCorrelationsUnderLock()
+    {
+        var requestIds = _terminalCorrelations
+            .OrderBy(correlation => correlation.Key, StringComparer.Ordinal)
+            .Skip(MaxTrackedSameAuthorityRequests)
+            .Select(correlation => correlation.Key)
+            .ToArray();
+        foreach (var requestId in requestIds)
+        {
+            _terminalCorrelations.Remove(requestId);
+        }
+    }
+
     private void RemoveUnderLock(string requestId)
     {
         _requestUrls.TryRemove(requestId, out _);
         _expectedServerRestartRequests.TryRemove(requestId, out _);
         _capturedExpectedServerRestartRequests.TryRemove(requestId, out _);
     }
+
+    private readonly record struct RestartRequestCorrelation(
+        string RequestUrl,
+        bool BeganDuringOutage,
+        bool CapturedAtRestart,
+        bool FailureObserved,
+        bool LogObserved,
+        long Generation);
 }

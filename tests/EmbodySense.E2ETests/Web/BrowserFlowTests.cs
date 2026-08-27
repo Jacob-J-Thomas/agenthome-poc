@@ -166,6 +166,74 @@ public sealed class BrowserFlowTests
         Assert.False(tracker.ProcessLoadingFailed("request-1", canceled: false, "net::ERR_CONNECTION_RESET"));
     }
 
+    [Fact]
+    public void Restart_request_tracking_correlates_loading_failed_before_late_log_without_widening_diagnostics()
+    {
+        const string TargetAuthority = "127.0.0.1:5001";
+        const string RequestUrl = "https://127.0.0.1:5001/api/loop-runs?maximumCount=50";
+        var tracker = new ExpectedServerRestartRequestTracker(TargetAuthority);
+        tracker.Track("captured", RequestUrl);
+        tracker.BeginExpectedServerRestart();
+
+        Assert.True(tracker.ProcessLoadingFailed("captured", canceled: false, "net::ERR_CONNECTION_RESET"));
+        Assert.True(tracker.IsExpectedServerRestartLogEntry("captured", "network", "fetch failed: net::ERR_CONNECTION_RESET", null));
+        var context = tracker.ReadLogContext("captured");
+        Assert.False(context.CapturedAtRestart);
+        Assert.False(tracker.IsExpectedServerRestartLogEntry("captured", "network", "fetch failed: net::ERR_CONNECTION_RESET", null));
+
+        tracker.Track("non-reset", RequestUrl);
+        tracker.BeginExpectedServerRestart();
+        Assert.False(tracker.ProcessLoadingFailed("non-reset", canceled: false, "fetch failed"));
+        Assert.False(tracker.IsExpectedServerRestartLogEntry("non-reset", "network", "fetch failed", null));
+
+        tracker.Track("external", "https://example.test/api/loop-runs?maximumCount=50");
+        Assert.False(tracker.IsExpectedServerRestartLogEntry("external", "network", "fetch failed: net::ERR_CONNECTION_RESET", "https://example.test/api/loop-runs?maximumCount=50"));
+    }
+
+    [Fact]
+    public void Restart_request_tracking_correlates_log_before_loading_failed_and_cleans_after_both_channels()
+    {
+        const string TargetAuthority = "127.0.0.1:5001";
+        const string RequestUrl = "https://127.0.0.1:5001/api/session";
+        var tracker = new ExpectedServerRestartRequestTracker(TargetAuthority);
+        tracker.Track("request-1", RequestUrl);
+        tracker.BeginExpectedServerRestart();
+
+        Assert.True(tracker.IsExpectedServerRestartLogEntry("request-1", "network", "fetch failed: net::ERR_CONNECTION_RESET", RequestUrl));
+        Assert.True(tracker.ProcessLoadingFailed("request-1", canceled: false, "net::ERR_CONNECTION_RESET"));
+        var context = tracker.ReadLogContext("request-1");
+        Assert.False(context.BeganDuringOutage);
+        Assert.False(context.CapturedAtRestart);
+    }
+
+    [Fact]
+    public void Restart_request_tracking_freezes_only_requests_drained_before_the_barrier()
+    {
+        const string TargetAuthority = "127.0.0.1:5001";
+        const string RequestUrl = "https://127.0.0.1:5001/api/loop-runs?maximumCount=50";
+        var tracker = new ExpectedServerRestartRequestTracker(TargetAuthority);
+        tracker.PrepareExpectedServerRestart();
+        tracker.Track("queued-before-barrier", RequestUrl);
+        tracker.FreezeExpectedServerRestart();
+
+        Assert.True(tracker.ProcessLoadingFailed("queued-before-barrier", canceled: false, "net::ERR_CONNECTION_RESET"));
+
+        tracker.Track("started-after-barrier", RequestUrl);
+        Assert.False(tracker.ProcessLoadingFailed("started-after-barrier", canceled: false, "net::ERR_CONNECTION_RESET"));
+    }
+
+    [Fact]
+    public void Restart_request_tracking_aborts_preparing_state_fail_closed()
+    {
+        var tracker = new ExpectedServerRestartRequestTracker("127.0.0.1:5001");
+        tracker.PrepareExpectedServerRestart();
+        tracker.Track("request-1", "https://127.0.0.1:5001/api/loop-runs?maximumCount=50");
+        tracker.AbortExpectedServerRestart();
+
+        Assert.False(tracker.IsExpectedServerRestart());
+        Assert.False(tracker.ProcessLoadingFailed("request-1", canceled: false, "net::ERR_CONNECTION_RESET"));
+    }
+
     [InstalledBrowserFact]
     public async Task Default_chat_recovers_in_place_after_process_restart_and_preserves_unsaved_draft()
     {
@@ -195,7 +263,7 @@ public sealed class BrowserFlowTests
             await ClickAsync(browser, "#chatNav");
 
             app.AssertHealthy();
-            browser.BeginExpectedServerRestart();
+            await browser.BeginExpectedServerRestartAsync();
             await app.DisposeAsync();
             app = null;
             await browser.WaitForExpressionAsync("/reconnect|retry/i.test(document.getElementById('clientStatus').textContent)");
@@ -357,7 +425,7 @@ public sealed class BrowserFlowTests
             Assert.Equal("Description survives validation correction and reload.", await browser.EvaluateStringAsync("document.getElementById('loopDescription').value"));
             Assert.Equal(0, await GetCustomDefinitionCountAsync(browser));
 
-            browser.BeginExpectedServerRestart();
+            await browser.BeginExpectedServerRestartAsync();
             await app.DisposeAsync();
             retiredServerOutput = app.FormatOutput();
             app = null;
@@ -2080,9 +2148,26 @@ public sealed class BrowserFlowTests
             }
         }
 
-        public void BeginExpectedServerRestart()
+        public async Task BeginExpectedServerRestartAsync(CancellationToken cancellationToken = default)
         {
-            _requestTracker.BeginExpectedServerRestart();
+            _requestTracker.PrepareExpectedServerRestart();
+            using var barrierTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            barrierTimeout.CancelAfter(TimeSpan.FromSeconds(5));
+            try
+            {
+                _ = await SendCommandAsync("Runtime.evaluate", new
+                {
+                    expression = "true",
+                    awaitPromise = false,
+                    returnByValue = true
+                }, barrierTimeout.Token);
+                _requestTracker.FreezeExpectedServerRestart();
+            }
+            catch
+            {
+                _requestTracker.AbortExpectedServerRestart();
+                throw;
+            }
         }
 
         public void MarkExpectedReplacementServerStarting()
