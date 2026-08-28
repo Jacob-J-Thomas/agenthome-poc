@@ -59,7 +59,10 @@ function Get-VerificationPreflightCoverageContractWeight {
         [int]$ResourceCapacity
     )
 
-    return [Math]::Min(3, $ResourceCapacity)
+    # https://github.com/Jacob-J-Thomas/agenthome-poc/issues/635: the 75-assertion coverage contract completed in 92.76 seconds alone,
+    # but timed out twice at the 120-second bound with no child output when an Ordinary preflight contract backfilled beside it.
+    # Its descendant-heavy reductions therefore reserve every admitted preflight unit instead of relying on timing-sensitive overlap.
+    return $ResourceCapacity
 }
 
 function Get-VerificationPreflightFrontendWeight {
