@@ -5,6 +5,7 @@ using System.Net.WebSockets;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using EmbodySense.Core.Application.Capabilities;
+using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Triggers;
 using EmbodySense.Core.Application.Triggers.Models;
 using EmbodySense.Core.Common.Authority;
@@ -13,6 +14,7 @@ using EmbodySense.Core.Common.Authority.Grants.Models;
 using EmbodySense.Core.Common.Authority.Models;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Capabilities.Models;
+using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Revisions;
 using EmbodySense.Core.Common.Triggers;
@@ -409,6 +411,54 @@ public sealed class WebGovernedLoopBackgroundLifetimeTests
 
             await Assert.ThrowsAsync<LoopRunEvidenceUnsupportedSchemaException>(() => runtimeHost.InvokeLoopAsync(input, "connection-1"));
             File.Delete(indexPath);
+
+            Assert.Empty((await runtimeHost.GetLoopRunsAsync()).Items);
+            Assert.Equal(
+                WebGovernedLoopBackgroundPosture.Ready,
+                (await WaitForPostureAsync(runtimeHost, WebGovernedLoopBackgroundPosture.Ready, TimeSpan.FromSeconds(10))).BackgroundPosture);
+        }
+        finally
+        {
+            await app.StopAsync();
+        }
+    }
+
+    [Fact]
+    public async Task Incomplete_pinned_recovery_remains_latched_until_an_explicit_retry_completes()
+    {
+        using var workspace = new TestWorkspace();
+        var codexPath = await WebBackgroundLifetimeCodexExecutable.CreateAsync(workspace);
+        await WorkspaceInitializer.ForWeb().InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await using var app = CreateApp(workspace.RootPath, codexPath, out _);
+        await app.StartAsync();
+
+        try
+        {
+            var runtimeHost = app.Services.GetRequiredService<WebAgentRuntimeHost>();
+            Assert.Equal(WebGovernedLoopBackgroundPosture.Ready, (await WaitForPostureAsync(runtimeHost, WebGovernedLoopBackgroundPosture.Ready)).BackgroundPosture);
+            var definition = await CreateInvocationLoopAsync(workspace);
+            var input = new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "pinned-recovery-pending", "leave retained runtime recovery required");
+            Directory.CreateDirectory(paths.CustomLoopRunsPath);
+            var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
+            await File.WriteAllTextAsync(indexPath, "{\"schemaVersion\":2,\"revision\":1,\"entries\":[]}");
+
+            await Assert.ThrowsAsync<LoopRunEvidenceUnsupportedSchemaException>(() => runtimeHost.InvokeLoopAsync(input, "connection-1"));
+
+            await using (var competingGate = new CustomLoopWorkspaceExecutionGate(paths))
+            {
+                var acquisition = competingGate.TryAcquire("pinned-background-recovery", new string('a', CustomLoopLimits.Sha256HexCharacters));
+                Assert.Equal(CustomLoopExecutionLeaseStatus.Acquired, acquisition.Status);
+                using var recoveryLease = Assert.IsAssignableFrom<IDisposable>(acquisition.Lease);
+
+                var incomplete = await Assert.ThrowsAsync<InvalidOperationException>(() => runtimeHost.GetLoopRunsAsync());
+
+                Assert.Contains("custom_loop_recovery_pending", incomplete.Message, StringComparison.Ordinal);
+                Assert.Equal(
+                    WebGovernedLoopBackgroundPosture.Unavailable,
+                    (await WaitForPostureAsync(runtimeHost, WebGovernedLoopBackgroundPosture.Unavailable, TimeSpan.FromSeconds(10))).BackgroundPosture);
+                File.Delete(indexPath);
+            }
 
             Assert.Empty((await runtimeHost.GetLoopRunsAsync()).Items);
             Assert.Equal(
