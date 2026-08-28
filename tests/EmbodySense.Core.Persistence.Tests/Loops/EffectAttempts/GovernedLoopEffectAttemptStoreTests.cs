@@ -228,6 +228,34 @@ public sealed class GovernedLoopEffectAttemptStoreTests
     }
 
     [Fact]
+    public async Task Read_only_current_head_closes_invalid_coordinates_missing_attempts_and_cancelled_reads()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var workspaceId = CapabilityWorkspaceScopeId.Create(paths.RootPath);
+        var store = (IGovernedLoopEffectAttemptReadStore)new GovernedLoopEffectAttemptStore(paths);
+
+        var invalidOperation = await store.ReadAsync(workspaceId, "INVALID OPERATION", 1);
+        var invalidGeneration = await store.ReadAsync(workspaceId, "effect-operation-1", 0);
+
+        Assert.Equal(GovernedLoopEffectAttemptReadStatus.Corrupt, invalidOperation.Status);
+        Assert.Equal(GovernedLoopEffectAttemptReadStatus.Corrupt, invalidGeneration.Status);
+        Assert.False(Directory.Exists(paths.GovernedLoopEffectAttemptsPath));
+
+        Directory.CreateDirectory(paths.GovernedLoopEffectAttemptsPath);
+        await File.WriteAllBytesAsync(Path.Combine(paths.GovernedLoopEffectAttemptsPath, ".custom-loop-mutations.lock"), []);
+        var absent = await store.ReadAsync(workspaceId, "effect-operation-1", 1);
+
+        Assert.Equal(GovernedLoopEffectAttemptReadStatus.Missing, absent.Status);
+        var beforeCancellation = Directory.EnumerateFiles(paths.GovernedLoopEffectAttemptsPath).Order().ToArray();
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => store.ReadAsync(workspaceId, "effect-operation-1", 1, cancellation.Token));
+        Assert.Equal(beforeCancellation, Directory.EnumerateFiles(paths.GovernedLoopEffectAttemptsPath).Order().ToArray());
+    }
+
+    [Fact]
     public async Task Headless_recovery_reserves_head_bytes_before_republishing_the_unique_tip()
     {
         using var workspace = new TestWorkspace();
