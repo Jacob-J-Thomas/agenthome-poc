@@ -15,7 +15,7 @@ internal sealed class HumanInputRequestLifecycleHarness
             Authorizer,
             Resolver,
             Transaction,
-            "workspace-one",
+            "workspace-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             Time);
     }
 

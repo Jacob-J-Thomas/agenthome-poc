@@ -216,7 +216,7 @@ public sealed class HumanInputRequestLifecycleAuthorityTests
         var candidate = HumanInputRequestHash.Apply(
             HumanInputRequestLifecycleTransitionTestSupport.RerouteCandidate(request) with
             {
-                Binding = request.Binding with { WorkspaceId = "different-workspace" },
+                Binding = request.Binding with { WorkspaceId = "workspace-sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
                 RequestHash = string.Empty,
             });
         var command = HumanInputRequestLifecycleTransitionTestSupport.Command(

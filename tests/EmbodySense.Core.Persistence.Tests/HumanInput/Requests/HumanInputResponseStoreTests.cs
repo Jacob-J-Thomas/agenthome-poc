@@ -1762,7 +1762,7 @@ public sealed class HumanInputResponseStoreTests
                     operation["request"]!.AsObject()["requestHash"] = HashC;
                     break;
                 case "workspace":
-                    operation["expectedBinding"]!.AsObject()["workspaceId"] = "workspace-substituted";
+                    operation["expectedBinding"]!.AsObject()["workspaceId"] = "workspace-sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
                     break;
                 default:
                     throw new ArgumentOutOfRangeException(nameof(corruption));

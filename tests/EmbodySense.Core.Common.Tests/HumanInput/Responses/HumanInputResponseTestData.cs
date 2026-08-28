@@ -18,7 +18,7 @@ internal static class HumanInputResponseTestData
             HumanInputRequest.CurrentSchemaVersion,
             "request-one",
             "request-version-one",
-            new HumanInputRequestBinding("workspace-one", "loop-one", "revision-one", "node-one", "run-one", "checkpoint-one"),
+            new HumanInputRequestBinding("workspace-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "loop-one", "revision-one", "node-one", "run-one", "checkpoint-one"),
             "Collect one bounded response.",
             "Provide untrusted response data only.",
             new HumanInputResponseSchema(HumanInputResponseKind.Text, 128, null, null, null),

@@ -610,7 +610,7 @@ public sealed class HumanInputResponseEvidenceContractTests
             evidence with { OperationId = "operation-two" },
             evidence with { CommandHash = HumanInputResponseTestData.Hash('d') },
             evidence with { Request = evidence.Request with { RequestVersionId = "request-version-two" } },
-            evidence with { ExpectedBinding = evidence.ExpectedBinding with { WorkspaceId = "workspace-two" } },
+            evidence with { ExpectedBinding = evidence.ExpectedBinding with { WorkspaceId = "workspace-sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" } },
             evidence with { ActorId = otherActor! },
             evidence with { ActorRoleId = "role-two" },
             evidence with { AuthenticationEvidenceHash = HumanInputResponseTestData.Hash('d') },
@@ -821,7 +821,7 @@ public sealed class HumanInputResponseEvidenceContractTests
         Assert.DoesNotContain("explanation-canary", text, StringComparison.Ordinal);
         Assert.DoesNotContain("user-one", text, StringComparison.Ordinal);
         Assert.DoesNotContain("role-one", text, StringComparison.Ordinal);
-        Assert.DoesNotContain("workspace-one", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("workspace-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", text, StringComparison.Ordinal);
     }
 
     [Fact]
