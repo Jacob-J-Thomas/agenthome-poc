@@ -142,7 +142,7 @@ public sealed class WebGovernedLoopBackgroundLifetimeTests
             await standby.StopAsync();
             await standby.DisposeAsync();
 
-            Assert.Equal(WebGovernedLoopBackgroundPosture.Stopped, standbyHost.GetStatus().BackgroundPosture);
+            Assert.Equal(WebGovernedLoopBackgroundPosture.Stopped, (await WaitForPostureAsync(standbyHost, WebGovernedLoopBackgroundPosture.Stopped)).BackgroundPosture);
             Assert.Equal(WebGovernedLoopBackgroundPosture.Ready, primaryHost.GetStatus().BackgroundPosture);
         }
         finally
