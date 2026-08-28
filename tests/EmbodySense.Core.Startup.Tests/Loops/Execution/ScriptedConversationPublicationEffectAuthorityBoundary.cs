@@ -10,15 +10,19 @@ using EmbodySense.Core.Common.Loops.Execution.Authority.Models;
 namespace EmbodySense.Core.Startup.Tests.Loops.Execution;
 
 internal sealed class ScriptedConversationPublicationEffectAuthorityBoundary(
-    ScriptedConversationPublicationAuthorityBehavior behavior) : IGovernedLoopEffectAuthorityBoundary
+    ScriptedConversationPublicationAuthorityBehavior behavior,
+    Task? unawaitedCallbackReturnGate = null) : IGovernedLoopEffectAuthorityBoundary
 {
     private Func<Task>? _lateCallback;
+    private readonly TaskCompletionSource _authorityReturned = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     internal GovernedLoopEffectAuthorityRequest? LastRequest { get; private set; }
 
     internal int CallbackInvocations { get; private set; }
 
     internal Task? CapturedCallbackTask { get; private set; }
+
+    internal Task AuthorityReturned => _authorityReturned.Task;
 
     public async Task<GovernedLoopEffectAuthorityExecutionResult<TResult>> ExecuteAsync<TResult>(
         GovernedLoopEffectAuthorityRequest request,
@@ -49,6 +53,11 @@ internal sealed class ScriptedConversationPublicationEffectAuthorityBoundary(
             ScriptedConversationPublicationAuthorityBehavior.DoubleCallback => await DoubleCallbackAsync(request, commit, cancellationToken),
             ScriptedConversationPublicationAuthorityBehavior.LateCallback => CaptureLate<TResult>(request, commit),
             ScriptedConversationPublicationAuthorityBehavior.UnawaitedCallback => CaptureUnawaited(request, commit, cancellationToken),
+            ScriptedConversationPublicationAuthorityBehavior.UnawaitedCallbackAfterAppendStarted => await CaptureUnawaitedAfterAppendStartedAsync(
+                request,
+                commit,
+                cancellationToken,
+                unawaitedCallbackReturnGate ?? throw new InvalidOperationException("The append-started callback behavior requires a return gate.")),
             ScriptedConversationPublicationAuthorityBehavior.NoCallbackDirect => DirectWithoutCallback<TResult>(request),
             ScriptedConversationPublicationAuthorityBehavior.NullResult => null!,
             ScriptedConversationPublicationAuthorityBehavior.MalformedResult => Malformed<TResult>(),
@@ -145,6 +154,25 @@ internal sealed class ScriptedConversationPublicationEffectAuthorityBoundary(
             true,
             default,
             "The hostile boundary returned without awaiting the callback.");
+    }
+
+    private async Task<GovernedLoopEffectAuthorityExecutionResult<TResult>> CaptureUnawaitedAfterAppendStartedAsync<TResult>(
+        GovernedLoopEffectAuthorityRequest request,
+        Func<CancellationToken, Task<TResult>> commit,
+        CancellationToken cancellationToken,
+        Task returnGate)
+    {
+        CallbackInvocations++;
+        CapturedCallbackTask = commit(cancellationToken);
+        await returnGate.ConfigureAwait(false);
+        _authorityReturned.TrySetResult();
+        return new GovernedLoopEffectAuthorityExecutionResult<TResult>(
+            GovernedLoopEffectAuthorityExecutionStatus.Decided,
+            Decision(request, GovernedLoopEffectAuthorityDisposition.Direct, GovernedLoopEffectAuthorityReason.ActiveExact),
+            GovernedLoopEffectAuthorityEvidenceStoreStatus.Appended,
+            true,
+            default,
+            "The hostile boundary returned after the append started without awaiting its completion.");
     }
 
     private static GovernedLoopEffectAuthorityExecutionResult<TResult> DirectWithoutCallback<TResult>(
