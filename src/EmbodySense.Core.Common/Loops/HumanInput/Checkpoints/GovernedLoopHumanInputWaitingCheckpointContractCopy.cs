@@ -3,6 +3,8 @@ using EmbodySense.Core.Common.HumanInput;
 using EmbodySense.Core.Common.HumanInput.Models;
 using EmbodySense.Core.Common.HumanInput.Responses.Models;
 using EmbodySense.Core.Common.Loops.HumanInput.Checkpoints.Models;
+using EmbodySense.Core.Common.Loops.HumanInput.Policies;
+using EmbodySense.Core.Common.Loops.HumanInput.Policies.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
 
@@ -17,6 +19,14 @@ internal static class GovernedLoopHumanInputWaitingCheckpointContractCopy
 
     internal static GovernedLoopHumanInputNodeConfiguration Copy(GovernedLoopHumanInputNodeConfiguration? value)
         => GovernedLoopHumanInputNodeConfigurationSnapshot.Copy(value)!;
+
+    internal static HumanInputPolicyResolutionSnapshot Copy(HumanInputPolicyResolutionSnapshot? value)
+        => value is null
+            ? null!
+            : new HumanInputPolicyResolutionSnapshot(value.SchemaVersion, value.WorkspaceId, value.GraphId, value.GraphRevisionId, value.NodeId, value.ActorId, Copy(value.TimeoutPolicy), Copy(value.FailurePolicy), value.ResolvedAtUtc, value.ExpiresAtUtc, value.TerminalDisposition, value.ResolutionHash);
+
+    private static HumanInputPolicyArtifact Copy(HumanInputPolicyArtifact value)
+        => new(value.SchemaVersion, value.PolicyId, value.RevisionId, value.Kind, value.WorkspaceId, value.GraphId, value.AuthorityActorId, value.ResponseWindowMilliseconds, value.TerminalDisposition, value.ContentHash);
 
     internal static HumanInputRequest Copy(HumanInputRequest? value)
         => value is null
