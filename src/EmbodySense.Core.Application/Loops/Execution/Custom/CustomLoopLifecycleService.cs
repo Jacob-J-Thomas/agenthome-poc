@@ -408,7 +408,7 @@ public sealed class CustomLoopLifecycleService : ICustomLoopLifecycleControlPort
             return await CompleteAsync(operation, status, quarantinedRun, quarantined.AuditRecorded, quarantined.Detail);
         }
 
-        if (IsDurablyWaitingCanonicalWait(run))
+        if (IsDurablyWaitingCanonicalCheckpoint(run))
         {
             var waitGate = _executionGate.TryAcquire(operation.OperationId, operation.RequestHash);
             if (waitGate.Status == CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable)
@@ -418,17 +418,17 @@ public sealed class CustomLoopLifecycleService : ICustomLoopLifecycleControlPort
 
             if (waitGate.Status == CustomLoopExecutionLeaseStatus.WorkspaceBusy)
             {
-                return await CompleteAuditedOutcomeAsync(operation, CustomLoopControlStatus.WorkspaceExecutionBusy, run, "workspace_execution_busy: another custom-loop run is actively executing; the Paused Wait and its durable checkpoint were not changed.");
+                return await CompleteAuditedOutcomeAsync(operation, CustomLoopControlStatus.WorkspaceExecutionBusy, run, "workspace_execution_busy: another custom-loop run is actively executing; the Paused parked checkpoint was not changed.");
             }
 
             if (waitGate.Status == CustomLoopExecutionLeaseStatus.OperationInProgress)
             {
-                return Result(CustomLoopControlStatus.OperationInProgress, run, operation.OperationId, "The same Resume operation is already rearming this durable Wait; no second lifecycle mutation was attempted.");
+                return Result(CustomLoopControlStatus.OperationInProgress, run, operation.OperationId, "The same Resume operation is already rearming this durable parked checkpoint; no second lifecycle mutation was attempted.");
             }
 
             if (waitGate.Status == CustomLoopExecutionLeaseStatus.OperationConflict || waitGate.Lease is null)
             {
-                return Result(CustomLoopControlStatus.Conflict, run, operation.OperationId, "The Resume operation could not acquire canonical workspace execution ownership for the durable Wait.");
+                return Result(CustomLoopControlStatus.Conflict, run, operation.OperationId, "The Resume operation could not acquire canonical workspace execution ownership for the durable parked checkpoint.");
             }
 
             using (waitGate.Lease)
@@ -438,7 +438,7 @@ public sealed class CustomLoopLifecycleService : ICustomLoopLifecycleControlPort
                     CustomLoopRunStatus.Waiting,
                     operation.Actor,
                     operation.OperationId,
-                    "Explicit Resume rearmed the exact durable Wait checkpoint without changing its frontier or dispatching ordered execution.");
+                    "Explicit Resume rearmed the exact durable Waiting checkpoint without changing its frontier or dispatching ordered execution.");
                 if (rearmed.Run is null)
                 {
                     return await CompleteAuditedOutcomeAsync(operation, rearmed.Status, rearmed.CurrentRun, rearmed.Detail);
@@ -447,6 +447,15 @@ public sealed class CustomLoopLifecycleService : ICustomLoopLifecycleControlPort
                 var outcome = rearmed.AuditRecorded ? CustomLoopControlStatus.Waiting : CustomLoopControlStatus.AuditWarning;
                 return await CompleteAsync(operation, outcome, rearmed.Run, rearmed.AuditRecorded, rearmed.Detail);
             }
+        }
+
+        if (run.SequentialAdapterBinding is not null && run.Frontier?.Payload.Status == GovernedLoopFrontierStatus.Waiting)
+        {
+            return await CompleteAuditedOutcomeAsync(
+                operation,
+                CustomLoopControlStatus.InvalidState,
+                run,
+                "Explicit Resume rejected a Paused canonical Waiting frontier without one exact pending checkpoint binding; the run remains Paused and no ordered execution was dispatched.");
         }
 
         bool modelAvailable;
@@ -592,22 +601,8 @@ public sealed class CustomLoopLifecycleService : ICustomLoopLifecycleControlPort
         return await CompleteAsync(operation, completionStatus, run, auditRecorded, detail);
     }
 
-    private static bool IsDurablyWaitingCanonicalWait(CustomLoopRunRecord run)
-    {
-        if (run.SequentialAdapterBinding is null
-            || run.Frontier?.Payload.Status != GovernedLoopFrontierStatus.Waiting)
-        {
-            return false;
-        }
-
-        var waiting = run.Frontier.Payload.Nodes
-            .Where(node => node.Status == GovernedLoopNodeExecutionStatus.Waiting)
-            .ToArray();
-        return waiting.Length > 0
-            && waiting.All(node => run.WaitEvidence.Any(wait =>
-                wait.ActivationOrdinal == node.ActivationOrdinal
-                && wait.ContinuationEvidence is null));
-    }
+    private static bool IsDurablyWaitingCanonicalCheckpoint(CustomLoopRunRecord run)
+        => CustomLoopRecoveryService.HasExactPendingCanonicalWaitingCheckpoint(run);
 
     private async Task<CustomLoopControlResult> HandleResumeExecutorFailureAsync(CustomLoopControlOperation operation, CustomLoopRunRecord resumedRun, Exception exception)
     {

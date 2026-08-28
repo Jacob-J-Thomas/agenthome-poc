@@ -3,6 +3,7 @@ using EmbodySense.Core.Application.HumanInput.Policies.Models;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
 using EmbodySense.Core.Application.Loops.Execution.Custom.Models;
 using EmbodySense.Core.Application.Loops.GraphValidation;
+using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Loops.Sequential;
 using EmbodySense.Core.Application.Loops.Sequential.Models;
 using EmbodySense.Core.Application.Tests.HumanInput.Policies;
@@ -17,6 +18,7 @@ using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Execution.Models;
 using EmbodySense.Core.Common.Loops.HumanInput;
+using EmbodySense.Core.Common.Loops.HumanInput.Checkpoints;
 using EmbodySense.Core.Common.Loops.HumanInput.Checkpoints.Models;
 using EmbodySense.Core.Common.Loops.HumanInput.Policies;
 using EmbodySense.Core.Common.Loops.HumanInput.Policies.Models;
@@ -260,6 +262,184 @@ public sealed partial class CustomLoopOrderedRunnerTests
         Assert.Equal(staleRevision ? "human_input_policy_resolution_divergent" : "human_input_policy_resolution_notfound", store.Current.FailureCode);
         Assert.Empty(store.Current.HumanInputWaitingCheckpoints);
         Assert.DoesNotContain(store.Writes, run => run.HumanInputWaitingCheckpoints.Count > 0);
+    }
+
+    [Fact]
+    public async Task Restart_recovery_preserves_an_exact_pending_human_input_checkpoint_without_delivery_or_continuation()
+    {
+        var context = await HumanInputContextAsync();
+        var store = new FakeRunStore(context.Run);
+        var executor = new QueueExecutor();
+        var publisher = new RecordingPublisher();
+        var parked = await Runtime(context, store, executor, publisher, HumanInputPolicyResolver(context)).RunAsync(Request(context));
+        var retained = store.Current;
+        var checkpoint = Assert.Single(retained.HumanInputWaitingCheckpoints);
+        var frontier = Assert.IsType<GovernedLoopFrontierPosture>(retained.Frontier);
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Waiting, parked.Status);
+        var recovery = Assert.Single(await new CustomLoopRecoveryService(
+            store,
+            new RecordingAuditLog(),
+            new FixedTimeProvider(_now.AddSeconds(1))).RecoverAsync(AuditSchema.Actors.Web));
+
+        Assert.True(recovery.Status == CustomLoopRecoveryStatus.Unchanged, recovery.Detail);
+        Assert.Same(retained, store.Current);
+        Assert.Equal(CustomLoopRunStatus.Waiting, store.Current.Status);
+        Assert.Equal(checkpoint.CheckpointHash, Assert.Single(store.Current.HumanInputWaitingCheckpoints).CheckpointHash);
+        Assert.Equal(frontier.Payload.FrontierVersion, store.Current.Frontier!.Payload.FrontierVersion);
+        Assert.Equal(frontier.Payload.ContentHash, store.Current.Frontier.Payload.ContentHash);
+        Assert.Empty(executor.Requests);
+        Assert.Empty(publisher.Requests);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Restart_recovery_fails_closed_for_malformed_or_stale_pending_human_input_checkpoint(bool stale)
+    {
+        var context = await HumanInputContextAsync();
+        var store = new FakeRunStore(context.Run);
+        var executor = new QueueExecutor();
+        var publisher = new RecordingPublisher();
+        var parked = await Runtime(context, store, executor, publisher, HumanInputPolicyResolver(context)).RunAsync(Request(context));
+        var malformed = MutateHumanInputWaitingCheckpoint(store.Current, stale);
+        store.ReplaceCurrent(malformed, validate: stale);
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Waiting, parked.Status);
+        Assert.Equal(stale, CustomLoopRunValidator.Validate(store.Current).IsValid);
+        var recovery = Assert.Single(await new CustomLoopRecoveryService(
+            store,
+            new RecordingAuditLog(),
+            new FixedTimeProvider(_now.AddSeconds(1))).RecoverAsync(AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopRecoveryStatus.Failed, recovery.Status);
+        Assert.Same(malformed, store.Current);
+        Assert.Equal(CustomLoopRunStatus.Waiting, store.Current.Status);
+        Assert.Empty(executor.Requests);
+        Assert.Empty(publisher.Requests);
+    }
+
+    [Fact]
+    public async Task Pause_and_resume_rearm_an_exact_pending_human_input_checkpoint_without_ordered_dispatch()
+    {
+        var context = await HumanInputContextAsync();
+        var store = new FakeRunStore(context.Run);
+        var executor = new QueueExecutor();
+        var publisher = new RecordingPublisher();
+        var parked = await Runtime(context, store, executor, publisher, HumanInputPolicyResolver(context)).RunAsync(Request(context));
+        var operationStore = new FakeControlOperationStore();
+        var resumeExecutor = new NoopWaitLifecycleResumeExecutor(store.Current);
+        var service = new CustomLoopLifecycleService(
+            store,
+            operationStore,
+            resumeExecutor,
+            new AvailableModel(),
+            new NoActiveAttemptCancellationSignal(),
+            new RecordingAuditLog(),
+            new TestExecutionGate(),
+            new FixedTimeProvider(_now.AddSeconds(1)));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Waiting, parked.Status);
+        var pause = await service.PauseAsync(new CustomLoopPauseRequest(
+            store.Current.Id,
+            store.Current.LifecycleVersion,
+            "pause-durable-human-input-before-resume",
+            AuditSchema.Actors.Web));
+        Assert.Equal(CustomLoopControlStatus.Paused, pause.Status);
+        var checkpoint = Assert.Single(store.Current.HumanInputWaitingCheckpoints);
+        var frontier = Assert.IsType<GovernedLoopFrontierPosture>(store.Current.Frontier);
+
+        var request = new CustomLoopResumeRequest(
+            store.Current.Id,
+            store.Current.LifecycleVersion,
+            "resume-durable-human-input",
+            AuditSchema.Actors.Web);
+        var resumed = await service.ResumeAsync(request);
+        var replayed = await service.ResumeAsync(request);
+
+        Assert.Equal(CustomLoopControlStatus.Waiting, resumed.Status);
+        Assert.Equal(CustomLoopControlStatus.Waiting, replayed.Status);
+        Assert.Equal(CustomLoopRunStatus.Waiting, store.Current.Status);
+        Assert.Equal(GovernedLoopFrontierStatus.Waiting, store.Current.Frontier!.Payload.Status);
+        Assert.Equal(checkpoint.CheckpointHash, Assert.Single(store.Current.HumanInputWaitingCheckpoints).CheckpointHash);
+        Assert.Equal(frontier.Payload.FrontierVersion, store.Current.Frontier.Payload.FrontierVersion);
+        Assert.Equal(frontier.Payload.ContentHash, store.Current.Frontier.Payload.ContentHash);
+        Assert.Equal(0, resumeExecutor.ResumeCount);
+        Assert.Empty(executor.Requests);
+        Assert.Empty(publisher.Requests);
+        Assert.True(CustomLoopRunValidator.Validate(store.Current).IsValid);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Resume_rejects_a_malformed_or_stale_pending_human_input_checkpoint_without_ordered_dispatch(bool stale)
+    {
+        var context = await HumanInputContextAsync();
+        var store = new FakeRunStore(context.Run);
+        var executor = new QueueExecutor();
+        var publisher = new RecordingPublisher();
+        var parked = await Runtime(context, store, executor, publisher, HumanInputPolicyResolver(context)).RunAsync(Request(context));
+        var resumeExecutor = new NoopWaitLifecycleResumeExecutor(store.Current);
+        var service = new CustomLoopLifecycleService(
+            store,
+            new FakeControlOperationStore(),
+            resumeExecutor,
+            new AvailableModel(),
+            new NoActiveAttemptCancellationSignal(),
+            new RecordingAuditLog(),
+            new TestExecutionGate(),
+            new FixedTimeProvider(_now.AddSeconds(1)));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Waiting, parked.Status);
+        var pause = await service.PauseAsync(new CustomLoopPauseRequest(
+            store.Current.Id,
+            store.Current.LifecycleVersion,
+            "pause-human-input-before-invalid-resume",
+            AuditSchema.Actors.Web));
+        Assert.Equal(CustomLoopControlStatus.Paused, pause.Status);
+        var malformed = MutateHumanInputWaitingCheckpoint(store.Current, stale);
+        store.ReplaceCurrent(malformed, validate: stale);
+        var writesBeforeResume = store.Writes.Count;
+
+        var result = await service.ResumeAsync(new CustomLoopResumeRequest(
+            store.Current.Id,
+            store.Current.LifecycleVersion,
+            stale ? "resume-stale-human-input" : "resume-malformed-human-input",
+            AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopControlStatus.InvalidState, result.Status);
+        Assert.Same(malformed, store.Current);
+        Assert.Equal(writesBeforeResume, store.Writes.Count);
+        Assert.Equal(0, resumeExecutor.ResumeCount);
+        Assert.Empty(executor.Requests);
+        Assert.Empty(publisher.Requests);
+    }
+
+    private static CustomLoopRunRecord MutateHumanInputWaitingCheckpoint(CustomLoopRunRecord run, bool stale)
+    {
+        var checkpoint = Assert.Single(run.HumanInputWaitingCheckpoints);
+        if (!stale)
+        {
+            return run with { HumanInputWaitingCheckpoints = [checkpoint with { CheckpointHash = new string('F', 64) }] };
+        }
+
+        Assert.True(checkpoint.Binding.FrontierVersion > 0);
+        var staleBinding = checkpoint.Binding with
+        {
+            FrontierVersion = checkpoint.Binding.FrontierVersion - 1,
+            FrontierHash = new string('a', 64),
+        };
+        var staleCheckpoint = GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(new GovernedLoopHumanInputWaitingCheckpoint(
+            checkpoint.SchemaVersion,
+            staleBinding,
+            checkpoint.NodeConfiguration,
+            checkpoint.ResolvedPolicy,
+            checkpoint.Request,
+            checkpoint.Posture,
+            checkpoint.Evidence,
+            string.Empty));
+        return run with { HumanInputWaitingCheckpoints = [staleCheckpoint] };
     }
 
     private static async Task<SequentialTestContext> HumanInputContextAsync()

@@ -14,6 +14,8 @@ using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Execution.Models;
+using EmbodySense.Core.Common.Loops.HumanInput.Checkpoints;
+using EmbodySense.Core.Common.Loops.HumanInput.Checkpoints.Models;
 using EmbodySense.Core.Common.Loops.Sequential;
 using EmbodySense.Core.Common.Loops.Sequential.Models;
 using EmbodySense.Core.Common.LocalWorkspace.Actions;
@@ -103,7 +105,7 @@ public sealed class CustomLoopRecoveryService
             && IsExactCanonicalWaitingCheckpoint(run)
             && !hasOpenAttempt)
         {
-            return Result(CustomLoopRecoveryStatus.Unchanged, run, "The run retains exact canonical Waiting frontier and Wait evidence for the canonical Wait recovery service; generic recovery did not replace its checkpoint or lifecycle truth.");
+            return Result(CustomLoopRecoveryStatus.Unchanged, run, "The run retains one exact canonical Waiting checkpoint and binding; generic recovery did not replace its frontier, checkpoint, or lifecycle truth.");
         }
 
         // Open canonical-attempt evidence makes the outcome uncertain. This includes a durable
@@ -216,9 +218,13 @@ public sealed class CustomLoopRecoveryService
         return Result(status, recovered, detail);
     }
 
-    private static bool IsExactCanonicalWaitingCheckpoint(CustomLoopRunRecord run)
+    /// <summary>Determines whether a Waiting or Paused canonical frontier retains only exact pending Wait or Human Input checkpoints.</summary>
+    /// <param name="run">The validated nonterminal run whose parked frontier is inspected without mutation.</param>
+    /// <returns><see langword="true"/> only when every Waiting activation has one exact unconsumed checkpoint bound to the admitted frontier; otherwise, <see langword="false"/>.</returns>
+    internal static bool HasExactPendingCanonicalWaitingCheckpoint(CustomLoopRunRecord run)
     {
         if (run.SequentialAdapterBinding is null
+            || run.Status is not (CustomLoopRunStatus.Waiting or CustomLoopRunStatus.Paused)
             || run.Frontier?.Payload.Status != GovernedLoopFrontierStatus.Waiting)
         {
             return false;
@@ -228,16 +234,57 @@ public sealed class CustomLoopRecoveryService
             .Where(node => node.Status == GovernedLoopNodeExecutionStatus.Waiting)
             .ToArray();
         return waiting.Length > 0
-            && waiting.All(node => run.WaitEvidence.Count(wait =>
+            && waiting.All(node => HasExactPendingWaitCheckpoint(run, node)
+                || HasExactPendingHumanInputCheckpoint(run, node));
+    }
+
+    private static bool IsExactCanonicalWaitingCheckpoint(CustomLoopRunRecord run)
+        => HasExactPendingCanonicalWaitingCheckpoint(run)
+            && run.Frontier!.Payload.Nodes
+                .Where(node => node.Status == GovernedLoopNodeExecutionStatus.Waiting)
+                .All(node => node.Descriptor.Kind == GovernedLoopNodeKind.HumanInput
+                    ? HasExactPendingHumanInputCheckpoint(run, node)
+                    : run.Events.Count(started =>
+                        started.SequentialNodeEvidence?.ActivationOrdinal == node.ActivationOrdinal
+                        && IsExactParkedWaitingAttemptStart(run, started)) == 1);
+
+    private static bool HasExactPendingWaitCheckpoint(CustomLoopRunRecord run, GovernedLoopNodeExecutionEvidence node)
+        => node.Descriptor.Kind == GovernedLoopNodeKind.Wait
+            && run.WaitEvidence.Count(wait =>
                 wait.ActivationOrdinal == node.ActivationOrdinal
                 && string.Equals(wait.NodeId, node.NodeId, StringComparison.Ordinal)
                 && wait.NodeVisitOrdinal == node.VisitOrdinal
                 && wait.WaitAttempt == node.Attempt
                 && string.Equals(wait.WaitOperationId, node.AttemptOperationId, StringComparison.Ordinal)
-                && wait.ContinuationEvidence is null) == 1
-                && run.Events.Count(started =>
-                    started.SequentialNodeEvidence?.ActivationOrdinal == node.ActivationOrdinal
-                    && IsExactWaitingAttemptStart(run, started)) == 1);
+                && wait.ContinuationEvidence is null) == 1;
+
+    private static bool HasExactPendingHumanInputCheckpoint(CustomLoopRunRecord run, GovernedLoopNodeExecutionEvidence node)
+    {
+        if (node.Descriptor.Kind != GovernedLoopNodeKind.HumanInput
+            || run.SequentialAdapterBinding is not { } adapter
+            || run.Frontier is not { } frontier)
+        {
+            return false;
+        }
+
+        return run.HumanInputWaitingCheckpoints.Count(checkpoint => checkpoint is not null
+            && checkpoint.Posture == GovernedLoopHumanInputWaitingCheckpointPosture.Pending
+            && GovernedLoopHumanInputWaitingCheckpointContractValidator.Validate(checkpoint).IsValid
+            && Equals(checkpoint.Binding.Execution, adapter.ExecutionBinding)
+            && Equals(checkpoint.Binding.Publication, adapter.AdmissionReceipt.Intent.Publication)
+            && string.Equals(checkpoint.Binding.WorkspaceId, adapter.WorkspaceId, StringComparison.Ordinal)
+            && string.Equals(checkpoint.Binding.GraphArtifactHash, adapter.GraphArtifactHash, StringComparison.Ordinal)
+            && string.Equals(checkpoint.Binding.GraphLayoutHash, adapter.GraphLayoutHash, StringComparison.Ordinal)
+            && string.Equals(checkpoint.Binding.AdmissionReceiptHash, adapter.AdmissionReceiptHash, StringComparison.Ordinal)
+            && checkpoint.Binding.FrontierVersion == frontier.Payload.FrontierVersion
+            && string.Equals(checkpoint.Binding.FrontierHash, frontier.Payload.ContentHash, StringComparison.Ordinal)
+            && checkpoint.Binding.ActivationOrdinal == node.ActivationOrdinal
+            && string.Equals(checkpoint.Binding.NodeId, node.NodeId, StringComparison.Ordinal)
+            && checkpoint.Binding.NodeVisitOrdinal == node.VisitOrdinal
+            && string.Equals(checkpoint.Binding.CycleId, node.CycleId, StringComparison.Ordinal)
+            && checkpoint.Binding.CycleIteration == node.CycleIteration
+            && string.Equals(checkpoint.Request.Binding.RunId, run.Id, StringComparison.Ordinal)
+            && string.Equals(checkpoint.Request.Binding.NodeId, node.NodeId, StringComparison.Ordinal)) == 1;
     }
 
     private static Dictionary<string, object?> RecoveryMetadata(
@@ -346,7 +393,7 @@ public sealed class CustomLoopRecoveryService
             && !IsRestartSafeRecoverableActionAttemptStart(run, item)
             && !GovernedLoopWaitClaimEvidence.IsExactRecoverableClaimStart(run, item)
             && !GovernedLoopWaitClaimEvidence.IsExactRecoverableContinuationStart(run, item)
-            && !IsExactWaitingAttemptStart(run, item));
+            && !IsExactParkedWaitingAttemptStart(run, item));
         return hasUnresolvedDispatch || HasUnresolvedRunningFrontierClaim(run);
     }
 
@@ -377,10 +424,10 @@ public sealed class CustomLoopRecoveryService
                 && !IsRestartSafeRecoverableActionAttemptStart(run, exactStarts[0])
                 && !GovernedLoopWaitClaimEvidence.IsExactRecoverableClaimStart(run, exactStarts[0])
                 && !GovernedLoopWaitClaimEvidence.IsExactRecoverableContinuationStart(run, exactStarts[0])
-                && !IsExactWaitingAttemptStart(run, exactStarts[0]));
+                && !IsExactParkedWaitingAttemptStart(run, exactStarts[0]));
     }
 
-    private static bool IsExactWaitingAttemptStart(CustomLoopRunRecord run, CustomLoopRunEvent started)
+    private static bool IsExactParkedWaitingAttemptStart(CustomLoopRunRecord run, CustomLoopRunEvent started)
     {
         if (run.Status != CustomLoopRunStatus.Waiting
             || run.Frontier?.Payload.Status != GovernedLoopFrontierStatus.Waiting
@@ -402,13 +449,7 @@ public sealed class CustomLoopRecoveryService
         var activation = run.Frontier.Payload.Nodes.SingleOrDefault(node =>
             node.ActivationOrdinal == dispatch.ActivationOrdinal);
         return activation?.Status == GovernedLoopNodeExecutionStatus.Waiting
-            && run.WaitEvidence.Count(wait =>
-                wait.ActivationOrdinal == dispatch.ActivationOrdinal
-                && string.Equals(wait.NodeId, dispatch.NodeId, StringComparison.Ordinal)
-                && wait.NodeVisitOrdinal == dispatch.VisitOrdinal
-                && wait.WaitAttempt == dispatch.Attempt
-                && string.Equals(wait.WaitOperationId, started.EventId, StringComparison.Ordinal)
-                && wait.ContinuationEvidence is null) == 1;
+            && HasExactPendingWaitCheckpoint(run, activation);
     }
 
     private static bool HasAuthenticatedTerminalSequentialOutcome(CustomLoopRunRecord run, CustomLoopRunEvent started)
