@@ -185,17 +185,113 @@ public sealed class GovernedLoopConversationPublicationCommitBoundaryTests
     }
 
     [Fact]
-    public async Task Unawaited_callback_is_rejected_before_append_and_remains_observable_to_the_boundary()
+    public async Task Unawaited_callback_closed_before_append_lifetime_preserves_the_outer_protocol_failure_and_observes_cancellation()
     {
         var fixture = ConversationPublicationAuthorityTestFixture.Create();
         var effect = new ScriptedConversationPublicationEffectAuthorityBoundary(ScriptedConversationPublicationAuthorityBehavior.UnawaitedCallback);
+        var callbackContext = new QueuedSynchronizationContext();
+        var previousContext = SynchronizationContext.Current;
+        var appendCount = 0;
+        var execution = Task.CompletedTask;
+        var captured = Task.CompletedTask;
+
+        try
+        {
+            SynchronizationContext.SetSynchronizationContext(callbackContext);
+            execution = CreateBoundary(effect, fixture).CommitAsync(_ =>
+            {
+                appendCount++;
+                return Task.CompletedTask;
+            });
+
+            Assert.True(execution.IsCompleted);
+            captured = Assert.IsAssignableFrom<Task>(effect.CapturedCallbackTask);
+            Assert.Equal(1, callbackContext.PendingCallbacks);
+        }
+        finally
+        {
+            SynchronizationContext.SetSynchronizationContext(previousContext);
+        }
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => execution);
+        callbackContext.Drain();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => captured);
+
+        Assert.Equal(0, appendCount);
+        Assert.Equal(1, effect.CallbackInvocations);
+    }
+
+    [Fact]
+    public async Task Unawaited_callback_with_an_existing_append_lifetime_preserves_the_outer_protocol_failure_and_cancels_the_append()
+    {
+        var fixture = ConversationPublicationAuthorityTestFixture.Create();
+        var appendStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var effect = new ScriptedConversationPublicationEffectAuthorityBoundary(
+            ScriptedConversationPublicationAuthorityBehavior.UnawaitedCallbackAfterAppendStarted,
+            appendStarted.Task);
         var appendCount = 0;
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() => CreateBoundary(effect, fixture).CommitAsync(async token =>
+        var execution = CreateBoundary(effect, fixture).CommitAsync(async token =>
         {
+            appendStarted.TrySetResult();
             await Task.Delay(Timeout.InfiniteTimeSpan, token);
             appendCount++;
-        }));
+        });
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => execution);
+        var captured = Assert.IsAssignableFrom<Task>(effect.CapturedCallbackTask);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => captured);
+
+        Assert.Equal(0, appendCount);
+        Assert.Equal(1, effect.CallbackInvocations);
+    }
+
+    [Fact]
+    public async Task Unawaited_callback_synchronous_entry_holds_closure_until_the_append_handoff_returns()
+    {
+        var fixture = ConversationPublicationAuthorityTestFixture.Create();
+        var appendStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseAppendHandoff = new ManualResetEventSlim();
+        var effect = new ScriptedConversationPublicationEffectAuthorityBoundary(
+            ScriptedConversationPublicationAuthorityBehavior.UnawaitedCallbackAfterAppendStarted,
+            appendStarted.Task);
+        var appendCount = 0;
+        var previousContext = SynchronizationContext.Current;
+        Task execution;
+
+        try
+        {
+            SynchronizationContext.SetSynchronizationContext(null);
+            execution = CreateBoundary(effect, fixture).CommitAsync(token =>
+            {
+                appendStarted.TrySetResult();
+                if (!releaseAppendHandoff.Wait(TimeSpan.FromSeconds(5)))
+                {
+                    throw new TimeoutException("The test did not release the synchronous append handoff.");
+                }
+
+                return CompleteAppendAfterCancellationAsync(token, () => appendCount++);
+            });
+        }
+        finally
+        {
+            SynchronizationContext.SetSynchronizationContext(previousContext);
+        }
+
+        try
+        {
+            await appendStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await effect.AuthorityReturned.WaitAsync(TimeSpan.FromSeconds(5));
+            var prematureCompletion = await Task.WhenAny(execution, Task.Delay(TimeSpan.FromMilliseconds(250)));
+
+            Assert.NotSame(execution, prematureCompletion);
+        }
+        finally
+        {
+            releaseAppendHandoff.Set();
+        }
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => execution);
         var captured = Assert.IsAssignableFrom<Task>(effect.CapturedCallbackTask);
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => captured);
 
@@ -267,4 +363,10 @@ public sealed class GovernedLoopConversationPublicationCommitBoundaryTests
             ConversationPublicationAuthorityTestFixture.NodeId,
             ConversationPublicationAuthorityTestFixture.NodeAttempt,
             ConversationPublicationAuthorityTestFixture.PublicationOperationId);
+
+    private static async Task CompleteAppendAfterCancellationAsync(CancellationToken token, Action append)
+    {
+        await Task.Delay(Timeout.InfiniteTimeSpan, token);
+        append();
+    }
 }

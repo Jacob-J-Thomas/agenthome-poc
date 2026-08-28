@@ -15,6 +15,7 @@ public enum ScriptedConversationPublicationAuthorityBehavior
     DoubleCallback,
     LateCallback,
     UnawaitedCallback,
+    UnawaitedCallbackAfterAppendStarted,
     NoCallbackDirect,
     NullResult,
     MalformedResult,

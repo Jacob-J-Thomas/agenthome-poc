@@ -160,7 +160,8 @@ public sealed class IsolatedCommandActionNativeHostTests
     public async Task Supplementary_unicode_at_the_retention_boundary_remains_a_conclusive_outcome()
     {
         using var artifact = PrepareArtifact();
-        var registration = CommandActionClientTestData.Registration(artifact.EntryPoint);
+        // #644: Retention-boundary semantics are independent of timeout/cancellation; keep a bounded CI child budget.
+        var registration = CommandActionClientTestData.Registration(artifact.EntryPoint, executionMilliseconds: 15_000);
         var evidence = new InMemoryCommandActionEvidenceStore();
         var boundary = new TestCommandActionProcessIsolationBoundary();
         var dispatch = new RecordingActuatorDispatchBoundary();
