@@ -121,6 +121,38 @@ public sealed class WebGovernedLoopBackgroundLifetimeTests
     }
 
     [Fact]
+    public async Task Standby_Web_lifetime_releases_its_runtime_without_stopping_the_live_peer()
+    {
+        using var workspace = new TestWorkspace();
+        var codexPath = await WebBackgroundLifetimeCodexExecutable.CreateAsync(workspace);
+        await WorkspaceInitializer.ForWeb().InitializeAsync(workspace.RootPath);
+        var primary = CreateApp(workspace.RootPath, codexPath, out _);
+        var standby = CreateApp(workspace.RootPath, codexPath, out _);
+
+        try
+        {
+            await primary.StartAsync();
+            var primaryHost = primary.Services.GetRequiredService<WebAgentRuntimeHost>();
+            Assert.Equal(WebGovernedLoopBackgroundPosture.Ready, (await WaitForPostureAsync(primaryHost, WebGovernedLoopBackgroundPosture.Ready)).BackgroundPosture);
+
+            await standby.StartAsync();
+            var standbyHost = standby.Services.GetRequiredService<WebAgentRuntimeHost>();
+            Assert.Equal(WebGovernedLoopBackgroundPosture.Degraded, (await WaitForPostureAsync(standbyHost, WebGovernedLoopBackgroundPosture.Degraded)).BackgroundPosture);
+
+            await standby.StopAsync();
+            await standby.DisposeAsync();
+
+            Assert.Equal(WebGovernedLoopBackgroundPosture.Stopped, standbyHost.GetStatus().BackgroundPosture);
+            Assert.Equal(WebGovernedLoopBackgroundPosture.Ready, primaryHost.GetStatus().BackgroundPosture);
+        }
+        finally
+        {
+            await standby.DisposeAsync();
+            await primary.DisposeAsync();
+        }
+    }
+
+    [Fact]
     public async Task Background_worker_processes_governed_trigger_after_the_only_browser_connection_disconnects()
     {
         using var workspace = new TestWorkspace();
@@ -299,6 +331,10 @@ public sealed class WebGovernedLoopBackgroundLifetimeTests
 
             Assert.Equal(WebGovernedLoopBackgroundPosture.Draining, runtimeHost.GetStatus().BackgroundPosture);
             Assert.False(turn.IsCompleted);
+
+            var rejected = runtimeHost.SendMessageAsync("reject new work during Web shutdown", (_, _) => Task.CompletedTask);
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => rejected);
+            Assert.Single(await File.ReadAllLinesAsync(WebBackgroundLifetimeCodexExecutable.StartedPath(workspace)));
 
             releaseEventWriter.TrySetResult(true);
             _ = await turn.WaitAsync(TimeSpan.FromSeconds(10));
