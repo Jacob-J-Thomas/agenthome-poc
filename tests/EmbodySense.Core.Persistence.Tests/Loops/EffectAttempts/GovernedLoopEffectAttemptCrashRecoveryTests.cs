@@ -71,21 +71,30 @@ public sealed class GovernedLoopEffectAttemptCrashRecoveryTests
         var recoveryReadyPath = workspace.File("effect-recovery-ready.txt");
         var recoveryResultPath = workspace.File("effect-recovery-result.txt");
 
-        using (var crashWorker = StartWorker(
+        var crashWorker = StartWorker(
                    workspace.RootPath,
                    "crash",
                    boundary,
                    callbackEvidencePath,
                    crashReadyPath,
-                   crashResultPath))
+                   crashResultPath);
+        using (crashWorker.EvidenceCancellation)
+        using (crashWorker.Process)
         {
-            var crash = new Verification.CrossProcessReadinessChild("crash", crashWorker, crashReadyPath, crashResultPath);
+            var crash = new Verification.CrossProcessReadinessChild(
+                "crash",
+                crashWorker.Process,
+                crashReadyPath,
+                crashResultPath,
+                crashWorker.StandardOutputTask,
+                crashWorker.StandardErrorTask,
+                crashWorker.EvidenceCancellation);
             await Verification.CrossProcessReadinessDiagnostics.WaitForChildrenReadyAsync(
                 "effect-attempt/crash",
                 [crash],
                 _workerReadinessTimeout);
-            var evidence = await WaitForExpectedCrashAsync(crash, boundary);
-            Assert.Equal(VstestCrashExitCode, crashWorker.ExitCode);
+            var evidence = await WaitForExpectedCrashAsync(crash, crashWorker, boundary);
+            Assert.Equal(VstestCrashExitCode, crashWorker.Process.ExitCode);
             Assert.Contains("test run was aborted", evidence.StandardError, StringComparison.OrdinalIgnoreCase);
         }
 
@@ -98,15 +107,24 @@ public sealed class GovernedLoopEffectAttemptCrashRecoveryTests
             Assert.False(Directory.Exists(paths.GovernedLoopEffectAttemptsPath));
         }
 
-        using (var recoveryWorker = StartWorker(
+        var recoveryWorker = StartWorker(
                    workspace.RootPath,
                    "recover",
                    boundary,
                    callbackEvidencePath,
                    recoveryReadyPath,
-                   recoveryResultPath))
+                   recoveryResultPath);
+        using (recoveryWorker.EvidenceCancellation)
+        using (recoveryWorker.Process)
         {
-            var recovery = new Verification.CrossProcessReadinessChild("recover", recoveryWorker, recoveryReadyPath, recoveryResultPath);
+            var recovery = new Verification.CrossProcessReadinessChild(
+                "recover",
+                recoveryWorker.Process,
+                recoveryReadyPath,
+                recoveryResultPath,
+                recoveryWorker.StandardOutputTask,
+                recoveryWorker.StandardErrorTask,
+                recoveryWorker.EvidenceCancellation);
             await Verification.CrossProcessReadinessDiagnostics.WaitForChildrenReadyAsync(
                 "effect-attempt/recover",
                 [recovery],
@@ -172,7 +190,7 @@ public sealed class GovernedLoopEffectAttemptCrashRecoveryTests
         await File.WriteAllTextAsync(resultPath, recovered.Payload.Phase.ToString());
     }
 
-    private static Verification.CrossProcessProcess StartWorker(
+    private static WorkerProcessCapture StartWorker(
         string workspaceRoot,
         string mode,
         CrashBoundary boundary,
@@ -196,7 +214,13 @@ public sealed class GovernedLoopEffectAttemptCrashRecoveryTests
         startInfo.Environment[WorkerCallbackEvidenceVariable] = callbackEvidencePath;
         startInfo.Environment[WorkerReadyVariable] = readyPath;
         startInfo.Environment[WorkerResultVariable] = resultPath;
-        return Verification.CrossProcessProcessOwnership.Start(startInfo);
+        var process = Verification.CrossProcessProcessOwnership.Start(startInfo);
+        var evidenceCancellation = new CancellationTokenSource();
+        return new WorkerProcessCapture(
+            process,
+            evidenceCancellation,
+            ReadWorkerStreamAsync(process.ReadStandardOutputToEndAsync(evidenceCancellation.Token)),
+            ReadWorkerStreamAsync(process.ReadStandardErrorToEndAsync(evidenceCancellation.Token)));
     }
 
     private static void AddWorkerVstestArguments(ProcessStartInfo startInfo, string mode)
@@ -223,6 +247,7 @@ public sealed class GovernedLoopEffectAttemptCrashRecoveryTests
 
     private static async Task<(string StandardOutput, string StandardError)> WaitForExpectedCrashAsync(
         Verification.CrossProcessReadinessChild worker,
+        WorkerProcessCapture capture,
         CrashBoundary boundary)
     {
         var resultWait = Stopwatch.StartNew();
@@ -230,12 +255,12 @@ public sealed class GovernedLoopEffectAttemptCrashRecoveryTests
         {
             if (worker.Process.HasExited)
             {
-                var evidence = await ReadWorkerEvidenceAsync(worker);
+                var evidence = await ReadWorkerEvidenceAsync(capture);
                 Assert.Fail($"Effect-attempt crash worker exited before publishing the `{boundary}` durable boundary result. {evidence}");
             }
             if (resultWait.Elapsed >= _workerResultTimeout)
             {
-                var evidence = await StopAndReadWorkerEvidenceAsync(worker);
+                var evidence = await StopAndReadWorkerEvidenceAsync(worker, capture);
                 Assert.Fail($"Effect-attempt crash worker did not publish the `{boundary}` durable boundary result within {_workerResultTimeout.TotalSeconds:0} seconds. {evidence}");
             }
 
@@ -249,31 +274,35 @@ public sealed class GovernedLoopEffectAttemptCrashRecoveryTests
         }
         catch (TimeoutException)
         {
-            var evidence = await StopAndReadWorkerEvidenceAsync(worker);
+            var evidence = await StopAndReadWorkerEvidenceAsync(worker, capture);
             Assert.Fail($"Effect-attempt crash worker published the `{boundary}` durable boundary result but did not exit within {_workerExitTimeout.TotalSeconds:0} seconds. {evidence}");
         }
 
-        return await ReadWorkerEvidenceAsync(worker);
+        return await ReadWorkerEvidenceAsync(capture);
     }
 
-    private static async Task AssertProcessSucceededAsync(Verification.CrossProcessProcess process)
+    private static async Task AssertProcessSucceededAsync(WorkerProcessCapture capture)
     {
-        var output = await ReadWorkerEvidenceAsync(process);
+        var output = await ReadWorkerEvidenceAsync(capture);
         Assert.True(
-            process.ExitCode == 0,
-            $"Effect-attempt recovery worker exited with `{process.ExitCode}`.{Environment.NewLine}{output.StandardError}{Environment.NewLine}{output.StandardOutput}");
+            capture.Process.ExitCode == 0,
+            $"Effect-attempt recovery worker exited with `{capture.Process.ExitCode}`.{Environment.NewLine}{output.StandardError}{Environment.NewLine}{output.StandardOutput}");
     }
 
-    private static async Task<(string StandardOutput, string StandardError)> ReadWorkerEvidenceAsync(Verification.CrossProcessReadinessChild worker)
-        => await ReadWorkerEvidenceAsync(worker.Process);
-
-    private static async Task<(string StandardOutput, string StandardError)> ReadWorkerEvidenceAsync(Verification.CrossProcessProcess process)
+    private static async Task<(string StandardOutput, string StandardError)> ReadWorkerEvidenceAsync(WorkerProcessCapture capture)
     {
-        using var cancellation = new CancellationTokenSource(_workerEvidenceReadTimeout);
-        var outputTask = ReadWorkerStreamAsync(process.ReadStandardOutputToEndAsync(cancellation.Token));
-        var errorTask = ReadWorkerStreamAsync(process.ReadStandardErrorToEndAsync(cancellation.Token));
-        await Task.WhenAll(outputTask, errorTask);
-        return (outputTask.Result, errorTask.Result);
+        var drainTask = Task.WhenAll(capture.StandardOutputTask, capture.StandardErrorTask);
+        try
+        {
+            await drainTask.WaitAsync(_workerEvidenceReadTimeout);
+        }
+        catch (TimeoutException)
+        {
+            capture.EvidenceCancellation.Cancel();
+            await drainTask.WaitAsync(_workerEvidenceReadTimeout);
+        }
+
+        return (capture.StandardOutputTask.Result, capture.StandardErrorTask.Result);
     }
 
     private static async Task<string> ReadWorkerStreamAsync(Task<string> streamTask)
@@ -296,7 +325,9 @@ public sealed class GovernedLoopEffectAttemptCrashRecoveryTests
         }
     }
 
-    private static async Task<string> StopAndReadWorkerEvidenceAsync(Verification.CrossProcessReadinessChild worker)
+    private static async Task<string> StopAndReadWorkerEvidenceAsync(
+        Verification.CrossProcessReadinessChild worker,
+        WorkerProcessCapture capture)
     {
         try
         {
@@ -314,7 +345,7 @@ public sealed class GovernedLoopEffectAttemptCrashRecoveryTests
         {
         }
 
-        var evidence = await ReadWorkerEvidenceAsync(worker);
+        var evidence = await ReadWorkerEvidenceAsync(capture);
         var state = worker.Process.HasExited ? $"exited exit={worker.Process.ExitCode}" : "still-running exit=<unavailable>";
         return $"pid={worker.Process.Id} state={state} ready={File.Exists(worker.ReadyPath)} result={File.Exists(worker.ResultPath)} stdout={evidence.StandardOutput} stderr={evidence.StandardError}";
     }
@@ -389,6 +420,12 @@ public sealed class GovernedLoopEffectAttemptCrashRecoveryTests
         AfterBoundaryBeforeOutcome,
         AfterOutcomeBeforeCommit,
     }
+
+    private sealed record WorkerProcessCapture(
+        Verification.CrossProcessProcess Process,
+        CancellationTokenSource EvidenceCancellation,
+        Task<string> StandardOutputTask,
+        Task<string> StandardErrorTask);
 
     private sealed class CrashRestartProtocolAdapter(
         IGovernedLoopEffectAttemptStore store,
