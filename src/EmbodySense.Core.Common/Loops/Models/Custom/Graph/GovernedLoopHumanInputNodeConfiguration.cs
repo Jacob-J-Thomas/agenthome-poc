@@ -12,8 +12,8 @@ namespace EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 /// <param name="PrivacyClass">The bounded handling classification for the untrusted exchange.</param>
 /// <param name="EligibleRespondents">The exact canonically ordered eligible respondent and route declarations.</param>
 /// <param name="ResponsePolicy">The data-only response selection policy.</param>
-/// <param name="TimeoutPolicyReference">The exact opaque reference to the authored timeout policy.</param>
-/// <param name="FailurePolicyReference">The exact opaque reference to the authored failure policy.</param>
+/// <param name="TimeoutPolicyReference">The exact schema-1 <c>policy-id@revision-id</c> reference to the finite timeout policy.</param>
+/// <param name="FailurePolicyReference">The exact schema-1 <c>policy-id@revision-id</c> reference to the closed deadline-disposition policy.</param>
 public sealed record GovernedLoopHumanInputNodeConfiguration(
     int SchemaVersion,
     string? RequestSchemaReference,
