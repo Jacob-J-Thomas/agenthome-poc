@@ -28,7 +28,7 @@ internal static class HumanInputLifecycleTestData
             HumanInputRequest.CurrentSchemaVersion,
             requestId,
             requestVersionId,
-            binding ?? new HumanInputRequestBinding("workspace-one", "governed-loop", "loop-revision-one", "node-one", "run-one", "checkpoint-one"),
+            binding ?? new HumanInputRequestBinding("workspace-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "governed-loop", "loop-revision-one", "node-one", "run-one", "checkpoint-one"),
             purpose,
             prompt,
             schema ?? new HumanInputResponseSchema(HumanInputResponseKind.Text, 128, null, null, null),

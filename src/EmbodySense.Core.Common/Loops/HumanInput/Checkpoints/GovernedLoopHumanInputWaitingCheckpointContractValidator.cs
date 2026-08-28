@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.HumanInput;
 using EmbodySense.Core.Common.HumanInput.Models;
 using EmbodySense.Core.Common.HumanInput.Responses;
@@ -66,7 +67,7 @@ public static class GovernedLoopHumanInputWaitingCheckpointContractValidator
         }
 
         Schema(binding.SchemaVersion, path + ".schemaVersion", errors);
-        Identifier(binding.WorkspaceId, path + ".workspaceId", errors);
+        WorkspaceId(binding.WorkspaceId, path + ".workspaceId", errors);
         Identifier(binding.NodeId, path + ".nodeId", errors);
         Identifier(binding.CheckpointId, path + ".checkpointId", errors);
         Hash(binding.GraphArtifactHash, path + ".graphArtifactHash", errors);
@@ -433,6 +434,11 @@ public static class GovernedLoopHumanInputWaitingCheckpointContractValidator
     private static void Identifier(string? value, string path, List<GovernedLoopHumanInputWaitingCheckpointValidationError> errors)
     {
         if (!HumanInputIdentifier.IsValid(value) || ContainsAuthorityTerm(value)) Add(errors, "invalid_identifier", path, "Identifiers must be canonical Human Input data-only identifiers.");
+    }
+
+    private static void WorkspaceId(string? value, string path, List<GovernedLoopHumanInputWaitingCheckpointValidationError> errors)
+    {
+        if (!ContextualRoleWorkspaceId.IsValid(value)) Add(errors, "invalid_workspace_id", path, "A canonical workspace-sha256 workspace scope is required.");
     }
 
     private static void Hash(string? value, string path, List<GovernedLoopHumanInputWaitingCheckpointValidationError> errors)

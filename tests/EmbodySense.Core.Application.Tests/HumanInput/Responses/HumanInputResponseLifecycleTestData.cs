@@ -51,7 +51,7 @@ internal static class HumanInputResponseLifecycleTestData
                 string.Empty));
     }
 
-    internal static HumanInputRequestBinding Binding(string workspaceId = "workspace-one")
+    internal static HumanInputRequestBinding Binding(string workspaceId = "workspace-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         => new(workspaceId, "governed-loop", "revision-1", "node-one", "run-one", "checkpoint-one");
 
     internal static HumanInputRequestReference Reference(HumanInputRequest request)

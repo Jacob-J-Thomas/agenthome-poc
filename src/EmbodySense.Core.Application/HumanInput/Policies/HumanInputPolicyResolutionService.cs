@@ -1,4 +1,5 @@
 using EmbodySense.Core.Application.HumanInput.Policies.Models;
+using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.HumanInput;
 using EmbodySense.Core.Common.Loops.HumanInput;
 using EmbodySense.Core.Common.Loops.HumanInput.Policies;
@@ -65,7 +66,7 @@ public sealed class HumanInputPolicyResolutionService
 
     private static bool IsValidRequest(HumanInputPolicyResolutionRequest? request)
         => request is not null
-            && HumanInputIdentifier.IsValid(request.WorkspaceId)
+            && ContextualRoleWorkspaceId.IsValid(request.WorkspaceId)
             && HumanInputIdentifier.IsValid(request.GraphId)
             && HumanInputIdentifier.IsValid(request.GraphRevisionId)
             && HumanInputIdentifier.IsValid(request.NodeId)

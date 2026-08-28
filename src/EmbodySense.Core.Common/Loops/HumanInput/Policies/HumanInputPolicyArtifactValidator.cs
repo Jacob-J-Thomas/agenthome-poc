@@ -1,4 +1,5 @@
 using EmbodySense.Core.Common.HumanInput;
+using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.Loops.HumanInput.Policies.Models;
 
 namespace EmbodySense.Core.Common.Loops.HumanInput.Policies;
@@ -22,7 +23,7 @@ public static class HumanInputPolicyArtifactValidator
         Identifier(artifact.PolicyId, "$.policyId", errors);
         Identifier(artifact.RevisionId, "$.revisionId", errors);
         if (!HumanInputPolicyReference.TryParse($"{artifact.PolicyId}{HumanInputPolicyReference.Separator}{artifact.RevisionId}", out _)) Add(errors, "non_exact_policy_reference", "$.policyId", "Policy and revision identities must not select a default, current, or latest policy.");
-        Identifier(artifact.WorkspaceId, "$.workspaceId", errors);
+        WorkspaceId(artifact.WorkspaceId, "$.workspaceId", errors);
         Identifier(artifact.GraphId, "$.graphId", errors);
         Identifier(artifact.AuthorityActorId, "$.authorityActorId", errors);
         if (!Enum.IsDefined(artifact.Kind) || artifact.Kind == HumanInputPolicyKind.Unknown) Add(errors, "unsupported_kind", "$.kind", "One supported Human Input policy kind is required.");
@@ -49,6 +50,11 @@ public static class HumanInputPolicyArtifactValidator
     private static void Identifier(string? value, string path, List<HumanInputPolicyArtifactValidationError> errors)
     {
         if (!HumanInputPolicyTextSafety.IsSafeIdentifier(value)) Add(errors, "unsafe_identifier", path, "Policy identities and scopes must be canonical non-secret data-only identifiers.");
+    }
+
+    private static void WorkspaceId(string? value, string path, List<HumanInputPolicyArtifactValidationError> errors)
+    {
+        if (!ContextualRoleWorkspaceId.IsValid(value)) Add(errors, "invalid_workspace_id", path, "A canonical workspace-sha256 workspace scope is required.");
     }
 
     private static void Add(List<HumanInputPolicyArtifactValidationError> errors, string code, string path, string message) => errors.Add(new HumanInputPolicyArtifactValidationError(code, path, message));

@@ -75,7 +75,7 @@ public sealed class HumanInputRequestLifecycleExpectedBindingTests
         HumanInputRequestLifecycleTransitionTestSupport.ResetCalls(harness);
         var expectedBinding = scenario switch
         {
-            0 => request.Binding with { WorkspaceId = "different-workspace" },
+            0 => request.Binding with { WorkspaceId = "workspace-sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
             1 => request.Binding with { LoopGraphId = "different-loop" },
             _ => request.Binding with { LoopRevisionId = "different-revision" },
         };
@@ -104,7 +104,7 @@ public sealed class HumanInputRequestLifecycleExpectedBindingTests
         var absent = HumanInputRequestLifecycleTestData.Request(
             requestId: "wrong-workspace-missing-request",
             requestVersionId: "wrong-workspace-missing-version",
-            workspaceId: "different-workspace");
+            workspaceId: "workspace-sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
         var expected = new HumanInputRequestLifecycleHead(
             1,
             absent.RequestId,

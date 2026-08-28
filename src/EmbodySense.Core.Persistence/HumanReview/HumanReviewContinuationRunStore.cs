@@ -1,3 +1,5 @@
+using EmbodySense.Core.Application.HumanReview;
+using EmbodySense.Core.Application.HumanReview.Models;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Common.HumanReview;
@@ -14,7 +16,7 @@ namespace EmbodySense.Core.Persistence.HumanReview;
 /// publishing a wake, appending a claim, or recording one terminal result through whole-run compare-exchange. Every uncertain
 /// publication result is reread from the canonical run before a caller can treat it as unavailable.
 /// </remarks>
-public sealed class HumanReviewContinuationRunStore
+public sealed class HumanReviewContinuationRunStore : IHumanReviewContinuationPublicationStore
 {
     private readonly ICustomLoopRunStore _runs;
 
@@ -49,6 +51,16 @@ public sealed class HumanReviewContinuationRunStore
         if (!IsInitialPublication(review, continuation)) return Result(HumanReviewContinuationMutationStatus.Invalid, current);
         if (current.LifecycleVersion != expectedLifecycleVersion) return Result(HumanReviewContinuationMutationStatus.Conflict, current);
         return await UpdateAsync(current, review with { Continuation = continuation }, continuation.Wake.PublishedAtUtc, cancellationToken).ConfigureAwait(false);
+    }
+
+    async Task<HumanReviewContinuationStoreMutationResult> IHumanReviewContinuationPublicationStore.PublishAsync(
+        string runId,
+        int expectedLifecycleVersion,
+        HumanReviewContinuationState continuation,
+        CancellationToken cancellationToken)
+    {
+        var result = await PublishAsync(runId, expectedLifecycleVersion, continuation, cancellationToken).ConfigureAwait(false);
+        return new HumanReviewContinuationStoreMutationResult(MapPublicationStatus(result.Status));
     }
 
     /// <summary>Appends one exact claim only when the current continuation remains nonterminal and the contract proves a strict-expiry takeover.</summary>
@@ -167,7 +179,8 @@ public sealed class HumanReviewContinuationRunStore
         CustomLoopRunRecord next;
         try
         {
-            next = current with { LifecycleVersion = checked(current.LifecycleVersion + 1), UpdatedAtUtc = updatedAtUtc, HumanReview = review };
+            var mutationAtUtc = updatedAtUtc < current.UpdatedAtUtc ? current.UpdatedAtUtc : updatedAtUtc;
+            next = current with { LifecycleVersion = checked(current.LifecycleVersion + 1), UpdatedAtUtc = mutationAtUtc, HumanReview = review };
             if (!CustomLoopRunValidator.ValidateUpdate(current, next).IsValid) return Result(HumanReviewContinuationMutationStatus.Invalid, current);
         }
         catch
@@ -297,6 +310,19 @@ public sealed class HumanReviewContinuationRunStore
         return expected.Retirement is null || retained.Completion is null
             && HumanReviewContinuationReplayClassifier.ClassifyRetirement(expected.Retirement, retained.Retirement) == HumanReviewContinuationReplayDisposition.ExactReplay;
     }
+
+    private static HumanReviewContinuationStoreMutationStatus MapPublicationStatus(HumanReviewContinuationMutationStatus status)
+        => status switch
+        {
+            HumanReviewContinuationMutationStatus.Committed => HumanReviewContinuationStoreMutationStatus.Committed,
+            HumanReviewContinuationMutationStatus.Replayed => HumanReviewContinuationStoreMutationStatus.Replayed,
+            HumanReviewContinuationMutationStatus.Conflict => HumanReviewContinuationStoreMutationStatus.Conflict,
+            HumanReviewContinuationMutationStatus.NotFound => HumanReviewContinuationStoreMutationStatus.NotFound,
+            HumanReviewContinuationMutationStatus.Invalid => HumanReviewContinuationStoreMutationStatus.Invalid,
+            HumanReviewContinuationMutationStatus.Unavailable => HumanReviewContinuationStoreMutationStatus.Unavailable,
+            HumanReviewContinuationMutationStatus.LimitExceeded => HumanReviewContinuationStoreMutationStatus.LimitExceeded,
+            _ => HumanReviewContinuationStoreMutationStatus.Unknown,
+        };
 
     private static HumanReviewContinuationMutationResult Result(HumanReviewContinuationMutationStatus status, CustomLoopRunRecord? run = null) => new(status, run);
 }

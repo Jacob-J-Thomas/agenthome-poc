@@ -224,7 +224,7 @@ public sealed class HumanInputResponseOperationCausalityChronologyTests
             store,
             new RecordingHumanInputResponseActorAuthenticator(),
             new StubCapabilityAuthorityTransaction(),
-            "workspace-one",
+            "workspace-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             new MutableHumanInputResponseTimeProvider(HumanInputResponseLifecycleTestData.Now.AddMinutes(5)));
         var missingCommand = HumanInputResponseLifecycleTestData.Submit(
             request,

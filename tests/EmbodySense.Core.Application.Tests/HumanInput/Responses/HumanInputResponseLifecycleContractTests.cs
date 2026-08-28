@@ -100,13 +100,13 @@ public sealed class HumanInputResponseLifecycleContractTests
             command.Kind,
             command.RequestId,
             command.CommandHash,
-            "workspace-one",
+            "workspace-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             HumanInputResponseLifecycleTestData.Now);
         var authentication = new HumanInputResponseActorAuthentication(
             HumanInputResponseActorAuthenticationStatus.Authenticated,
             command.OperationId,
             command.CommandHash,
-            "workspace-one",
+            "workspace-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             HumanInputResponseLifecycleTestData.Now,
             HumanInputResponseLifecycleTestData.Actor("secret-actor"),
             HumanInputResponseLifecycleTestData.Hash('e'));

@@ -1,5 +1,6 @@
 using System.Globalization;
 using EmbodySense.Core.Application.HumanInput.Lifecycle.Models;
+using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.Authority;
 using EmbodySense.Core.Common.Authority.Grants;
 using EmbodySense.Core.Common.Authority.Grants.Models;
@@ -195,7 +196,7 @@ public static class HumanInputRequestLifecycleCommandValidator
             or HumanInputRequestLifecycleOperationKind.Supersede;
 
     private static bool BindingIsValid(HumanInputRequestBinding binding)
-        => HumanInputIdentifier.IsValid(binding.WorkspaceId)
+        => ContextualRoleWorkspaceId.IsValid(binding.WorkspaceId)
             && HumanInputIdentifier.IsValid(binding.LoopGraphId)
             && HumanInputIdentifier.IsValid(binding.LoopRevisionId)
             && HumanInputIdentifier.IsValid(binding.NodeId)

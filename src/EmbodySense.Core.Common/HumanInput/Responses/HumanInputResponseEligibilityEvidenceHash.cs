@@ -2,6 +2,7 @@ using System.Buffers;
 using System.Security.Cryptography;
 using System.Text.Json;
 using EmbodySense.Core.Common.Authority;
+using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.HumanInput.Lifecycle;
 using EmbodySense.Core.Common.HumanInput.Models;
 using EmbodySense.Core.Common.HumanInput.Responses.Models;
@@ -32,7 +33,7 @@ public static class HumanInputResponseEligibilityEvidenceHash
         string authenticationEvidenceHash,
         DateTimeOffset evaluatedAtUtc)
     {
-        if (!HumanInputIdentifier.IsValid(workspaceId))
+        if (!ContextualRoleWorkspaceId.IsValid(workspaceId))
         {
             throw new ArgumentException("A canonical bounded workspace identifier is required.", nameof(workspaceId));
         }
@@ -121,7 +122,7 @@ public static class HumanInputResponseEligibilityEvidenceHash
             && evidence.Request is not null
             && HumanInputRequestLifecycleValidator.ValidateReference(evidence.Request).IsValid
             && evidence.ExpectedBinding is not null
-            && HumanInputIdentifier.IsValid(evidence.ExpectedBinding.WorkspaceId)
+            && ContextualRoleWorkspaceId.IsValid(evidence.ExpectedBinding.WorkspaceId)
             && evidence.ActorId is not null
             && AuthorityActorId.TryParse(evidence.ActorId.Value, out _, out _)
             && (evidence.ActorRoleId is null || HumanInputIdentifier.IsValid(evidence.ActorRoleId))

@@ -45,6 +45,27 @@ public sealed class HumanInputPolicyArtifactTests
     }
 
     [Fact]
+    public void Workspace_scope_uses_only_the_canonical_runtime_identity()
+    {
+        var invalidWorkspaceIds = new[]
+        {
+            "workspace-one",
+            "workspace-sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "workspace-sha256:" + new string('a', 63),
+            "workspace-sha256:" + new string('a', 65),
+            "workspace-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:extra",
+            "workspace-sha512:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        };
+
+        foreach (var workspaceId in invalidWorkspaceIds)
+        {
+            var policy = HumanInputPolicyArtifactHash.Apply(Timeout() with { WorkspaceId = workspaceId });
+            Assert.Contains(HumanInputPolicyArtifactValidator.Validate(policy).Errors, error => error.Code == "invalid_workspace_id" && error.Path == "$.workspaceId");
+            Assert.Null(HumanInputPolicyResolutionSnapshot.TryCreate(workspaceId, "graph-one", "revision-one", "node-one", "actor-one", policy, Failure(), At));
+        }
+    }
+
+    [Fact]
     public void Shared_text_safety_rejects_secret_markers_in_policy_ids_references_and_artifacts()
     {
         var timeout = Timeout();
@@ -76,8 +97,8 @@ public sealed class HumanInputPolicyArtifactTests
     [Fact]
     public void Trusted_snapshot_binds_exact_scope_policies_and_overflow_safe_finite_window()
     {
-        var snapshot = HumanInputPolicyResolutionSnapshot.TryCreate("workspace-one", "graph-one", "revision-one", "node-one", "actor-one", Timeout(), Failure(), At);
-        var overflow = HumanInputPolicyResolutionSnapshot.TryCreate("workspace-one", "graph-one", "revision-one", "node-one", "actor-one", Timeout(TimeSpan.FromDays(1)), Failure(), DateTimeOffset.MaxValue);
+        var snapshot = HumanInputPolicyResolutionSnapshot.TryCreate("workspace-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "graph-one", "revision-one", "node-one", "actor-one", Timeout(), Failure(), At);
+        var overflow = HumanInputPolicyResolutionSnapshot.TryCreate("workspace-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "graph-one", "revision-one", "node-one", "actor-one", Timeout(TimeSpan.FromDays(1)), Failure(), DateTimeOffset.MaxValue);
 
         Assert.NotNull(snapshot);
         Assert.True(HumanInputPolicyResolutionSnapshot.IsValid(snapshot));
@@ -89,10 +110,10 @@ public sealed class HumanInputPolicyArtifactTests
     internal static readonly DateTimeOffset At = new(2026, 8, 26, 15, 0, 0, TimeSpan.Zero);
 
     internal static HumanInputPolicyArtifact Timeout(TimeSpan? window = null)
-        => HumanInputPolicyArtifactHash.Apply(new HumanInputPolicyArtifact(1, "timeout-one", "revision-one", HumanInputPolicyKind.ResponseWindow, "workspace-one", "graph-one", "actor-one", (long)(window ?? TimeSpan.FromHours(1)).TotalMilliseconds, HumanInputTerminalDisposition.Unknown, string.Empty));
+        => HumanInputPolicyArtifactHash.Apply(new HumanInputPolicyArtifact(1, "timeout-one", "revision-one", HumanInputPolicyKind.ResponseWindow, "workspace-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "graph-one", "actor-one", (long)(window ?? TimeSpan.FromHours(1)).TotalMilliseconds, HumanInputTerminalDisposition.Unknown, string.Empty));
 
     internal static HumanInputPolicyArtifact Failure()
-        => HumanInputPolicyArtifactHash.Apply(new HumanInputPolicyArtifact(1, "failure-one", "revision-one", HumanInputPolicyKind.DeadlineDisposition, "workspace-one", "graph-one", "actor-one", null, HumanInputTerminalDisposition.Expired, string.Empty));
+        => HumanInputPolicyArtifactHash.Apply(new HumanInputPolicyArtifact(1, "failure-one", "revision-one", HumanInputPolicyKind.DeadlineDisposition, "workspace-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "graph-one", "actor-one", null, HumanInputTerminalDisposition.Expired, string.Empty));
 
     private static byte[] ReverseProperties(byte[] json)
     {
