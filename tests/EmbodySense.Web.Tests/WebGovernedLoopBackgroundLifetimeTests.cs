@@ -25,6 +25,7 @@ using EmbodySense.Core.Application.Loops.Sleep.Models;
 using EmbodySense.Core.Common.Loops.Execution.Sleep;
 using EmbodySense.Core.Common.Loops.Execution.Sleep.Models;
 using EmbodySense.Core.Startup.Loops;
+using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Core.Startup.Loops.Execution.Models;
 using EmbodySense.Core.Startup.Loops.Models;
 using EmbodySense.Core.Startup.Loops.Execution.Sleep.Models;
@@ -369,6 +370,12 @@ public sealed class WebGovernedLoopBackgroundLifetimeTests
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => rejected);
             Assert.Single(await File.ReadAllLinesAsync(WebBackgroundLifetimeCodexExecutable.StartedPath(workspace)));
 
+            // The hosted stop deadline must bound container disposal too. Cleanup remains deferred while this
+            // permanently-stalled writer still owns the admitted turn and is allowed to finish only after release.
+            var disposal = app.DisposeAsync().AsTask();
+            await disposal.WaitAsync(TimeSpan.FromSeconds(1));
+            Assert.False(turn.IsCompleted);
+
             releaseEventWriter.TrySetResult(true);
             _ = await turn.WaitAsync(TimeSpan.FromSeconds(10));
             Assert.Equal(WebGovernedLoopBackgroundPosture.Stopped, (await WaitForPostureAsync(runtimeHost, WebGovernedLoopBackgroundPosture.Stopped)).BackgroundPosture);
@@ -377,6 +384,40 @@ public sealed class WebGovernedLoopBackgroundLifetimeTests
         {
             releaseEventWriter.TrySetResult(true);
             await app.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task Pinned_background_recovery_stops_and_releases_before_rebuilding_the_custom_loop_store()
+    {
+        using var workspace = new TestWorkspace();
+        var codexPath = await WebBackgroundLifetimeCodexExecutable.CreateAsync(workspace);
+        await WorkspaceInitializer.ForWeb().InitializeAsync(workspace.RootPath);
+        await using var app = CreateApp(workspace.RootPath, codexPath, out _);
+        await app.StartAsync();
+
+        try
+        {
+            var runtimeHost = app.Services.GetRequiredService<WebAgentRuntimeHost>();
+            Assert.Equal(WebGovernedLoopBackgroundPosture.Ready, (await WaitForPostureAsync(runtimeHost, WebGovernedLoopBackgroundPosture.Ready)).BackgroundPosture);
+            var definition = await CreateInvocationLoopAsync(workspace);
+            var input = new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "pinned-recovery", "force recovery after background activation");
+            var paths = new WorkspacePaths(workspace.RootPath);
+            Directory.CreateDirectory(paths.CustomLoopRunsPath);
+            var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
+            await File.WriteAllTextAsync(indexPath, "{\"schemaVersion\":2,\"revision\":1,\"entries\":[]}");
+
+            await Assert.ThrowsAsync<LoopRunEvidenceUnsupportedSchemaException>(() => runtimeHost.InvokeLoopAsync(input, "connection-1"));
+            File.Delete(indexPath);
+
+            Assert.Empty((await runtimeHost.GetLoopRunsAsync()).Items);
+            Assert.Equal(
+                WebGovernedLoopBackgroundPosture.Ready,
+                (await WaitForPostureAsync(runtimeHost, WebGovernedLoopBackgroundPosture.Ready, TimeSpan.FromSeconds(10))).BackgroundPosture);
+        }
+        finally
+        {
+            await app.StopAsync();
         }
     }
 
@@ -398,8 +439,12 @@ public sealed class WebGovernedLoopBackgroundLifetimeTests
             await app.StopAsync(shutdownDeadline.Token).WaitAsync(TimeSpan.FromSeconds(10));
 
             Assert.Equal(WebGovernedLoopBackgroundPosture.Draining, runtimeHost.GetStatus().BackgroundPosture);
+            var disposal = app.DisposeAsync().AsTask();
+            await disposal.WaitAsync(TimeSpan.FromSeconds(1));
             await WebShutdownDeadlineCodexExecutable.ReleaseRuntimeCompositionAsync(workspace);
             Assert.Equal(WebGovernedLoopBackgroundPosture.Stopped, (await WaitForPostureAsync(runtimeHost, WebGovernedLoopBackgroundPosture.Stopped)).BackgroundPosture);
+            var coordinatorPath = workspace.File(".agent", "loops", "execution", "coordinator");
+            Assert.Empty(Directory.EnumerateFiles(coordinatorPath, "ledger-*.json"));
         }
         finally
         {
@@ -448,9 +493,13 @@ public sealed class WebGovernedLoopBackgroundLifetimeTests
         throw new TimeoutException($"The Web background posture did not reach `{posture}`.");
     }
 
-    private static async Task<WebStatus> WaitForPostureAsync(WebAgentRuntimeHost runtimeHost, WebGovernedLoopBackgroundPosture posture)
+    private static async Task<WebStatus> WaitForPostureAsync(
+        WebAgentRuntimeHost runtimeHost,
+        WebGovernedLoopBackgroundPosture posture,
+        TimeSpan? timeout = null)
     {
-        for (var attempt = 0; attempt < 200; attempt++)
+        var deadline = DateTimeOffset.UtcNow + (timeout ?? TimeSpan.FromSeconds(5));
+        do
         {
             var status = runtimeHost.GetStatus();
             if (status.BackgroundPosture == posture)
@@ -460,6 +509,7 @@ public sealed class WebGovernedLoopBackgroundLifetimeTests
 
             await Task.Delay(25);
         }
+        while (DateTimeOffset.UtcNow < deadline);
 
         throw new TimeoutException($"The Web background posture did not reach `{posture}`.");
     }

@@ -50,6 +50,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     private readonly SemaphoreSlim _workspaceInitializationGate = new(1, 1);
     private readonly object _codexRuntimeStatusGate = new();
     private readonly object _turnCancellationGate = new();
+    private readonly object _hostDisposalGate = new();
     private readonly CancellationTokenSource _hostLifetimeCancellation = new();
     private readonly object _backgroundStopGate = new();
     private Task<CodexRuntimeStatus>? _codexRuntimeStatusTask;
@@ -59,6 +60,10 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     private TaskCompletionSource<bool>? _authoringOperationDrainCompletion;
     private Task<AgentRuntimeGovernedLoopBackgroundStopResult>? _backgroundStopCompletion;
     private Task? _backgroundStopReleaseTask;
+    private Task? _backgroundLifetimeDrainTask;
+    private Task? _hostDisposalTask;
+    private long _backgroundStopGeneration;
+    private long _governedLoopBackgroundGeneration;
     private int _activeCustomRuntimeOperations;
     private int _activeAuthoringOperations;
     private bool _discardRuntimeWhenCustomOperationsComplete;
@@ -68,6 +73,8 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     private AgentRuntimeGovernedLoopBackgroundStopResult? _lastBackgroundStopResult;
     private int _governedLoopBackgroundPosture = (int)WebGovernedLoopBackgroundPosture.Unavailable;
     private int _governedLoopBackgroundLivePeerStandby;
+    private int _hostShutdownDeadlineElapsed;
+    private int _loopRecoveryInProgress;
     private int _disposed;
 
     /// <summary>
@@ -243,6 +250,18 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         }
     }
 
+    /// <summary>
+    /// Records that the hosted shutdown deadline elapsed while a safe-boundary drain remains active.
+    /// </summary>
+    /// <remarks>
+    /// Container disposal must not then wait indefinitely for a stalled admitted operation. The host retains its
+    /// synchronization resources until the already-started safe-boundary cleanup completes.
+    /// </remarks>
+    internal void MarkHostShutdownDeadlineElapsed()
+    {
+        Volatile.Write(ref _hostShutdownDeadlineElapsed, 1);
+    }
+
     internal async Task WaitForConversationTurnsAsync(CancellationToken cancellationToken = default)
     {
         await _turnGate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -262,60 +281,104 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
                 "governed_local_background_unavailable: the Web workspace is not initialized.");
         }
 
-        AgentRuntime runtime;
-        while (true)
+        await _backgroundLifetimeGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+        try
         {
-            Task? discardCompletion = null;
-            await _runtimeGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
-            try
+            AgentRuntime runtime;
+            while (true)
             {
-                ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
-                if (!_discardRuntimeWhenCustomOperationsComplete)
+                Task? discardCompletion = null;
+                await _runtimeGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+                try
                 {
-                    runtime = await GetOrCreateRuntimeUnderGateAsync(CancellationToken.None).ConfigureAwait(false);
-                    _governedLoopBackgroundRuntimePinned = true;
-                    break;
+                    ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+                    if (Volatile.Read(ref _loopRecoveryInProgress) != 0)
+                    {
+                        return new AgentRuntimeGovernedLoopBackgroundStartResult(
+                            AgentRuntimeGovernedLoopBackgroundStartStatus.Unavailable,
+                            AgentRuntimeGovernedLoopBackgroundReadiness.Unavailable,
+                            AgentRuntimeGovernedLoopBackgroundOwnership.None,
+                            true,
+                            "governed_local_background_recovery_pending: durable custom-loop recovery still owns the retained runtime boundary; retry background activation after recovery completes.");
+                    }
+
+                    if (!_discardRuntimeWhenCustomOperationsComplete)
+                    {
+                        var createdRuntime = _runtime is null;
+                        if (!_governedLoopBackgroundRuntimePinned)
+                        {
+                            // This unpinned-to-pinned attempt starts a new Web background lifetime. Reset every prior
+                            // stop completion and release boundary here so a delayed terminal callback cannot release
+                            // or project posture for this generation.
+                            BeginNewGovernedLoopLocalBackgroundLifetime();
+                        }
+
+                        runtime = await GetOrCreateRuntimeUnderGateAsync(CancellationToken.None).ConfigureAwait(false);
+                        if (_hostLifetimeCancellation.IsCancellationRequested)
+                        {
+                            if (createdRuntime)
+                            {
+                                await DisposeRuntimeUnderGateAsync().ConfigureAwait(false);
+                            }
+
+                            _hostLifetimeCancellation.Token.ThrowIfCancellationRequested();
+                        }
+
+                        _governedLoopBackgroundRuntimePinned = true;
+                        break;
+                    }
+
+                    discardCompletion = _runtimeDiscardCompletion?.Task;
+                }
+                finally
+                {
+                    _runtimeGate.Release();
                 }
 
-                discardCompletion = _runtimeDiscardCompletion?.Task;
-            }
-            finally
-            {
-                _runtimeGate.Release();
+                await (discardCompletion ?? throw new InvalidOperationException("The pending runtime discard did not retain a completion boundary.")).ConfigureAwait(false);
             }
 
-            await (discardCompletion ?? throw new InvalidOperationException("The pending runtime discard did not retain a completion boundary.")).ConfigureAwait(false);
+            var start = await runtime.StartGovernedLoopLocalBackgroundWithStatusAsync(CancellationToken.None).ConfigureAwait(false);
+            Volatile.Write(ref _governedLoopBackgroundLivePeerStandby, start.Ownership == AgentRuntimeGovernedLoopBackgroundOwnership.LivePeer ? 1 : 0);
+            return start;
         }
-
-        var start = await runtime.StartGovernedLoopLocalBackgroundWithStatusAsync(CancellationToken.None).ConfigureAwait(false);
-        Volatile.Write(ref _governedLoopBackgroundLivePeerStandby, start.Ownership == AgentRuntimeGovernedLoopBackgroundOwnership.LivePeer ? 1 : 0);
-        return start;
+        finally
+        {
+            _backgroundLifetimeGate.Release();
+        }
     }
 
     internal async Task<AgentRuntimeGovernedLoopBackgroundStatus> ReadGovernedLoopLocalBackgroundForProcessAsync()
     {
-        AgentRuntime? runtime;
         await _runtimeGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
         try
         {
-            runtime = _governedLoopBackgroundRuntimePinned ? _runtime : null;
+            if (Volatile.Read(ref _loopRecoveryInProgress) != 0)
+            {
+                return new AgentRuntimeGovernedLoopBackgroundStatus(
+                    AgentRuntimeGovernedLoopBackgroundReadiness.Unavailable,
+                    AgentRuntimeGovernedLoopBackgroundOwnership.None,
+                    "governed_local_background_recovery_pending: durable custom-loop recovery owns the retained runtime boundary; retry the status read after recovery completes.");
+            }
+
+            var runtime = _governedLoopBackgroundRuntimePinned ? _runtime : null;
+            return runtime is null
+                ? new AgentRuntimeGovernedLoopBackgroundStatus(
+                    AgentRuntimeGovernedLoopBackgroundReadiness.Unavailable,
+                    AgentRuntimeGovernedLoopBackgroundOwnership.None,
+                    "governed_local_background_unavailable: the Web process has not retained a canonical runtime.")
+                : await runtime.ReadGovernedLoopLocalBackgroundStatusAsync(CancellationToken.None).ConfigureAwait(false);
         }
         finally
         {
             _runtimeGate.Release();
         }
-
-        return runtime is null
-            ? new AgentRuntimeGovernedLoopBackgroundStatus(
-                AgentRuntimeGovernedLoopBackgroundReadiness.Unavailable,
-                AgentRuntimeGovernedLoopBackgroundOwnership.None,
-                "governed_local_background_unavailable: the Web process has not retained a canonical runtime.")
-            : await runtime.ReadGovernedLoopLocalBackgroundStatusAsync(CancellationToken.None).ConfigureAwait(false);
     }
 
     internal async Task<AgentRuntimeGovernedLoopBackgroundStopResult> StopGovernedLoopLocalBackgroundForProcessAsync()
     {
         AgentRuntime? runtime;
+        long generation;
         await _backgroundLifetimeGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
         try
         {
@@ -323,6 +386,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
             try
             {
                 runtime = _governedLoopBackgroundRuntimePinned ? _runtime : null;
+                generation = Volatile.Read(ref _governedLoopBackgroundGeneration);
             }
             finally
             {
@@ -336,7 +400,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
                     AgentRuntimeGovernedLoopBackgroundOwnership.None,
                     "governed_local_background_stopped: the Web process did not retain a canonical runtime.")
                 : await runtime.StopGovernedLoopLocalBackgroundAsync(CancellationToken.None).ConfigureAwait(false);
-            RememberBackgroundStop(runtime, result);
+            RememberBackgroundStop(runtime, result, generation);
             return result;
         }
         finally
@@ -345,9 +409,19 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         }
     }
 
-    internal async Task ReleaseGovernedLoopLocalBackgroundForProcessAsync()
+    internal async Task ReleaseGovernedLoopLocalBackgroundForProcessAsync(bool retainRuntime = false, long? expectedGeneration = null)
     {
-        var stopCompletion = Volatile.Read(ref _backgroundStopCompletion);
+        Task<AgentRuntimeGovernedLoopBackgroundStopResult>? stopCompletion;
+        lock (_backgroundStopGate)
+        {
+            if (!MatchesBackgroundGeneration(expectedGeneration))
+            {
+                return;
+            }
+
+            stopCompletion = _backgroundStopCompletion;
+        }
+
         if (stopCompletion is not null)
         {
             var completedStop = await stopCompletion.ConfigureAwait(false);
@@ -361,6 +435,11 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         await _backgroundLifetimeGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
         try
         {
+            if (!MatchesBackgroundGeneration(expectedGeneration))
+            {
+                return;
+            }
+
             await _runtimeGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
             try
             {
@@ -370,6 +449,11 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
                 }
 
                 _governedLoopBackgroundRuntimePinned = false;
+                if (retainRuntime)
+                {
+                    return;
+                }
+
                 if (_activeCustomRuntimeOperations > 0)
                 {
                     _discardRuntimeWhenCustomOperationsComplete = true;
@@ -401,30 +485,59 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     {
         lock (_backgroundStopGate)
         {
-            return _backgroundStopReleaseTask ??= CompleteGovernedLoopLocalBackgroundStopReleaseAsync();
+            var generation = Volatile.Read(ref _governedLoopBackgroundGeneration);
+            return _backgroundStopReleaseTask ??= CompleteGovernedLoopLocalBackgroundStopReleaseAsync(generation);
         }
     }
 
-    private async Task CompleteGovernedLoopLocalBackgroundStopReleaseAsync()
+    /// <summary>
+    /// Registers the one hosted drain task that can still use host lifetime gates after an expired shutdown deadline.
+    /// </summary>
+    /// <param name="drainTask">The exact hosted drain task that owns the retained coordinator boundary.</param>
+    internal void RegisterGovernedLoopLocalBackgroundLifetimeDrain(Task drainTask)
+    {
+        ArgumentNullException.ThrowIfNull(drainTask);
+        lock (_backgroundStopGate)
+        {
+            _backgroundLifetimeDrainTask ??= drainTask;
+        }
+    }
+
+    private async Task CompleteGovernedLoopLocalBackgroundStopReleaseAsync(long expectedGeneration)
     {
         AgentRuntimeGovernedLoopBackgroundStopResult? completedStop;
-        var stopCompletion = Volatile.Read(ref _backgroundStopCompletion);
+        Task<AgentRuntimeGovernedLoopBackgroundStopResult>? stopCompletion;
+        bool wasLivePeerStandby;
+        lock (_backgroundStopGate)
+        {
+            if (!MatchesBackgroundGeneration(expectedGeneration))
+            {
+                return;
+            }
+
+            stopCompletion = _backgroundStopCompletion;
+            completedStop = _lastBackgroundStopResult;
+            wasLivePeerStandby = Volatile.Read(ref _governedLoopBackgroundLivePeerStandby) != 0;
+        }
+
         if (stopCompletion is not null)
         {
             completedStop = await stopCompletion.ConfigureAwait(false);
         }
-        else
-        {
-            completedStop = Volatile.Read(ref _lastBackgroundStopResult);
-        }
 
-        if (completedStop is null || completedStop.Readiness == AgentRuntimeGovernedLoopBackgroundReadiness.Draining)
+        if (completedStop is null
+            || completedStop.Readiness == AgentRuntimeGovernedLoopBackgroundReadiness.Draining
+            || !MatchesBackgroundGeneration(expectedGeneration))
         {
             return;
         }
 
-        var wasLivePeerStandby = Volatile.Read(ref _governedLoopBackgroundLivePeerStandby) != 0;
-        await ReleaseGovernedLoopLocalBackgroundForProcessAsync().ConfigureAwait(false);
+        await ReleaseGovernedLoopLocalBackgroundForProcessAsync(expectedGeneration: expectedGeneration).ConfigureAwait(false);
+        if (!MatchesBackgroundGeneration(expectedGeneration))
+        {
+            return;
+        }
+
         SetGovernedLoopBackgroundPosture(ToWebReleasePosture(completedStop, wasLivePeerStandby));
     }
 
@@ -631,19 +744,41 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     internal Task InvalidateRuntimeAfterCapabilityLifecycleMutationAsync()
         => DiscardRuntimeAsync();
 
-    private void RememberBackgroundStop(
-        AgentRuntime? runtime,
-        AgentRuntimeGovernedLoopBackgroundStopResult result)
+    private void BeginNewGovernedLoopLocalBackgroundLifetime()
     {
-        Volatile.Write(ref _lastBackgroundStopResult, result);
-        if (runtime is null || result.Readiness == AgentRuntimeGovernedLoopBackgroundReadiness.Stopped)
-        {
-            return;
-        }
-
         lock (_backgroundStopGate)
         {
-            _backgroundStopCompletion ??= runtime.WaitForGovernedLoopLocalBackgroundStopAsync();
+            var generation = Interlocked.Increment(ref _governedLoopBackgroundGeneration);
+            _backgroundStopGeneration = generation;
+            _backgroundStopCompletion = null;
+            _backgroundStopReleaseTask = null;
+            _lastBackgroundStopResult = null;
+            Volatile.Write(ref _governedLoopBackgroundLivePeerStandby, 0);
+        }
+    }
+
+    private bool MatchesBackgroundGeneration(long? expectedGeneration)
+        => expectedGeneration is null
+            || (expectedGeneration.Value == Volatile.Read(ref _governedLoopBackgroundGeneration)
+                && expectedGeneration.Value == Volatile.Read(ref _backgroundStopGeneration));
+
+    private void RememberBackgroundStop(
+        AgentRuntime? runtime,
+        AgentRuntimeGovernedLoopBackgroundStopResult result,
+        long generation)
+    {
+        lock (_backgroundStopGate)
+        {
+            if (!MatchesBackgroundGeneration(generation))
+            {
+                return;
+            }
+
+            _backgroundStopGeneration = generation;
+            _lastBackgroundStopResult = result;
+            _backgroundStopCompletion = runtime is null || result.Readiness == AgentRuntimeGovernedLoopBackgroundReadiness.Stopped
+                ? null
+                : runtime.WaitForGovernedLoopLocalBackgroundStopAsync();
         }
     }
 
@@ -669,6 +804,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         await _turnGate.WaitAsync(cancellationToken);
         try
         {
+            await EnsureLoopRecoveryAsync(cancellationToken);
             while (true)
             {
                 Task? discardCompletion = null;
@@ -683,7 +819,11 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
                     }
                     else
                     {
-                        await EnsureLoopRecoveryUnderGateAsync(cancellationToken);
+                        if (Volatile.Read(ref _loopRecoveryInProgress) != 0)
+                        {
+                            throw new InvalidOperationException("custom_loop_recovery_pending: durable custom-loop recovery owns the retained runtime boundary; retry the transcript request after recovery completes.");
+                        }
+
                         if (_runtime is null && _preserveCurrentConversationOnNextRuntimeCreation)
                         {
                             var persistedTranscript = await new ConversationTranscriptReader().ReadCurrentAsync(_options.WorkingDirectory, cancellationToken);
@@ -1254,17 +1394,37 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     /// </summary>
     /// <returns>A value task that completes after runtime and run-inspection resources are disposed.</returns>
     /// <remarks>
-    /// Disposal is idempotent. The host signal rejects new conversation turns and cancels an admitted default turn;
-    /// disposal then waits for the conversation gate before stopping or releasing the pinned background runtime.
+    /// Disposal is idempotent. The host signal rejects new conversation turns and cancels an admitted default turn.
+    /// Ordinarily disposal waits for the conversation gate before stopping or releasing the pinned background runtime.
+    /// When the hosted shutdown deadline already elapsed, disposal schedules that same safe-boundary cleanup and returns
+    /// so the application container can finish its bounded shutdown path without disposing synchronization resources
+    /// still used by the deferred cleanup.
     /// </remarks>
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
         {
-            return;
+            return ValueTask.CompletedTask;
         }
 
         SignalHostShutdown();
+        Task disposal;
+        lock (_hostDisposalGate)
+        {
+            disposal = _hostDisposalTask ??= DisposeAtSafeBoundaryAsync();
+        }
+
+        if (Volatile.Read(ref _hostShutdownDeadlineElapsed) != 0)
+        {
+            _ = ObserveDeferredHostDisposalAsync(disposal);
+            return ValueTask.CompletedTask;
+        }
+
+        return new ValueTask(disposal);
+    }
+
+    private async Task DisposeAtSafeBoundaryAsync()
+    {
         await WaitForConversationTurnsAsync().ConfigureAwait(false);
         var stop = await StopGovernedLoopLocalBackgroundForProcessAsync().ConfigureAwait(false);
         SetGovernedLoopBackgroundPosture(stop.Readiness switch
@@ -1286,15 +1446,43 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         }
         await DiscardRuntimeAsync(waitForCustomOperations: true);
         await WaitForAuthoringOperationsAsync();
+        await WaitForGovernedLoopLocalBackgroundLifetimeDrainAsync();
         await _customLoopRunStoreProvider.DisposeAsync();
         await _loopRuns.DisposeAsync();
-
         _runtimeGate.Dispose();
         _backgroundLifetimeGate.Dispose();
         _authoringOperationGate.Dispose();
         _turnGate.Dispose();
         _workspaceInitializationGate.Dispose();
         _hostLifetimeCancellation.Dispose();
+    }
+
+    private async Task ObserveDeferredHostDisposalAsync(Task disposal)
+    {
+        try
+        {
+            await disposal.ConfigureAwait(false);
+        }
+        catch
+        {
+            // The caller has already received its bounded shutdown result. Preserve fail-closed posture while the
+            // process lifetime owns any synchronization resources that a failed safe-boundary cleanup could still use.
+            SetGovernedLoopBackgroundPosture(WebGovernedLoopBackgroundPosture.Unavailable);
+        }
+    }
+
+    private async Task WaitForGovernedLoopLocalBackgroundLifetimeDrainAsync()
+    {
+        Task? drainTask;
+        lock (_backgroundStopGate)
+        {
+            drainTask = _backgroundLifetimeDrainTask;
+        }
+
+        if (drainTask is not null)
+        {
+            await drainTask.ConfigureAwait(false);
+        }
     }
 
     private async Task<AgentRuntime> GetRuntimeAsync(CancellationToken cancellationToken)
@@ -1462,6 +1650,11 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     private async Task<AgentRuntime> GetOrCreateRuntimeUnderGateAsync(CancellationToken cancellationToken)
     {
         _hostLifetimeCancellation.Token.ThrowIfCancellationRequested();
+        if (Volatile.Read(ref _loopRecoveryInProgress) != 0)
+        {
+            throw new InvalidOperationException("custom_loop_recovery_pending: durable custom-loop recovery owns the retained runtime boundary; retry the request after recovery completes.");
+        }
+
         if (_runtime is null)
         {
             var codexRuntimeStatus = await GetCodexRuntimeStatusAsync(cancellationToken);
@@ -1499,14 +1692,74 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
 
     private async Task EnsureLoopRecoveryAsync(CancellationToken cancellationToken)
     {
+        var releasePinnedRuntime = false;
         await _runtimeGate.WaitAsync(cancellationToken);
         try
         {
-            await EnsureLoopRecoveryUnderGateAsync(cancellationToken);
+            if (Volatile.Read(ref _loopRecoveryInProgress) != 0)
+            {
+                throw new InvalidOperationException("custom_loop_recovery_pending: another recovery owns the retained runtime boundary; retry the evidence request afterward.");
+            }
+
+            if (_runtime?.CustomLoopRecoveryRequired == true && _governedLoopBackgroundRuntimePinned)
+            {
+                if (_activeCustomRuntimeOperations > 0)
+                {
+                    throw new InvalidOperationException("custom_loop_recovery_pending: the retained background runtime still has an active custom-loop operation; retry recovery after its safe boundary.");
+                }
+
+                _loopRecoveryCompleted = false;
+                Volatile.Write(ref _loopRecoveryInProgress, 1);
+                releasePinnedRuntime = true;
+            }
+            else
+            {
+                Volatile.Write(ref _loopRecoveryInProgress, 1);
+                try
+                {
+                    await EnsureLoopRecoveryUnderGateAsync(cancellationToken);
+                }
+                finally
+                {
+                    Volatile.Write(ref _loopRecoveryInProgress, 0);
+                }
+            }
         }
         finally
         {
             _runtimeGate.Release();
+        }
+
+        if (!releasePinnedRuntime)
+        {
+            return;
+        }
+
+        try
+        {
+            var stop = await StopGovernedLoopLocalBackgroundForProcessAsync().ConfigureAwait(false);
+            if (stop.Readiness != AgentRuntimeGovernedLoopBackgroundReadiness.Stopped)
+            {
+                throw new InvalidOperationException("custom_loop_recovery_pending: the pinned governed-loop background runtime has not reached a terminal stop boundary; retry the evidence request afterward.");
+            }
+
+            // Retain the exact stopped coordinator while its run-store recovery completes. Its confirmed terminal
+            // ownership permits the Web lifetime to restart immediately afterward without mistaking its own unexpired
+            // 30-second heartbeat for a live peer; the recovery flag blocks every other runtime use meanwhile.
+            await ReleaseGovernedLoopLocalBackgroundForProcessAsync(retainRuntime: true).ConfigureAwait(false);
+            await _runtimeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await RecoverLoopRunStoresUnderGateAsync(cancellationToken);
+            }
+            finally
+            {
+                _runtimeGate.Release();
+            }
+        }
+        finally
+        {
+            Volatile.Write(ref _loopRecoveryInProgress, 0);
         }
     }
 
@@ -1526,6 +1779,11 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
             }
 
             _loopRecoveryCompleted = false;
+            if (_governedLoopBackgroundRuntimePinned)
+            {
+                throw new InvalidOperationException("custom_loop_recovery_pending: the retained background runtime must reach a terminal release boundary before durable recovery can replace shared stores.");
+            }
+
             if (_activeCustomRuntimeOperations > 0)
             {
                 // Recovery requires exclusive ownership of persisted execution state. Retire the retained
@@ -1538,6 +1796,11 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
             await DisposeRuntimeUnderGateAsync();
         }
 
+        await RecoverLoopRunStoresUnderGateAsync(cancellationToken);
+    }
+
+    private async Task RecoverLoopRunStoresUnderGateAsync(CancellationToken cancellationToken)
+    {
         var recovery = await _loopRuns.RecoverInterruptedRunsAsync(cancellationToken);
         _loopRecoveryCompleted = recovery.Completed;
         _preserveCurrentConversationOnNextRuntimeCreation |= recovery.PreserveCurrentConversation;
@@ -1565,6 +1828,11 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         {
             if (_governedLoopBackgroundRuntimePinned)
             {
+                if (Volatile.Read(ref _loopRecoveryInProgress) != 0)
+                {
+                    return;
+                }
+
                 if (quarantinePinnedDefaultConversation && _runtime is not null)
                 {
                     await _runtime.QuarantineDefaultConversationProviderAsync().ConfigureAwait(false);

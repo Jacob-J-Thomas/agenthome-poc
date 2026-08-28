@@ -37,8 +37,10 @@ internal sealed class WebGovernedLoopBackgroundHostedService : BackgroundService
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            _host.MarkHostShutdownDeadlineElapsed();
             // The one safe-boundary drain remains active after the host deadline. BackgroundService.StopAsync now
-            // receives the cancellation budget so the process can finish its bounded shutdown path.
+            // receives the cancellation budget so the process can finish its bounded shutdown path. Container disposal
+            // subsequently schedules rather than awaits that retained safe-boundary cleanup.
         }
 
         await base.StopAsync(cancellationToken).ConfigureAwait(false);
@@ -115,7 +117,7 @@ internal sealed class WebGovernedLoopBackgroundHostedService : BackgroundService
             // Keep the complete runtime composition pinned while the Startup coordinator parks the admitted one-shot
             // or confirms an unavailable boundary. The completion task releases and projects the terminal posture only
             // after that stop task reaches its safe boundary.
-            _ = ObserveDeferredStopReleaseAsync();
+            await ObserveDeferredStopReleaseAsync().ConfigureAwait(false);
             return;
         }
 
@@ -125,10 +127,14 @@ internal sealed class WebGovernedLoopBackgroundHostedService : BackgroundService
 
     private Task BeginDrainAndReleaseAsync()
     {
+        Task drainTask;
         lock (_drainGate)
         {
-            return _drainAndReleaseTask ??= DrainAndReleaseAtSafeBoundaryAsync();
+            drainTask = _drainAndReleaseTask ??= DrainAndReleaseAtSafeBoundaryAsync();
         }
+
+        _host.RegisterGovernedLoopLocalBackgroundLifetimeDrain(drainTask);
+        return drainTask;
     }
 
     private async Task DrainAndReleaseAtSafeBoundaryAsync()
