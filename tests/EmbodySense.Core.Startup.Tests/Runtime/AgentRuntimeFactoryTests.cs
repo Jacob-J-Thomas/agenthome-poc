@@ -784,8 +784,8 @@ public sealed class AgentRuntimeFactoryTests
         Assert.Contains(catalog.NodeDescriptors, item => item.Descriptor.Kind == GovernedLoopNodeKind.Wait && item.IsExecutable);
         var humanInput = Assert.Single(catalog.NodeDescriptors, item => item.Descriptor.Kind == GovernedLoopNodeKind.HumanInput);
         Assert.True(humanInput.IsAdvertised);
-        Assert.False(humanInput.IsExecutable);
-        Assert.False(GovernedLoopSequentialNodeDescriptors.IsSupported(humanInput.Descriptor));
+        Assert.True(humanInput.IsExecutable);
+        Assert.True(GovernedLoopSequentialNodeDescriptors.IsSupported(humanInput.Descriptor));
         Assert.All(catalog.NodeDescriptors.Where(item => item.IsExecutable), item => Assert.True(GovernedLoopSequentialNodeDescriptors.IsSupported(item.Descriptor)));
         Assert.Equal(8, catalog.RetryPolicies.MaximumAttempts);
         Assert.Equal(["none", "fixed", "exponential"], catalog.RetryPolicies.BackoffStrategies);

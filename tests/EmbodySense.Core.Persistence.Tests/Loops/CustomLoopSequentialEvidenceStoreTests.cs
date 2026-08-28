@@ -12,6 +12,8 @@ using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Common.Authority.Grants.Models;
 using EmbodySense.Core.Common.Governance.Tools;
 using EmbodySense.Core.Common.ContextualRoles.Models;
+using EmbodySense.Core.Common.HumanInput;
+using EmbodySense.Core.Common.HumanInput.Models;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Inference.Profiles.Models;
 using EmbodySense.Core.Common.Loops.Admission;
@@ -29,6 +31,11 @@ using EmbodySense.Core.Common.Loops.Execution.Wait;
 using EmbodySense.Core.Common.Loops.Execution.Wait.Models;
 using EmbodySense.Core.Common.Loops.Failures;
 using EmbodySense.Core.Common.Loops.Failures.Models;
+using EmbodySense.Core.Common.Loops.HumanInput;
+using EmbodySense.Core.Common.Loops.HumanInput.Checkpoints;
+using EmbodySense.Core.Common.Loops.HumanInput.Checkpoints.Models;
+using EmbodySense.Core.Common.Loops.HumanInput.Policies;
+using EmbodySense.Core.Common.Loops.HumanInput.Policies.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
@@ -161,6 +168,32 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
         Assert.Equal(
             CustomLoopRunArtifactSerializer.Serialize(completed),
             CustomLoopRunArtifactSerializer.Serialize(Assert.IsType<CustomLoopRunRecord>(await restartedAfterCompletion.GetAsync(completed.Id))));
+    }
+
+    [Fact]
+    public async Task Maximum_Human_Input_waiting_checkpoint_round_trips_through_the_real_store_above_the_lifecycle_control_budget()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var stages = CreateMaximumHumanInputWaitingStages();
+        using var store = new CustomLoopRunStore(paths);
+
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(stages.Admitted)).Status);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(stages.InferenceRunning, stages.Admitted.LifecycleVersion)).Status);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(stages.HumanInputReady, stages.InferenceRunning.LifecycleVersion)).Status);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(stages.HumanInputRunning, stages.HumanInputReady.LifecycleVersion)).Status);
+
+        var artifactPath = Path.Combine(paths.CustomLoopRunsPath, stages.Admitted.LoopId, stages.Admitted.Id + ".json");
+        var bytesBeforeWaitingCheckpoint = new FileInfo(artifactPath).Length;
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(stages.Waiting, stages.HumanInputRunning.LifecycleVersion)).Status);
+        Assert.True(new FileInfo(artifactPath).Length - bytesBeforeWaitingCheckpoint > CustomLoopLimits.MaxTraceControlEventUtf8Bytes);
+
+        using var restarted = new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath));
+        var persisted = Assert.IsType<CustomLoopRunRecord>(await restarted.GetAsync(stages.Admitted.Id));
+        var checkpoint = Assert.Single(persisted.HumanInputWaitingCheckpoints);
+        Assert.Equal(stages.Configuration.Prompt, checkpoint.NodeConfiguration.Prompt);
+        Assert.Equal(stages.Configuration.Prompt, checkpoint.Request.Prompt);
+        Assert.True(CustomLoopRunValidator.Validate(persisted).IsValid);
     }
 
     [Fact]
@@ -1871,6 +1904,242 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
         return new WaitRunStages(admitted, inferenceRunning, readyForWait, running, waiting, checkpointed, skippedParkPhase, continued, completed);
     }
 
+    private static HumanInputRunStages CreateMaximumHumanInputWaitingStages()
+    {
+        var configuration = MaximumHumanInputConfiguration();
+        var context = CreateContext(MaximumHumanInputGraph(configuration), identity: "maximum-human-input");
+        var admitted = context.Run;
+        var inferenceSelection = GovernedLoopSequentialFrontierMachine.Select(admitted.Frontier, context.Binding, context.Plan);
+        var inferenceNode = Assert.IsType<GovernedLoopSequentialPlanNode>(inferenceSelection.Node);
+        var inferenceReady = Assert.IsType<GovernedLoopNodeExecutionEvidence>(inferenceSelection.Activation);
+        var runningEvent = Event(2, "maximum-human-input-running", CustomLoopRunEventKind.LifecycleChanged);
+        var inferenceStart = WithEvidence(
+            Event(3, "maximum-human-input-inference-start", CustomLoopRunEventKind.NodeAttemptStarted, "step-1", 1),
+            context.Binding,
+            inferenceNode.NodeId,
+            1,
+            CustomLoopSequentialNodeEvidenceKind.DispatchStarted,
+            CustomLoopSequentialNodeDisposition.Unknown,
+            activationOrdinalOverride: inferenceReady.ActivationOrdinal,
+            outgoingControlEdgeIdsOverride: ["step-to-human-input"]);
+        var inferenceStartedTransition = GovernedLoopSequentialFrontierMachine.Start(
+            admitted.Frontier,
+            context.Binding,
+            context.Plan,
+            inferenceNode,
+            inferenceReady,
+            1,
+            inferenceStart.EventId,
+            inferenceStart.TimestampUtc);
+        Assert.Equal(GovernedLoopSequentialFrontierTransitionStatus.Applied, inferenceStartedTransition.Status);
+        var inferenceRunningFrontier = Assert.IsType<GovernedLoopFrontierPosture>(inferenceStartedTransition.Frontier);
+        var inferenceRunning = admitted with
+        {
+            LifecycleVersion = 2,
+            Status = CustomLoopRunStatus.Running,
+            UpdatedAtUtc = inferenceStart.TimestampUtc,
+            ExecutionClock = new CustomLoopExecutionClock(0, inferenceStart.TimestampUtc),
+            Frontier = inferenceRunningFrontier,
+            Events = [.. admitted.Events, runningEvent, inferenceStart],
+        };
+
+        var inferenceCompletion = WithEvidence(
+            Event(4, "maximum-human-input-inference-completed", CustomLoopRunEventKind.NodeAttemptCompleted, "step-1", 1),
+            context.Binding,
+            inferenceNode.NodeId,
+            1,
+            CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
+            CustomLoopSequentialNodeDisposition.Completed,
+            activationOrdinalOverride: inferenceReady.ActivationOrdinal,
+            outgoingControlEdgeIdsOverride: ["step-to-human-input"]);
+        var inferenceCompletedTransition = GovernedLoopSequentialFrontierMachine.CompleteRunning(
+            inferenceRunningFrontier,
+            context.Binding,
+            context.Plan,
+            inferenceNode,
+            inferenceRunningFrontier.Payload.Nodes[inferenceReady.ActivationOrdinal],
+            1,
+            inferenceStart.EventId,
+            inferenceCompletion.EventId,
+            inferenceCompletion.SequentialNodeEvidence!.OutcomeArtifactHash,
+            GovernedLoopControlCondition.Success,
+            [],
+            inferenceCompletion.TimestampUtc);
+        Assert.Equal(GovernedLoopSequentialFrontierTransitionStatus.Applied, inferenceCompletedTransition.Status);
+        var humanInputReadyFrontier = Assert.IsType<GovernedLoopFrontierPosture>(inferenceCompletedTransition.Frontier);
+        var humanInputReady = inferenceRunning with
+        {
+            LifecycleVersion = 3,
+            UpdatedAtUtc = inferenceCompletion.TimestampUtc,
+            Frontier = humanInputReadyFrontier,
+            Events = [.. inferenceRunning.Events, inferenceCompletion],
+        };
+
+        var humanInputSelection = GovernedLoopSequentialFrontierMachine.Select(humanInputReadyFrontier, context.Binding, context.Plan);
+        var humanInputNode = Assert.IsType<GovernedLoopSequentialPlanNode>(humanInputSelection.Node);
+        var humanInputReadyActivation = Assert.IsType<GovernedLoopNodeExecutionEvidence>(humanInputSelection.Activation);
+        Assert.True(GovernedLoopSequentialNodeDescriptors.IsHumanInput(humanInputNode.Descriptor));
+        const string HumanInputClaimOperationId = "maximum-human-input-claim";
+        var parkedAtUtc = _timestamp.AddMinutes(4);
+        var humanInputStartedTransition = GovernedLoopSequentialFrontierMachine.Start(
+            humanInputReadyFrontier,
+            context.Binding,
+            context.Plan,
+            humanInputNode,
+            humanInputReadyActivation,
+            1,
+            HumanInputClaimOperationId,
+            parkedAtUtc);
+        Assert.Equal(GovernedLoopSequentialFrontierTransitionStatus.Applied, humanInputStartedTransition.Status);
+        var humanInputRunningFrontier = Assert.IsType<GovernedLoopFrontierPosture>(humanInputStartedTransition.Frontier);
+        var humanInputRunning = humanInputReady with
+        {
+            LifecycleVersion = 4,
+            UpdatedAtUtc = parkedAtUtc,
+            Frontier = humanInputRunningFrontier,
+        };
+
+        var humanInputRunningActivation = humanInputRunningFrontier.Payload.Nodes[humanInputReadyActivation.ActivationOrdinal];
+        var humanInputParkedTransition = GovernedLoopSequentialFrontierMachine.ParkRunningHumanInput(
+            humanInputRunningFrontier,
+            context.Binding,
+            context.Plan,
+            humanInputNode,
+            humanInputRunningActivation,
+            1,
+            HumanInputClaimOperationId,
+            parkedAtUtc);
+        Assert.Equal(GovernedLoopSequentialFrontierTransitionStatus.Applied, humanInputParkedTransition.Status);
+        var waitingFrontier = Assert.IsType<GovernedLoopFrontierPosture>(humanInputParkedTransition.Frontier);
+        var checkpoint = CreateMaximumHumanInputWaitingCheckpoint(
+            context.Binding,
+            humanInputRunning,
+            humanInputNode,
+            waitingFrontier.Payload.Nodes[humanInputRunningActivation.ActivationOrdinal],
+            waitingFrontier,
+            configuration,
+            parkedAtUtc);
+        var waiting = humanInputRunning with
+        {
+            LifecycleVersion = 5,
+            Status = CustomLoopRunStatus.Waiting,
+            UpdatedAtUtc = parkedAtUtc,
+            ExecutionClock = new CustomLoopExecutionClock(120_000, null),
+            Frontier = waitingFrontier,
+            HumanInputWaitingCheckpoints = [checkpoint],
+            Events = [.. humanInputRunning.Events, Event(5, "maximum-human-input-waiting", CustomLoopRunEventKind.LifecycleChanged)],
+        };
+
+        foreach (var run in new[] { admitted, inferenceRunning, humanInputReady, humanInputRunning, waiting })
+        {
+            var validation = CustomLoopRunValidator.Validate(run);
+            Assert.True(validation.IsValid, $"Lifecycle {run.LifecycleVersion}:{Environment.NewLine}{string.Join(Environment.NewLine, validation.Errors)}");
+        }
+
+        return new HumanInputRunStages(admitted, inferenceRunning, humanInputReady, humanInputRunning, waiting, configuration);
+    }
+
+    private static GovernedLoopHumanInputWaitingCheckpoint CreateMaximumHumanInputWaitingCheckpoint(
+        GovernedLoopSequentialAdapterBinding binding,
+        CustomLoopRunRecord run,
+        GovernedLoopSequentialPlanNode node,
+        GovernedLoopNodeExecutionEvidence activation,
+        GovernedLoopFrontierPosture waitingFrontier,
+        GovernedLoopHumanInputNodeConfiguration configuration,
+        DateTimeOffset resolvedAtUtc)
+    {
+        var timeout = HumanInputPolicyArtifactHash.Apply(new HumanInputPolicyArtifact(
+            HumanInputPolicyArtifact.CurrentSchemaVersion,
+            "timeout-policy-one",
+            "revision-one",
+            HumanInputPolicyKind.ResponseWindow,
+            binding.WorkspaceId,
+            binding.ExecutionBinding.Revision.GraphId,
+            run.AdmissionActor,
+            60_000,
+            HumanInputTerminalDisposition.Unknown,
+            string.Empty));
+        var failure = HumanInputPolicyArtifactHash.Apply(new HumanInputPolicyArtifact(
+            HumanInputPolicyArtifact.CurrentSchemaVersion,
+            "failure-policy-one",
+            "revision-one",
+            HumanInputPolicyKind.DeadlineDisposition,
+            binding.WorkspaceId,
+            binding.ExecutionBinding.Revision.GraphId,
+            run.AdmissionActor,
+            null,
+            HumanInputTerminalDisposition.Expired,
+            string.Empty));
+        var resolution = Assert.IsType<HumanInputPolicyResolutionSnapshot>(HumanInputPolicyResolutionSnapshot.TryCreate(
+            binding.WorkspaceId,
+            binding.ExecutionBinding.Revision.GraphId,
+            binding.ExecutionBinding.Revision.RevisionId,
+            node.NodeId,
+            run.AdmissionActor,
+            timeout,
+            failure,
+            resolvedAtUtc));
+        var checkpointId = "maximum-human-input-checkpoint";
+        var request = HumanInputRequestHash.Apply(new HumanInputRequest(
+            HumanInputRequest.CurrentSchemaVersion,
+            "maximum-human-input-request",
+            "maximum-human-input-request-version",
+            new HumanInputRequestBinding(
+                binding.WorkspaceId,
+                binding.ExecutionBinding.Revision.GraphId,
+                binding.ExecutionBinding.Revision.RevisionId,
+                node.NodeId,
+                run.Id,
+                checkpointId),
+            configuration.Purpose!,
+            configuration.Prompt!,
+            configuration.ResponseSchema!,
+            configuration.PrivacyClass,
+            configuration.EligibleRespondents!.Select(item => item!).ToArray(),
+            new HumanInputTiming(resolution.ResolvedAtUtc, resolution.ExpiresAtUtc),
+            configuration.ResponsePolicy!,
+            new HumanInputContinuationBinding(HumanInputContinuationPolicyKind.BoundNodeAndCheckpointOnly, node.NodeId, checkpointId),
+            string.Empty));
+        var evidence = GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(new GovernedLoopHumanInputWaitingCheckpointEvidence(
+            GovernedLoopHumanInputWaitingCheckpointContractLimits.CurrentSchemaVersion,
+            1,
+            GovernedLoopHumanInputWaitingCheckpointEvidenceKind.Published,
+            resolvedAtUtc,
+            null,
+            null,
+            null,
+            null,
+            null,
+            string.Empty,
+            string.Empty));
+        var checkpoint = GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(new GovernedLoopHumanInputWaitingCheckpoint(
+            GovernedLoopHumanInputWaitingCheckpoint.CurrentSchemaVersion,
+            new GovernedLoopHumanInputWaitingCheckpointBinding(
+                GovernedLoopHumanInputWaitingCheckpointContractLimits.CurrentSchemaVersion,
+                binding.WorkspaceId,
+                binding.ExecutionBinding,
+                binding.AdmissionReceipt.Intent.Publication,
+                binding.GraphArtifactHash,
+                binding.GraphLayoutHash,
+                binding.AdmissionReceiptHash,
+                waitingFrontier.Payload.FrontierVersion,
+                waitingFrontier.Payload.ContentHash,
+                activation.ActivationOrdinal,
+                activation.CycleId,
+                activation.CycleIteration,
+                node.NodeId,
+                activation.VisitOrdinal,
+                checkpointId),
+            configuration,
+            resolution,
+            request,
+            GovernedLoopHumanInputWaitingCheckpointPosture.Pending,
+            [evidence],
+            string.Empty));
+        Assert.True(GovernedLoopHumanInputWaitingCheckpointContractValidator.Validate(checkpoint).IsValid);
+        return checkpoint;
+    }
+
     private static async Task PersistWaitStagesAsync(CustomLoopRunStore store, WaitRunStages stages)
     {
         Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(stages.Admitted)).Status);
@@ -2151,6 +2420,91 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
                 nodes.Select((node, index) => new GovernedLoopNodeDisplayMetadata(node.Id, node.Id, "Node.", index * 100, 0)).ToArray()),
             DefaultModelRoutingPolicy());
     }
+
+    private static GovernedLoopGraphDefinition MaximumHumanInputGraph(GovernedLoopHumanInputNodeConfiguration configuration)
+    {
+        var role = new ContextualRoleRevisionPin(new ContextualRoleRevisionIdentity("sequential-role", 1), Hash('a'));
+        var nodes = new[]
+        {
+            new GovernedLoopNodeDefinition(
+                "trigger",
+                GovernedLoopSequentialNodeDescriptors.ManualTrigger,
+                [Port("request", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data), Port("invocation-context", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Context)],
+                GovernedLoopAuthorityCeiling.Create([]),
+                new Dictionary<string, string>()),
+            new GovernedLoopNodeDefinition(
+                "step-1",
+                GovernedLoopSequentialNodeDescriptors.ProviderInference,
+                [Port("request", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data), Port("invocation-context", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Context), Port("result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data)],
+                GovernedLoopAuthorityCeiling.Create([ModelInferenceCapabilityId, ModelProfileCapabilityId]),
+                new Dictionary<string, string> { ["instruction"] = "Collect the bounded Human Input request." }),
+            new GovernedLoopNodeDefinition(
+                "human-input",
+                new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.HumanInput, GovernedLoopHumanInputVocabulary.TypeId, GovernedLoopHumanInputVocabulary.DescriptorVersion),
+                [Port(GovernedLoopHumanInputVocabulary.ResponsePortId, GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data)],
+                GovernedLoopAuthorityCeiling.Create([]),
+                new Dictionary<string, string>(),
+                null,
+                null,
+                null,
+                configuration),
+            new GovernedLoopNodeDefinition(
+                "exit",
+                GovernedLoopSequentialNodeDescriptors.SuccessExit,
+                [Port("result", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data), Port("published-result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data)],
+                GovernedLoopAuthorityCeiling.Create([ConversationTurnCapabilityId]),
+                new Dictionary<string, string>()),
+        };
+        return GovernedLoopGraphDefinition.Create(
+            1,
+            "sequential-loop",
+            "revision-1",
+            "Persist one exact maximum bounded Human Input waiting checkpoint.",
+            role,
+            "trigger",
+            ["exit"],
+            GovernedLoopAuthorityCeiling.Create([ConversationTurnCapabilityId, ModelInferenceCapabilityId, ModelProfileCapabilityId]),
+            [new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false)],
+            nodes,
+            [
+                new GovernedLoopControlEdgeDefinition("trigger-to-step", "trigger", "step-1", GovernedLoopControlCondition.Always),
+                new GovernedLoopControlEdgeDefinition("step-to-human-input", "step-1", "human-input", GovernedLoopControlCondition.Success),
+                new GovernedLoopControlEdgeDefinition("human-input-to-exit", "human-input", "exit", GovernedLoopControlCondition.Success),
+            ],
+            [
+                new GovernedLoopBindingDefinition("data-to-step", GovernedLoopBindingKind.Data, "trigger", "request", "step-1", "request"),
+                new GovernedLoopBindingDefinition("context-to-step", GovernedLoopBindingKind.Context, "trigger", "invocation-context", "step-1", "invocation-context"),
+                new GovernedLoopBindingDefinition("response-to-exit", GovernedLoopBindingKind.Data, "human-input", GovernedLoopHumanInputVocabulary.ResponsePortId, "exit", "result"),
+            ],
+            new GovernedLoopOutputContract("Return the exact bounded Human Input response.", [new GovernedLoopOutputDefinition("result", "text", "exit", "published-result", true)]),
+            new GovernedLoopDisplayMetadata(
+                "Maximum Human Input loop",
+                "Display metadata is not execution order.",
+                nodes.Select((node, index) => new GovernedLoopNodeDisplayMetadata(node.Id, node.Id, "Node.", index * 100, 0)).ToArray()),
+            DefaultModelRoutingPolicy());
+    }
+
+    private static GovernedLoopHumanInputNodeConfiguration MaximumHumanInputConfiguration()
+        => new(
+            GovernedLoopHumanInputNodeConfiguration.CurrentSchemaVersion,
+            "text",
+            "Collect one bounded private response.",
+            new string('p', HumanInputLimits.MaxPromptCharacters),
+            new HumanInputResponseSchema(
+                HumanInputResponseKind.Choice,
+                null,
+                Enumerable.Range(0, HumanInputLimits.MaxChoices)
+                    .Select(index => new HumanInputChoice(
+                        "choice-" + index.ToString("D2", CultureInfo.InvariantCulture) + "-" + new string('a', HumanInputLimits.MaxIdentifierCharacters - 10),
+                        "Display " + index.ToString("D2", CultureInfo.InvariantCulture) + " " + new string('x', HumanInputLimits.MaxChoiceDisplayCharacters - 11)))
+                    .ToArray(),
+                null,
+                null),
+            HumanInputPrivacyClass.Private,
+            [new HumanInputEligibleRespondent("actor-one", "role-one", "route-one")],
+            new HumanInputResponsePolicy(HumanInputResponsePolicyKind.FirstValid, null, null),
+            "timeout-policy-one@revision-one",
+            "failure-policy-one@revision-one");
 
     private static GovernedLoopGraphDefinition WaitGraph()
     {
@@ -2882,6 +3236,14 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
         CustomLoopRunRecord SkippedParkPhase,
         CustomLoopRunRecord Continued,
         CustomLoopRunRecord Completed);
+
+    private sealed record HumanInputRunStages(
+        CustomLoopRunRecord Admitted,
+        CustomLoopRunRecord InferenceRunning,
+        CustomLoopRunRecord HumanInputReady,
+        CustomLoopRunRecord HumanInputRunning,
+        CustomLoopRunRecord Waiting,
+        GovernedLoopHumanInputNodeConfiguration Configuration);
 
     private sealed record RetryCapacityStages(
         CustomLoopRunStore Store,

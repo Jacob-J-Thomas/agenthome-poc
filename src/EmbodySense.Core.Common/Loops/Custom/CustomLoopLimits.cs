@@ -443,6 +443,16 @@ public static class CustomLoopLimits
     /// </summary>
     public const int MaxTraceControlEventUtf8Bytes = 9 * 1_024;
     /// <summary>
+    /// Maximum UTF-8 growth for one atomic Human Input waiting-checkpoint publication and its optional lifecycle transition.
+    /// </summary>
+    /// <remarks>
+    /// A checkpoint retains two exact copies of the bounded request contract plus its resolved policy and integrity evidence.
+    /// The compact run envelope de-duplicates the repeated display, respondent, and response-schema values, but the valid
+    /// schema-1 maximum remains larger than a lifecycle-event detail. This bound is deliberately no larger than the complete
+    /// control reserve and is accepted only for the one validator-proven Running-to-Waiting checkpoint successor.
+    /// </remarks>
+    public const int MaxHumanInputWaitingCheckpointPublicationUtf8Bytes = MaxTraceControlReserveUtf8Bytes;
+    /// <summary>
     /// Maximum append-only retry-state event UTF-8 bytes.
     /// </summary>
     /// <remarks>

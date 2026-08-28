@@ -12,6 +12,11 @@ namespace EmbodySense.Core.Common.Loops.HumanInput.Checkpoints;
 
 internal static class GovernedLoopHumanInputWaitingCheckpointContractCopy
 {
+    internal static GovernedLoopHumanInputWaitingCheckpoint Copy(GovernedLoopHumanInputWaitingCheckpoint? value)
+        => value is null
+            ? null!
+            : new GovernedLoopHumanInputWaitingCheckpoint(value.SchemaVersion, Copy(value.Binding), Copy(value.NodeConfiguration), Copy(value.ResolvedPolicy), Copy(value.Request), value.Posture, Copy(value.Evidence), value.CheckpointHash);
+
     internal static GovernedLoopHumanInputWaitingCheckpointBinding Copy(GovernedLoopHumanInputWaitingCheckpointBinding? value)
         => value is null
             ? null!

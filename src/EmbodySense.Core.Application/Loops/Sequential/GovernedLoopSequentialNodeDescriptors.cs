@@ -1,6 +1,7 @@
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.PureNodes;
 using EmbodySense.Core.Common.Loops.Execution.Wait;
+using EmbodySense.Core.Common.Loops.HumanInput;
 using EmbodySense.Core.Application.Loops.GraphValidation;
 using EmbodySense.Core.Common.LocalWorkspace.Actions;
 using EmbodySense.Core.Common.CommandActions;
@@ -97,6 +98,7 @@ public static class GovernedLoopSequentialNodeDescriptors
                 || Equals(descriptor, SuccessExit)
                 || Equals(descriptor, FailTerminal)
                 || IsWait(descriptor)
+                || IsHumanInput(descriptor)
                 || IsTopology(descriptor)
                 || IsPure(descriptor));
 
@@ -110,6 +112,12 @@ public static class GovernedLoopSequentialNodeDescriptors
             && descriptor.Kind == GovernedLoopNodeKind.Wait
             && descriptor.Version == GovernedLoopWaitVocabulary.DescriptorVersion
             && GovernedLoopWaitVocabulary.IsSupported(descriptor.TypeId);
+
+    /// <summary>Gets whether a descriptor exactly names the one data-only schema-1 Human Input node.</summary>
+    /// <param name="descriptor">The descriptor to compare with the closed Human Input vocabulary.</param>
+    /// <returns><see langword="true"/> only for the supported data-only Human Input descriptor; otherwise, <see langword="false"/>.</returns>
+    public static bool IsHumanInput(GovernedLoopNodeDescriptor? descriptor)
+        => GovernedLoopHumanInputVocabulary.IsSupported(descriptor);
 
     /// <summary>Gets whether a descriptor exactly names one schema-1 governed workspace Action.</summary>
     public static bool IsWorkspaceAction(GovernedLoopNodeDescriptor? descriptor)

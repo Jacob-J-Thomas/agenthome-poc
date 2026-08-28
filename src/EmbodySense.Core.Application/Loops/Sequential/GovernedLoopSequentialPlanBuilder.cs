@@ -27,7 +27,7 @@ public static class GovernedLoopSequentialPlanBuilder
     private const string ScheduleTriggerCapabilityId = "org.embodysense/triggers/time";
     private const string WorkspaceCommandCapabilityId = "org.embodysense/workspace-command";
 
-    /// <summary>Builds one exact Trigger-to-terminal topology containing supported inference, pure, Condition, Join, and bounded-cycle nodes.</summary>
+    /// <summary>Builds one exact Trigger-to-terminal topology containing supported inference, Human Input, pure, Condition, Join, and bounded-cycle nodes.</summary>
     public static GovernedLoopSequentialPlanBuildResult Build(GovernedLoopGraphRevisionArtifact? artifact)
     {
         if (!IsValidArtifact(artifact))
@@ -75,6 +75,7 @@ public static class GovernedLoopSequentialPlanBuilder
         var inferenceCount = planNodes.Count(node => Equals(node.Descriptor, GovernedLoopSequentialNodeDescriptors.ProviderInference));
         var hasExecutableNode = inferenceCount >= CustomLoopLimits.MinInferenceSteps
             || planNodes.Any(node => GovernedLoopSequentialNodeDescriptors.IsWait(node.Descriptor)
+                || GovernedLoopSequentialNodeDescriptors.IsHumanInput(node.Descriptor)
                 || GovernedLoopSequentialNodeDescriptors.IsRecoverableAction(node.Descriptor));
         if (inferenceCount > CustomLoopLimits.MaxInferenceSteps
             || !hasExecutableNode)
@@ -417,7 +418,8 @@ public static class GovernedLoopSequentialPlanBuilder
         => Equals(descriptor, GovernedLoopSequentialNodeDescriptors.ProviderInference)
             || GovernedLoopSequentialNodeDescriptors.IsRecoverableAction(descriptor)
             || GovernedLoopSequentialNodeDescriptors.IsPure(descriptor)
-            || GovernedLoopSequentialNodeDescriptors.IsWait(descriptor);
+            || GovernedLoopSequentialNodeDescriptors.IsWait(descriptor)
+            || GovernedLoopSequentialNodeDescriptors.IsHumanInput(descriptor);
 
     private static bool HasImpossibleJoin(GovernedLoopGraphDefinition graph)
     {
@@ -627,6 +629,7 @@ public static class GovernedLoopSequentialPlanBuilder
                 GovernedLoopNodeKind.Transform or GovernedLoopNodeKind.Validate => IsExactPureNode(node, schemaById),
                 GovernedLoopNodeKind.Condition or GovernedLoopNodeKind.Join => IsExactTopologyNode(node, schemaById),
                 GovernedLoopNodeKind.Wait => IsExactWaitNode(node),
+                GovernedLoopNodeKind.HumanInput => IsExactHumanInputNode(node, schemaById),
                 GovernedLoopNodeKind.Exit => IsExactExit(node, schemaById),
                 GovernedLoopNodeKind.Fail => GovernedLoopFailNodeCatalogContract.HasExactNodeSemantics(
                     node,
@@ -835,6 +838,25 @@ public static class GovernedLoopSequentialPlanBuilder
             && GovernedLoopWaitContractValidator.ValidateDescriptor(
                 node.Descriptor,
                 new Dictionary<string, string>(StringComparer.Ordinal) { [parameterId] = value }).IsValid;
+    }
+
+    private static bool IsExactHumanInputNode(
+        GovernedLoopNodeDefinition node,
+        IReadOnlyDictionary<string, GovernedLoopValueSchemaDefinition> schemas)
+    {
+        if (node.AuthorityCeiling.CapabilityIds.Count != 0
+            || node.Parameters.Count != 0
+            || node.ModelRoutingPolicy is not null
+            || node.AuthoredInputDataClasses is not null
+            || !GovernedLoopHumanInputNodeCatalogContract.TryResolve(node.Descriptor, out var contract)
+            || contract is null
+            || !HasExactCatalogPorts(node, contract, schemas)
+            || !HasExactCatalogParameters(node, contract))
+        {
+            return false;
+        }
+
+        return GovernedLoopHumanInputNodeCatalogContract.HasExactSchemaSemantics(node, schemas);
     }
 
     private static bool HasExactPurePorts(

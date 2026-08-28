@@ -563,12 +563,14 @@ public sealed class CustomLoopRunStoreTests
         var json = await File.ReadAllTextAsync(path);
         Assert.StartsWith("{\"artifactKind\":\"custom-loop-run\",\"artifactSchemaVersion\":1,\"projectionSchemaVersion\":1,\"encoding\":\"utf-8\"", json, StringComparison.Ordinal);
         Assert.Contains("\"status\":\"admitted\"", json, StringComparison.Ordinal);
+        Assert.Contains("\"humanInputWaitingCheckpoints\":[]", json, StringComparison.Ordinal);
         Assert.DoesNotContain("isTerminal", json, StringComparison.Ordinal);
         Assert.DoesNotContain("\r", json, StringComparison.Ordinal);
         Assert.EndsWith("\n", json, StringComparison.Ordinal);
 
         var restarted = new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath));
         AssertRun(run, await restarted.GetAsync(run.Id));
+        Assert.Empty((await restarted.GetAsync(run.Id))!.HumanInputWaitingCheckpoints);
         AssertRun(run, await restarted.GetByAdmissionOperationAsync(run.AdmissionOperationId));
         var summary = Assert.Single(await restarted.ListRecentAsync(50));
         Assert.Equal(run.Id, summary.Id);
@@ -2696,6 +2698,7 @@ public sealed class CustomLoopRunStoreTests
         var mutations = new Action<JsonObject>[]
         {
             root => root.Remove("surface"),
+            root => root.Remove("humanInputWaitingCheckpoints"),
             root => root["unknownField"] = true,
             root => ((JsonObject)root["admittedDefinition"]!["triggerPolicy"]!).Remove("includeInvokingConversation"),
             root => ((JsonObject)root["contextSnapshot"]!)["unknownNested"] = 1,

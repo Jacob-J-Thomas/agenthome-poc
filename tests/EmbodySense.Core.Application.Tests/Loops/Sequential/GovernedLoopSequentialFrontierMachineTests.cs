@@ -1,11 +1,13 @@
 using EmbodySense.Core.Application.Loops.Sequential;
 using EmbodySense.Core.Application.Loops.Sequential.Models;
 using EmbodySense.Core.Common.ContextualRoles.Models;
+using EmbodySense.Core.Common.HumanInput.Models;
 using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Execution.Models;
 using EmbodySense.Core.Common.Loops.Execution.Retry;
 using EmbodySense.Core.Common.Loops.Execution.Retry.Models;
 using EmbodySense.Core.Common.Loops.Failures.Models;
+using EmbodySense.Core.Common.Loops.HumanInput;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
 
@@ -481,6 +483,38 @@ public sealed class GovernedLoopSequentialFrontierMachineTests
         Assert.Equal(GovernedLoopNodeExecutionStatus.Waiting, exhausted.Payload.Nodes.Single(node => string.Equals(node.NodeId, "branch-b", StringComparison.Ordinal)).Status);
         Assert.Equal(GovernedLoopNodeExecutionStatus.Ready, exhausted.Payload.Nodes.Single(node => string.Equals(node.NodeId, "fail", StringComparison.Ordinal)).Status);
         Assert.True(GovernedLoopSequentialFrontierMachine.Validate(exhausted, context.AdapterBinding, context.Plan));
+    }
+
+    [Fact]
+    public async Task Human_input_parking_keeps_the_frontier_active_when_an_independent_sibling_is_ready()
+    {
+        var context = await GovernedLoopSequentialRunMaterializerTests.ContextAsync(artifactFactory: ParallelHumanInputArtifact);
+        var fanOut = AdvanceInferenceToFanOut(context);
+        var humanInput = context.Plan.Nodes.Single(node => string.Equals(node.NodeId, "branch-a", StringComparison.Ordinal));
+        var running = Frontier(GovernedLoopSequentialFrontierMachine.Start(
+            fanOut,
+            context.AdapterBinding,
+            context.Plan,
+            humanInput,
+            fanOut.Payload.Nodes.Single(node => string.Equals(node.NodeId, "branch-a", StringComparison.Ordinal)),
+            1,
+            "attempt-human-input-1",
+            _startedAtUtc.AddSeconds(3)));
+
+        var parked = Frontier(GovernedLoopSequentialFrontierMachine.ParkRunningHumanInput(
+            running,
+            context.AdapterBinding,
+            context.Plan,
+            humanInput,
+            SelectedActivation(running, context),
+            1,
+            "attempt-human-input-1",
+            _startedAtUtc.AddSeconds(4)));
+
+        Assert.Equal(GovernedLoopFrontierStatus.Active, parked.Payload.Status);
+        Assert.Equal(GovernedLoopNodeExecutionStatus.Waiting, parked.Payload.Nodes.Single(node => node.NodeId == "branch-a").Status);
+        Assert.Equal(GovernedLoopNodeExecutionStatus.Ready, parked.Payload.Nodes.Single(node => node.NodeId == "branch-b").Status);
+        Assert.True(GovernedLoopSequentialFrontierMachine.Validate(parked, context.AdapterBinding, context.Plan));
     }
 
     [Fact]
@@ -1084,6 +1118,45 @@ public sealed class GovernedLoopSequentialFrontierMachineTests
             source.TerminalNodeIds.Append("fail").ToArray(),
             owningRole,
             source.Bindings,
+            source.ValueSchemas,
+            source.OutputContract,
+            source.AuthorityCeiling);
+    }
+
+    private static GovernedLoopGraphRevisionArtifact ParallelHumanInputArtifact(ContextualRoleRevisionPin owningRole)
+    {
+        var source = GovernedLoopSequentialApplicationTestFixture.ParallelAllJoinArtifact(owningRole).Graph;
+        var configuration = new GovernedLoopHumanInputNodeConfiguration(
+            GovernedLoopHumanInputNodeConfiguration.CurrentSchemaVersion,
+            "text",
+            "Collect bounded untrusted data.",
+            "Provide the requested bounded response.",
+            new HumanInputResponseSchema(HumanInputResponseKind.Text, 64, null, null, null),
+            HumanInputPrivacyClass.Private,
+            [new HumanInputEligibleRespondent("user-one", "role-one", "route-one")],
+            new HumanInputResponsePolicy(HumanInputResponsePolicyKind.FirstValid, null, null),
+            "timeout-policy-one@revision-one",
+            "failure-policy-one@revision-one");
+        var nodes = source.Nodes.Select(node => string.Equals(node.Id, "branch-a", StringComparison.Ordinal)
+            ? new GovernedLoopNodeDefinition(
+                node.Id,
+                new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.HumanInput, GovernedLoopHumanInputVocabulary.TypeId, GovernedLoopHumanInputVocabulary.DescriptorVersion),
+                [GovernedLoopSequentialApplicationTestFixture.Port(GovernedLoopHumanInputVocabulary.ResponsePortId, GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data)],
+                GovernedLoopAuthorityCeiling.Create([]),
+                new Dictionary<string, string>(),
+                null,
+                null,
+                null,
+                configuration)
+            : node)
+            .ToArray();
+        var bindings = source.Bindings.Where(binding => !string.Equals(binding.ToNodeId, "branch-a", StringComparison.Ordinal)).ToArray();
+        return GovernedLoopSequentialApplicationTestFixture.Artifact(
+            nodes,
+            source.ControlEdges,
+            source.TerminalNodeIds,
+            owningRole,
+            bindings,
             source.ValueSchemas,
             source.OutputContract,
             source.AuthorityCeiling);
