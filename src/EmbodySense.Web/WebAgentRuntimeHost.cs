@@ -242,9 +242,9 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         }
     }
 
-    internal async Task WaitForConversationTurnsAsync()
+    internal async Task WaitForConversationTurnsAsync(CancellationToken cancellationToken = default)
     {
-        await _turnGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+        await _turnGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         _turnGate.Release();
     }
 

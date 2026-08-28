@@ -15,9 +15,11 @@ internal sealed class WebGovernedLoopBackgroundHostedService : BackgroundService
     private static readonly TimeSpan _reconciliationInterval = TimeSpan.FromMilliseconds(250);
     private readonly WebAgentRuntimeHost _host;
     private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
+    private readonly object _drainGate = new();
     private int _stopRequested;
     private bool _startCompleted;
     private bool _startRetryBlocked;
+    private Task? _drainAndReleaseTask;
 
     internal WebGovernedLoopBackgroundHostedService(WebAgentRuntimeHost host)
     {
@@ -29,15 +31,14 @@ internal sealed class WebGovernedLoopBackgroundHostedService : BackgroundService
         _host.SignalHostShutdown();
         Interlocked.Exchange(ref _stopRequested, 1);
         _host.SetGovernedLoopBackgroundPosture(WebGovernedLoopBackgroundPosture.Draining);
-        await _host.WaitForConversationTurnsAsync().ConfigureAwait(false);
-        await _lifecycleGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
         try
         {
-            await DrainAndReleaseAsync().ConfigureAwait(false);
+            await BeginDrainAndReleaseAsync().WaitAsync(cancellationToken).ConfigureAwait(false);
         }
-        finally
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            _lifecycleGate.Release();
+            // The one safe-boundary drain remains active after the host deadline. BackgroundService.StopAsync now
+            // receives the cancellation budget so the process can finish its bounded shutdown path.
         }
 
         await base.StopAsync(cancellationToken).ConfigureAwait(false);
@@ -120,6 +121,36 @@ internal sealed class WebGovernedLoopBackgroundHostedService : BackgroundService
 
         await _host.ReleaseGovernedLoopLocalBackgroundForProcessAsync().ConfigureAwait(false);
         _host.SetGovernedLoopBackgroundPosture(ToPosture(stop.Readiness));
+    }
+
+    private Task BeginDrainAndReleaseAsync()
+    {
+        lock (_drainGate)
+        {
+            return _drainAndReleaseTask ??= DrainAndReleaseAtSafeBoundaryAsync();
+        }
+    }
+
+    private async Task DrainAndReleaseAtSafeBoundaryAsync()
+    {
+        try
+        {
+            await _host.WaitForConversationTurnsAsync().ConfigureAwait(false);
+            await _lifecycleGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+            try
+            {
+                await DrainAndReleaseAsync().ConfigureAwait(false);
+            }
+            finally
+            {
+                _lifecycleGate.Release();
+            }
+        }
+        catch
+        {
+            // A failed cleanup boundary must remain visibly fail closed rather than claim a completed stop.
+            _host.SetGovernedLoopBackgroundPosture(WebGovernedLoopBackgroundPosture.Unavailable);
+        }
     }
 
     private async Task ObserveDeferredStopReleaseAsync()

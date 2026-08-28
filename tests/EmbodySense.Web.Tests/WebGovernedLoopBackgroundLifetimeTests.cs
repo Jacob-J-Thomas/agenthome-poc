@@ -270,6 +270,75 @@ public sealed class WebGovernedLoopBackgroundLifetimeTests
         }
     }
 
+    [Fact]
+    public async Task Shutdown_honors_its_deadline_while_a_stalled_conversation_reaches_a_safe_stop_afterward()
+    {
+        using var workspace = new TestWorkspace();
+        var codexPath = await WebBackgroundLifetimeCodexExecutable.CreateAsync(workspace);
+        await WorkspaceInitializer.ForWeb().InitializeAsync(workspace.RootPath);
+        var app = CreateApp(workspace.RootPath, codexPath, out _);
+        var eventWriterEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseEventWriter = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        try
+        {
+            await app.StartAsync();
+            var runtimeHost = app.Services.GetRequiredService<WebAgentRuntimeHost>();
+            Assert.Equal(WebGovernedLoopBackgroundPosture.Ready, (await WaitForPostureAsync(runtimeHost, WebGovernedLoopBackgroundPosture.Ready)).BackgroundPosture);
+            var turn = runtimeHost.SendMessageAsync(
+                "hold Web shutdown event writer",
+                (_, _) =>
+                {
+                    eventWriterEntered.TrySetResult(true);
+                    return releaseEventWriter.Task;
+                });
+            await eventWriterEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+            using var shutdownDeadline = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
+            await app.StopAsync(shutdownDeadline.Token).WaitAsync(TimeSpan.FromSeconds(10));
+
+            Assert.Equal(WebGovernedLoopBackgroundPosture.Draining, runtimeHost.GetStatus().BackgroundPosture);
+            Assert.False(turn.IsCompleted);
+
+            releaseEventWriter.TrySetResult(true);
+            _ = await turn.WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.Equal(WebGovernedLoopBackgroundPosture.Stopped, (await WaitForPostureAsync(runtimeHost, WebGovernedLoopBackgroundPosture.Stopped)).BackgroundPosture);
+        }
+        finally
+        {
+            releaseEventWriter.TrySetResult(true);
+            await app.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task Shutdown_honors_its_deadline_while_runtime_composition_holds_the_lifecycle_gate()
+    {
+        using var workspace = new TestWorkspace();
+        var codexPath = await WebShutdownDeadlineCodexExecutable.CreateRuntimeCompositionStallAsync(workspace);
+        await WorkspaceInitializer.ForWeb().InitializeAsync(workspace.RootPath);
+        var app = CreateApp(workspace.RootPath, codexPath, out _);
+
+        try
+        {
+            await app.StartAsync();
+            await WebShutdownDeadlineCodexExecutable.WaitForRuntimeCompositionAsync(workspace);
+            var runtimeHost = app.Services.GetRequiredService<WebAgentRuntimeHost>();
+
+            using var shutdownDeadline = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
+            await app.StopAsync(shutdownDeadline.Token).WaitAsync(TimeSpan.FromSeconds(10));
+
+            Assert.Equal(WebGovernedLoopBackgroundPosture.Draining, runtimeHost.GetStatus().BackgroundPosture);
+            await WebShutdownDeadlineCodexExecutable.ReleaseRuntimeCompositionAsync(workspace);
+            Assert.Equal(WebGovernedLoopBackgroundPosture.Stopped, (await WaitForPostureAsync(runtimeHost, WebGovernedLoopBackgroundPosture.Stopped)).BackgroundPosture);
+        }
+        finally
+        {
+            await WebShutdownDeadlineCodexExecutable.ReleaseRuntimeCompositionAsync(workspace);
+            await app.DisposeAsync();
+        }
+    }
+
     private static WebApplication CreateApp(string rootPath, string codexPath, out WebRunOptions options)
     {
         var port = GetFreePort();
@@ -305,6 +374,22 @@ public sealed class WebGovernedLoopBackgroundLifetimeTests
             }
 
             await Task.Delay(50);
+        }
+
+        throw new TimeoutException($"The Web background posture did not reach `{posture}`.");
+    }
+
+    private static async Task<WebStatus> WaitForPostureAsync(WebAgentRuntimeHost runtimeHost, WebGovernedLoopBackgroundPosture posture)
+    {
+        for (var attempt = 0; attempt < 200; attempt++)
+        {
+            var status = runtimeHost.GetStatus();
+            if (status.BackgroundPosture == posture)
+            {
+                return status;
+            }
+
+            await Task.Delay(25);
         }
 
         throw new TimeoutException($"The Web background posture did not reach `{posture}`.");
