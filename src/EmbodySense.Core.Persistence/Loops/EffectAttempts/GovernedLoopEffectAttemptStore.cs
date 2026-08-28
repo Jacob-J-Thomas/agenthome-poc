@@ -19,7 +19,7 @@ namespace EmbodySense.Core.Persistence.Loops.EffectAttempts;
 /// recovered by exact replay. Later head changes require both a live per-generation owner and the common direct-successor
 /// relation.
 /// </remarks>
-public sealed class GovernedLoopEffectAttemptStore : IGovernedLoopEffectAttemptStore, IGovernedLoopEffectAttemptPreparationClaimStore
+public sealed class GovernedLoopEffectAttemptStore : IGovernedLoopEffectAttemptStore, IGovernedLoopEffectAttemptPreparationClaimStore, IGovernedLoopEffectAttemptReadStore
 {
     private const int MaximumConfiguredAttempts = 16_384;
     private const int MaximumConfiguredVersionsPerAttempt = 16;
@@ -114,6 +114,57 @@ public sealed class GovernedLoopEffectAttemptStore : IGovernedLoopEffectAttemptS
         catch (Exception exception) when (IsUnavailable(exception))
         {
             return Result(GovernedLoopEffectAttemptStoreStatus.Unavailable);
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task<GovernedLoopEffectAttemptReadResult> ReadAsync(
+        string operationId,
+        long effectGeneration,
+        CancellationToken cancellationToken = default)
+    {
+        if (!CustomLoopArtifactIdentifier.IsValid(operationId, GovernedLoopExecutionLimits.MaxIdentifierCharacters)
+            || effectGeneration is < 1 or > GovernedLoopExecutionLimits.MaxVersion)
+        {
+            return ReadResult(GovernedLoopEffectAttemptReadStatus.Corrupt);
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        try
+        {
+            if (!_guard.DirectoryExists(_root))
+            {
+                return ReadResult(GovernedLoopEffectAttemptReadStatus.Missing);
+            }
+
+            var lockPath = _guard.GetFilePath(_root, ".custom-loop-mutations.lock");
+            using var readLock = await AcquireExistingReadLockAsync(lockPath, cancellationToken).ConfigureAwait(false);
+            if (readLock is null)
+            {
+                return ReadResult(GovernedLoopEffectAttemptReadStatus.Corrupt);
+            }
+            ValidateDirectory(out _, out _);
+            var storageKey = StorageKey(operationId, effectGeneration);
+            var versions = VersionPaths(storageKey);
+            if (versions.Count == 0)
+            {
+                return ReadResult(GovernedLoopEffectAttemptReadStatus.Missing);
+            }
+
+            var current = await ReadCurrentStrictlyAsync(versions, storageKey, operationId, effectGeneration, cancellationToken).ConfigureAwait(false);
+            return ReadResult(GovernedLoopEffectAttemptReadStatus.Current, current);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception) when (IsCorrupt(exception))
+        {
+            return ReadResult(GovernedLoopEffectAttemptReadStatus.Corrupt);
+        }
+        catch (Exception exception) when (IsUnavailable(exception))
+        {
+            return ReadResult(GovernedLoopEffectAttemptReadStatus.Unavailable);
         }
     }
 
@@ -417,6 +468,28 @@ public sealed class GovernedLoopEffectAttemptStore : IGovernedLoopEffectAttemptS
         }
     }
 
+    private static async Task<FileStream?> AcquireExistingReadLockAsync(string lockPath, CancellationToken cancellationToken)
+    {
+        for (var attempt = 1; attempt <= 4; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                return new FileStream(lockPath, FileMode.Open, FileAccess.Read, FileShare.None, bufferSize: 1, FileOptions.WriteThrough);
+            }
+            catch (FileNotFoundException)
+            {
+                return null;
+            }
+            catch (IOException) when (attempt < 4)
+            {
+                await Task.Yield();
+            }
+        }
+
+        throw new IOException("Governed-loop effect-attempt persistence remained locked by another process after bounded read retries.");
+    }
+
     private void ValidateDirectory(out HashSet<string> retainedIdentities, out long retainedBytes)
     {
         var maximumArtifacts = checked(MaximumConfiguredAttempts * (MaximumConfiguredVersionsPerAttempt + 2) + 2);
@@ -659,6 +732,77 @@ public sealed class GovernedLoopEffectAttemptStore : IGovernedLoopEffectAttemptS
         return current;
     }
 
+    private async Task<GovernedLoopEffectAttempt> ReadCurrentStrictlyAsync(
+        IReadOnlyList<string> versionPaths,
+        string storageKey,
+        string operationId,
+        long effectGeneration,
+        CancellationToken cancellationToken)
+    {
+        if (versionPaths.Count > _maximumVersionsPerAttempt)
+        {
+            throw new FormatException("Governed-loop effect-attempt evidence exceeds its finite chain bound.");
+        }
+
+        var versions = new Dictionary<string, GovernedLoopEffectAttempt>(StringComparer.Ordinal);
+        foreach (var versionPath in versionPaths)
+        {
+            var version = await ReadVersionAsync(versionPath, storageKey, operationId, effectGeneration, cancellationToken).ConfigureAwait(false);
+            if (!versions.TryAdd(version.ContentHash, version))
+            {
+                throw new FormatException("Governed-loop effect-attempt evidence contains a duplicate immutable version.");
+            }
+        }
+
+        var roots = versions.Values.Where(version => version.PreviousContentHash is null).ToArray();
+        if (roots.Length != 1)
+        {
+            throw new FormatException("Governed-loop effect-attempt evidence must contain exactly one initial intent root.");
+        }
+
+        var children = new Dictionary<string, GovernedLoopEffectAttempt>(StringComparer.Ordinal);
+        foreach (var version in versions.Values.Where(version => version.PreviousContentHash is not null))
+        {
+            if (!versions.TryGetValue(version.PreviousContentHash!, out var prior)
+                || !GovernedLoopEffectAttemptContract.IsDirectSuccessor(prior, version)
+                || !children.TryAdd(prior.ContentHash, version))
+            {
+                throw new FormatException("Governed-loop effect-attempt evidence contains a missing predecessor, broken successor, or fork.");
+            }
+        }
+
+        var current = roots[0];
+        var visited = new HashSet<string>(StringComparer.Ordinal);
+        while (visited.Add(current.ContentHash) && children.TryGetValue(current.ContentHash, out var child))
+        {
+            current = child;
+        }
+        if (visited.Count != versions.Count)
+        {
+            throw new FormatException("Governed-loop effect-attempt evidence contains a cycle or disconnected immutable version.");
+        }
+
+        var headPath = HeadPath(storageKey);
+        if (!File.Exists(headPath))
+        {
+            throw new FormatException("Governed-loop effect-attempt head is missing and cannot be repaired by a read-only observation.");
+        }
+
+        var headBytes = await _guard.ReadAllBytesAsync(
+            _root,
+            headPath,
+            GovernedLoopExecutionLimits.Sha256HexCharacters,
+            "Governed-loop effect-attempt head",
+            cancellationToken).ConfigureAwait(false);
+        var headHash = Encoding.ASCII.GetString(headBytes);
+        if (!IsHash(headHash) || !visited.Contains(headHash) || !string.Equals(headHash, current.ContentHash, StringComparison.Ordinal))
+        {
+            throw new FormatException("Governed-loop effect-attempt head is malformed, noncanonical, or disconnected from retained evidence.");
+        }
+
+        return current;
+    }
+
     private async Task<GovernedLoopEffectAttempt> ReadVersionAsync(
         string path,
         string expectedStorageKey,
@@ -818,6 +962,21 @@ public sealed class GovernedLoopEffectAttemptStore : IGovernedLoopEffectAttemptS
             throw new InvalidOperationException("A validated effect-attempt store result could not be detached.");
         }
         return new GovernedLoopEffectAttemptStoreResult(status, captured, lease);
+    }
+
+    private static GovernedLoopEffectAttemptReadResult ReadResult(
+        GovernedLoopEffectAttemptReadStatus status,
+        GovernedLoopEffectAttempt? attempt = null)
+    {
+        if (attempt is null)
+        {
+            return new GovernedLoopEffectAttemptReadResult(status);
+        }
+        if (!TryCapture(attempt, out var captured))
+        {
+            throw new InvalidOperationException("A validated effect-attempt read result could not be detached.");
+        }
+        return new GovernedLoopEffectAttemptReadResult(status, captured);
     }
 
     private static bool IsHash(string? value)

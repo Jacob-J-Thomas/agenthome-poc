@@ -170,6 +170,35 @@ public sealed class GovernedLoopEffectAttemptStoreTests
     }
 
     [Fact]
+    public async Task Read_only_current_head_never_acquires_an_owner_or_repairs_a_missing_head()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var missing = await ((IGovernedLoopEffectAttemptReadStore)new GovernedLoopEffectAttemptStore(paths)).ReadAsync("effect-operation-1", 1);
+
+        Assert.Equal(GovernedLoopEffectAttemptReadStatus.Missing, missing.Status);
+        Assert.False(Directory.Exists(paths.GovernedLoopEffectAttemptsPath));
+
+        var prepared = Prepare();
+        var store = new GovernedLoopEffectAttemptStore(paths);
+        var begun = await store.BeginAsync(prepared);
+        begun.Lease!.Dispose();
+
+        var before = Directory.EnumerateFiles(paths.GovernedLoopEffectAttemptsPath).Order().ToArray();
+        var read = await ((IGovernedLoopEffectAttemptReadStore)store).ReadAsync(prepared.Payload.OperationId, prepared.Payload.EffectGeneration);
+
+        Assert.Equal(GovernedLoopEffectAttemptReadStatus.Current, read.Status);
+        Assert.Equal(prepared.ContentHash, read.Attempt?.ContentHash);
+        Assert.Equal(before, Directory.EnumerateFiles(paths.GovernedLoopEffectAttemptsPath).Order().ToArray());
+
+        File.Delete(Directory.EnumerateFiles(paths.GovernedLoopEffectAttemptsPath, "*.head").Single());
+        var headless = await ((IGovernedLoopEffectAttemptReadStore)new GovernedLoopEffectAttemptStore(paths)).ReadAsync(prepared.Payload.OperationId, prepared.Payload.EffectGeneration);
+
+        Assert.Equal(GovernedLoopEffectAttemptReadStatus.Corrupt, headless.Status);
+        Assert.Empty(Directory.EnumerateFiles(paths.GovernedLoopEffectAttemptsPath, "*.head"));
+    }
+
+    [Fact]
     public async Task Headless_recovery_reserves_head_bytes_before_republishing_the_unique_tip()
     {
         using var workspace = new TestWorkspace();

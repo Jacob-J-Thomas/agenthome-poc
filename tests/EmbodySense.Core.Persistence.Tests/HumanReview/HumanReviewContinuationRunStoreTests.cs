@@ -19,6 +19,89 @@ namespace EmbodySense.Core.Persistence.Tests.HumanReview;
 public sealed class HumanReviewContinuationRunStoreTests
 {
     [Fact]
+    public async Task Accepted_reservation_publication_replays_after_response_loss_restart_and_concurrent_calls_without_duplicate_wakes()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var approved = await CreateApprovedRunAsync(paths, "continuation-publisher");
+
+        using (var store = new CustomLoopRunStore(paths))
+        {
+            var canonical = new HumanReviewContinuationRunStore(store);
+            var responseLost = new ResponseLostHumanReviewContinuationPublicationStore(canonical);
+            var publisher = new HumanReviewContinuationPublicationService(store, responseLost);
+
+            var recovered = await publisher.PublishAsync(approved.Id);
+
+            Assert.Equal(HumanReviewContinuationStoreMutationStatus.Replayed, recovered.Status);
+            Assert.Equal(1, responseLost.CommitCount);
+            var concurrently = await Task.WhenAll(
+                publisher.PublishAsync(approved.Id),
+                new HumanReviewContinuationPublicationService(store, canonical).PublishAsync(approved.Id));
+            Assert.All(concurrently, result => Assert.Equal(HumanReviewContinuationStoreMutationStatus.Replayed, result.Status));
+        }
+
+        using var restarted = new CustomLoopRunStore(paths);
+        var replay = await new HumanReviewContinuationPublicationService(restarted, new HumanReviewContinuationRunStore(restarted)).PublishAsync(approved.Id);
+        var durable = Assert.IsType<CustomLoopRunRecord>(await restarted.GetAsync(approved.Id));
+
+        Assert.Equal(HumanReviewContinuationStoreMutationStatus.Replayed, replay.Status);
+        Assert.NotNull(durable.HumanReview?.Continuation);
+        Assert.Empty(durable.HumanReview!.Continuation!.Claims);
+        Assert.Null(durable.HumanReview.Continuation.Completion);
+        Assert.Null(durable.HumanReview.Continuation.Retirement);
+    }
+
+    [Fact]
+    public async Task Concurrent_accepted_reservation_publishers_converge_on_one_wake_only()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var approved = await CreateApprovedRunAsync(paths, "continuation-publisher-race");
+        using var store = new CustomLoopRunStore(paths);
+        var continuations = new HumanReviewContinuationRunStore(store);
+        var first = new HumanReviewContinuationPublicationService(store, continuations);
+        var second = new HumanReviewContinuationPublicationService(store, continuations);
+
+        var results = await Task.WhenAll(first.PublishAsync(approved.Id), second.PublishAsync(approved.Id));
+        var durable = Assert.IsType<CustomLoopRunRecord>(await store.GetAsync(approved.Id));
+
+        Assert.Contains(results, result => result.Status == HumanReviewContinuationStoreMutationStatus.Committed);
+        Assert.Contains(results, result => result.Status == HumanReviewContinuationStoreMutationStatus.Replayed);
+        Assert.NotNull(durable.HumanReview?.Continuation);
+        Assert.Empty(durable.HumanReview!.Continuation!.Claims);
+    }
+
+    [Fact]
+    public async Task Publication_after_a_later_conflict_receipt_keeps_the_deterministic_wake_and_exactly_replays()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var approved = await CreateApprovedRunAsync(paths, "continuation-publisher-conflict");
+        var reservation = Assert.IsType<HumanReviewContinuationReservation>(approved.HumanReview?.ContinuationReservation);
+        using var store = new CustomLoopRunStore(paths);
+        var conflict = await new HumanReviewDecisionService(
+            store,
+            new HumanReviewDecisionStoreTestAuthorizer(),
+            new HumanReviewDecisionStoreTestClock(approved.UpdatedAtUtc.AddMinutes(1)))
+            .DecideAsync(new HumanReviewDecisionCommand(approved.Id, approved.LifecycleVersion, "post-approval-conflict", HumanReviewDecisionKind.Reject, null));
+        var afterConflict = Assert.IsType<CustomLoopRunRecord>(await store.GetAsync(approved.Id));
+        var publisher = new HumanReviewContinuationPublicationService(store, new HumanReviewContinuationRunStore(store));
+
+        var published = await publisher.PublishAsync(approved.Id);
+        var durable = Assert.IsType<CustomLoopRunRecord>(await store.GetAsync(approved.Id));
+        var replay = await new HumanReviewContinuationPublicationService(store, new HumanReviewContinuationRunStore(store)).PublishAsync(approved.Id);
+
+        Assert.Equal(HumanReviewDecisionServiceStatus.Conflict, conflict.Status);
+        Assert.Equal(HumanReviewDecisionOperationDisposition.Conflict, conflict.Receipt?.Disposition);
+        Assert.True(afterConflict.UpdatedAtUtc > reservation.ReservedAtUtc);
+        Assert.Equal(HumanReviewContinuationStoreMutationStatus.Committed, published.Status);
+        Assert.Equal(reservation.ReservedAtUtc, durable.HumanReview?.Continuation?.Wake.PublishedAtUtc);
+        Assert.Equal(afterConflict.UpdatedAtUtc, durable.UpdatedAtUtc);
+        Assert.Equal(HumanReviewContinuationStoreMutationStatus.Replayed, replay.Status);
+    }
+
+    [Fact]
     public async Task Canonical_store_publishes_claims_takes_over_and_completes_one_approval_across_restart()
     {
         using var workspace = new TestWorkspace();
@@ -584,4 +667,5 @@ public sealed class HumanReviewContinuationRunStoreTests
             await Task.Delay(TimeSpan.FromMilliseconds(10), cancellation.Token);
         }
     }
+
 }

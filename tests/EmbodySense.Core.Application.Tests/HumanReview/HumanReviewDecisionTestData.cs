@@ -27,7 +27,7 @@ internal static class HumanReviewDecisionTestData
 {
     public static readonly DateTimeOffset CreatedAtUtc = new(2026, 8, 25, 12, 0, 0, TimeSpan.Zero);
 
-    public static async Task<HumanReviewDecisionTestFixture> CreateAsync(ImmutableArray<HumanReviewDecisionKind>? requestedDecisions = null, bool includeEffectAttempt = false)
+    public static async Task<HumanReviewDecisionTestFixture> CreateAsync(ImmutableArray<HumanReviewDecisionKind>? requestedDecisions = null, bool includeEffectAttempt = false, long effectAttemptExecutionGenerationOffset = 0)
     {
         var context = await GovernedLoopSequentialRunMaterializerTests.ContextAsync();
         var materializedStore = new GovernedLoopSequentialRunMaterializerTests.RecordingRunStore();
@@ -42,7 +42,7 @@ internal static class HumanReviewDecisionTestData
         var block = GovernedLoopSequentialFrontierMachine.ReviewBlockCurrent(running.Frontier, context.AdapterBinding, null, null, running.UpdatedAtUtc.AddMinutes(1));
         Assert.Equal(GovernedLoopSequentialFrontierTransitionStatus.Applied, block.Status);
         var blocked = Assert.IsType<GovernedLoopFrontierPosture>(block.Frontier);
-        var request = Request(running, blocked, requestedDecisions, includeEffectAttempt, out var effectAttempt);
+        var request = Request(running, blocked, requestedDecisions, includeEffectAttempt, effectAttemptExecutionGenerationOffset, out var effectAttempt);
         var shared = new HumanReviewAdmissionSharedState(running);
         var admission = new HumanReviewAdmissionService(new HumanReviewAdmissionTestStore(shared));
         var admissionResult = await admission.AdmitAsync(new HumanReviewAdmissionCommand(running.Id, running.LifecycleVersion, request, blocked));
@@ -148,14 +148,14 @@ internal static class HumanReviewDecisionTestData
         };
     }
 
-    private static HumanReviewRequest Request(CustomLoopRunRecord predecessor, GovernedLoopFrontierPosture blocked, ImmutableArray<HumanReviewDecisionKind>? requestedDecisions, bool includeEffectAttempt, out GovernedLoopEffectAttempt? effectAttempt)
+    private static HumanReviewRequest Request(CustomLoopRunRecord predecessor, GovernedLoopFrontierPosture blocked, ImmutableArray<HumanReviewDecisionKind>? requestedDecisions, bool includeEffectAttempt, long effectAttemptExecutionGenerationOffset, out GovernedLoopEffectAttempt? effectAttempt)
     {
         var blockedNode = Assert.Single(blocked.Payload.Nodes, node => node.Status == GovernedLoopNodeExecutionStatus.ReviewBlocked);
         var binding = HumanReviewContractHash.ApplyBinding(new HumanReviewBinding(1, blocked.WorkspaceId, predecessor.Id, blocked.Binding.Revision.GraphId, blocked.Binding.Revision.RevisionId, blocked.Binding.Revision.ExecutableHash, blockedNode.NodeId, blockedNode.ActivationOrdinal, null, blockedNode.Attempt!.Value, "frontier-one", blocked.Payload.FrontierVersion, blocked.Payload.ContentHash, Hash('e'), Hash('f'), Hash('1'), Hash('2'), Hash('3'), Hash('4'), Hash('5'), null, string.Empty));
         effectAttempt = null;
         if (includeEffectAttempt)
         {
-            effectAttempt = CreateEffectAttempt(predecessor, binding);
+            effectAttempt = CreateEffectAttempt(predecessor, binding, effectAttemptExecutionGenerationOffset);
             var preparation = HumanReviewEffectReleaseContract.CreatePreparation(binding, effectAttempt);
             var reviewedEffect = HumanReviewContractHash.ApplyEffectAttempt(new HumanReviewEffectAttemptBinding(effectAttempt.Payload.EffectId, effectAttempt.Payload.OperationId, effectAttempt.Payload.EffectGeneration, effectAttempt.Payload.IntentHash, preparation.PreparationHash, HumanReviewEffectDispatchCertainty.NotDispatched, string.Empty));
             binding = HumanReviewContractHash.ApplyBinding(binding with { EffectAttempt = reviewedEffect, BindingHash = string.Empty });
@@ -171,7 +171,7 @@ internal static class HumanReviewDecisionTestData
             HumanReviewContractHash.ApplyPreview(new HumanReviewRedactedPreview(HumanReviewPreviewKind.Evidence, "Evidence", "Redacted evidence.", string.Empty))), timing, Provenance(HumanReviewProvenanceKind.Server, "request-correlation", timing.CreatedAtUtc), string.Empty));
     }
 
-    private static GovernedLoopEffectAttempt CreateEffectAttempt(CustomLoopRunRecord predecessor, HumanReviewBinding binding)
+    private static GovernedLoopEffectAttempt CreateEffectAttempt(CustomLoopRunRecord predecessor, HumanReviewBinding binding, long executionGenerationOffset)
     {
         Assert.True(CapabilityId.TryParse("org.embodysense/workspace/read-file", out var capabilityId, out _));
         Assert.True(CapabilityVersion.TryParse("1.2.3", out var capabilityVersion, out _));
@@ -179,7 +179,11 @@ internal static class HumanReviewDecisionTestData
         Assert.True(CapabilityProviderId.TryParse("org.embodysense", out var providerId, out _));
         var adapter = Assert.IsType<GovernedLoopSequentialAdapterBinding>(predecessor.SequentialAdapterBinding);
         return GovernedLoopEffectAttemptContract.Prepare(
-            adapter.ExecutionBinding,
+            GovernedLoopExecutionBinding.Create(
+                adapter.ExecutionBinding.SchemaVersion,
+                adapter.ExecutionBinding.RunId,
+                adapter.ExecutionBinding.Revision,
+                checked(adapter.ExecutionBinding.ExecutionGeneration + executionGenerationOffset)),
             binding.NodeId,
             binding.Attempt,
             new CapabilityDescriptorIdentity(capabilityId!, capabilityVersion!, capabilityHash!),
