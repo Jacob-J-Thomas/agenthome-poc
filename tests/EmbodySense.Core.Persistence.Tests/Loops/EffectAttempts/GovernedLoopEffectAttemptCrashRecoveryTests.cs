@@ -251,9 +251,30 @@ public sealed class GovernedLoopEffectAttemptCrashRecoveryTests
         CrashBoundary boundary)
     {
         var resultWait = Stopwatch.StartNew();
-        while (!File.Exists(worker.ResultPath))
+        var expectedBoundary = boundary.ToString();
+        string? observedBoundary = null;
+        while (true)
         {
-            if (worker.Process.HasExited)
+            var resultExists = File.Exists(worker.ResultPath);
+            if (resultExists)
+            {
+                try
+                {
+                    observedBoundary = await File.ReadAllTextAsync(worker.ResultPath);
+                    if (string.Equals(expectedBoundary, observedBoundary, StringComparison.Ordinal))
+                    {
+                        break;
+                    }
+                }
+                catch (IOException)
+                {
+                }
+                catch (UnauthorizedAccessException)
+                {
+                }
+            }
+
+            if (!resultExists && worker.Process.HasExited)
             {
                 var evidence = await ReadWorkerEvidenceAsync(capture);
                 Assert.Fail($"Effect-attempt crash worker exited before publishing the `{boundary}` durable boundary result. {evidence}");
@@ -261,13 +282,13 @@ public sealed class GovernedLoopEffectAttemptCrashRecoveryTests
             if (resultWait.Elapsed >= _workerResultTimeout)
             {
                 var evidence = await StopAndReadWorkerEvidenceAsync(worker, capture);
-                Assert.Fail($"Effect-attempt crash worker did not publish the `{boundary}` durable boundary result within {_workerResultTimeout.TotalSeconds:0} seconds. {evidence}");
+                var observed = observedBoundary ?? "<unreadable>";
+                Assert.Fail($"Effect-attempt crash worker did not publish the `{boundary}` durable boundary result within {_workerResultTimeout.TotalSeconds:0} seconds. Last readable marker: `{observed}`. {evidence}");
             }
 
             await Task.Delay(10);
         }
 
-        Assert.Equal(boundary.ToString(), await File.ReadAllTextAsync(worker.ResultPath));
         try
         {
             await worker.Process.WaitForExitAsync().WaitAsync(_workerExitTimeout);
