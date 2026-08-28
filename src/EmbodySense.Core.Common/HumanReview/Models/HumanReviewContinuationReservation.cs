@@ -5,7 +5,7 @@ namespace EmbodySense.Core.Common.HumanReview.Models;
 /// <param name="ReservationId">The globally unique reservation identity.</param>
 /// <param name="Request">The exact immutable request reference.</param>
 /// <param name="Decision">The exact accepted approval decision reference.</param>
-/// <param name="ReservedAtUtc">The trusted reservation time.</param>
+/// <param name="ReservedAtUtc">The immutable trusted UTC reservation time and deterministic wake-publication timestamp. A publisher must replay this exact value after an uncertain response and must not obtain a replacement clock value.</param>
 /// <param name="Provenance">The trusted server or coordinator provenance.</param>
 /// <param name="ReservationHash">The canonical hash of every behavior-affecting reservation field.</param>
 public sealed record HumanReviewContinuationReservation(int SchemaVersion, string ReservationId, HumanReviewRequestReference Request, HumanReviewDecisionReference Decision, DateTimeOffset ReservedAtUtc, HumanReviewProvenance Provenance, string ReservationHash)
