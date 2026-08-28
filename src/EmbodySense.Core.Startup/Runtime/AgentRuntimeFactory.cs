@@ -7,6 +7,7 @@ using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Application.CommandActions;
 using EmbodySense.Core.Application.Governance.Tools;
 using EmbodySense.Core.Application.Governance.Authority.Grants;
+using EmbodySense.Core.Application.HumanInput.Policies;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Admission;
 using EmbodySense.Core.Application.Loops.EffectAuthorityUsage;
@@ -41,6 +42,7 @@ using EmbodySense.Core.Persistence.Audit;
 using EmbodySense.Core.Persistence.Authority;
 using EmbodySense.Core.Persistence.Capabilities;
 using EmbodySense.Core.Persistence.ContextualRoles;
+using EmbodySense.Core.Persistence.HumanInput.Policies;
 using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Core.Persistence.Loops.Admission;
 using EmbodySense.Core.Persistence.Loops.Execution.Authority;
@@ -620,6 +622,7 @@ public sealed class AgentRuntimeFactory
             var governedWaitNodeRelay = new GovernedLoopWaitNodeExecutionRelay();
             var governedRetryNodeRelay = new GovernedLoopRetryNodeExecutionRelay();
             var governedWaitContinuationRelay = new GovernedLoopWaitContinuationRelay();
+            var humanInputPolicyResolutionService = new HumanInputPolicyResolutionService(new HumanInputPolicyFileStore(paths));
             var governedWaitPosture = new GovernedLoopCanonicalWaitCurrentPostureAdapter(
                 customRunStore,
                 governedGrantResolver);
@@ -647,7 +650,8 @@ public sealed class AgentRuntimeFactory
                 retryNodeExecutor: governedRetryNodeRelay,
                 workspaceActionExecutor: governedWorkspaceActionExecutor,
                 commandActionExecutor: governedCommandActionExecutor,
-                failureClassifier: failureClassifier);
+                failureClassifier: failureClassifier,
+                humanInputPolicyResolutionService: humanInputPolicyResolutionService);
             var governedAdmissionStore = new GovernedLoopAdmissionStore(paths, _capabilityTrustProvider, authorityTransaction: capabilityAuthority);
             var governedAdmission = new GovernedLoopAdmissionService(
                 workspaceId,

@@ -218,7 +218,7 @@ public sealed class GovernedLoopGraphAuthoringFactoryTests
 
         Assert.Equal(GovernedLoopGraphAuthoringStatus.Committed, first.Status);
         Assert.Equal(first.GraphValidationEvidenceHash, second.GraphValidationEvidenceHash);
-        Assert.Equal("1794a51b33518f10a49195c52ca3b02906a1df80388f280555e61002895f08f8", first.GraphValidationEvidenceHash);
+        Assert.Equal("928f0db16706bbe4c4f907973e337723ff05abcc038d1cf731b8c5d012ac564c", first.GraphValidationEvidenceHash);
     }
 
     [Fact]

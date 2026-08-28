@@ -63,12 +63,10 @@ public static class GovernedLoopHumanInputNodeCatalogContract
         => GovernedLoopHumanInputNodeConfigurationValidator.HasExactNodeSemantics(node, schemas);
 
     private static GovernedLoopNodeCatalogDescriptor CreateDescriptor()
-        // https://github.com/Jacob-J-Thomas/agenthome-poc/issues/586 owns authoritative timeout/failure policy resolution;
-        // keep Human Input non-executable until that dependency and the atomic runner checkpoint path are composed.
         => new(
             new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.HumanInput, GovernedLoopHumanInputVocabulary.TypeId, GovernedLoopHumanInputVocabulary.DescriptorVersion),
             IsAdvertised: true,
-            IsExecutable: false,
+            IsExecutable: true,
             IsLegalEntry: false,
             IsLegalTerminal: false,
             _successFailure,

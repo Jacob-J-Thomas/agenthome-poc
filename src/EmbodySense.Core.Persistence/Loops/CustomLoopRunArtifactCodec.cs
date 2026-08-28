@@ -8,6 +8,7 @@ using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using System.Text.Json.Serialization.Metadata;
 using EmbodySense.Core.Common.Governance.Tools.Models;
+using EmbodySense.Core.Common.HumanInput.Models;
 using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
@@ -361,9 +362,84 @@ internal static class CustomLoopRunArtifactCodec
             Content(sequentialInvocation.TriggerOrigin?.CanonicalEnvelope);
         }
 
+        foreach (var checkpoint in run.HumanInputWaitingCheckpoints)
+        {
+            CanonicalHumanInputConfiguration(checkpoint.NodeConfiguration, Content);
+            CanonicalHumanInputRequest(checkpoint.Request, Content);
+        }
+
         if (nextContent != contentEntries.Count)
         {
             throw new FormatException("The content table contains an unreferenced or noncanonical entry.");
+        }
+    }
+
+    private static void CanonicalHumanInputConfiguration(
+        GovernedLoopHumanInputNodeConfiguration configuration,
+        Action<string?> content)
+    {
+        content(configuration.Purpose);
+        content(configuration.Prompt);
+        CanonicalHumanInputResponseSchema(configuration.ResponseSchema, content);
+        CanonicalHumanInputEligibleRespondents(configuration.EligibleRespondents, content);
+        CanonicalHumanInputResponsePolicy(configuration.ResponsePolicy, content);
+    }
+
+    private static void CanonicalHumanInputRequest(HumanInputRequest request, Action<string?> content)
+    {
+        content(request.Purpose);
+        content(request.Prompt);
+        CanonicalHumanInputResponseSchema(request.ResponseSchema, content);
+        CanonicalHumanInputEligibleRespondents(request.EligibleRespondents, content);
+        CanonicalHumanInputResponsePolicy(request.ResponsePolicy, content);
+    }
+
+    private static void CanonicalHumanInputResponseSchema(HumanInputResponseSchema? schema, Action<string?> content)
+    {
+        if (schema is null)
+        {
+            return;
+        }
+
+        CanonicalHumanInputChoices(schema.Choices, content);
+        foreach (var field in schema.StructuredFields ?? [])
+        {
+            content(field?.FieldId);
+            CanonicalHumanInputChoices(field?.Choices, content);
+        }
+    }
+
+    private static void CanonicalHumanInputChoices(HumanInputChoice[]? choices, Action<string?> content)
+    {
+        foreach (var choice in choices ?? [])
+        {
+            content(choice?.ChoiceId);
+            content(choice?.DisplayText);
+        }
+    }
+
+    private static void CanonicalHumanInputEligibleRespondents(
+        IReadOnlyList<HumanInputEligibleRespondent?>? respondents,
+        Action<string?> content)
+    {
+        foreach (var respondent in respondents ?? [])
+        {
+            content(respondent?.RespondentId);
+            content(respondent?.RespondentRoleId);
+            content(respondent?.RoutingReference);
+        }
+    }
+
+    private static void CanonicalHumanInputResponsePolicy(HumanInputResponsePolicy? policy, Action<string?> content)
+    {
+        if (policy?.OrderedRoleIds is not { } roles || roles.IsDefault)
+        {
+            return;
+        }
+
+        foreach (var roleId in roles)
+        {
+            content(roleId);
         }
     }
 
@@ -621,6 +697,7 @@ internal static class CustomLoopRunArtifactCodec
         {
             ProjectPreparedSequentialInvocation(sequentialInvocation);
         }
+        CompactHumanInputWaitingCheckpoints(projection, contents);
 
         return projection;
     }
@@ -833,6 +910,99 @@ internal static class CustomLoopRunArtifactCodec
         if (output is not null)
         {
             ReferenceIdentifierProperty(output, "content");
+        }
+    }
+
+    private static void CompactHumanInputWaitingCheckpoints(JsonObject projection, ContentRegistry contents)
+    {
+        foreach (var item in RequireArray(projection, "humanInputWaitingCheckpoints"))
+        {
+            var checkpoint = item?.AsObject() ?? throw new FormatException("Human Input checkpoint projection entries must be objects.");
+            CompactHumanInputConfiguration(RequireObject(checkpoint, "nodeConfiguration"), contents);
+            CompactHumanInputRequest(RequireObject(checkpoint, "request"), contents);
+        }
+    }
+
+    private static void CompactHumanInputConfiguration(JsonObject configuration, ContentRegistry contents)
+    {
+        ReferenceProperty(configuration, "purpose", contents);
+        ReferenceProperty(configuration, "prompt", contents);
+        CompactHumanInputResponseSchema(RequireObject(configuration, "responseSchema"), contents);
+        CompactHumanInputEligibleRespondents(RequireArray(configuration, "eligibleRespondents"), contents);
+        CompactHumanInputResponsePolicy(RequireObject(configuration, "responsePolicy"), contents);
+    }
+
+    private static void CompactHumanInputRequest(JsonObject request, ContentRegistry contents)
+    {
+        ReferenceProperty(request, "purpose", contents);
+        ReferenceProperty(request, "prompt", contents);
+        CompactHumanInputResponseSchema(RequireObject(request, "responseSchema"), contents);
+        CompactHumanInputEligibleRespondents(RequireArray(request, "eligibleRespondents"), contents);
+        CompactHumanInputResponsePolicy(RequireObject(request, "responsePolicy"), contents);
+    }
+
+    private static void CompactHumanInputResponseSchema(JsonObject schema, ContentRegistry contents)
+    {
+        CompactHumanInputChoices(schema["choices"] as JsonArray, contents);
+        foreach (var item in schema["structuredFields"] as JsonArray ?? [])
+        {
+            var field = item?.AsObject() ?? throw new FormatException("Human Input structured-field projection entries must be objects.");
+            ReferenceProperty(field, "fieldId", contents);
+            CompactHumanInputChoices(field["choices"] as JsonArray, contents);
+        }
+    }
+
+    private static void CompactHumanInputChoices(JsonArray? choices, ContentRegistry contents)
+    {
+        if (choices is null)
+        {
+            return;
+        }
+
+        foreach (var item in choices)
+        {
+            var choice = item?.AsObject() ?? throw new FormatException("Human Input choice projection entries must be objects.");
+            ReferenceProperty(choice, "choiceId", contents);
+            ReferenceProperty(choice, "displayText", contents);
+        }
+    }
+
+    private static void CompactHumanInputEligibleRespondents(JsonArray respondents, ContentRegistry contents)
+    {
+        foreach (var item in respondents)
+        {
+            var respondent = item?.AsObject() ?? throw new FormatException("Human Input respondent projection entries must be objects.");
+            ReferenceProperty(respondent, "respondentId", contents);
+            ReferenceProperty(respondent, "respondentRoleId", contents);
+            ReferenceProperty(respondent, "routingReference", contents);
+        }
+    }
+
+    private static void CompactHumanInputResponsePolicy(JsonObject policy, ContentRegistry contents)
+    {
+        if (policy["orderedRoleIds"] is not JsonArray roles)
+        {
+            return;
+        }
+
+        for (var index = 0; index < roles.Count; index++)
+        {
+            if (roles[index] is not JsonValue value)
+            {
+                throw new FormatException("Human Input response-policy role projection entries must be strings.");
+            }
+
+            string roleId;
+            try
+            {
+                roleId = value.GetValue<string>();
+            }
+            catch (InvalidOperationException exception)
+            {
+                throw new FormatException("Human Input response-policy role projection entries must be strings.", exception);
+            }
+
+            roles[index] = new JsonObject { [ContentReferenceProperty] = contents.Reference(roleId) };
         }
     }
 

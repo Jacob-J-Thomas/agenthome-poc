@@ -9,6 +9,7 @@ using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Application.Governance.Tools;
 using EmbodySense.Core.Application.Governance.Tools.Models;
 using EmbodySense.Core.Application.Capabilities;
+using EmbodySense.Core.Application.HumanInput.Policies;
 using EmbodySense.Core.Application.Capabilities.Models;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Admission;
@@ -7011,7 +7012,8 @@ public sealed partial class CustomLoopOrderedRunnerTests
         IGovernedLoopRetryNodeExecutor? retryNodeExecutor = null,
         IGovernedLoopWorkspaceActionExecutor? workspaceActionExecutor = null,
         IGovernedLoopCommandActionExecutor? commandActionExecutor = null,
-        IGovernedLoopFailureClassifier? failureClassifier = null)
+        IGovernedLoopFailureClassifier? failureClassifier = null,
+        HumanInputPolicyResolutionService? humanInputPolicyResolutionService = null)
     {
         return new CustomLoopOrderedRunner(
             store,
@@ -7033,7 +7035,8 @@ public sealed partial class CustomLoopOrderedRunnerTests
             retryNodeExecutor: retryNodeExecutor,
             workspaceActionExecutor: workspaceActionExecutor,
             commandActionExecutor: commandActionExecutor,
-            failureClassifier: failureClassifier);
+            failureClassifier: failureClassifier,
+            humanInputPolicyResolutionService: humanInputPolicyResolutionService);
     }
 
     private static GovernedLoopWorkspaceActionExecutionResult WorkspaceActionOutcome(WorkspaceActionResultStatus status)

@@ -3105,6 +3105,9 @@ public sealed class CustomLoopRunStore :
         var pureCompletions = attemptClosures.Count(item => IsExactPureCompletion(candidate, item));
         var lifecycleEvents = appended.Count(IsLifecycleControlEvent);
         var retryStateEvents = appended.Count(item => item.Kind == CustomLoopRunEventKind.RetryStateChanged);
+        var humanInputCheckpointPublication = candidate.HumanInputWaitingCheckpoints.Count == current.HumanInputWaitingCheckpoints.Count + 1
+            && appended.All(IsLifecycleControlEvent)
+            && lifecycleEvents <= 1;
         if (retryStateEvents > 0 && (lifecycleEvents > 1 || appended.Any(item => !IsRetryStateAtomicEvent(item))))
         {
             throw new FormatException("A retry-state mutation may atomically append only retry transitions, its lifecycle boundary, and terminal retry exhaustion evidence.");
@@ -3167,7 +3170,17 @@ public sealed class CustomLoopRunStore :
             throw new FormatException("A retry-state append exceeded its reserved maximum serialized footprint.");
         }
 
-        if (retryStateEvents == 0 && lifecycleEvents > 0 && delta > lifecycleControlBudget)
+        if (retryStateEvents == 0
+            && humanInputCheckpointPublication
+            && delta > CustomLoopLimits.MaxHumanInputWaitingCheckpointPublicationUtf8Bytes)
+        {
+            throw new FormatException("A Human Input waiting-checkpoint publication exceeded its bounded compact serialized footprint.");
+        }
+
+        if (retryStateEvents == 0
+            && lifecycleEvents > 0
+            && !humanInputCheckpointPublication
+            && delta > lifecycleControlBudget)
         {
             throw new FormatException("A lifecycle control event exceeded its permanent reserved serialized footprint.");
         }

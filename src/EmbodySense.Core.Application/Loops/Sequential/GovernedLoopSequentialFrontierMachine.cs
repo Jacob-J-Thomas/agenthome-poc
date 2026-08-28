@@ -296,6 +296,54 @@ public static class GovernedLoopSequentialFrontierMachine
         }
     }
 
+    /// <summary>Parks only the exact Running Human Input activation while preserving its attempt and operation identity for a checkpoint-bound request.</summary>
+    /// <param name="frontier">The current exact durable frontier.</param>
+    /// <param name="binding">The admitted execution and publication binding.</param>
+    /// <param name="plan">The exact canonical plan that owns the activation.</param>
+    /// <param name="node">The selected Human Input plan node.</param>
+    /// <param name="activation">The selected Running activation.</param>
+    /// <param name="attempt">The retained activation attempt number.</param>
+    /// <param name="attemptOperationId">The retained attempt operation identity.</param>
+    /// <param name="updatedAtUtc">The trusted timestamp for the durable frontier successor.</param>
+    /// <returns>An applied Waiting successor only when every supplied coordinate exactly matches the selected Running Human Input activation; otherwise, an invalid transition that exposes no request.</returns>
+    public static GovernedLoopSequentialFrontierTransitionResult ParkRunningHumanInput(
+        GovernedLoopFrontierPosture? frontier,
+        GovernedLoopSequentialAdapterBinding? binding,
+        GovernedLoopSequentialPlan? plan,
+        GovernedLoopSequentialPlanNode? node,
+        GovernedLoopNodeExecutionEvidence? activation,
+        int attempt,
+        string? attemptOperationId,
+        DateTimeOffset updatedAtUtc)
+    {
+        var selected = Select(frontier, binding, plan);
+        if (selected.Status != GovernedLoopSequentialFrontierSelectionStatus.Running
+            || !SamePlanNode(selected.Node, node)
+            || !SameActivation(selected.Activation, activation)
+            || selected.Attempt != attempt
+            || !string.Equals(selected.AttemptOperationId, attemptOperationId, StringComparison.Ordinal)
+            || !GovernedLoopSequentialNodeDescriptors.IsHumanInput(node?.Descriptor))
+        {
+            return Invalid("Only the exact committed Running Human Input activation can enter durable Waiting posture.");
+        }
+
+        try
+        {
+            var waiting = CopyActivation(activation!, GovernedLoopNodeExecutionStatus.Waiting, attempt, attemptOperationId, null, null, null, [], []);
+            var aggregate = frontier!.Payload.Nodes.Any(candidate => candidate.Status == GovernedLoopNodeExecutionStatus.Ready)
+                ? GovernedLoopFrontierStatus.Active
+                : GovernedLoopFrontierStatus.Waiting;
+            var successor = ReplaceActivation(frontier, binding!, waiting, aggregate, updatedAtUtc);
+            return TransitionIsValid(frontier, successor, binding, plan)
+                ? Applied(successor, "The exact Human Input activation entered Waiting with no response delivery or continuation.")
+                : Invalid("The Running-to-Waiting Human Input successor violates the canonical frontier transition contract.");
+        }
+        catch (Exception exception) when (IsContractFailure(exception))
+        {
+            return Invalid($"The Running-to-Waiting Human Input transition was rejected by its bounded contract: {exception.GetType().Name}.");
+        }
+    }
+
     /// <summary>Parks one exact Running activation under a distinct, already-governed next-attempt reservation.</summary>
     public static GovernedLoopSequentialFrontierTransitionResult ParkRunningForRetry(
         GovernedLoopFrontierPosture? frontier,

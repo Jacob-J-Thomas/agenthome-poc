@@ -9,6 +9,8 @@ using System.Text;
 using System.Text.Json;
 using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Application.Governance.Tools;
+using EmbodySense.Core.Application.HumanInput.Policies;
+using EmbodySense.Core.Application.HumanInput.Policies.Models;
 using EmbodySense.Core.Application.Inference.Profiles;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.EffectAuthorityUsage;
@@ -57,6 +59,12 @@ using EmbodySense.Core.Common.Loops.Sequential;
 using EmbodySense.Core.Common.Loops.Sequential.Models;
 using EmbodySense.Core.Common.CommandActions;
 using EmbodySense.Core.Common.CommandActions.Models;
+using EmbodySense.Core.Common.HumanInput;
+using EmbodySense.Core.Common.HumanInput.Models;
+using EmbodySense.Core.Common.Loops.HumanInput;
+using EmbodySense.Core.Common.Loops.HumanInput.Checkpoints;
+using EmbodySense.Core.Common.Loops.HumanInput.Checkpoints.Models;
+using EmbodySense.Core.Common.Loops.HumanInput.Policies;
 
 namespace EmbodySense.Core.Application.Loops.Execution.Custom;
 
@@ -109,6 +117,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
     private readonly IGovernedLoopWorkspaceActionExecutor? _workspaceActionExecutor;
     private readonly IGovernedLoopCommandActionExecutor? _commandActionExecutor;
     private readonly IGovernedLoopFailureClassifier _failureClassifier;
+    private readonly HumanInputPolicyResolutionService? _humanInputPolicyResolutionService;
     private readonly TimeProvider _timeProvider;
     private readonly ConcurrentDictionary<string, byte> _activeRuns = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _activeAttemptCancellations = new(StringComparer.Ordinal);
@@ -132,6 +141,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
     /// <param name="workspaceActionExecutor">The canonical workspace Action executor. A missing executor rejects Action dispatch without changing legacy execution.</param>
     /// <param name="commandActionExecutor">The canonical structured command Action executor. A missing executor rejects command dispatch without changing legacy execution.</param>
     /// <param name="failureClassifier">The pure canonical schema-1 failure classifier. The built-in classifier is used when omitted for compatibility with existing internal composition.</param>
+    /// <param name="humanInputPolicyResolutionService">The exact policy resolver required to atomically park a canonical Human Input activation. A missing resolver fails closed without exposing a request.</param>
     public CustomLoopOrderedRunner(
         ICustomLoopRunStore runStore,
         CustomLoopContextResolver contextResolver,
@@ -148,7 +158,8 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         IGovernedLoopRetryNodeExecutor? retryNodeExecutor = null,
         IGovernedLoopWorkspaceActionExecutor? workspaceActionExecutor = null,
         IGovernedLoopCommandActionExecutor? commandActionExecutor = null,
-        IGovernedLoopFailureClassifier? failureClassifier = null)
+        IGovernedLoopFailureClassifier? failureClassifier = null,
+        HumanInputPolicyResolutionService? humanInputPolicyResolutionService = null)
     {
         _runStore = runStore ?? throw new ArgumentNullException(nameof(runStore));
         _contextResolver = contextResolver ?? throw new ArgumentNullException(nameof(contextResolver));
@@ -166,6 +177,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         _workspaceActionExecutor = workspaceActionExecutor;
         _commandActionExecutor = commandActionExecutor;
         _failureClassifier = failureClassifier ?? new GovernedLoopFailureClassifier();
+        _humanInputPolicyResolutionService = humanInputPolicyResolutionService;
     }
 
     /// <summary>
@@ -1733,6 +1745,18 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 cancellationToken).ConfigureAwait(false);
         }
 
+        if (GovernedLoopSequentialNodeDescriptors.IsHumanInput(node.Descriptor))
+        {
+            return await DispatchAndParkSequentialHumanInputNodeAsync(
+                context,
+                run,
+                node,
+                attempt,
+                attemptOperationId,
+                actor,
+                cancellationToken);
+        }
+
         return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.InvalidState, run, "The schema-1 sequential frontier selected an unsupported canonical node family."));
     }
 
@@ -2707,6 +2731,313 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 ? new RunAdvance(durable, null)
                 : new RunAdvance(null, Result(CustomLoopOrderedRunStatus.InvalidState, durable, "The parked Wait does not compose with the aggregate run lifecycle."));
     }
+
+    private async Task<RunAdvance> DispatchAndParkSequentialHumanInputNodeAsync(
+        SequentialExecutionContext context,
+        CustomLoopRunRecord run,
+        GovernedLoopSequentialPlanNode node,
+        int attempt,
+        string attemptOperationId,
+        string actor,
+        CancellationToken cancellationToken)
+    {
+        var activation = RequireRunningSequentialActivation(run, node, attempt, attemptOperationId);
+        if (_humanInputPolicyResolutionService is null)
+        {
+            var unavailable = await TerminateAsync(
+                run,
+                actor,
+                CustomLoopRunStatus.NeedsReview,
+                "human_input_policy_resolution_unavailable",
+                "The exact Human Input policy resolver is unavailable; no request checkpoint or delivery opportunity was exposed.",
+                terminalAuditRecorder: context.AuditRecorder).ConfigureAwait(false);
+            return new RunAdvance(unavailable.Run, unavailable);
+        }
+
+        var graphNode = context.Artifact.Graph.Nodes.SingleOrDefault(candidate => string.Equals(candidate.Id, node.NodeId, StringComparison.Ordinal));
+        var configuration = graphNode?.HumanInputConfiguration;
+        if (graphNode is null
+            || !Equals(graphNode.Descriptor, node.Descriptor)
+            || !GovernedLoopSequentialNodeDescriptors.IsHumanInput(node.Descriptor)
+            || !GovernedLoopHumanInputNodeConfigurationValidator.IsValid(configuration))
+        {
+            var invalid = await TerminateAsync(
+                run,
+                actor,
+                CustomLoopRunStatus.NeedsReview,
+                "human_input_configuration_invalid",
+                "The exact admitted Human Input node configuration is unavailable or malformed; no request checkpoint or delivery opportunity was exposed.",
+                terminalAuditRecorder: context.AuditRecorder).ConfigureAwait(false);
+            return new RunAdvance(invalid.Run, invalid);
+        }
+
+        HumanInputPolicyResolutionResult resolution;
+        try
+        {
+            resolution = await _humanInputPolicyResolutionService.ResolveAsync(
+                new HumanInputPolicyResolutionRequest(
+                    context.Anchor.AdapterBinding.WorkspaceId,
+                    context.Anchor.AdapterBinding.ExecutionBinding.Revision.GraphId,
+                    context.Anchor.AdapterBinding.ExecutionBinding.Revision.RevisionId,
+                    node.NodeId,
+                    run.AdmissionActor,
+                    configuration!),
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            var unavailable = await TerminateAsync(
+                run,
+                actor,
+                CustomLoopRunStatus.NeedsReview,
+                "human_input_policy_resolution_unavailable",
+                $"The exact Human Input policy resolver failed closed before request publication: {SafeExceptionClass(exception)}.",
+                terminalAuditRecorder: context.AuditRecorder).ConfigureAwait(false);
+            return new RunAdvance(unavailable.Run, unavailable);
+        }
+
+        if (resolution is null
+            || resolution.Status != HumanInputPolicyResolutionStatus.Resolved
+            || resolution.Snapshot is null
+            || !HumanInputPolicyResolutionSnapshot.IsValid(resolution.Snapshot)
+            || !MatchesHumanInputPolicyResolution(run, context, node, configuration!, resolution.Snapshot))
+        {
+            var status = resolution is null || !Enum.IsDefined(resolution.Status) ? "invalid" : resolution.Status.ToString().ToLowerInvariant();
+            var rejected = await TerminateAsync(
+                run,
+                actor,
+                CustomLoopRunStatus.NeedsReview,
+                "human_input_policy_resolution_" + status,
+                "The exact Human Input timeout and failure policy resolution was rejected before request publication; no delivery opportunity was exposed.",
+                terminalAuditRecorder: context.AuditRecorder).ConfigureAwait(false);
+            return new RunAdvance(rejected.Run, rejected);
+        }
+
+        var now = Now(run);
+        if (now < resolution.Snapshot.ResolvedAtUtc)
+        {
+            now = resolution.Snapshot.ResolvedAtUtc;
+        }
+        var parked = GovernedLoopSequentialFrontierMachine.ParkRunningHumanInput(
+            run.Frontier,
+            context.Anchor.AdapterBinding,
+            context.Plan,
+            node,
+            activation,
+            attempt,
+            attemptOperationId,
+            now);
+        if (parked.Status != GovernedLoopSequentialFrontierTransitionStatus.Applied || parked.Frontier is null)
+        {
+            var invalid = await TerminateAsync(
+                run,
+                actor,
+                CustomLoopRunStatus.NeedsReview,
+                "human_input_frontier_park_invalid",
+                "The exact Running Human Input activation could not enter its checkpoint-bound Waiting frontier; no request or delivery opportunity was exposed.",
+                terminalAuditRecorder: context.AuditRecorder).ConfigureAwait(false);
+            return new RunAdvance(invalid.Run, invalid);
+        }
+
+        var waitingActivation = parked.Frontier.Payload.Nodes[activation.ActivationOrdinal];
+        var checkpoint = CreateHumanInputWaitingCheckpoint(run, context, node, waitingActivation, parked.Frontier, resolution.Snapshot, configuration!);
+        if (checkpoint is null
+            || checkpoint.Binding.FrontierVersion != parked.Frontier.Payload.FrontierVersion
+            || !string.Equals(checkpoint.Binding.FrontierHash, parked.Frontier.Payload.ContentHash, StringComparison.Ordinal)
+            || !GovernedLoopHumanInputWaitingCheckpointContractValidator.Validate(checkpoint).IsValid)
+        {
+            var invalid = await TerminateAsync(
+                run,
+                actor,
+                CustomLoopRunStatus.NeedsReview,
+                "human_input_checkpoint_invalid",
+                "The exact Human Input request checkpoint could not be composed from the admitted frontier and resolved policy; no delivery opportunity was exposed.",
+                terminalAuditRecorder: context.AuditRecorder).ConfigureAwait(false);
+            return new RunAdvance(invalid.Run, invalid);
+        }
+
+        var waiting = parked.Frontier.Payload.Status == GovernedLoopFrontierStatus.Waiting;
+        var events = new List<CustomLoopRunEvent>();
+        if (waiting && run.Status != CustomLoopRunStatus.Waiting)
+        {
+            var lifecycleOwner = run with { Events = [.. run.Events, .. events] };
+            events.Add(Event(lifecycleOwner, now, CustomLoopRunEventKind.LifecycleChanged, "Ordered execution is parked on the exact durable Human Input checkpoint."));
+        }
+
+        var candidate = Append(run, now, events) with
+        {
+            Status = waiting ? CustomLoopRunStatus.Waiting : CustomLoopRunStatus.Running,
+            ExecutionClock = AdvanceClock(run.ExecutionClock, now, terminal: waiting),
+            Frontier = parked.Frontier,
+            HumanInputWaitingCheckpoints = [.. run.HumanInputWaitingCheckpoints, checkpoint],
+        };
+        var persisted = await PersistHumanInputCheckpointAsync(run, candidate, checkpoint).ConfigureAwait(false);
+        if (persisted.Terminal is not null)
+        {
+            return persisted;
+        }
+
+        var durable = persisted.Run!;
+        if (!HasExactHumanInputCheckpoint(durable, checkpoint))
+        {
+            return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.InvalidState, durable, "The Human Input checkpoint persistence acknowledgement did not retain the exact checkpoint identity and hash."));
+        }
+
+        return durable.Status == CustomLoopRunStatus.Waiting
+            ? new RunAdvance(null, Result(CustomLoopOrderedRunStatus.Waiting, durable, "The exact Human Input request checkpoint is durably waiting before any notification or delivery opportunity."))
+            : durable.Status == CustomLoopRunStatus.Running && durable.Frontier?.Payload.Status == GovernedLoopFrontierStatus.Active
+                ? new RunAdvance(durable, null)
+                : new RunAdvance(null, Result(CustomLoopOrderedRunStatus.InvalidState, durable, "The Human Input checkpoint does not compose with the durable aggregate lifecycle."));
+    }
+
+    private async Task<RunAdvance> PersistHumanInputCheckpointAsync(
+        CustomLoopRunRecord current,
+        CustomLoopRunRecord candidate,
+        GovernedLoopHumanInputWaitingCheckpoint checkpoint)
+    {
+        var persisted = await PersistAsync(current, candidate, IntegrityToken(), outcomeMayExist: false).ConfigureAwait(false);
+        if (persisted.Terminal is null)
+        {
+            return persisted;
+        }
+
+        CustomLoopRunRecord? latest;
+        try
+        {
+            latest = await _runStore.GetAsync(current.Id, IntegrityToken()).ConfigureAwait(false);
+        }
+        catch
+        {
+            return persisted;
+        }
+
+        if (latest is null
+            || !CustomLoopRunValidator.HasExactDurableEventPrefix(candidate, latest)
+            || !HasExactHumanInputCheckpoint(latest, checkpoint))
+        {
+            return persisted;
+        }
+
+        return latest.Status switch
+        {
+            CustomLoopRunStatus.Waiting => new RunAdvance(null, Result(CustomLoopOrderedRunStatus.Waiting, latest, "The uncertain checkpoint persistence outcome reconciled to the exact durable Human Input waiting checkpoint.")),
+            CustomLoopRunStatus.Running when latest.Frontier?.Payload.Status == GovernedLoopFrontierStatus.Active => new RunAdvance(latest, null),
+            CustomLoopRunStatus.Cancelled => new RunAdvance(null, Result(CustomLoopOrderedRunStatus.Cancelled, latest, "The exact checkpoint persistence outcome was superseded by durable cancellation.")),
+            CustomLoopRunStatus.NeedsReview => new RunAdvance(null, Result(CustomLoopOrderedRunStatus.NeedsReview, latest, "The exact checkpoint persistence outcome was superseded by durable review state.")),
+            CustomLoopRunStatus.Failed => new RunAdvance(null, Result(CustomLoopOrderedRunStatus.Failed, latest, "The exact checkpoint persistence outcome was superseded by durable failure state.")),
+            _ => persisted,
+        };
+    }
+
+    private static bool MatchesHumanInputPolicyResolution(
+        CustomLoopRunRecord run,
+        SequentialExecutionContext context,
+        GovernedLoopSequentialPlanNode node,
+        GovernedLoopHumanInputNodeConfiguration configuration,
+        HumanInputPolicyResolutionSnapshot snapshot)
+        => string.Equals(snapshot.WorkspaceId, context.Anchor.AdapterBinding.WorkspaceId, StringComparison.Ordinal)
+            && string.Equals(snapshot.GraphId, context.Anchor.AdapterBinding.ExecutionBinding.Revision.GraphId, StringComparison.Ordinal)
+            && string.Equals(snapshot.GraphRevisionId, context.Anchor.AdapterBinding.ExecutionBinding.Revision.RevisionId, StringComparison.Ordinal)
+            && string.Equals(snapshot.NodeId, node.NodeId, StringComparison.Ordinal)
+            && string.Equals(snapshot.ActorId, run.AdmissionActor, StringComparison.Ordinal)
+            && HumanInputPolicyReference.TryParse(configuration.TimeoutPolicyReference, out var timeoutReference)
+            && HumanInputPolicyReference.TryParse(configuration.FailurePolicyReference, out var failureReference)
+            && Equals(snapshot.TimeoutPolicy.Reference, timeoutReference)
+            && Equals(snapshot.FailurePolicy.Reference, failureReference);
+
+    private static GovernedLoopHumanInputWaitingCheckpoint? CreateHumanInputWaitingCheckpoint(
+        CustomLoopRunRecord run,
+        SequentialExecutionContext context,
+        GovernedLoopSequentialPlanNode node,
+        GovernedLoopNodeExecutionEvidence activation,
+        GovernedLoopFrontierPosture waitingFrontier,
+        HumanInputPolicyResolutionSnapshot resolvedPolicy,
+        GovernedLoopHumanInputNodeConfiguration configuration)
+    {
+        try
+        {
+            var adapter = context.Anchor.AdapterBinding;
+            var checkpointId = CreateHumanInputIdentity(
+                "human-input-checkpoint-",
+                run.Id,
+                adapter.ExecutionBinding.ExecutionGeneration.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                node.NodeId,
+                activation.ActivationOrdinal.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                activation.VisitOrdinal.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                activation.AttemptOperationId!);
+            var binding = new GovernedLoopHumanInputWaitingCheckpointBinding(
+                GovernedLoopHumanInputWaitingCheckpointContractLimits.CurrentSchemaVersion,
+                adapter.WorkspaceId,
+                adapter.ExecutionBinding,
+                adapter.AdmissionReceipt.Intent.Publication,
+                adapter.GraphArtifactHash,
+                adapter.GraphLayoutHash,
+                adapter.AdmissionReceiptHash,
+                waitingFrontier.Payload.FrontierVersion,
+                waitingFrontier.Payload.ContentHash,
+                activation.ActivationOrdinal,
+                activation.CycleId,
+                activation.CycleIteration,
+                node.NodeId,
+                activation.VisitOrdinal,
+                checkpointId);
+            var requestId = CreateHumanInputIdentity("human-input-request-", checkpointId);
+            var requestVersionId = CreateHumanInputIdentity("human-input-request-version-", checkpointId);
+            var request = HumanInputRequestHash.Apply(new HumanInputRequest(
+                HumanInputRequest.CurrentSchemaVersion,
+                requestId,
+                requestVersionId,
+                new HumanInputRequestBinding(adapter.WorkspaceId, adapter.ExecutionBinding.Revision.GraphId, adapter.ExecutionBinding.Revision.RevisionId, node.NodeId, run.Id, checkpointId),
+                configuration.Purpose!,
+                configuration.Prompt!,
+                configuration.ResponseSchema!,
+                configuration.PrivacyClass,
+                configuration.EligibleRespondents!.Select(item => item!).ToArray(),
+                new HumanInputTiming(resolvedPolicy.ResolvedAtUtc, resolvedPolicy.ExpiresAtUtc),
+                configuration.ResponsePolicy!,
+                new HumanInputContinuationBinding(HumanInputContinuationPolicyKind.BoundNodeAndCheckpointOnly, node.NodeId, checkpointId),
+                string.Empty));
+            var evidence = GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(new GovernedLoopHumanInputWaitingCheckpointEvidence(
+                GovernedLoopHumanInputWaitingCheckpointContractLimits.CurrentSchemaVersion,
+                1,
+                GovernedLoopHumanInputWaitingCheckpointEvidenceKind.Published,
+                resolvedPolicy.ResolvedAtUtc,
+                null,
+                null,
+                null,
+                null,
+                null,
+                string.Empty,
+                string.Empty));
+            return GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(new GovernedLoopHumanInputWaitingCheckpoint(
+                GovernedLoopHumanInputWaitingCheckpoint.CurrentSchemaVersion,
+                binding,
+                configuration,
+                resolvedPolicy,
+                request,
+                GovernedLoopHumanInputWaitingCheckpointPosture.Pending,
+                [evidence],
+                string.Empty));
+        }
+        catch (ArgumentException)
+        {
+            return null;
+        }
+    }
+
+    private static string CreateHumanInputIdentity(string prefix, params string[] coordinates)
+    {
+        var material = string.Join('\n', coordinates);
+        return prefix + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(material)));
+    }
+
+    private static bool HasExactHumanInputCheckpoint(CustomLoopRunRecord run, GovernedLoopHumanInputWaitingCheckpoint checkpoint)
+        => run.HumanInputWaitingCheckpoints.Count(item => item is not null
+            && string.Equals(item.CheckpointHash, checkpoint.CheckpointHash, StringComparison.Ordinal)) == 1;
 
     private async Task<RunAdvance> CompleteSequentialWaitNodeAsync(
         SequentialExecutionContext context,

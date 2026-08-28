@@ -6,6 +6,7 @@ using EmbodySense.Core.Common.Loops.Sequential.Models;
 using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Execution.Wait;
 using EmbodySense.Core.Common.Loops.Execution.Wait.Models;
+using EmbodySense.Core.Common.Loops.HumanInput.Checkpoints;
 
 namespace EmbodySense.Core.Common.Loops.Custom.Execution;
 
@@ -61,6 +62,7 @@ public sealed record CustomLoopRunRecord(
     string? FailureDetail)
 {
     private IReadOnlyList<GovernedLoopWaitExecutionEvidence>? _waitEvidence = Array.AsReadOnly(Array.Empty<GovernedLoopWaitExecutionEvidence>());
+    private IReadOnlyList<GovernedLoopHumanInputWaitingCheckpoint>? _humanInputWaitingCheckpoints = Array.AsReadOnly(Array.Empty<GovernedLoopHumanInputWaitingCheckpoint>());
 
     /// <summary>
     /// Schema version required by the current custom-loop run contract.
@@ -92,6 +94,17 @@ public sealed record CustomLoopRunRecord(
         init => _waitEvidence = value is null
             ? null
             : Array.AsReadOnly(value.Select(GovernedLoopWaitContractCopy.Copy).ToArray());
+    }
+
+    /// <summary>Gets the bounded append-only Human Input checkpoints that were atomically published with their exact waiting frontiers.</summary>
+    /// <remarks>The JSON property is required even when empty; schema-1 artifacts that omit it are unsupported.</remarks>
+    [JsonRequired]
+    public IReadOnlyList<GovernedLoopHumanInputWaitingCheckpoint> HumanInputWaitingCheckpoints
+    {
+        get => _humanInputWaitingCheckpoints!;
+        init => _humanInputWaitingCheckpoints = value is null
+            ? null
+            : Array.AsReadOnly(value.Select(item => GovernedLoopHumanInputWaitingCheckpointContractCopy.Copy(item)).ToArray());
     }
 
     /// <summary>Gets the required schema-1 Human Review state plane, or null when this run is not controlled by Human Review.</summary>

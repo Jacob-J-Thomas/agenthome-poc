@@ -8,6 +8,12 @@ internal sealed class HumanInputPolicyResolutionTestSource : IHumanInputPolicySo
 {
     internal Dictionary<HumanInputPolicyReference, HumanInputPolicySourceReadResult> Results { get; } = [];
 
+    internal Action<HumanInputPolicyReference, CancellationToken>? BeforeRead { get; set; }
+
     public Task<HumanInputPolicySourceReadResult> ReadAsync(HumanInputPolicyReference reference, CancellationToken cancellationToken = default)
-        => Task.FromResult(Results.GetValueOrDefault(reference, new HumanInputPolicySourceReadResult(HumanInputPolicySourceReadStatus.NotFound, null, 1)));
+    {
+        BeforeRead?.Invoke(reference, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(Results.GetValueOrDefault(reference, new HumanInputPolicySourceReadResult(HumanInputPolicySourceReadStatus.NotFound, null, 1)));
+    }
 }
