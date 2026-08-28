@@ -67,6 +67,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     private bool _preserveCurrentConversationOnNextRuntimeCreation = true;
     private AgentRuntimeGovernedLoopBackgroundStopResult? _lastBackgroundStopResult;
     private int _governedLoopBackgroundPosture = (int)WebGovernedLoopBackgroundPosture.Unavailable;
+    private int _governedLoopBackgroundLivePeerStandby;
     private int _disposed;
 
     /// <summary>
@@ -286,7 +287,9 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
             await (discardCompletion ?? throw new InvalidOperationException("The pending runtime discard did not retain a completion boundary.")).ConfigureAwait(false);
         }
 
-        return await runtime.StartGovernedLoopLocalBackgroundWithStatusAsync(CancellationToken.None).ConfigureAwait(false);
+        var start = await runtime.StartGovernedLoopLocalBackgroundWithStatusAsync(CancellationToken.None).ConfigureAwait(false);
+        Volatile.Write(ref _governedLoopBackgroundLivePeerStandby, start.Ownership == AgentRuntimeGovernedLoopBackgroundOwnership.LivePeer ? 1 : 0);
+        return start;
     }
 
     internal async Task<AgentRuntimeGovernedLoopBackgroundStatus> ReadGovernedLoopLocalBackgroundForProcessAsync()
@@ -420,8 +423,9 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
             return;
         }
 
+        var wasLivePeerStandby = Volatile.Read(ref _governedLoopBackgroundLivePeerStandby) != 0;
         await ReleaseGovernedLoopLocalBackgroundForProcessAsync().ConfigureAwait(false);
-        SetGovernedLoopBackgroundPosture(ToWebPosture(completedStop.Readiness));
+        SetGovernedLoopBackgroundPosture(ToWebReleasePosture(completedStop, wasLivePeerStandby));
     }
 
     /// <summary>
@@ -1701,6 +1705,15 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
             AgentRuntimeGovernedLoopBackgroundReadiness.Stopped => WebGovernedLoopBackgroundPosture.Stopped,
             _ => WebGovernedLoopBackgroundPosture.Unavailable
         };
+
+    private static WebGovernedLoopBackgroundPosture ToWebReleasePosture(
+        AgentRuntimeGovernedLoopBackgroundStopResult stop,
+        bool wasLivePeerStandby)
+        => (wasLivePeerStandby || stop.Status == AgentRuntimeGovernedLoopBackgroundStopStatus.OwnershipLost)
+            && stop.Readiness == AgentRuntimeGovernedLoopBackgroundReadiness.Degraded
+            && stop.Ownership == AgentRuntimeGovernedLoopBackgroundOwnership.LivePeer
+            ? WebGovernedLoopBackgroundPosture.Stopped
+            : ToWebPosture(stop.Readiness);
 
     private static async Task WriteTurnResultAsync(
         AgentRuntimeTurnResult result,

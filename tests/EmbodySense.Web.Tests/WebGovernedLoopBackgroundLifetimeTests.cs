@@ -140,10 +140,43 @@ public sealed class WebGovernedLoopBackgroundLifetimeTests
             Assert.Equal(WebGovernedLoopBackgroundPosture.Degraded, (await WaitForPostureAsync(standbyHost, WebGovernedLoopBackgroundPosture.Degraded)).BackgroundPosture);
 
             await standby.StopAsync();
-            await standby.DisposeAsync();
-
             Assert.Equal(WebGovernedLoopBackgroundPosture.Stopped, (await WaitForPostureAsync(standbyHost, WebGovernedLoopBackgroundPosture.Stopped)).BackgroundPosture);
+            await standby.DisposeAsync();
             Assert.Equal(WebGovernedLoopBackgroundPosture.Ready, primaryHost.GetStatus().BackgroundPosture);
+        }
+        finally
+        {
+            await standby.DisposeAsync();
+            await primary.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task Standby_Web_lifetime_retains_an_unavailable_posture_when_live_peer_evidence_becomes_corrupt()
+    {
+        using var workspace = new TestWorkspace();
+        var codexPath = await WebBackgroundLifetimeCodexExecutable.CreateAsync(workspace);
+        await WorkspaceInitializer.ForWeb().InitializeAsync(workspace.RootPath);
+        var primary = CreateApp(workspace.RootPath, codexPath, out _);
+        var standby = CreateApp(workspace.RootPath, codexPath, out _);
+
+        try
+        {
+            await primary.StartAsync();
+            var primaryHost = primary.Services.GetRequiredService<WebAgentRuntimeHost>();
+            Assert.Equal(WebGovernedLoopBackgroundPosture.Ready, (await WaitForPostureAsync(primaryHost, WebGovernedLoopBackgroundPosture.Ready)).BackgroundPosture);
+
+            await standby.StartAsync();
+            var standbyHost = standby.Services.GetRequiredService<WebAgentRuntimeHost>();
+            Assert.Equal(WebGovernedLoopBackgroundPosture.Degraded, (await WaitForPostureAsync(standbyHost, WebGovernedLoopBackgroundPosture.Degraded)).BackgroundPosture);
+
+            var coordinatorLedger = Directory.EnumerateFiles(workspace.File(".agent", "loops", "execution", "coordinator"), "ledger-*.json")
+                .Order(StringComparer.Ordinal)
+                .Last();
+            await File.WriteAllTextAsync(coordinatorLedger, "{invalid");
+            await standby.StopAsync();
+
+            Assert.Equal(WebGovernedLoopBackgroundPosture.Unavailable, (await WaitForPostureAsync(standbyHost, WebGovernedLoopBackgroundPosture.Unavailable)).BackgroundPosture);
         }
         finally
         {
