@@ -70,6 +70,7 @@ public sealed class GovernedLoopConversationPublicationCommitBoundary
         Exception? callbackFailure = null;
         InvalidOperationException? callbackViolation = null;
         using var callbackLifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var callbackLifetimeToken = callbackLifetime.Token;
 
         async Task<object> CommitUnderAuthorityAsync(CancellationToken token)
         {
@@ -86,20 +87,35 @@ public sealed class GovernedLoopConversationPublicationCommitBoundary
             // This yield gives a boundary that captures or fires-and-forgets the callback a chance to
             // close before the identity-bearing append can start.
             await Task.Yield();
-            lock (callbackSync)
-            {
-                if (callbackClosed)
-                {
-                    // https://github.com/Jacob-J-Thomas/agenthome-poc/issues/507 owns cancellation observability when closure wins before append lifetime creation.
-                    callbackViolation ??= Protocol("The governed effect boundary did not await the conversation append while its authority boundary was active.");
-                    throw callbackViolation;
-                }
-            }
-
+            var closedBeforeAppendLifetime = false;
+            CancellationTokenSource? appendLifetime = null;
+            Task? appendTask = null;
             try
             {
-                using var appendLifetime = CancellationTokenSource.CreateLinkedTokenSource(token, callbackLifetime.Token);
-                await commitAppend(appendLifetime.Token).ConfigureAwait(false);
+                lock (callbackSync)
+                {
+                    if (callbackClosed)
+                    {
+                        // https://github.com/Jacob-J-Thomas/agenthome-poc/issues/507: this captured callback awaits the
+                        // boundary-owned cancellation lifetime before it can report the outer protocol violation.
+                        callbackViolation ??= Protocol("The governed effect boundary did not await the conversation append while its authority boundary was active.");
+                        closedBeforeAppendLifetime = true;
+                    }
+                    else
+                    {
+                        appendLifetime = CancellationTokenSource.CreateLinkedTokenSource(token, callbackLifetimeToken);
+                        // Keep admission and synchronous publisher entry together so closure cannot cancel between them.
+                        appendTask = commitAppend(appendLifetime.Token);
+                    }
+                }
+
+                if (closedBeforeAppendLifetime)
+                {
+                    await Task.Delay(Timeout.InfiniteTimeSpan, callbackLifetimeToken).ConfigureAwait(false);
+                    throw callbackViolation!;
+                }
+
+                await appendTask!.ConfigureAwait(false);
                 lock (callbackSync)
                 {
                     callbackCompleted = true;
@@ -118,6 +134,10 @@ public sealed class GovernedLoopConversationPublicationCommitBoundary
                 }
 
                 throw;
+            }
+            finally
+            {
+                appendLifetime?.Dispose();
             }
         }
 
