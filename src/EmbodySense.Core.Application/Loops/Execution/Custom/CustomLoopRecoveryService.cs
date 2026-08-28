@@ -276,8 +276,13 @@ public sealed class CustomLoopRecoveryService
             && string.Equals(checkpoint.Binding.GraphArtifactHash, adapter.GraphArtifactHash, StringComparison.Ordinal)
             && string.Equals(checkpoint.Binding.GraphLayoutHash, adapter.GraphLayoutHash, StringComparison.Ordinal)
             && string.Equals(checkpoint.Binding.AdmissionReceiptHash, adapter.AdmissionReceiptHash, StringComparison.Ordinal)
-            && checkpoint.Binding.FrontierVersion == frontier.Payload.FrontierVersion
-            && string.Equals(checkpoint.Binding.FrontierHash, frontier.Payload.ContentHash, StringComparison.Ordinal)
+            // A sibling may park after this exact immutable checkpoint. Its aggregate frontier
+            // advancement cannot invalidate the retained historical binding, but the binding may
+            // never describe a frontier newer than the durable aggregate or substitute its hash at
+            // the aggregate's current version.
+            && checkpoint.Binding.FrontierVersion <= frontier.Payload.FrontierVersion
+            && (checkpoint.Binding.FrontierVersion != frontier.Payload.FrontierVersion
+                || string.Equals(checkpoint.Binding.FrontierHash, frontier.Payload.ContentHash, StringComparison.Ordinal))
             && checkpoint.Binding.ActivationOrdinal == node.ActivationOrdinal
             && string.Equals(checkpoint.Binding.NodeId, node.NodeId, StringComparison.Ordinal)
             && checkpoint.Binding.NodeVisitOrdinal == node.VisitOrdinal

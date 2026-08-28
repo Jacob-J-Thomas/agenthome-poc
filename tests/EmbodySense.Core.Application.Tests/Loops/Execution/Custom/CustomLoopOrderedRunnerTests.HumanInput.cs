@@ -295,18 +295,18 @@ public sealed partial class CustomLoopOrderedRunnerTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task Restart_recovery_fails_closed_for_malformed_or_stale_pending_human_input_checkpoint(bool stale)
+    public async Task Restart_recovery_fails_closed_for_malformed_or_future_divergent_pending_human_input_checkpoint(bool futureDivergence)
     {
         var context = await HumanInputContextAsync();
         var store = new FakeRunStore(context.Run);
         var executor = new QueueExecutor();
         var publisher = new RecordingPublisher();
         var parked = await Runtime(context, store, executor, publisher, HumanInputPolicyResolver(context)).RunAsync(Request(context));
-        var malformed = MutateHumanInputWaitingCheckpoint(store.Current, stale);
-        store.ReplaceCurrent(malformed, validate: stale);
+        var malformed = MutateHumanInputWaitingCheckpoint(store.Current, futureDivergence);
+        store.ReplaceCurrent(malformed, validate: false);
 
         Assert.Equal(CustomLoopOrderedRunStatus.Waiting, parked.Status);
-        Assert.Equal(stale, CustomLoopRunValidator.Validate(store.Current).IsValid);
+        Assert.False(CustomLoopRunValidator.Validate(store.Current).IsValid);
         var recovery = Assert.Single(await new CustomLoopRecoveryService(
             store,
             new RecordingAuditLog(),
@@ -317,6 +317,31 @@ public sealed partial class CustomLoopOrderedRunnerTests
         Assert.Equal(CustomLoopRunStatus.Waiting, store.Current.Status);
         Assert.Empty(executor.Requests);
         Assert.Empty(publisher.Requests);
+    }
+
+    [Fact]
+    public async Task Restart_recovery_preserves_parallel_pending_human_input_checkpoints_across_aggregate_frontier_evolution()
+    {
+        var parked = await ParkParallelHumanInputAsync();
+        var retained = parked.Store.Current;
+        var checkpoints = retained.HumanInputWaitingCheckpoints.OrderBy(checkpoint => checkpoint.Binding.FrontierVersion).ToArray();
+        var frontier = Assert.IsType<GovernedLoopFrontierPosture>(retained.Frontier);
+
+        Assert.Equal(2, checkpoints.Length);
+        Assert.True(checkpoints[0].Binding.FrontierVersion < checkpoints[1].Binding.FrontierVersion);
+        Assert.True(checkpoints[1].Binding.FrontierVersion == frontier.Payload.FrontierVersion);
+        Assert.NotEqual(frontier.Payload.ContentHash, checkpoints[0].Binding.FrontierHash);
+        var inferenceDispatches = parked.Executor.Requests.Count;
+        var recovery = Assert.Single(await new CustomLoopRecoveryService(
+            parked.Store,
+            new RecordingAuditLog(),
+            new FixedTimeProvider(_now.AddSeconds(1))).RecoverAsync(AuditSchema.Actors.Web));
+
+        Assert.True(recovery.Status == CustomLoopRecoveryStatus.Unchanged, recovery.Detail);
+        Assert.Same(retained, parked.Store.Current);
+        Assert.Equal(checkpoints.Select(checkpoint => checkpoint.CheckpointHash), parked.Store.Current.HumanInputWaitingCheckpoints.Select(checkpoint => checkpoint.CheckpointHash));
+        Assert.Equal(inferenceDispatches, parked.Executor.Requests.Count);
+        Assert.Empty(parked.Publisher.Requests);
     }
 
     [Fact]
@@ -373,7 +398,7 @@ public sealed partial class CustomLoopOrderedRunnerTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task Resume_rejects_a_malformed_or_stale_pending_human_input_checkpoint_without_ordered_dispatch(bool stale)
+    public async Task Resume_rejects_a_malformed_or_future_divergent_pending_human_input_checkpoint_without_ordered_dispatch(bool futureDivergence)
     {
         var context = await HumanInputContextAsync();
         var store = new FakeRunStore(context.Run);
@@ -398,14 +423,14 @@ public sealed partial class CustomLoopOrderedRunnerTests
             "pause-human-input-before-invalid-resume",
             AuditSchema.Actors.Web));
         Assert.Equal(CustomLoopControlStatus.Paused, pause.Status);
-        var malformed = MutateHumanInputWaitingCheckpoint(store.Current, stale);
-        store.ReplaceCurrent(malformed, validate: stale);
+        var malformed = MutateHumanInputWaitingCheckpoint(store.Current, futureDivergence);
+        store.ReplaceCurrent(malformed, validate: false);
         var writesBeforeResume = store.Writes.Count;
 
         var result = await service.ResumeAsync(new CustomLoopResumeRequest(
             store.Current.Id,
             store.Current.LifecycleVersion,
-            stale ? "resume-stale-human-input" : "resume-malformed-human-input",
+            futureDivergence ? "resume-future-human-input" : "resume-malformed-human-input",
             AuditSchema.Actors.Web));
 
         Assert.Equal(CustomLoopControlStatus.InvalidState, result.Status);
@@ -416,30 +441,89 @@ public sealed partial class CustomLoopOrderedRunnerTests
         Assert.Empty(publisher.Requests);
     }
 
-    private static CustomLoopRunRecord MutateHumanInputWaitingCheckpoint(CustomLoopRunRecord run, bool stale)
+    [Fact]
+    public async Task Pause_and_resume_rearm_parallel_pending_human_input_checkpoints_across_aggregate_frontier_evolution()
+    {
+        var parked = await ParkParallelHumanInputAsync();
+        var operationStore = new FakeControlOperationStore();
+        var resumeExecutor = new NoopWaitLifecycleResumeExecutor(parked.Store.Current);
+        var service = new CustomLoopLifecycleService(
+            parked.Store,
+            operationStore,
+            resumeExecutor,
+            new AvailableModel(),
+            new NoActiveAttemptCancellationSignal(),
+            new RecordingAuditLog(),
+            new TestExecutionGate(),
+            new FixedTimeProvider(_now.AddSeconds(1)));
+
+        var pause = await service.PauseAsync(new CustomLoopPauseRequest(
+            parked.Store.Current.Id,
+            parked.Store.Current.LifecycleVersion,
+            "pause-parallel-human-input-before-resume",
+            AuditSchema.Actors.Web));
+        Assert.Equal(CustomLoopControlStatus.Paused, pause.Status);
+        var checkpoints = parked.Store.Current.HumanInputWaitingCheckpoints.OrderBy(checkpoint => checkpoint.Binding.FrontierVersion).ToArray();
+        var frontier = Assert.IsType<GovernedLoopFrontierPosture>(parked.Store.Current.Frontier);
+        Assert.NotEqual(frontier.Payload.ContentHash, checkpoints[0].Binding.FrontierHash);
+        var inferenceDispatches = parked.Executor.Requests.Count;
+
+        var resumed = await service.ResumeAsync(new CustomLoopResumeRequest(
+            parked.Store.Current.Id,
+            parked.Store.Current.LifecycleVersion,
+            "resume-parallel-human-input",
+            AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopControlStatus.Waiting, resumed.Status);
+        Assert.Equal(CustomLoopRunStatus.Waiting, parked.Store.Current.Status);
+        Assert.Equal(checkpoints.Select(checkpoint => checkpoint.CheckpointHash), parked.Store.Current.HumanInputWaitingCheckpoints.Select(checkpoint => checkpoint.CheckpointHash));
+        Assert.Equal(frontier.Payload.FrontierVersion, parked.Store.Current.Frontier!.Payload.FrontierVersion);
+        Assert.Equal(frontier.Payload.ContentHash, parked.Store.Current.Frontier.Payload.ContentHash);
+        Assert.Equal(0, resumeExecutor.ResumeCount);
+        Assert.Equal(inferenceDispatches, parked.Executor.Requests.Count);
+        Assert.Empty(parked.Publisher.Requests);
+        Assert.True(CustomLoopRunValidator.Validate(parked.Store.Current).IsValid);
+    }
+
+    private static CustomLoopRunRecord MutateHumanInputWaitingCheckpoint(CustomLoopRunRecord run, bool futureDivergence)
     {
         var checkpoint = Assert.Single(run.HumanInputWaitingCheckpoints);
-        if (!stale)
+        if (!futureDivergence)
         {
             return run with { HumanInputWaitingCheckpoints = [checkpoint with { CheckpointHash = new string('F', 64) }] };
         }
 
-        Assert.True(checkpoint.Binding.FrontierVersion > 0);
-        var staleBinding = checkpoint.Binding with
+        var futureBinding = checkpoint.Binding with
         {
-            FrontierVersion = checkpoint.Binding.FrontierVersion - 1,
+            FrontierVersion = checkpoint.Binding.FrontierVersion + 1,
             FrontierHash = new string('a', 64),
         };
-        var staleCheckpoint = GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(new GovernedLoopHumanInputWaitingCheckpoint(
+        var futureCheckpoint = GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(new GovernedLoopHumanInputWaitingCheckpoint(
             checkpoint.SchemaVersion,
-            staleBinding,
+            futureBinding,
             checkpoint.NodeConfiguration,
             checkpoint.ResolvedPolicy,
             checkpoint.Request,
             checkpoint.Posture,
             checkpoint.Evidence,
             string.Empty));
-        return run with { HumanInputWaitingCheckpoints = [staleCheckpoint] };
+        return run with { HumanInputWaitingCheckpoints = [futureCheckpoint] };
+    }
+
+    private static async Task<(FakeRunStore Store, QueueExecutor Executor, RecordingPublisher Publisher)> ParkParallelHumanInputAsync()
+    {
+        var context = await ParallelHumanInputContextAsync();
+        var store = new FakeRunStore(context.Run);
+        var executor = new QueueExecutor(Result("parallel Human Input source"));
+        var publisher = new RecordingPublisher();
+
+        var parked = await Runtime(context, store, executor, publisher, HumanInputPolicyResolver(context)).RunAsync(Request(context));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Waiting, parked.Status);
+        Assert.Equal(CustomLoopRunStatus.Waiting, store.Current.Status);
+        Assert.Equal(2, store.Current.HumanInputWaitingCheckpoints.Count);
+        Assert.True(CustomLoopRunValidator.Validate(store.Current).IsValid);
+        return (store, executor, publisher);
     }
 
     private static async Task<SequentialTestContext> HumanInputContextAsync()
@@ -448,6 +532,17 @@ public sealed partial class CustomLoopOrderedRunnerTests
             artifactFactory: role =>
             {
                 var artifact = HumanInputArtifact(role);
+                var plan = GovernedLoopSequentialPlanBuilder.Build(artifact);
+                Assert.True(plan.Plan is not null, $"{plan.Status}: {plan.FailurePath}");
+                return artifact;
+            });
+
+    private static async Task<SequentialTestContext> ParallelHumanInputContextAsync()
+        => await SequentialContextAsync(
+            Run(SequentialDefinition()),
+            artifactFactory: role =>
+            {
+                var artifact = ParallelHumanInputArtifact(role);
                 var plan = GovernedLoopSequentialPlanBuilder.Build(artifact);
                 Assert.True(plan.Plan is not null, $"{plan.Status}: {plan.FailurePath}");
                 return artifact;
@@ -497,6 +592,37 @@ public sealed partial class CustomLoopOrderedRunnerTests
             role,
             bindings: [new GovernedLoopBindingDefinition("response-to-exit", GovernedLoopBindingKind.Data, "human-input", GovernedLoopHumanInputVocabulary.ResponsePortId, "exit", "result")],
             authorityCeiling: GovernedLoopAuthorityCeiling.Create([GovernedLoopSequentialApplicationTestFixture.ConversationTurnCapabilityId]));
+    }
+
+    private static GovernedLoopGraphRevisionArtifact ParallelHumanInputArtifact(ContextualRoleRevisionPin role)
+    {
+        var source = GovernedLoopSequentialApplicationTestFixture.ParallelAllJoinArtifact(role).Graph;
+        var configuration = HumanInputConfiguration();
+        var nodes = source.Nodes.Select(node => node.Id is "branch-a" or "branch-b"
+            ? new GovernedLoopNodeDefinition(
+                node.Id,
+                new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.HumanInput, GovernedLoopHumanInputVocabulary.TypeId, GovernedLoopHumanInputVocabulary.DescriptorVersion),
+                [new GovernedLoopPortDefinition(GovernedLoopHumanInputVocabulary.ResponsePortId, GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "text", true)],
+                GovernedLoopAuthorityCeiling.Create([]),
+                new Dictionary<string, string>(),
+                null,
+                null,
+                null,
+                configuration)
+            : node)
+            .ToArray();
+        var bindings = source.Bindings
+            .Where(binding => binding.ToNodeId is not "branch-a" and not "branch-b")
+            .ToArray();
+        return GovernedLoopSequentialApplicationTestFixture.Artifact(
+            nodes,
+            source.ControlEdges,
+            source.TerminalNodeIds,
+            role,
+            bindings,
+            source.ValueSchemas,
+            source.OutputContract,
+            source.AuthorityCeiling);
     }
 
     private static GovernedLoopHumanInputNodeConfiguration HumanInputConfiguration()
