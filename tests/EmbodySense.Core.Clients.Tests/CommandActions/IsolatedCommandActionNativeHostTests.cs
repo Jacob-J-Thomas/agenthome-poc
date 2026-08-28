@@ -72,6 +72,29 @@ public sealed class IsolatedCommandActionNativeHostTests
         Assert.Contains("artifact", unavailable.Detail, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public async Task Nested_catalog_availability_uses_reentrant_launch_fence_and_revalidates_currentness()
+    {
+        using var workspace = new TestWorkspace();
+        var executablePath = workspace.File("command.exe");
+        await File.WriteAllTextAsync(executablePath, "test executable");
+        var registration = CommandActionClientTestData.Registration();
+        var resolver = new ReentrantCurrentArtifactResolver(workspace.RootPath, registration.Template.ArtifactDigest, registration.Template.ActivationRevision);
+        var host = new IsolatedCommandActionNativeHost(
+            new InMemoryCommandActionEvidenceStore(),
+            resolver,
+            new TestCommandActionProcessIsolationBoundary(),
+            new TestCommandActionConcurrencyGate());
+        var available = await host.CheckExecutableAvailabilityAsync(registration);
+        resolver.Current = false;
+        var stale = await host.CheckExecutableAvailabilityAsync(registration);
+
+        Assert.Equal(EmbodySense.Core.Application.Capabilities.Models.CapabilityExecutableAvailabilityStatus.Available, available.Status);
+        Assert.Equal(EmbodySense.Core.Application.Capabilities.Models.CapabilityExecutableAvailabilityStatus.Unavailable, stale.Status);
+        Assert.Equal(2, resolver.ExecuteLaunchFenceCalls);
+        Assert.Equal(0, resolver.AcquireLaunchFenceCalls);
+    }
+
     [WindowsFact]
     public async Task Literal_tokens_cross_the_process_boundary_unchanged_but_arbitrary_input_canaries_are_redacted_from_durable_evidence()
     {

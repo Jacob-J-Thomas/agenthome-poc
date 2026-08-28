@@ -12,6 +12,7 @@ namespace EmbodySense.Web.Models;
 /// <param name="InitializationOutcome">The latest explicit request outcome when this snapshot completes initialization; otherwise <see langword="null"/>.</param>
 /// <param name="Url">The bound Web origin.</param>
 /// <param name="CliRole">A short description of the CLI's complementary role.</param>
+/// <param name="BackgroundPosture">The non-sensitive process posture of canonical governed-loop background delivery.</param>
 public sealed record WebStatus(
     string Client,
     bool PrimaryClient,
@@ -21,4 +22,5 @@ public sealed record WebStatus(
     bool InitializationRequiresCleanup,
     string? InitializationOutcome,
     string Url,
-    string CliRole);
+    string CliRole,
+    WebGovernedLoopBackgroundPosture BackgroundPosture);
