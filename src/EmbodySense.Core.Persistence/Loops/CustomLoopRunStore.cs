@@ -544,6 +544,16 @@ public sealed class CustomLoopRunStore :
             throw new ArgumentOutOfRangeException(nameof(maximumCount));
         }
 
+        // The schedule-admission root is the only source for this read. Avoid acquiring the run mutation lock when
+        // no schedule evidence exists: the lock's canonical-directory preparation would otherwise create an empty
+        // custom-run root during every background-coordinator cycle on a fresh workspace. A concurrent writer that
+        // creates the root after this check is observed by the next bounded retry cycle.
+        if (!Directory.Exists(_scheduleAdmissionsRoot)
+            || !Directory.EnumerateFileSystemEntries(_scheduleAdmissionsRoot).Any())
+        {
+            return [];
+        }
+
         await using var mutation = await AcquireMutationLockAsync(cancellationToken);
         var admissions = await ReadAllScheduleAdmissionsAsync(cancellationToken);
         var candidates = admissions

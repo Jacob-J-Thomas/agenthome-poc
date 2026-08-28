@@ -129,7 +129,7 @@ public sealed class CapabilityApiControllerTests
     }
 
     [Fact]
-    public async Task Applied_lifecycle_confirmation_retires_the_cached_runtime_before_the_next_graph_catalog_read()
+    public async Task Applied_lifecycle_confirmation_keeps_the_process_pinned_runtime_for_the_next_graph_catalog_read()
     {
         using var workspace = new TestWorkspace();
         var facade = new StubCapabilityCatalogFacade();
@@ -163,7 +163,8 @@ public sealed class CapabilityApiControllerTests
             Assert.Equal(HttpStatusCode.OK, firstCatalog.StatusCode);
             Assert.Equal(HttpStatusCode.OK, confirmation.StatusCode);
             Assert.Equal(HttpStatusCode.OK, refreshedCatalog.StatusCode);
-            Assert.Equal(2, runtimeFactoryCalls);
+            Assert.Contains("\"status\":\"available\"", await refreshedCatalog.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+            Assert.Equal(1, runtimeFactoryCalls);
         }
         finally
         {

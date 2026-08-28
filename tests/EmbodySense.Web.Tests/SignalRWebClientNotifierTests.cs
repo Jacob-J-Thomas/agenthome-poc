@@ -10,7 +10,7 @@ public sealed class SignalRWebClientNotifierTests
     {
         var context = new RecordingHubContext();
         var notifier = new SignalRWebClientNotifier(context);
-        var status = new WebStatus("web", true, "C:\\workspace", true, "initialized", false, "initialized", "http://127.0.0.1:5174", "CLI verification");
+        var status = new WebStatus("web", true, "C:\\workspace", true, "initialized", false, "initialized", "http://127.0.0.1:5174", "CLI verification", WebGovernedLoopBackgroundPosture.Ready);
 
         await notifier.StatusChangedAsync(status);
 

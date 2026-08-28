@@ -74,12 +74,14 @@ using EmbodySense.Core.Startup.Loops.InvocationPreparation;
 using EmbodySense.Core.Startup.Loops.InvocationPreparation.Models;
 using EmbodySense.Core.Startup.Loops.Posture.Models;
 using EmbodySense.Core.Startup.Capabilities;
+using EmbodySense.Core.Startup.Capabilities.Models;
 using EmbodySense.Core.Startup.Loops;
 using EmbodySense.Core.Startup.Loops.Execution.Effects;
 using EmbodySense.Core.Startup.Loops.Models;
 using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Runtime.Models;
 using EmbodySense.Core.Startup.Workspace;
+using EmbodySense.Core.Startup.Tests.Capabilities;
 using EmbodySense.Core.Application.Triggers;
 using EmbodySense.Core.Application.Triggers.Models;
 using EmbodySense.Core.Application.Triggers.Schedules.Models;
@@ -1499,6 +1501,85 @@ public sealed class AgentRuntimeFactoryTests
         Assert.DoesNotContain("file:///", serialized, StringComparison.Ordinal);
         Assert.DoesNotContain("Arguments", serialized, StringComparison.Ordinal);
         Assert.DoesNotContain("Environment", serialized, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Pinned_runtime_refreshes_graph_catalog_after_current_capability_lifecycle_changes()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var catalogTrust = new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath);
+        var artifactTrust = new FileCapabilityArtifactStateTrustProvider(workspace.ServerStatePath);
+        var artifactVerifier = new AlwaysTrustedLifecycleArtifactVerifier();
+        var registration = GovernedCommandActionFactoryTests.Registration();
+        var stage = new CapabilityArtifactStageRequest(
+            registration.Manifest,
+            new CapabilityArtifactContent("command-artifact"u8.ToArray()),
+            new CapabilityArtifactTrustDecision(CapabilityArtifactTrustStatus.Verified, "test-server-policy", "Verified."));
+        var catalog = new CapabilityCatalogService(new CapabilityCatalogStore(paths, catalogTrust));
+        var catalogRevision = (await catalog.ReadAsync(null, 1)).Page!.CatalogRevision;
+        catalogRevision = (await catalog.DeclareAsync(stage.Manifest.Descriptor, catalogRevision, "declare-pinned-runtime-command")).CatalogRevision!.Value;
+        catalogRevision = (await catalog.InstallAsync(stage.Manifest.Descriptor.Id, catalogRevision, "install-pinned-runtime-command")).CatalogRevision!.Value;
+        catalogRevision = (await catalog.VerifyAsync(stage.Manifest.Descriptor.Id, catalogRevision, "verify-pinned-runtime-command")).CatalogRevision!.Value;
+        catalogRevision = (await catalog.EnableAsync(stage.Manifest.Descriptor.Id, catalogRevision, "enable-pinned-runtime-command")).CatalogRevision!.Value;
+        Assert.Equal(CapabilityCatalogMutationStatus.Applied, (await catalog.MarkHealthyAsync(stage.Manifest.Descriptor.Id, catalogRevision, "healthy-pinned-runtime-command")).Status);
+        var artifacts = new CapabilityArtifactStore(paths, artifactTrust, artifactVerifier);
+        Assert.Equal(CapabilityArtifactStoreStatus.Applied, (await artifacts.StageAsync(stage)).Status);
+        var activation = await artifacts.ActivateAsync(new CapabilityArtifactActivationRequest(stage.Manifest, 0, "activate-pinned-runtime-command"));
+        Assert.Equal(CapabilityArtifactStoreStatus.Applied, activation.Status);
+        var activeRegistration = registration with
+        {
+            Template = CommandActionTemplateContract.Create(
+                registration.Template.SchemaVersion,
+                registration.Template.Capability,
+                registration.Template.Implementation,
+                registration.Template.ArtifactDigest,
+                activation.Activation!.Revision,
+                registration.Template.TemplateId,
+                registration.Template.TemplateVersion,
+                registration.Template.Slots,
+                registration.Template.Arguments,
+                registration.Template.Environment,
+                registration.Template.SecondaryGrammar,
+                registration.Template.StandardInput,
+                registration.Template.StandardInputSlot,
+                registration.Template.Output,
+                registration.Template.Isolation,
+                registration.Template.RequiresCredentialChannel),
+        };
+        var provider = new CommandActionRuntimeProvider([activeRegistration], artifacts, AvailableCommandActionProcessIsolationBoundary.Instance);
+        await using var runtime = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Web, commandActionRuntimeProvider: provider);
+        var lifecycle = CapabilityLifecycleFactory.CreateSelection(paths, catalogTrust, artifactTrust, artifactVerifier, new AuditLog(paths));
+
+        var initial = await runtime.GovernedLoopGraphAuthoring.ReadCatalogAsync();
+        var command = Assert.Single(initial.NodeDescriptors, node => CommandActionNodeDescriptors.Matches(node.Descriptor, activeRegistration.Template));
+        Assert.True(command.IsExecutable);
+
+        var disablePreview = await lifecycle.PreviewAsync(new CapabilityLifecycleSelectionRequest("disable-pinned-runtime-command", CapabilityLifecycleOperationKind.Disable, activeRegistration.Manifest.Descriptor.Id));
+        Assert.Equal(CapabilityLifecycleSelectionStatus.Ready, disablePreview.Status);
+        Assert.Equal(CapabilityLifecycleMutationStatus.Applied, (await lifecycle.MutateAsync(disablePreview.Preview!)).Status);
+
+        var disabled = await runtime.GovernedLoopGraphAuthoring.ReadCatalogAsync();
+        Assert.False(Assert.Single(disabled.NodeDescriptors, node => CommandActionNodeDescriptors.Matches(node.Descriptor, activeRegistration.Template)).IsExecutable);
+
+        var rollbackPreview = await lifecycle.PreviewAsync(new CapabilityLifecycleSelectionRequest("rollback-pinned-runtime-command", CapabilityLifecycleOperationKind.Rollback, activeRegistration.Manifest.Descriptor.Id));
+        Assert.Equal(CapabilityLifecycleSelectionStatus.Ready, rollbackPreview.Status);
+        Assert.Equal(CapabilityLifecycleMutationStatus.Applied, (await lifecycle.MutateAsync(rollbackPreview.Preview!)).Status);
+        var reenabled = await runtime.GovernedLoopGraphAuthoring.ReadCatalogAsync();
+        Assert.True(Assert.Single(reenabled.NodeDescriptors, node => CommandActionNodeDescriptors.Matches(node.Descriptor, activeRegistration.Template)).IsExecutable);
+
+        var removePreview = await lifecycle.PreviewAsync(new CapabilityLifecycleSelectionRequest("remove-pinned-runtime-command", CapabilityLifecycleOperationKind.Remove, activeRegistration.Manifest.Descriptor.Id));
+        Assert.Equal(CapabilityLifecycleSelectionStatus.Ready, removePreview.Status);
+        Assert.Equal(CapabilityLifecycleMutationStatus.Applied, (await lifecycle.MutateAsync(removePreview.Preview!)).Status);
+        var removed = await runtime.GovernedLoopGraphAuthoring.ReadCatalogAsync();
+        Assert.False(Assert.Single(removed.NodeDescriptors, node => CommandActionNodeDescriptors.Matches(node.Descriptor, activeRegistration.Template)).IsExecutable);
+
+        var rollbackRemovalPreview = await lifecycle.PreviewAsync(new CapabilityLifecycleSelectionRequest("rollback-pinned-runtime-command-removal", CapabilityLifecycleOperationKind.Rollback, activeRegistration.Manifest.Descriptor.Id));
+        Assert.Equal(CapabilityLifecycleSelectionStatus.Ready, rollbackRemovalPreview.Status);
+        Assert.Equal(CapabilityLifecycleMutationStatus.Applied, (await lifecycle.MutateAsync(rollbackRemovalPreview.Preview!)).Status);
+        var restored = await runtime.GovernedLoopGraphAuthoring.ReadCatalogAsync();
+        Assert.True(Assert.Single(restored.NodeDescriptors, node => CommandActionNodeDescriptors.Matches(node.Descriptor, activeRegistration.Template)).IsExecutable);
     }
 
     [Fact]

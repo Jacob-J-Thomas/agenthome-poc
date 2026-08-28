@@ -169,16 +169,20 @@ public sealed class LoopAuthoringFacadeRunStoreOwnershipTests
             Expression: IdentifierNameSyntax { Identifier.ValueText: "_customLoopRunStoreProvider" },
             Name: IdentifierNameSyntax { Identifier.ValueText: "DisposeAsync" }
         });
-        var hostDispose = Assert.IsType<MethodDeclarationSyntax>(providerDisposal.FirstAncestorOrSelf<MethodDeclarationSyntax>());
-        var runtimeDiscard = Assert.Single(hostDispose.DescendantNodes().OfType<InvocationExpressionSyntax>(), invocation => invocation.Expression is IdentifierNameSyntax { Identifier.ValueText: "DiscardRuntimeAsync" });
-        var authoringDrain = Assert.Single(hostDispose.DescendantNodes().OfType<InvocationExpressionSyntax>(), invocation => invocation.Expression is IdentifierNameSyntax { Identifier.ValueText: "WaitForAuthoringOperationsAsync" });
+        var safeBoundaryDispose = Assert.IsType<MethodDeclarationSyntax>(providerDisposal.FirstAncestorOrSelf<MethodDeclarationSyntax>());
+        var runtimeDiscard = Assert.Single(safeBoundaryDispose.DescendantNodes().OfType<InvocationExpressionSyntax>(), invocation => invocation.Expression is IdentifierNameSyntax { Identifier.ValueText: "DiscardRuntimeAsync" });
+        var authoringDrain = Assert.Single(safeBoundaryDispose.DescendantNodes().OfType<InvocationExpressionSyntax>(), invocation => invocation.Expression is IdentifierNameSyntax { Identifier.ValueText: "WaitForAuthoringOperationsAsync" });
+        var hostDispose = Assert.Single(root.DescendantNodes().OfType<MethodDeclarationSyntax>(), method => method.Identifier.ValueText == "DisposeAsync");
+        var safeBoundaryDelegation = Assert.Single(hostDispose.DescendantNodes().OfType<InvocationExpressionSyntax>(), invocation => invocation.Expression is IdentifierNameSyntax { Identifier.ValueText: "DisposeAtSafeBoundaryAsync" });
+        var ownershipFence = Assert.Single(hostDispose.DescendantNodes().OfType<IfStatementSyntax>(), IsIdempotentDisposalFence);
 
         Assert.Equal("_customLoopRunStoreProvider", GetIdentifierValue(providerAssignment.Left));
         Assert.Equal("CreateLoopAuthoringFacade", ((MemberAccessExpressionSyntax)authoringCreation.Expression).Name.Identifier.ValueText);
         Assert.Equal("WithCustomLoopRunStoreProvider", ((MemberAccessExpressionSyntax)runtimeProviderTransfer.Expression).Name.Identifier.ValueText);
-        Assert.Equal("DisposeAsync", hostDispose.Identifier.ValueText);
+        Assert.Equal("DisposeAtSafeBoundaryAsync", safeBoundaryDispose.Identifier.ValueText);
         Assert.True(runtimeDiscard.SpanStart < providerDisposal.SpanStart);
         Assert.True(authoringDrain.SpanStart < providerDisposal.SpanStart);
+        Assert.True(ownershipFence.SpanStart < safeBoundaryDelegation.SpanStart);
     }
 
     [Fact]

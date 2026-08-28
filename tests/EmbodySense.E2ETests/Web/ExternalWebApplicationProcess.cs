@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Net.Http.Json;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using EmbodySense.E2EBrowserHost;
 using EmbodySense.Web.Models;
 
@@ -8,17 +9,24 @@ namespace EmbodySense.E2ETests.Web;
 
 internal sealed class ExternalWebApplicationProcess : IAsyncDisposable
 {
-    private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web);
+    private static readonly JsonSerializerOptions _jsonOptions = CreateJsonOptions();
     private readonly Process _process;
     private readonly ProcessOutputBuffer _output;
     private readonly ProcessOutputBuffer _error;
+    private readonly WindowsConsoleControlledProcess? _windowsConsoleProcess;
 
-    private ExternalWebApplicationProcess(Process process, ProcessOutputBuffer output, ProcessOutputBuffer error, string baseUrl)
+    private ExternalWebApplicationProcess(
+        Process process,
+        ProcessOutputBuffer output,
+        ProcessOutputBuffer error,
+        string baseUrl,
+        WindowsConsoleControlledProcess? windowsConsoleProcess)
     {
         _process = process;
         _output = output;
         _error = error;
         BaseUrl = baseUrl;
+        _windowsConsoleProcess = windowsConsoleProcess;
     }
 
     public string BaseUrl { get; }
@@ -146,12 +154,23 @@ internal sealed class ExternalWebApplicationProcess : IAsyncDisposable
             startInfo.Environment[item.Key] = item.Value;
         }
 
-        var process = Process.Start(startInfo) ?? throw new InvalidOperationException("External Web process did not start.");
-        process.OutputDataReceived += (_, args) => output.Append(args.Data);
-        process.ErrorDataReceived += (_, args) => error.Append(args.Data);
-        process.BeginOutputReadLine();
-        process.BeginErrorReadLine();
-        var application = new ExternalWebApplicationProcess(process, output, error, $"http://127.0.0.1:{port}");
+        WindowsConsoleControlledProcess? windowsConsoleProcess = null;
+        Process process;
+        if (OperatingSystem.IsWindows())
+        {
+            windowsConsoleProcess = WindowsConsoleControlledProcess.Start(startInfo, output, error);
+            process = windowsConsoleProcess.Process;
+        }
+        else
+        {
+            process = Process.Start(startInfo) ?? throw new InvalidOperationException("External Web process did not start.");
+            process.OutputDataReceived += (_, args) => output.Append(args.Data);
+            process.ErrorDataReceived += (_, args) => error.Append(args.Data);
+            process.BeginOutputReadLine();
+            process.BeginErrorReadLine();
+        }
+
+        var application = new ExternalWebApplicationProcess(process, output, error, $"http://127.0.0.1:{port}", windowsConsoleProcess);
         try
         {
             await application.WaitUntilReadyAsync();
@@ -183,8 +202,45 @@ internal sealed class ExternalWebApplicationProcess : IAsyncDisposable
         Assert.DoesNotContain("Unhandled exception", _output.Text, StringComparison.OrdinalIgnoreCase);
     }
 
+    public async Task StopAsync()
+    {
+        if (_process.HasExited)
+        {
+            return;
+        }
+
+        if (OperatingSystem.IsWindows())
+        {
+            await (_windowsConsoleProcess ?? throw new InvalidOperationException("The Windows external Web process was not console-controlled.")).StopAsync();
+            return;
+        }
+
+        using var signal = Process.Start(new ProcessStartInfo
+        {
+            FileName = "/bin/kill",
+            RedirectStandardError = true,
+            RedirectStandardOutput = true,
+            UseShellExecute = false,
+            ArgumentList = { "-INT", _process.Id.ToString(System.Globalization.CultureInfo.InvariantCulture) }
+        }) ?? throw new InvalidOperationException("The external Web shutdown signal process did not start.");
+        await signal.WaitForExitAsync();
+        if (signal.ExitCode != 0)
+        {
+            throw new InvalidOperationException("The external Web shutdown signal process failed: " + await signal.StandardError.ReadToEndAsync());
+        }
+
+        await _process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(15));
+    }
+
     public async ValueTask DisposeAsync()
     {
+        if (_windowsConsoleProcess is not null)
+        {
+            await _windowsConsoleProcess.DisposeAsync();
+            _process.Dispose();
+            return;
+        }
+
         if (!_process.HasExited)
         {
             _process.Kill(entireProcessTree: true);
@@ -222,5 +278,12 @@ internal sealed class ExternalWebApplicationProcess : IAsyncDisposable
         }
 
         throw new TimeoutException($"External Web process did not serve /api/status.{Environment.NewLine}{FormatOutput()}", lastException);
+    }
+
+    private static JsonSerializerOptions CreateJsonOptions()
+    {
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        options.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.KebabCaseLower, allowIntegerValues: false));
+        return options;
     }
 }

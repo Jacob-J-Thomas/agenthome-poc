@@ -9,7 +9,7 @@ public sealed class WebClientNotifierTests
     public async Task None_accepts_a_valid_status_through_the_interface()
     {
         IWebClientNotifier notifier = WebClientNotifier.None;
-        var status = new WebStatus("web", true, "C:\\workspace", false, "uninitialized", false, null, "http://127.0.0.1:5174", "CLI verification");
+        var status = new WebStatus("web", true, "C:\\workspace", false, "uninitialized", false, null, "http://127.0.0.1:5174", "CLI verification", WebGovernedLoopBackgroundPosture.Unavailable);
 
         await notifier.StatusChangedAsync(status);
     }
