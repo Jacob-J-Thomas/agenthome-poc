@@ -220,8 +220,8 @@ public sealed class GovernedLoopGraphRevisionStoreTests
         var humanInput = Assert.Single(read.Artifact.Graph.Nodes, node => node.Descriptor.Kind == GovernedLoopNodeKind.HumanInput);
         Assert.Equal(GovernedLoopHumanInputVocabulary.TypeId, humanInput.Descriptor.TypeId);
         Assert.Equal("text", humanInput.HumanInputConfiguration!.RequestSchemaReference);
-        Assert.Equal("timeout-policy-one", humanInput.HumanInputConfiguration.TimeoutPolicyReference);
-        Assert.Equal("failure-policy-one", humanInput.HumanInputConfiguration.FailurePolicyReference);
+        Assert.Equal("timeout-policy-one@revision-one", humanInput.HumanInputConfiguration.TimeoutPolicyReference);
+        Assert.Equal("failure-policy-one@revision-one", humanInput.HumanInputConfiguration.FailurePolicyReference);
     }
 
     [Fact]
@@ -422,8 +422,8 @@ public sealed class GovernedLoopGraphRevisionStoreTests
             HumanInputPrivacyClass.Private,
             [new HumanInputEligibleRespondent("user-one", "role-one", "route-one")],
             new HumanInputResponsePolicy(HumanInputResponsePolicyKind.FirstValid, null, null),
-            "timeout-policy-one",
-            "failure-policy-one");
+            "timeout-policy-one@revision-one",
+            "failure-policy-one@revision-one");
         var graph = GraphWithEveryClosedEnum(configuration);
         var hash = graph.ExecutableHash;
         var captured = Assert.Single(graph.Nodes, node => node.Descriptor.Kind == GovernedLoopNodeKind.HumanInput).HumanInputConfiguration!;
@@ -1935,8 +1935,8 @@ public sealed class GovernedLoopGraphRevisionStoreTests
             HumanInputPrivacyClass.Private,
             [new HumanInputEligibleRespondent("user-one", "role-one", "route-one")],
             new HumanInputResponsePolicy(HumanInputResponsePolicyKind.FirstValid, null, null),
-            "timeout-policy-one",
-            "failure-policy-one");
+            "timeout-policy-one@revision-one",
+            "failure-policy-one@revision-one");
         var kinds = Enum.GetValues<GovernedLoopNodeKind>()
             .Where(value => value != GovernedLoopNodeKind.Unknown)
             .ToArray();
@@ -2039,8 +2039,8 @@ public sealed class GovernedLoopGraphRevisionStoreTests
             privacyClass,
             [new HumanInputEligibleRespondent("user-one", "role-one", "route-one"), new HumanInputEligibleRespondent("user-two", "role-two", "route-two")],
             responsePolicy,
-            "timeout-policy-one",
-            "failure-policy-one");
+            "timeout-policy-one@revision-one",
+            "failure-policy-one@revision-one");
 
     private static ContextualRoleRevisionPin Role(
         string roleId = "researcher",
