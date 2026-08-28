@@ -7,6 +7,11 @@ internal static class CrossProcessReadinessDiagnostics
 {
     private static readonly TimeSpan _childEvidenceReadTimeout = TimeSpan.FromSeconds(5);
 
+    // Covered VSTest children publish their operation marker before the XPlat collector flushes and
+    // the testhost exits. Keep that teardown allowance local to the two process-race callers rather
+    // than changing the repository-wide verifier or the nested operation decision bound.
+    internal static readonly TimeSpan CoverageChildTeardownTimeout = TimeSpan.FromSeconds(90);
+
     private const int MaximumChildEvidenceCharacters = 8_192;
 
     internal static async Task WaitForChildrenReadyAsync(
@@ -38,10 +43,16 @@ internal static class CrossProcessReadinessDiagnostics
         string operation,
         string stage,
         IReadOnlyList<CrossProcessReadinessChild> children,
-        TimeSpan timeout)
+        TimeSpan timeout,
+        TimeSpan? postResultTeardownTimeout = null)
     {
         Validate(operation, children, timeout);
-        var wait = Stopwatch.StartNew();
+        if (postResultTeardownTimeout is not null)
+        {
+            ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(postResultTeardownTimeout.Value, TimeSpan.Zero);
+        }
+
+        var resultWait = Stopwatch.StartNew();
         while (true)
         {
             var exited = children.Where(child => child.Process.HasExited).ToArray();
@@ -52,15 +63,45 @@ internal static class CrossProcessReadinessDiagnostics
                 Assert.Fail($"Cross-process {operation} child failed during {stage}. {DescribeMarkers(children)}{Environment.NewLine}{evidence}");
             }
 
+            if (children.All(child => File.Exists(child.ResultPath)))
+            {
+                break;
+            }
+
+            if (resultWait.Elapsed >= timeout)
+            {
+                var evidence = await StopAndReadChildEvidenceAsync(operation, stage + "-result-timeout", children);
+                Assert.Fail($"Cross-process {operation} children did not publish {stage} results within {timeout.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture)} seconds. {DescribeMarkers(children)}{Environment.NewLine}{evidence}");
+            }
+
+            await Task.Delay(10);
+        }
+
+        // A successful result marker only proves that the nested operation returned. For covered
+        // VSTest children, retain the process and its native completion handle until the collector
+        // has flushed and the host has exited. This prevents accepting a result while its coverage
+        // report is still being published and keeps the teardown bound explicit and fail-closed.
+        var teardownTimeout = postResultTeardownTimeout ?? timeout - resultWait.Elapsed;
+        var teardownWait = Stopwatch.StartNew();
+        while (true)
+        {
+            var exited = children.Where(child => child.Process.HasExited).ToArray();
+            var unsuccessful = exited.Where(child => child.Process.ExitCode != 0).ToArray();
+            if (unsuccessful.Length > 0)
+            {
+                var evidence = await StopAndReadChildEvidenceAsync(operation, stage + "-teardown-exit", children);
+                Assert.Fail($"Cross-process {operation} child failed during {stage} teardown. {DescribeMarkers(children)}{Environment.NewLine}{evidence}");
+            }
+
             if (exited.Length == children.Count)
             {
                 return;
             }
 
-            if (wait.Elapsed >= timeout)
+            if (teardownWait.Elapsed >= teardownTimeout)
             {
-                var evidence = await StopAndReadChildEvidenceAsync(operation, stage + "-timeout", children);
-                Assert.Fail($"Cross-process {operation} children did not complete {stage} within {timeout.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture)} seconds. {DescribeMarkers(children)}{Environment.NewLine}{evidence}");
+                var evidence = await StopAndReadChildEvidenceAsync(operation, stage + "-teardown-timeout", children);
+                Assert.Fail($"Cross-process {operation} children did not finish {stage} teardown within {teardownTimeout.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture)} seconds after publishing results. {DescribeMarkers(children)}{Environment.NewLine}{evidence}");
             }
 
             await Task.Delay(10);
