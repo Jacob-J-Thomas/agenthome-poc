@@ -26,6 +26,7 @@ using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Runtime.Models;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Tests.Support;
+using System.IO.Pipes;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -955,6 +956,66 @@ internal static class CustomLoopRuntimeTests
         Assert.Contains("workspaceExecutionBusy", await File.ReadAllTextAsync(receiptPath), StringComparison.Ordinal);
     }
 
+    internal static async Task Windows_faulted_active_broker_durably_records_and_replays_workspace_busy_outcome()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var firstDefinition = await CreateInvocationLoopAsync(
+            workspace,
+            includeInvokingConversation: false,
+            "create-runtime-faulted-busy-1",
+            "update-runtime-faulted-busy-1",
+            publishExitOutput: false);
+        var secondDefinition = await CreateInvocationLoopAsync(
+            workspace,
+            includeInvokingConversation: false,
+            "create-runtime-faulted-busy-2",
+            "update-runtime-faulted-busy-2",
+            publishExitOutput: false);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await using var runtime = await CreateRuntimeAsync(workspace);
+        var first = runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput(firstDefinition.Id, firstDefinition.DefinitionVersion, firstDefinition.ContentHash, "invoke-runtime-faulted-busy-1", "delayed fault owner"));
+        await WaitForAttemptStartAsync(workspace);
+        var descriptor = JsonNode.Parse(await File.ReadAllBytesAsync(paths.CustomLoopCancellationOwnerPath))!.AsObject();
+        var pipeName = descriptor["pipeName"]!.GetValue<string>();
+        using var occupiedSuccessor = new NamedPipeServerStream(pipeName, PipeDirection.InOut, 2, PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+        using var firstClient = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
+        using var secondClient = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
+        await firstClient.ConnectAsync().WaitAsync(TimeSpan.FromSeconds(2));
+        try
+        {
+            await secondClient.ConnectAsync().WaitAsync(TimeSpan.FromSeconds(2));
+        }
+        catch (Exception exception) when (exception is IOException or TimeoutException)
+        {
+            // The first client may already have selected the live listener and faulted the broker.
+        }
+
+        Assert.True(SpinWait.SpinUntil(() => !File.Exists(paths.CustomLoopCancellationOwnerPath), TimeSpan.FromSeconds(10)), "The faulted broker did not withdraw its descriptor.");
+        var busyInput = new LoopRunInvocationInput(secondDefinition.Id, secondDefinition.DefinitionVersion, secondDefinition.ContentHash, "invoke-runtime-faulted-busy-2", "record busy outcome after fault");
+
+        var busy = await runtime.InvokeCustomLoopAsync(busyInput);
+        var replay = await runtime.InvokeCustomLoopAsync(busyInput);
+
+        ReleaseAttempt(workspace);
+        var completed = await first;
+
+        Assert.Equal("WorkspaceExecutionBusy", busy.AdmissionStatus);
+        Assert.False(busy.WasDispatched);
+        Assert.Null(busy.Run);
+        Assert.Equal("WorkspaceExecutionBusy", replay.AdmissionStatus);
+        Assert.False(replay.WasDispatched);
+        Assert.Equal("Completed", completed.ExecutionStatus);
+        Assert.DoesNotContain(completed.Run!.Events, runEvent => runEvent.Kind == "ConversationPublicationStarted");
+        var receiptPath = Path.Combine(paths.CustomLoopInvocationOperationsPath, busyInput.OperationId + ".json");
+        Assert.Contains("workspaceExecutionBusy", await File.ReadAllTextAsync(receiptPath), StringComparison.Ordinal);
+    }
+
     internal static async Task Concurrent_same_operation_has_one_owner_and_replays_its_admitted_run_without_redispatch()
     {
         using var workspace = new TestWorkspace();
@@ -1171,17 +1232,20 @@ internal static class CustomLoopRuntimeTests
         Assert.False(summary.IsDeleted);
     }
 
-    private static async Task<LoopDefinitionSnapshot> CreateInvocationLoopAsync(TestWorkspace workspace, bool includeInvokingConversation, string createOperationId, string updateOperationId)
+    private static async Task<LoopDefinitionSnapshot> CreateInvocationLoopAsync(TestWorkspace workspace, bool includeInvokingConversation, string createOperationId, string updateOperationId, bool publishExitOutput = true)
     {
         var facade = new LoopAuthoringFacade(workspace.RootPath, new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath)), WorkspaceActors.Cli);
         var created = Assert.IsType<LoopDefinitionSnapshot>((await facade.CreateAsync(createOperationId)).Definition);
+        var exitPolicy = publishExitOutput
+            ? new LoopNodeContextPolicy(LoopContextPolicyMode.Inherit, null)
+            : new LoopNodeContextPolicy(LoopContextPolicyMode.Custom, new LoopContextPolicy(created.ContextDefaults.Exit.ContextIn, new LoopContextOutputPolicy(false, false)));
         var input = new LoopDefinitionInput(
             "Runtime test loop",
             "Executes one governed inference step.",
             new LoopTriggerPolicy(LoopTriggerPromptSource.Invocation, string.Empty, includeInvokingConversation),
             [new LoopInferenceStep(created.InferenceSteps.Single().Id, "Respond", "Return a concise response to the admitted trigger prompt.", new LoopNodeContextPolicy(LoopContextPolicyMode.Inherit, null))],
             [],
-            new LoopExitPolicy(0, created.ExitPolicy.DecisionInstruction, new LoopNodeContextPolicy(LoopContextPolicyMode.Inherit, null)));
+            new LoopExitPolicy(0, created.ExitPolicy.DecisionInstruction, exitPolicy));
         var updated = await facade.UpdateAsync(created.Id, created.DefinitionVersion, updateOperationId, input);
 
         Assert.Equal("Updated", updated.Status);
