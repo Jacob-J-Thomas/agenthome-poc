@@ -12,6 +12,7 @@ using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Loops.EffectAttempts;
 using EmbodySense.Tests.Support;
+using Xunit.Sdk;
 
 namespace EmbodySense.Core.Persistence.Tests.Loops.EffectAttempts;
 
@@ -147,12 +148,54 @@ public sealed class GovernedLoopEffectAttemptCrashRecoveryTests
     }
 
     [Fact]
+    public async Task External_process_loss_fails_fast_after_invalid_marker_worker_exit()
+    {
+        using var workspace = new TestWorkspace();
+        var callbackEvidencePath = workspace.File("invalid-marker-callbacks.log");
+        var readyPath = workspace.File("invalid-marker-ready.txt");
+        var resultPath = workspace.File("invalid-marker-result.txt");
+        var worker = StartWorker(
+            workspace.RootPath,
+            "invalid-marker",
+            CrashBoundary.BeforeIntentPublication,
+            callbackEvidencePath,
+            readyPath,
+            resultPath);
+        using (worker.EvidenceCancellation)
+        using (worker.Process)
+        {
+            var child = new Verification.CrossProcessReadinessChild(
+                "invalid-marker",
+                worker.Process,
+                readyPath,
+                resultPath,
+                worker.StandardOutputTask,
+                worker.StandardErrorTask,
+                worker.EvidenceCancellation);
+            await Verification.CrossProcessReadinessDiagnostics.WaitForChildrenReadyAsync(
+                "effect-attempt/invalid-marker",
+                [child],
+                _workerReadinessTimeout);
+
+            var wait = Stopwatch.StartNew();
+            var failure = await Assert.ThrowsAsync<FailException>(() => WaitForExpectedCrashAsync(child, worker, CrashBoundary.BeforeIntentPublication));
+
+            Assert.True(
+                wait.Elapsed < TimeSpan.FromSeconds(10),
+                $"The invalid-marker worker failure took {wait.Elapsed.TotalSeconds:0.###} seconds instead of failing after its terminal exit.");
+            Assert.Contains("Last readable marker: `invalid-marker`", failure.Message, StringComparison.Ordinal);
+            Assert.Equal(VstestCrashExitCode, worker.Process.ExitCode);
+        }
+    }
+
+    [Fact]
     public async Task Cross_process_effect_attempt_worker()
     {
         var workspaceRoot = Environment.GetEnvironmentVariable(WorkerWorkspaceVariable);
         if (string.IsNullOrWhiteSpace(workspaceRoot))
         {
             Assert.True(UsesExpectedTerminationVstestHost("crash"));
+            Assert.True(UsesExpectedTerminationVstestHost("invalid-marker"));
             Assert.False(UsesExpectedTerminationVstestHost("recover"));
             Assert.Throws<ArgumentOutOfRangeException>(() => UsesExpectedTerminationVstestHost("invalid"));
             return;
@@ -175,6 +218,12 @@ public sealed class GovernedLoopEffectAttemptCrashRecoveryTests
             resultPath);
 
         await File.WriteAllTextAsync(readyPath, mode);
+        if (string.Equals(mode, "invalid-marker", StringComparison.Ordinal))
+        {
+            await File.WriteAllTextAsync(resultPath, "invalid-marker");
+            Environment.Exit(TestHostCrashExitCode);
+            throw new InvalidOperationException("The invalid-marker worker did not terminate.");
+        }
 
         if (string.Equals(mode, "crash", StringComparison.Ordinal))
         {
@@ -240,7 +289,7 @@ public sealed class GovernedLoopEffectAttemptCrashRecoveryTests
     private static bool UsesExpectedTerminationVstestHost(string mode)
         => mode switch
         {
-            "crash" => true,
+            "crash" or "invalid-marker" => true,
             "recover" => false,
             _ => throw new ArgumentOutOfRangeException(nameof(mode), mode, "The effect-attempt worker mode is not supported.")
         };
@@ -255,29 +304,34 @@ public sealed class GovernedLoopEffectAttemptCrashRecoveryTests
         string? observedBoundary = null;
         while (true)
         {
-            var resultExists = File.Exists(worker.ResultPath);
-            if (resultExists)
+            if (File.Exists(worker.ResultPath))
             {
-                try
+                var observed = await TryReadWorkerResultMarkerAsync(worker.ResultPath);
+                if (observed is not null)
                 {
-                    observedBoundary = await File.ReadAllTextAsync(worker.ResultPath);
+                    observedBoundary = observed;
                     if (string.Equals(expectedBoundary, observedBoundary, StringComparison.Ordinal))
                     {
                         break;
                     }
                 }
-                catch (IOException)
-                {
-                }
-                catch (UnauthorizedAccessException)
-                {
-                }
             }
 
-            if (!resultExists && worker.Process.HasExited)
+            if (worker.Process.HasExited)
             {
+                var observed = await TryReadWorkerResultMarkerAsync(worker.ResultPath);
+                if (observed is not null)
+                {
+                    observedBoundary = observed;
+                    if (string.Equals(expectedBoundary, observedBoundary, StringComparison.Ordinal))
+                    {
+                        break;
+                    }
+                }
+
                 var evidence = await ReadWorkerEvidenceAsync(capture);
-                Assert.Fail($"Effect-attempt crash worker exited before publishing the `{boundary}` durable boundary result. {evidence}");
+                var lastReadableMarker = observedBoundary ?? "<unreadable>";
+                Assert.Fail($"Effect-attempt crash worker exited without publishing the `{boundary}` durable boundary result. Last readable marker: `{lastReadableMarker}`. {evidence}");
             }
             if (resultWait.Elapsed >= _workerResultTimeout)
             {
@@ -300,6 +354,22 @@ public sealed class GovernedLoopEffectAttemptCrashRecoveryTests
         }
 
         return await ReadWorkerEvidenceAsync(capture);
+    }
+
+    private static async Task<string?> TryReadWorkerResultMarkerAsync(string resultPath)
+    {
+        try
+        {
+            return await File.ReadAllTextAsync(resultPath);
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return null;
+        }
     }
 
     private static async Task AssertProcessSucceededAsync(WorkerProcessCapture capture)
