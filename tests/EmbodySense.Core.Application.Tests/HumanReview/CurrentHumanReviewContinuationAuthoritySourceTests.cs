@@ -121,6 +121,49 @@ public sealed class CurrentHumanReviewContinuationAuthoritySourceTests
         Assert.Equal(HumanReviewContinuationAuthorityReadStatus.Stale, result.Status);
     }
 
+    [Fact]
+    public async Task Active_revalidation_with_duplicate_admitted_pins_is_stale()
+    {
+        var context = await GovernedLoopSequentialRunMaterializerTests.ContextAsync();
+        var admittedPins = context.AdapterBinding.AdmissionReceipt.Evidence.CapabilityAdmission.Pins;
+        var capabilities = new TestCapabilityAdmissionService
+        {
+            RevalidationResult = new CapabilityRevalidationResult(
+                true,
+                [.. admittedPins, admittedPins[0]],
+                "Duplicated admitted capability pin.",
+                CapabilityRevalidationStatus.Active),
+        };
+        var source = new CurrentHumanReviewContinuationAuthoritySource(GovernedLoopAdmissionTestHarness.Create(), capabilities);
+
+        var result = await source.ReadAsync(new HumanReviewContinuationAuthorityQuery(Binding(context), context.AdapterBinding, context.Artifact));
+
+        Assert.Equal(HumanReviewContinuationAuthorityReadStatus.Stale, result.Status);
+    }
+
+    [Fact]
+    public async Task Active_revalidation_with_substituted_admitted_pin_is_stale()
+    {
+        var context = await GovernedLoopSequentialRunMaterializerTests.ContextAsync();
+        var admittedPins = context.AdapterBinding.AdmissionReceipt.Evidence.CapabilityAdmission.Pins;
+        var admittedPin = admittedPins[0];
+        Assert.True(CapabilityDescriptorHash.TryParse($"sha256:{Hash('a')}", out var substitutedHash, out _));
+        var substitutedPin = admittedPin with { DescriptorIdentity = admittedPin.DescriptorIdentity with { Hash = substitutedHash! } };
+        var capabilities = new TestCapabilityAdmissionService
+        {
+            RevalidationResult = new CapabilityRevalidationResult(
+                true,
+                [substitutedPin, .. admittedPins.Skip(1)],
+                "Substituted capability pin.",
+                CapabilityRevalidationStatus.Active),
+        };
+        var source = new CurrentHumanReviewContinuationAuthoritySource(GovernedLoopAdmissionTestHarness.Create(), capabilities);
+
+        var result = await source.ReadAsync(new HumanReviewContinuationAuthorityQuery(Binding(context), context.AdapterBinding, context.Artifact));
+
+        Assert.Equal(HumanReviewContinuationAuthorityReadStatus.Stale, result.Status);
+    }
+
     private static HumanReviewBinding Binding(GovernedLoopSequentialRunMaterializerTests.TestContext context)
         => Binding(context.Receipt, context.AdapterBinding);
 

@@ -212,8 +212,11 @@ public sealed class CurrentHumanReviewContinuationAuthoritySource : IHumanReview
         }
         if (capability.Status is not CapabilityRevalidationStatus.Active
             || !capability.IsValid
-            || capability.ObservedPins is { Count: > 0 }
-            || !capability.EffectivePins.ToHashSet().SetEquals(admitted.Evidence.CapabilityAdmission.Pins))
+            || capability.EffectivePins is null
+            || capability.EffectivePins.Count != admitted.Evidence.CapabilityAdmission.Pins.Count
+            || !capability.EffectivePins.All(pin => pin is not null && admitted.Evidence.CapabilityAdmission.Pins.Contains(pin))
+            || capability.EffectivePins.Select(pin => pin.DescriptorIdentity.Id.Value).Distinct(StringComparer.Ordinal).Count() != capability.EffectivePins.Count
+            || capability.ObservedPins is { Count: > 0 })
         {
             return HumanReviewContinuationAuthorityReadStatus.Stale;
         }
