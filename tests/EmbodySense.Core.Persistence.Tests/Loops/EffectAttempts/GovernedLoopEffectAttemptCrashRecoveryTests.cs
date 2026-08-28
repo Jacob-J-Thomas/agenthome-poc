@@ -21,11 +21,16 @@ public sealed class GovernedLoopEffectAttemptCrashRecoveryTests
     private const string WorkerModeVariable = "EMBODYSENSE_EFFECT_ATTEMPT_WORKER_MODE";
     private const string WorkerBoundaryVariable = "EMBODYSENSE_EFFECT_ATTEMPT_WORKER_BOUNDARY";
     private const string WorkerCallbackEvidenceVariable = "EMBODYSENSE_EFFECT_ATTEMPT_WORKER_CALLBACK_EVIDENCE";
+    private const string WorkerReadyVariable = "EMBODYSENSE_EFFECT_ATTEMPT_WORKER_READY";
     private const string WorkerResultVariable = "EMBODYSENSE_EFFECT_ATTEMPT_WORKER_RESULT";
+    private const int MaximumWorkerEvidenceCharacters = 8_192;
     private const int VstestCrashExitCode = 1;
     private const int TestHostCrashExitCode = 73;
-    private const int WorkerExitTimeoutSeconds = 60;
     private static readonly DateTimeOffset _preparedAtUtc = DateTimeOffset.Parse("2026-08-12T20:00:00Z");
+    private static readonly TimeSpan _workerReadinessTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan _workerResultTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan _workerExitTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan _workerEvidenceReadTimeout = TimeSpan.FromSeconds(5);
 
     [Theory]
     [InlineData(
@@ -61,6 +66,9 @@ public sealed class GovernedLoopEffectAttemptCrashRecoveryTests
     {
         using var workspace = new TestWorkspace();
         var callbackEvidencePath = workspace.File("effect-dispatch-callbacks.log");
+        var crashReadyPath = workspace.File("effect-crash-ready.txt");
+        var crashResultPath = workspace.File("effect-crash-result.txt");
+        var recoveryReadyPath = workspace.File("effect-recovery-ready.txt");
         var recoveryResultPath = workspace.File("effect-recovery-result.txt");
 
         using (var crashWorker = StartWorker(
@@ -68,11 +76,17 @@ public sealed class GovernedLoopEffectAttemptCrashRecoveryTests
                    "crash",
                    boundary,
                    callbackEvidencePath,
-                   recoveryResultPath))
+                   crashReadyPath,
+                   crashResultPath))
         {
-            var crash = await WaitForExitAsync(crashWorker);
+            var crash = new Verification.CrossProcessReadinessChild("crash", crashWorker, crashReadyPath, crashResultPath);
+            await Verification.CrossProcessReadinessDiagnostics.WaitForChildrenReadyAsync(
+                "effect-attempt/crash",
+                [crash],
+                _workerReadinessTimeout);
+            var evidence = await WaitForExpectedCrashAsync(crash, boundary);
             Assert.Equal(VstestCrashExitCode, crashWorker.ExitCode);
-            Assert.Contains("test run was aborted", crash.StandardError, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("test run was aborted", evidence.StandardError, StringComparison.OrdinalIgnoreCase);
         }
 
         var paths = new WorkspacePaths(workspace.RootPath);
@@ -89,8 +103,20 @@ public sealed class GovernedLoopEffectAttemptCrashRecoveryTests
                    "recover",
                    boundary,
                    callbackEvidencePath,
+                   recoveryReadyPath,
                    recoveryResultPath))
         {
+            var recovery = new Verification.CrossProcessReadinessChild("recover", recoveryWorker, recoveryReadyPath, recoveryResultPath);
+            await Verification.CrossProcessReadinessDiagnostics.WaitForChildrenReadyAsync(
+                "effect-attempt/recover",
+                [recovery],
+                _workerReadinessTimeout);
+            await Verification.CrossProcessReadinessDiagnostics.WaitForChildrenCompletedAsync(
+                "effect-attempt/recover",
+                "durable recovery result",
+                [recovery],
+                _workerResultTimeout,
+                Verification.CrossProcessReadinessDiagnostics.CoverageChildTeardownTimeout);
             await AssertProcessSucceededAsync(recoveryWorker);
         }
 
@@ -121,11 +147,16 @@ public sealed class GovernedLoopEffectAttemptCrashRecoveryTests
                 ?? throw new InvalidOperationException("The effect-attempt crash boundary is required."));
         var callbackEvidencePath = Environment.GetEnvironmentVariable(WorkerCallbackEvidenceVariable)
             ?? throw new InvalidOperationException("The effect-attempt callback evidence path is required.");
+        var readyPath = Environment.GetEnvironmentVariable(WorkerReadyVariable)
+            ?? throw new InvalidOperationException("The effect-attempt worker readiness path is required.");
         var resultPath = Environment.GetEnvironmentVariable(WorkerResultVariable)
             ?? throw new InvalidOperationException("The effect-attempt recovery result path is required.");
         var adapter = new CrashRestartProtocolAdapter(
             new GovernedLoopEffectAttemptStore(new WorkspacePaths(workspaceRoot)),
-            callbackEvidencePath);
+            callbackEvidencePath,
+            resultPath);
+
+        await File.WriteAllTextAsync(readyPath, mode);
 
         if (string.Equals(mode, "crash", StringComparison.Ordinal))
         {
@@ -141,11 +172,12 @@ public sealed class GovernedLoopEffectAttemptCrashRecoveryTests
         await File.WriteAllTextAsync(resultPath, recovered.Payload.Phase.ToString());
     }
 
-    private static Process StartWorker(
+    private static Verification.CrossProcessProcess StartWorker(
         string workspaceRoot,
         string mode,
         CrashBoundary boundary,
         string callbackEvidencePath,
+        string readyPath,
         string resultPath)
     {
         var startInfo = new ProcessStartInfo("dotnet")
@@ -162,9 +194,9 @@ public sealed class GovernedLoopEffectAttemptCrashRecoveryTests
         startInfo.Environment[WorkerModeVariable] = mode;
         startInfo.Environment[WorkerBoundaryVariable] = boundary.ToString();
         startInfo.Environment[WorkerCallbackEvidenceVariable] = callbackEvidencePath;
+        startInfo.Environment[WorkerReadyVariable] = readyPath;
         startInfo.Environment[WorkerResultVariable] = resultPath;
-        return Process.Start(startInfo)
-            ?? throw new InvalidOperationException("The effect-attempt crash/restart test worker did not start.");
+        return Verification.CrossProcessProcessOwnership.Start(startInfo);
     }
 
     private static void AddWorkerVstestArguments(ProcessStartInfo startInfo, string mode)
@@ -189,33 +221,108 @@ public sealed class GovernedLoopEffectAttemptCrashRecoveryTests
             _ => throw new ArgumentOutOfRangeException(nameof(mode), mode, "The effect-attempt worker mode is not supported.")
         };
 
-    private static async Task<(string StandardOutput, string StandardError)> WaitForExitAsync(Process process)
+    private static async Task<(string StandardOutput, string StandardError)> WaitForExpectedCrashAsync(
+        Verification.CrossProcessReadinessChild worker,
+        CrashBoundary boundary)
     {
-        var outputTask = process.StandardOutput.ReadToEndAsync();
-        var errorTask = process.StandardError.ReadToEndAsync();
+        var resultWait = Stopwatch.StartNew();
+        while (!File.Exists(worker.ResultPath))
+        {
+            if (worker.Process.HasExited)
+            {
+                var evidence = await ReadWorkerEvidenceAsync(worker);
+                Assert.Fail($"Effect-attempt crash worker exited before publishing the `{boundary}` durable boundary result. {evidence}");
+            }
+            if (resultWait.Elapsed >= _workerResultTimeout)
+            {
+                var evidence = await StopAndReadWorkerEvidenceAsync(worker);
+                Assert.Fail($"Effect-attempt crash worker did not publish the `{boundary}` durable boundary result within {_workerResultTimeout.TotalSeconds:0} seconds. {evidence}");
+            }
+
+            await Task.Delay(10);
+        }
+
+        Assert.Equal(boundary.ToString(), await File.ReadAllTextAsync(worker.ResultPath));
         try
         {
-            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(WorkerExitTimeoutSeconds));
+            await worker.Process.WaitForExitAsync().WaitAsync(_workerExitTimeout);
         }
-        finally
+        catch (TimeoutException)
         {
-            if (!process.HasExited)
-            {
-                process.Kill(entireProcessTree: true);
-                await process.WaitForExitAsync();
-            }
+            var evidence = await StopAndReadWorkerEvidenceAsync(worker);
+            Assert.Fail($"Effect-attempt crash worker published the `{boundary}` durable boundary result but did not exit within {_workerExitTimeout.TotalSeconds:0} seconds. {evidence}");
         }
 
-        return (await outputTask, await errorTask);
+        return await ReadWorkerEvidenceAsync(worker);
     }
 
-    private static async Task AssertProcessSucceededAsync(Process process)
+    private static async Task AssertProcessSucceededAsync(Verification.CrossProcessProcess process)
     {
-        var output = await WaitForExitAsync(process);
+        var output = await ReadWorkerEvidenceAsync(process);
         Assert.True(
             process.ExitCode == 0,
             $"Effect-attempt recovery worker exited with `{process.ExitCode}`.{Environment.NewLine}{output.StandardError}{Environment.NewLine}{output.StandardOutput}");
     }
+
+    private static async Task<(string StandardOutput, string StandardError)> ReadWorkerEvidenceAsync(Verification.CrossProcessReadinessChild worker)
+        => await ReadWorkerEvidenceAsync(worker.Process);
+
+    private static async Task<(string StandardOutput, string StandardError)> ReadWorkerEvidenceAsync(Verification.CrossProcessProcess process)
+    {
+        using var cancellation = new CancellationTokenSource(_workerEvidenceReadTimeout);
+        var outputTask = ReadWorkerStreamAsync(process.ReadStandardOutputToEndAsync(cancellation.Token));
+        var errorTask = ReadWorkerStreamAsync(process.ReadStandardErrorToEndAsync(cancellation.Token));
+        await Task.WhenAll(outputTask, errorTask);
+        return (outputTask.Result, errorTask.Result);
+    }
+
+    private static async Task<string> ReadWorkerStreamAsync(Task<string> streamTask)
+    {
+        try
+        {
+            return BoundWorkerEvidence(await streamTask);
+        }
+        catch (OperationCanceledException)
+        {
+            return "<timed-out>";
+        }
+        catch (IOException)
+        {
+            return "<unavailable>";
+        }
+        catch (ObjectDisposedException)
+        {
+            return "<unavailable>";
+        }
+    }
+
+    private static async Task<string> StopAndReadWorkerEvidenceAsync(Verification.CrossProcessReadinessChild worker)
+    {
+        try
+        {
+            worker.Ownership.TerminateProcessTree();
+        }
+        catch (InvalidOperationException) when (worker.Process.HasExited)
+        {
+        }
+
+        try
+        {
+            await worker.Process.WaitForExitAsync().WaitAsync(_workerEvidenceReadTimeout);
+        }
+        catch (TimeoutException)
+        {
+        }
+
+        var evidence = await ReadWorkerEvidenceAsync(worker);
+        var state = worker.Process.HasExited ? $"exited exit={worker.Process.ExitCode}" : "still-running exit=<unavailable>";
+        return $"pid={worker.Process.Id} state={state} ready={File.Exists(worker.ReadyPath)} result={File.Exists(worker.ResultPath)} stdout={evidence.StandardOutput} stderr={evidence.StandardError}";
+    }
+
+    private static string BoundWorkerEvidence(string evidence)
+        => evidence.Length <= MaximumWorkerEvidenceCharacters
+            ? evidence
+            : "<truncated>" + evidence[^MaximumWorkerEvidenceCharacters..];
 
     private static GovernedLoopEffectAttempt? ReadDurableHead(WorkspacePaths paths)
     {
@@ -285,13 +392,14 @@ public sealed class GovernedLoopEffectAttemptCrashRecoveryTests
 
     private sealed class CrashRestartProtocolAdapter(
         IGovernedLoopEffectAttemptStore store,
-        string callbackEvidencePath)
+        string callbackEvidencePath,
+        string crashResultPath)
     {
         public async Task CrashAsync(CrashBoundary boundary)
         {
             if (boundary == CrashBoundary.BeforeIntentPublication)
             {
-                TerminateWorker();
+                await TerminateWorkerAsync(boundary);
             }
 
             var begun = RequireOwner(await store.BeginAsync(Prepare()));
@@ -299,7 +407,7 @@ public sealed class GovernedLoopEffectAttemptCrashRecoveryTests
             var current = begun.Attempt!;
             if (boundary == CrashBoundary.AfterIntentBeforeBoundary)
             {
-                TerminateWorker();
+                await TerminateWorkerAsync(boundary);
             }
 
             current = await AttachAuthorityAsync(current, lease);
@@ -307,13 +415,13 @@ public sealed class GovernedLoopEffectAttemptCrashRecoveryTests
             AppendCallbackEvidence();
             if (boundary == CrashBoundary.AfterBoundaryBeforeOutcome)
             {
-                TerminateWorker();
+                await TerminateWorkerAsync(boundary);
             }
 
             current = await ObserveOutcomeAsync(current, lease);
             if (boundary == CrashBoundary.AfterOutcomeBeforeCommit)
             {
-                TerminateWorker();
+                await TerminateWorkerAsync(boundary);
             }
 
             _ = await CommitAsync(current, lease);
@@ -437,8 +545,9 @@ public sealed class GovernedLoopEffectAttemptCrashRecoveryTests
             return Assert.IsType<GovernedLoopEffectAttempt>(result.Attempt);
         }
 
-        private static void TerminateWorker()
+        private async Task TerminateWorkerAsync(CrashBoundary boundary)
         {
+            await File.WriteAllTextAsync(crashResultPath, boundary.ToString());
             Environment.Exit(TestHostCrashExitCode);
             throw new InvalidOperationException("The test host did not terminate.");
         }
