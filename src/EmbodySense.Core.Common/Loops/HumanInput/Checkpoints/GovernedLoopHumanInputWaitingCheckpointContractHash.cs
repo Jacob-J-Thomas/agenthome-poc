@@ -5,6 +5,7 @@ using System.Text;
 using EmbodySense.Core.Common.HumanInput.Models;
 using EmbodySense.Core.Common.HumanInput.Responses.Models;
 using EmbodySense.Core.Common.Loops.HumanInput.Checkpoints.Models;
+using EmbodySense.Core.Common.Loops.HumanInput.Policies;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 
 namespace EmbodySense.Core.Common.Loops.HumanInput.Checkpoints;
@@ -23,6 +24,7 @@ public static class GovernedLoopHumanInputWaitingCheckpointContractHash
         Append(builder, checkpoint.SchemaVersion);
         AppendBinding(builder, checkpoint.Binding);
         AppendConfiguration(builder, checkpoint.NodeConfiguration);
+        AppendResolvedPolicy(builder, checkpoint.ResolvedPolicy);
         AppendRequest(builder, checkpoint.Request);
         Append(builder, (int)checkpoint.Posture);
         AppendEvidenceHistory(builder, checkpoint.Evidence);
@@ -37,8 +39,8 @@ public static class GovernedLoopHumanInputWaitingCheckpointContractHash
     {
         ArgumentNullException.ThrowIfNull(checkpoint);
         var evidence = checkpoint.Evidence.IsDefault ? default : checkpoint.Evidence.Select(Apply).ToImmutableArray();
-        var prepared = new GovernedLoopHumanInputWaitingCheckpoint(checkpoint.SchemaVersion, checkpoint.Binding, checkpoint.NodeConfiguration, checkpoint.Request, checkpoint.Posture, evidence, string.Empty);
-        return new GovernedLoopHumanInputWaitingCheckpoint(prepared.SchemaVersion, prepared.Binding, prepared.NodeConfiguration, prepared.Request, prepared.Posture, prepared.Evidence, ComputeCheckpointHash(prepared));
+        var prepared = new GovernedLoopHumanInputWaitingCheckpoint(checkpoint.SchemaVersion, checkpoint.Binding, checkpoint.NodeConfiguration, checkpoint.ResolvedPolicy, checkpoint.Request, checkpoint.Posture, evidence, string.Empty);
+        return new GovernedLoopHumanInputWaitingCheckpoint(prepared.SchemaVersion, prepared.Binding, prepared.NodeConfiguration, prepared.ResolvedPolicy, prepared.Request, prepared.Posture, prepared.Evidence, ComputeCheckpointHash(prepared));
     }
 
     /// <summary>Gets whether a checkpoint retains exact nested evidence hashes and its canonical checkpoint hash.</summary>
@@ -207,6 +209,28 @@ public static class GovernedLoopHumanInputWaitingCheckpointContractHash
         AppendResponsePolicy(builder, value.ResponsePolicy);
         Append(builder, value.TimeoutPolicyReference);
         Append(builder, value.FailurePolicyReference);
+    }
+
+    private static void AppendResolvedPolicy(StringBuilder builder, HumanInputPolicyResolutionSnapshot? value)
+    {
+        if (value is null)
+        {
+            Append(builder, null);
+            return;
+        }
+
+        Append(builder, value.SchemaVersion);
+        Append(builder, value.WorkspaceId);
+        Append(builder, value.GraphId);
+        Append(builder, value.GraphRevisionId);
+        Append(builder, value.NodeId);
+        Append(builder, value.ActorId);
+        Append(builder, value.TimeoutPolicy.ContentHash);
+        Append(builder, value.FailurePolicy.ContentHash);
+        Append(builder, value.ResolvedAtUtc.ToString("O", CultureInfo.InvariantCulture));
+        Append(builder, value.ExpiresAtUtc.ToString("O", CultureInfo.InvariantCulture));
+        Append(builder, (int)value.TerminalDisposition);
+        Append(builder, value.ResolutionHash);
     }
 
     private static void AppendRequest(StringBuilder builder, HumanInputRequest? value)

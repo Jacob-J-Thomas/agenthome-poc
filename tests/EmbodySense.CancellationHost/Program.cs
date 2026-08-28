@@ -226,9 +226,14 @@ if (args is ["credential-create-payload-crash", var payloadWorkspaceRoot, var tr
     return await CrashCredentialPayloadCreateAsync(payloadWorkspaceRoot, trustProfile, payloadOperationId, consentId, referencePayload, bindingPayload, payloadLocatorMarker, payloadProviderEntryMarker);
 }
 
-if (args is [var cancellationWorkspaceRoot, var cancellationRunId])
+if (args is ["cancellation-host", var cancellationWorkspaceRoot, var cancellationRunId, var cancellationReadyPath])
 {
-    return await HostCancellationAsync(cancellationWorkspaceRoot, cancellationRunId);
+    return await HostCancellationAsync(cancellationWorkspaceRoot, cancellationRunId, cancellationReadyPath);
+}
+
+if (args is [var directCancellationWorkspaceRoot, var directCancellationRunId])
+{
+    return await HostCancellationAsync(directCancellationWorkspaceRoot, directCancellationRunId);
 }
 
 return 2;
@@ -451,13 +456,18 @@ static async Task<int> HoldContextualRoleMutationAsync(string workspaceRoot)
     return result.Status == ContextualRoleRevisionMutationStatus.Accepted ? 0 : 3;
 }
 
-static async Task<int> HostCancellationAsync(string workspaceRoot, string runId)
+static async Task<int> HostCancellationAsync(string workspaceRoot, string runId, string? readinessPath = null)
 {
     var paths = new WorkspacePaths(workspaceRoot);
     await using var gate = new CustomLoopWorkspaceExecutionGate(paths);
     using var cancellation = new CancellationTokenSource();
     using var registration = gate.RegisterActiveAttempt(runId, cancellation);
-    Console.WriteLine("ready");
+    if (readinessPath is not null)
+    {
+        await File.WriteAllTextAsync(readinessPath, "broker-ready");
+    }
+
+    Console.WriteLine("broker-ready");
     await Console.Out.FlushAsync();
     try
     {

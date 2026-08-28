@@ -28,5 +28,8 @@ public sealed class CustomLoopRuntimeTestsPublicationAndConcurrency
     public Task Concurrent_different_loop_is_durably_rejected_as_workspace_busy_without_context_capture_or_hidden_queueing() => CustomLoopRuntimeTests.Concurrent_different_loop_is_durably_rejected_as_workspace_busy_without_context_capture_or_hidden_queueing();
 
     [Fact]
+    public Task Windows_faulted_active_broker_durably_records_and_replays_workspace_busy_outcome() => CustomLoopRuntimeTests.Windows_faulted_active_broker_durably_records_and_replays_workspace_busy_outcome();
+
+    [Fact]
     public Task Paused_run_releases_workspace_ownership_and_resume_busy_is_replayed_without_mutation_or_dispatch() => CustomLoopRuntimeTests.Paused_run_releases_workspace_ownership_and_resume_busy_is_replayed_without_mutation_or_dispatch();
 }

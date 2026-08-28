@@ -100,6 +100,6 @@ public sealed class GovernedLoopHumanInputNodeCatalogContractTests
             HumanInputPrivacyClass.Private,
             [new HumanInputEligibleRespondent("user-one", "role-one", "route-one")],
             new HumanInputResponsePolicy(HumanInputResponsePolicyKind.FirstValid, null, null),
-            "timeout-policy-one",
-            "failure-policy-one");
+            "timeout-policy-one@revision-one",
+            "failure-policy-one@revision-one");
 }

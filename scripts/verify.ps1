@@ -421,7 +421,7 @@ try {
         }
         $coverageContractArguments += @("-File", (Join-Path $testsPath "scripts\verify-coverage.tests.ps1"))
         Add-VerificationParallelPhase -Name "contract-verify-coverage.tests" -FileName $powerShellExecutable -Arguments $coverageContractArguments -TimeoutSeconds 120 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "verify-coverage.tests.ps1.log") -EstimatedDurationSeconds 75 -Weight $preflightCoverageContractWeight -ResourceClass "ProcessHeavy"
-        Write-Output "VERIFY_PARALLEL_PLAN kind=pull-request-build-overlap phases=$($script:VerificationParallelPhases.Count) requested_workers=$MaximumTestWorkers maximum_workers=$preflightMaximumWorkers maximum_resource_capacity=$preflightResourceCapacity maximum_process_heavy=$preflightMaximumProcessHeavyWorkers maximum_cpu_bound=1 build_weight=$preflightProcessHeavyWeight coverage_contract_weight=$preflightCoverageContractWeight frontend_weight=$preflightFrontendWeight ordinary_contract_weight=1 ordinary_contracts=$($preflightBuildOverlapContractScripts.Count) coverage_after_build_by_singleton_lpt=true configuration=$Configuration"
+        Write-Output "VERIFY_PARALLEL_PLAN kind=pull-request-build-overlap phases=$($script:VerificationParallelPhases.Count) requested_workers=$MaximumTestWorkers maximum_workers=$preflightMaximumWorkers maximum_resource_capacity=$preflightResourceCapacity maximum_process_heavy=$preflightMaximumProcessHeavyWorkers maximum_cpu_bound=1 build_weight=$preflightProcessHeavyWeight coverage_contract_weight=$preflightCoverageContractWeight coverage_contract_isolation=full-resource-capacity frontend_weight=$preflightFrontendWeight ordinary_contract_weight=1 ordinary_contracts=$($preflightBuildOverlapContractScripts.Count) coverage_after_build_by_singleton_lpt=true configuration=$Configuration"
         Invoke-VerificationParallelPhases -MaximumWorkers $preflightMaximumWorkers -MaximumResourceCapacity $preflightResourceCapacity -MaximumProcessHeavyWorkers $preflightMaximumProcessHeavyWorkers -MaximumCpuBoundWorkers 1 | Out-Null
         Reset-VerificationParallelPhaseState
         $script:LastCompletedVerificationPhase = "pull-request-build-overlap"
@@ -563,6 +563,7 @@ try {
     }
     Write-Output "VERIFY_ARTIFACT_ISOLATION_COMPLETE projects=$($isolations.Count) lanes=$($testResults.Count)"
 
+    # TODO(https://github.com/Jacob-J-Thomas/agenthome-poc/issues/430): make per-platform behavior inventory explicit while Windows remains authoritative for coverage.
     $inventoryArguments = @("-NoProfile")
     if ($runningOnWindows) { $inventoryArguments += @("-ExecutionPolicy", "Bypass") }
     $inventoryArguments += @("-File", (Join-Path $PSScriptRoot "verify-test-inventory.ps1"), "-ExpectedInventoryPath", $verificationInventoryPath, "-ResultsRoot", $standardTestResultsRoot, "-ReportPath", $verificationInventoryReportPath)
