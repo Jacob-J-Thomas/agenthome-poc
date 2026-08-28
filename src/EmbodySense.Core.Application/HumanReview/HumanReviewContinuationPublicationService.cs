@@ -78,6 +78,12 @@ public sealed class HumanReviewContinuationPublicationService : IHumanReviewCont
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
+                var reconciled = await ReconcileCanceledPublicationAsync(runId).ConfigureAwait(false);
+                if (reconciled is not null)
+                {
+                    return reconciled;
+                }
+
                 throw;
             }
             catch
@@ -102,6 +108,21 @@ public sealed class HumanReviewContinuationPublicationService : IHumanReviewCont
                 ? Result(HumanReviewContinuationStoreMutationStatus.Replayed)
                 : Result(HumanReviewContinuationStoreMutationStatus.Conflict)
             : Result(HumanReviewContinuationStoreMutationStatus.Unavailable);
+    }
+
+    private async Task<HumanReviewContinuationStoreMutationResult?> ReconcileCanceledPublicationAsync(string runId)
+    {
+        var read = await ReadAsync(runId, CancellationToken.None).ConfigureAwait(false);
+        if (read.Status != HumanReviewContinuationStoreMutationStatus.Committed || read.Run is null || !TryBuild(read.Run, out var expected))
+        {
+            return null;
+        }
+
+        return read.Run.HumanReview?.Continuation is { } retained
+            ? HasExactPublishedWake(retained, expected!)
+                ? Result(HumanReviewContinuationStoreMutationStatus.Replayed)
+                : Result(HumanReviewContinuationStoreMutationStatus.Conflict)
+            : null;
     }
 
     private async Task<(HumanReviewContinuationStoreMutationStatus Status, CustomLoopRunRecord? Run)> ReadAsync(string runId, CancellationToken cancellationToken)
