@@ -111,6 +111,54 @@ public sealed class HumanReviewContinuationRunStoreTests
         Assert.Null(durable.HumanReview?.Continuation);
     }
 
+    [Theory]
+    [InlineData(null, "null")]
+    [InlineData(HumanReviewContinuationStoreMutationStatus.Unknown, "status-zero")]
+    [InlineData(HumanReviewContinuationStoreMutationStatus.Unavailable, "status-six")]
+    public async Task Null_unknown_and_unavailable_post_commit_responses_reconcile_the_exact_canonical_wake_before_cancellation(HumanReviewContinuationStoreMutationStatus? uncertainStatus, string identity)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var approved = await CreateApprovedRunAsync(paths, "continuation-cancel-uncertain-" + identity);
+        using var cancellation = new CancellationTokenSource();
+        using var store = new CustomLoopRunStore(paths);
+        var canonical = new HumanReviewContinuationRunStore(store);
+        var cancelled = new CancellationHumanReviewContinuationPublicationStore(
+            canonical,
+            cancellation,
+            afterCommit: _ => uncertainStatus is { } status ? new HumanReviewContinuationStoreMutationResult(status) : null);
+        var publisher = new HumanReviewContinuationPublicationService(store, cancelled);
+
+        var result = await publisher.PublishAsync(approved.Id, cancellation.Token);
+        var durable = Assert.IsType<CustomLoopRunRecord>(await store.GetAsync(approved.Id));
+
+        Assert.True(cancellation.IsCancellationRequested);
+        Assert.Equal(HumanReviewContinuationStoreMutationStatus.Replayed, result.Status);
+        Assert.Equal(1, cancelled.CommitCount);
+        Assert.NotNull(durable.HumanReview?.Continuation);
+    }
+
+    [Fact]
+    public async Task Non_cancellation_exception_after_a_durable_publication_reconciles_the_exact_canonical_wake_before_cancellation()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var approved = await CreateApprovedRunAsync(paths, "continuation-cancel-exception");
+        using var cancellation = new CancellationTokenSource();
+        using var store = new CustomLoopRunStore(paths);
+        var canonical = new HumanReviewContinuationRunStore(store);
+        var cancelled = new CancellationHumanReviewContinuationPublicationStore(canonical, cancellation, afterCommit: _ => throw new IOException("The canonical mutation response was lost."));
+        var publisher = new HumanReviewContinuationPublicationService(store, cancelled);
+
+        var result = await publisher.PublishAsync(approved.Id, cancellation.Token);
+        var durable = Assert.IsType<CustomLoopRunRecord>(await store.GetAsync(approved.Id));
+
+        Assert.True(cancellation.IsCancellationRequested);
+        Assert.Equal(HumanReviewContinuationStoreMutationStatus.Replayed, result.Status);
+        Assert.Equal(1, cancelled.CommitCount);
+        Assert.NotNull(durable.HumanReview?.Continuation);
+    }
+
     [Fact]
     public async Task Publication_after_a_later_conflict_receipt_keeps_the_deterministic_wake_and_exactly_replays()
     {

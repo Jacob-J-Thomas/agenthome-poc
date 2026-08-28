@@ -78,10 +78,10 @@ public sealed class HumanReviewContinuationPublicationService : IHumanReviewCont
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                var reconciled = await ReconcileCanceledPublicationAsync(runId).ConfigureAwait(false);
-                if (reconciled is not null)
+                var cancellationReconciliation = await ReconcileUncertainPublicationAsync(runId).ConfigureAwait(false);
+                if (cancellationReconciliation is not null)
                 {
-                    return reconciled;
+                    return cancellationReconciliation;
                 }
 
                 throw;
@@ -90,6 +90,14 @@ public sealed class HumanReviewContinuationPublicationService : IHumanReviewCont
             {
                 // The canonical reread below decides whether the write committed, diverged, or remained unavailable.
             }
+
+            var reconciled = await ReconcileUncertainPublicationAsync(runId).ConfigureAwait(false);
+            if (reconciled is not null)
+            {
+                return reconciled;
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
         }
 
         var finalRead = await ReadAsync(runId, cancellationToken).ConfigureAwait(false);
@@ -110,7 +118,7 @@ public sealed class HumanReviewContinuationPublicationService : IHumanReviewCont
             : Result(HumanReviewContinuationStoreMutationStatus.Unavailable);
     }
 
-    private async Task<HumanReviewContinuationStoreMutationResult?> ReconcileCanceledPublicationAsync(string runId)
+    private async Task<HumanReviewContinuationStoreMutationResult?> ReconcileUncertainPublicationAsync(string runId)
     {
         var read = await ReadAsync(runId, CancellationToken.None).ConfigureAwait(false);
         if (read.Status != HumanReviewContinuationStoreMutationStatus.Committed || read.Run is null || !TryBuild(read.Run, out var expected))

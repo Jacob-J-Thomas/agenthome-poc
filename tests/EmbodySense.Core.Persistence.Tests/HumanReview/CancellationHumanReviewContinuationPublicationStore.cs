@@ -9,12 +9,18 @@ internal sealed class CancellationHumanReviewContinuationPublicationStore : IHum
     private readonly IHumanReviewContinuationPublicationStore _inner;
     private readonly CancellationTokenSource _cancellation;
     private readonly bool _cancelBeforeCommit;
+    private readonly Func<HumanReviewContinuationStoreMutationResult, HumanReviewContinuationStoreMutationResult?>? _afterCommit;
 
-    public CancellationHumanReviewContinuationPublicationStore(IHumanReviewContinuationPublicationStore inner, CancellationTokenSource cancellation, bool cancelBeforeCommit = false)
+    public CancellationHumanReviewContinuationPublicationStore(
+        IHumanReviewContinuationPublicationStore inner,
+        CancellationTokenSource cancellation,
+        bool cancelBeforeCommit = false,
+        Func<HumanReviewContinuationStoreMutationResult, HumanReviewContinuationStoreMutationResult?>? afterCommit = null)
     {
         _inner = inner;
         _cancellation = cancellation;
         _cancelBeforeCommit = cancelBeforeCommit;
+        _afterCommit = afterCommit;
     }
 
     public int CommitCount { get; private set; }
@@ -32,6 +38,11 @@ internal sealed class CancellationHumanReviewContinuationPublicationStore : IHum
         {
             CommitCount++;
             _cancellation.Cancel();
+            if (_afterCommit is not null)
+            {
+                return _afterCommit(result)!;
+            }
+
             throw new OperationCanceledException("The canonical mutation committed before cancellation was observed.", _cancellation.Token);
         }
 
