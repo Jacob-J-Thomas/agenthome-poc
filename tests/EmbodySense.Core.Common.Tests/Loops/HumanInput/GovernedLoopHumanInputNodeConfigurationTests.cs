@@ -25,8 +25,8 @@ public sealed class GovernedLoopHumanInputNodeConfigurationTests
             HumanInputPrivacyClass.Private,
             respondents,
             new HumanInputResponsePolicy(HumanInputResponsePolicyKind.FirstValid, null, null),
-            "timeout-policy-one",
-            "failure-policy-one");
+            "timeout-policy-one@revision-one",
+            "failure-policy-one@revision-one");
 
         Assert.True(GovernedLoopHumanInputNodeConfigurationValidator.IsValid(configuration));
         var graph = Graph(configuration, "text", GovernedLoopValueKind.Text);
@@ -117,8 +117,8 @@ public sealed class GovernedLoopHumanInputNodeConfigurationTests
                     new HumanInputEligibleRespondent("user-two", "role-two", "route-two"),
                 ],
                 responsePolicy: new HumanInputResponsePolicy(HumanInputResponsePolicyKind.Quorum, 2, null)),
-            Configuration(timeoutPolicyReference: "timeout-policy-two"),
-            Configuration(failurePolicyReference: "failure-policy-two"),
+            Configuration(timeoutPolicyReference: "timeout-policy-two@revision-one"),
+            Configuration(failurePolicyReference: "failure-policy-two@revision-one"),
         };
         var baseline = Configuration();
         var baselineHash = Graph(baseline, baseline.RequestSchemaReference!, GovernedLoopValueKind.Text).ExecutableHash;
@@ -140,8 +140,8 @@ public sealed class GovernedLoopHumanInputNodeConfigurationTests
             HumanInputPrivacyClass.Private,
             [new HumanInputEligibleRespondent("user-one", "role-one", "route-one")],
             new HumanInputResponsePolicy(HumanInputResponsePolicyKind.FirstValid, null, null),
-            "timeout-policy-one",
-            "failure-policy-one");
+            "timeout-policy-one@revision-one",
+            "failure-policy-one@revision-one");
         var graph = Graph(configuration, "object", GovernedLoopValueKind.Object);
         var node = graph.Nodes.Single(value => value.Id == "human-input");
         var hash = graph.ExecutableHash;
@@ -171,8 +171,8 @@ public sealed class GovernedLoopHumanInputNodeConfigurationTests
         HumanInputPrivacyClass privacyClass = HumanInputPrivacyClass.Private,
         IReadOnlyList<HumanInputEligibleRespondent?>? eligibleRespondents = null,
         HumanInputResponsePolicy? responsePolicy = null,
-        string timeoutPolicyReference = "timeout-policy-one",
-        string failurePolicyReference = "failure-policy-one")
+        string timeoutPolicyReference = "timeout-policy-one@revision-one",
+        string failurePolicyReference = "failure-policy-one@revision-one")
         => new(
             schemaVersion,
             requestSchemaReference,

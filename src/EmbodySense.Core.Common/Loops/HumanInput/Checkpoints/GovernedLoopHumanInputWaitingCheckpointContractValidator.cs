@@ -6,6 +6,8 @@ using EmbodySense.Core.Common.HumanInput.Responses.Models;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.HumanInput.Checkpoints.Models;
+using EmbodySense.Core.Common.Loops.HumanInput.Policies;
+using EmbodySense.Core.Common.Loops.HumanInput.Policies.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
 
@@ -31,8 +33,9 @@ public static class GovernedLoopHumanInputWaitingCheckpointContractValidator
         Schema(checkpoint.SchemaVersion, "$.schemaVersion", errors);
         ValidateBinding(checkpoint.Binding, "$.binding", errors);
         ValidateConfiguration(checkpoint.NodeConfiguration, "$.nodeConfiguration", errors);
+        ValidateResolvedPolicy(checkpoint.ResolvedPolicy, "$.resolvedPolicy", errors);
         ValidateRequest(checkpoint.Request, "$.request", errors);
-        ValidateConfigurationRequestComposition(checkpoint.Binding, checkpoint.NodeConfiguration, checkpoint.Request, errors);
+        ValidateConfigurationRequestComposition(checkpoint.Binding, checkpoint.NodeConfiguration, checkpoint.ResolvedPolicy, checkpoint.Request, errors);
         ValidatePosture(checkpoint.Posture, "$.posture", errors);
         ValidateEvidence(checkpoint.Evidence, checkpoint.Binding, checkpoint.Request, checkpoint.Posture, errors);
         Hash(checkpoint.CheckpointHash, "$.checkpointHash", errors);
@@ -143,13 +146,19 @@ public static class GovernedLoopHumanInputWaitingCheckpointContractValidator
         }
     }
 
+    private static void ValidateResolvedPolicy(HumanInputPolicyResolutionSnapshot? policy, string path, List<GovernedLoopHumanInputWaitingCheckpointValidationError> errors)
+    {
+        if (!HumanInputPolicyResolutionSnapshot.IsValid(policy)) Add(errors, "invalid_resolved_policy", path, "A complete exact trusted-time Human Input policy-resolution snapshot is required.");
+    }
+
     private static void ValidateConfigurationRequestComposition(
         GovernedLoopHumanInputWaitingCheckpointBinding? binding,
         GovernedLoopHumanInputNodeConfiguration? configuration,
+        HumanInputPolicyResolutionSnapshot? policy,
         HumanInputRequest? request,
         List<GovernedLoopHumanInputWaitingCheckpointValidationError> errors)
     {
-        if (binding is null || configuration is null || request is null)
+        if (binding is null || configuration is null || policy is null || request is null)
         {
             return;
         }
@@ -185,6 +194,24 @@ public static class GovernedLoopHumanInputWaitingCheckpointContractValidator
             || !string.Equals(request.ContinuationBinding.CheckpointId, binding.CheckpointId, StringComparison.Ordinal))
         {
             Add(errors, "continuation_binding_mismatch", "$.request.continuationBinding", "Request continuation visibility must remain bound only to the exact node and checkpoint.");
+        }
+
+        if (binding.Execution?.Revision is null
+            || !string.Equals(policy.WorkspaceId, binding.WorkspaceId, StringComparison.Ordinal)
+            || !string.Equals(policy.GraphId, binding.Execution.Revision.GraphId, StringComparison.Ordinal)
+            || !string.Equals(policy.GraphRevisionId, binding.Execution.Revision.RevisionId, StringComparison.Ordinal)
+            || !string.Equals(policy.NodeId, binding.NodeId, StringComparison.Ordinal)
+            || !HumanInputPolicyReference.TryParse(configuration.TimeoutPolicyReference, out var timeoutReference)
+            || !HumanInputPolicyReference.TryParse(configuration.FailurePolicyReference, out var failureReference)
+            || !Equals(policy.TimeoutPolicy.Reference, timeoutReference)
+            || !Equals(policy.FailurePolicy.Reference, failureReference))
+        {
+            Add(errors, "resolved_policy_mismatch", "$.resolvedPolicy", "The policy snapshot must exactly bind checkpoint workspace, graph revision, node, and policy references.");
+        }
+
+        if (request.Timing is null || request.Timing.RequestedAtUtc != policy.ResolvedAtUtc || request.Timing.ExpiresAtUtc != policy.ExpiresAtUtc)
+        {
+            Add(errors, "request_policy_timing_mismatch", "$.request.timing", "The request response window must exactly equal the trusted policy snapshot timing.");
         }
     }
 

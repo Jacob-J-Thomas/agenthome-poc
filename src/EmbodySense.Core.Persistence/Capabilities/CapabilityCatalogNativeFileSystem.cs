@@ -57,6 +57,8 @@ internal static class CapabilityCatalogNativeFileSystem
     private const ushort UnixRegularFile = 0x8000;
     private const uint StatxMode = 0x2;
     private const uint StatxLinkCount = 0x4;
+    private const uint StatxBasicStats = 0x7ff;
+    private const uint StatxBirthTime = 0x800;
     private const uint AttributeVolumeCapabilities = 0x00020000;
     private const uint AttributeVolumeInfo = 0x80000000;
 
@@ -328,6 +330,33 @@ internal static class CapabilityCatalogNativeFileSystem
         throw new PlatformNotSupportedException("Capability catalog physical workspace identity supports Windows and macOS.");
     }
 
+    public static string GetPathBindingIdentityMaterial(SafeFileHandle handle)
+    {
+        ArgumentNullException.ThrowIfNull(handle);
+        if (OperatingSystem.IsWindows() || OperatingSystem.IsMacOS())
+        {
+            return GetPhysicalIdentityMaterial(handle);
+        }
+
+        if (!OperatingSystem.IsLinux())
+        {
+            throw new PlatformNotSupportedException("Capability catalog retained-path binding supports Windows, Linux, and macOS.");
+        }
+
+        if (statx(handle, string.Empty, AtEmptyPath, StatxBasicStats | StatxBirthTime, out var information) != 0)
+        {
+            throw NativeIOException("The capability catalog retained-path binding identity could not be read", Marshal.GetLastPInvokeError());
+        }
+        if ((information.Mask & (StatxBasicStats | StatxBirthTime)) != (StatxBasicStats | StatxBirthTime)
+            || information.Inode == 0
+            || information.BirthTime.Seconds == 0 && information.BirthTime.Nanoseconds == 0)
+        {
+            throw new IOException("The Linux filesystem does not expose the retained-path lifetime identity required for no-follow substitution fencing.");
+        }
+
+        return $"linux-path:{information.DeviceMajor:x8}:{information.DeviceMinor:x8}:{information.Inode:x16}:{information.BirthTime.Seconds:x16}:{information.BirthTime.Nanoseconds:x8}";
+    }
+
     private static bool MacVolumeUsesNonRecycledObjectIds(SafeFileHandle directory)
     {
         var attributes = new CapabilityCatalogMacAttributeList { BitmapCount = 5, VolumeAttributes = AttributeVolumeInfo | AttributeVolumeCapabilities };
@@ -350,6 +379,20 @@ internal static class CapabilityCatalogNativeFileSystem
 
         var devicePath = $"/dev/fd/{descriptor}";
         return Directory.Exists(devicePath) ? devicePath : throw new IOException("No handle-relative directory enumeration surface is available on this platform.");
+    }
+
+    public static void RewindDirectoryEnumeration(SafeFileHandle directory)
+    {
+        ArgumentNullException.ThrowIfNull(directory);
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        if (lseek(directory, 0, 0) < 0)
+        {
+            throw NativeIOException("Capability catalog retained-directory enumeration could not be rewound", Marshal.GetLastPInvokeError());
+        }
     }
 
     public static IReadOnlyList<CapabilityCatalogDirectoryEntry> EnumerateWindowsDirectory(SafeFileHandle directory, int maximumEntries)
@@ -991,6 +1034,9 @@ internal static class CapabilityCatalogNativeFileSystem
 
     [DllImport("libc", SetLastError = true)]
     private static extern int fsync(SafeFileHandle file);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern long lseek(SafeFileHandle file, long offset, int origin);
 
     [DllImport("libc", SetLastError = true)]
     private static extern int fchmod(SafeFileHandle file, int mode);

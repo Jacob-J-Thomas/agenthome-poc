@@ -38,29 +38,63 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
     private readonly string _encodedSecret;
     private readonly byte[] _secret;
     private readonly string _pipeName;
+    private readonly Action? _brokerFaulted;
+    private readonly ICustomLoopCancellationBrokerLifecycleObserver? _brokerLifecycleObserver;
     private readonly CancellationTokenSource _shutdown = new();
-    private readonly Task _server;
+    private readonly TaskCompletionSource<bool> _brokerReady = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly object _descriptorGate = new();
+    private Task? _server;
     private readonly Dictionary<string, ActiveAttempt> _activeAttempts = new(StringComparer.Ordinal);
     private readonly object _gate = new();
     private long _attemptGeneration;
     private int _disposed;
+    private int _serverResourceReleaseRequested;
+    private int _serverResourceReleaseAttached;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="CustomLoopAttemptCancellationHost"/> type.
     /// </summary>
     /// <param name="paths">The paths.</param>
     /// <param name="workspaceKey">The workspace key.</param>
-    public CustomLoopAttemptCancellationHost(WorkspacePaths paths, string workspaceKey)
+    /// <param name="brokerFaulted">The callback invoked after a terminal broker failure withdraws the descriptor.</param>
+    /// <param name="brokerLifecycleObserver">The optional in-process observer for bounded broker lifecycle transitions.</param>
+    public CustomLoopAttemptCancellationHost(WorkspacePaths paths, string workspaceKey, Action? brokerFaulted = null, ICustomLoopCancellationBrokerLifecycleObserver? brokerLifecycleObserver = null)
     {
         _paths = paths;
         _ownerId = "owner-" + Guid.NewGuid().ToString("N");
         _secret = RandomNumberGenerator.GetBytes(32);
         _encodedSecret = Convert.ToBase64String(_secret);
         _pipeName = "es-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(workspaceKey + "\n" + _ownerId))).ToLowerInvariant()[..16];
-        // TODO(https://github.com/Jacob-J-Thomas/agenthome-poc/issues/535): Publish this descriptor only after the exact named-pipe generation reaches a bounded listener-ready boundary.
-        WriteOwnerDescriptor();
-        _server = Task.Run(RunServerAsync);
+        _brokerFaulted = brokerFaulted;
+        _brokerLifecycleObserver = brokerLifecycleObserver;
+        var server = RunServerAsync();
+        Volatile.Write(ref _server, server);
+        if (Volatile.Read(ref _serverResourceReleaseRequested) != 0)
+        {
+            AttachServerResourceRelease(server);
+        }
+
+        try
+        {
+            _brokerReady.Task.WaitAsync(_connectionIoTimeout).GetAwaiter().GetResult();
+            _brokerLifecycleObserver?.OnBrokerReadyBeforeOwnerDescriptorPublication(_pipeName);
+            if (!TryPublishOwnerDescriptor())
+            {
+                StopServerAfterFailedReadiness();
+            }
+        }
+        catch
+        {
+            StopServerAfterFailedReadiness();
+            throw;
+        }
     }
+
+    /// <summary>
+    /// Gets whether this owner generation can still serve authenticated cancellation requests.
+    /// </summary>
+    /// <value><see langword="true"/> while the broker has not exited or faulted.</value>
+    public bool IsAvailable => Volatile.Read(ref _disposed) == 0;
 
     /// <summary>
     /// Registers the single active provider attempt for a run and returns its generation-bound lifetime handle.
@@ -226,11 +260,106 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
     /// </summary>
     public void Dispose()
     {
-        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        lock (_descriptorGate)
         {
-            return;
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            {
+                return;
+            }
+
+            CompleteActiveAttemptsAsOwnerUnavailable();
+
+            _shutdown.Cancel();
+            DeleteOwnerDescriptor();
         }
 
+        ReleaseServerResourcesAfterStop();
+    }
+
+    private async Task RunServerAsync()
+    {
+        NamedPipeServerStream? listener = null;
+        try
+        {
+            listener = CreateServer();
+            var listenerConnection = listener.WaitForConnectionAsync(_shutdown.Token);
+            _brokerReady.TrySetResult(true);
+            while (!_shutdown.IsCancellationRequested)
+            {
+                await listenerConnection;
+                var connected = listener;
+                listener = CreateServer();
+                listenerConnection = listener.WaitForConnectionAsync(_shutdown.Token);
+                try
+                {
+                    await HandleConnectionAsync(connected, _shutdown.Token);
+                }
+                catch (OperationCanceledException) when (!_shutdown.IsCancellationRequested)
+                {
+                    // An incomplete client frame or blocked response is abandoned at its bounded I/O deadline.
+                }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException or FormatException)
+                {
+                    // A malformed or disconnected caller cannot terminate the bounded owner broker.
+                }
+                finally
+                {
+                    connected.Dispose();
+                }
+            }
+        }
+        catch (OperationCanceledException) when (_shutdown.IsCancellationRequested)
+        {
+            _brokerReady.TrySetCanceled(_shutdown.Token);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException or FormatException)
+        {
+            if (_brokerReady.TrySetException(exception))
+            {
+                return;
+            }
+
+            FaultBroker();
+        }
+        finally
+        {
+            listener?.Dispose();
+        }
+    }
+
+    private NamedPipeServerStream CreateServer()
+    {
+        var options = PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly;
+        return new NamedPipeServerStream(_pipeName, PipeDirection.InOut, 2, PipeTransmissionMode.Byte, options);
+    }
+
+    private void StopServerAfterFailedReadiness()
+    {
+        _shutdown.Cancel();
+        ReleaseServerResourcesAfterStop();
+    }
+
+    private void FaultBroker()
+    {
+        lock (_descriptorGate)
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            {
+                return;
+            }
+
+            CompleteActiveAttemptsAsOwnerUnavailable();
+            _shutdown.Cancel();
+            DeleteOwnerDescriptor();
+        }
+
+        NotifyBrokerFaulted();
+        _brokerFaulted?.Invoke();
+        ReleaseServerResourcesAfterStop();
+    }
+
+    private void CompleteActiveAttemptsAsOwnerUnavailable()
+    {
         ActiveAttempt[] attempts;
         lock (_gate)
         {
@@ -242,10 +371,30 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
         {
             attempt.CompleteOwnerUnavailable();
         }
+    }
 
-        _shutdown.Cancel();
-        DeleteOwnerDescriptor();
-        _ = _server.ContinueWith(
+    private void ReleaseServerResourcesAfterStop()
+    {
+        if (Interlocked.Exchange(ref _serverResourceReleaseRequested, 1) != 0)
+        {
+            return;
+        }
+
+        var server = Volatile.Read(ref _server);
+        if (server is not null)
+        {
+            AttachServerResourceRelease(server);
+        }
+    }
+
+    private void AttachServerResourceRelease(Task server)
+    {
+        if (Interlocked.Exchange(ref _serverResourceReleaseAttached, 1) != 0)
+        {
+            return;
+        }
+
+        _ = server.ContinueWith(
             _ =>
             {
                 _shutdown.Dispose();
@@ -254,32 +403,6 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
             CancellationToken.None,
             TaskContinuationOptions.ExecuteSynchronously,
             TaskScheduler.Default);
-    }
-
-    private async Task RunServerAsync()
-    {
-        while (!_shutdown.IsCancellationRequested)
-        {
-            try
-            {
-                var options = PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly;
-                await using var server = new NamedPipeServerStream(_pipeName, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, options);
-                await server.WaitForConnectionAsync(_shutdown.Token);
-                await HandleConnectionAsync(server, _shutdown.Token);
-            }
-            catch (OperationCanceledException) when (_shutdown.IsCancellationRequested)
-            {
-                return;
-            }
-            catch (OperationCanceledException)
-            {
-                // An incomplete client frame or blocked response is abandoned at its bounded I/O deadline.
-            }
-            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException or FormatException)
-            {
-                // A malformed or disconnected caller cannot terminate the bounded owner broker.
-            }
-        }
     }
 
     private async Task HandleConnectionAsync(Stream stream, CancellationToken cancellationToken)
@@ -300,6 +423,18 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
         return new CustomLoopAttemptCancellationResult(status, detail, _ownerId, Environment.ProcessId);
     }
 
+    private void NotifyBrokerFaulted()
+    {
+        try
+        {
+            _brokerLifecycleObserver?.OnBrokerFaulted();
+        }
+        catch (Exception)
+        {
+            // An observer cannot prevent the faulted owner from retiring its descriptor, lock, and active attempts.
+        }
+    }
+
     private bool IsAuthenticated(CancellationWireRequest request)
     {
         if (request.SchemaVersion != 1
@@ -313,6 +448,27 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
 
         var expected = ComputeAuthenticationTag(_encodedSecret, _ownerId, request.RunId, request.OperationId);
         return CryptographicOperations.FixedTimeEquals(Encoding.ASCII.GetBytes(expected), Encoding.ASCII.GetBytes(request.AuthenticationTag));
+    }
+
+    private bool TryPublishOwnerDescriptor()
+    {
+        lock (_descriptorGate)
+        {
+            if (!IsAvailable)
+            {
+                DeleteOwnerDescriptor();
+                return false;
+            }
+
+            WriteOwnerDescriptor();
+            if (IsAvailable)
+            {
+                return true;
+            }
+
+            DeleteOwnerDescriptor();
+            return false;
+        }
     }
 
     private void WriteOwnerDescriptor()

@@ -15,6 +15,7 @@ using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Audit;
 using EmbodySense.Core.Persistence.Loops;
+using EmbodySense.Core.Persistence.Tests.Verification;
 using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Persistence.Tests.Loops;
@@ -383,7 +384,44 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
     }
 
     [Fact]
-    public async Task Incomplete_client_frame_is_abandoned_before_a_later_authenticated_cancel()
+    public async Task Windows_initial_post_ready_broker_fault_cannot_publish_an_owner_descriptor()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        WindowsBrokerFaultLifecycleObserver? observer = null;
+        Action<string> afterBrokerReady = pipeName =>
+        {
+            using var occupiedSuccessor = new NamedPipeServerStream(pipeName, PipeDirection.InOut, 2, PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+            using var firstClient = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
+            using var secondClient = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
+            firstClient.ConnectAsync().WaitAsync(TimeSpan.FromSeconds(2)).GetAwaiter().GetResult();
+            try
+            {
+                secondClient.ConnectAsync().WaitAsync(TimeSpan.FromSeconds(2)).GetAwaiter().GetResult();
+            }
+            catch (Exception exception) when (exception is IOException or TimeoutException)
+            {
+                // The first client may already have selected the live listener and faulted the broker.
+            }
+
+            Assert.True(observer!.BrokerFaulted.Task.Wait(TimeSpan.FromSeconds(10)), "The deterministic post-ready broker fault did not complete.");
+        };
+        using (observer = new WindowsBrokerFaultLifecycleObserver(afterBrokerReady))
+        {
+            await using var gate = new CustomLoopWorkspaceExecutionGate(paths, observer);
+
+            Assert.True(observer!.BrokerFaulted.Task.IsCompletedSuccessfully);
+            Assert.False(File.Exists(paths.CustomLoopCancellationOwnerPath));
+        }
+    }
+
+    [Fact]
+    public async Task Incomplete_client_frame_is_abandoned_before_a_later_authenticated_remote_cancel()
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
@@ -398,22 +436,130 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
         await Task.Delay(TimeSpan.FromSeconds(1.2));
         var confirmation = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         using var providerObservation = cancellation.Token.Register(() => confirmation.TrySetResult(registration.TryConfirmProviderInterruption(cancellation.Token)));
+        await using var requester = new CustomLoopWorkspaceExecutionGate(paths);
+        requester.RelinquishWorkspaceHost();
 
-        var result = await owner.RequestCancellationAsync("run-incomplete-client", "cancel-after-incomplete-client");
+        var result = await requester.RequestCancellationAsync("run-incomplete-client", "cancel-after-incomplete-client");
 
         Assert.Equal(CustomLoopAttemptCancellationStatus.ProviderInterruptionConfirmed, result.Status);
+        Assert.Equal(Environment.ProcessId, result.OwnerProcessId);
         Assert.True(await confirmation.Task);
+    }
+
+    [Fact]
+    public async Task Windows_successor_listener_failure_withdraws_the_published_owner_and_faults_the_host()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await using var owner = new CustomLoopWorkspaceExecutionGate(paths);
+        await using var idleReference = new CustomLoopWorkspaceExecutionGate(paths);
+        var activeResult = owner.TryAcquire("invoke-successor-listener-failure", _firstHash);
+        Assert.Equal(CustomLoopExecutionLeaseStatus.Acquired, activeResult.Status);
+        Assert.NotNull(activeResult.Lease);
+        using var activeLease = activeResult.Lease;
+        using var cancellation = new CancellationTokenSource();
+        using var registration = owner.RegisterActiveAttempt("run-successor-listener-failure", cancellation);
+        var descriptor = JsonNode.Parse(await File.ReadAllBytesAsync(paths.CustomLoopCancellationOwnerPath))!.AsObject();
+        using var occupiedSuccessor = new NamedPipeServerStream(descriptor["pipeName"]!.GetValue<string>(), PipeDirection.InOut, 2, PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+        await using var requester = new CustomLoopWorkspaceExecutionGate(paths);
+        requester.RelinquishWorkspaceHost();
+
+        var terminal = await requester.RequestCancellationAsync("run-successor-listener-failure", "cancel-successor-listener-failure");
+        var local = await owner.RequestCancellationAsync("run-successor-listener-failure", "cancel-after-successor-listener-failure");
+        var afterWithdrawal = await requester.RequestCancellationAsync("run-successor-listener-failure", "cancel-after-withdrawal");
+
+        Assert.Equal(CustomLoopAttemptCancellationStatus.OwnerUnavailable, terminal.Status);
+        Assert.False(File.Exists(paths.CustomLoopCancellationOwnerPath));
+        Assert.Equal(CustomLoopAttemptCancellationStatus.OwnerUnavailable, local.Status);
+        Assert.Equal(CustomLoopAttemptCancellationStatus.OwnerUnavailable, afterWithdrawal.Status);
+
+        await using var blockedOwner = new CustomLoopWorkspaceExecutionGate(paths);
+        Assert.Equal(CustomLoopExecutionLeaseStatus.WorkspaceBusy, blockedOwner.TryAcquire("invoke-overlap-after-successor-failure", _secondHash).Status);
+        var faultedBusyReservation = blockedOwner.TryReserveWorkspaceBusyOutcome("invoke-record-after-successor-failure", _secondHash);
+        Assert.Equal(CustomLoopExecutionLeaseStatus.BusyOutcomeReserved, faultedBusyReservation.Status);
+        Assert.NotNull(faultedBusyReservation.Lease);
+        faultedBusyReservation.Lease.Dispose();
+        activeLease.Dispose();
+
+        await using var replacementOwner = new CustomLoopWorkspaceExecutionGate(paths);
+        var replacementResult = replacementOwner.TryAcquire("invoke-after-successor-listener-failure", _firstHash);
+
+        Assert.Equal(CustomLoopExecutionLeaseStatus.Acquired, replacementResult.Status);
+        Assert.NotNull(replacementResult.Lease);
+        using var replacement = replacementResult.Lease;
+        var replacementDescriptor = JsonNode.Parse(await File.ReadAllBytesAsync(paths.CustomLoopCancellationOwnerPath))!.AsObject();
+        Assert.NotEqual(descriptor["ownerId"]!.GetValue<string>(), replacementDescriptor["ownerId"]!.GetValue<string>());
+        using var replacementCancellation = new CancellationTokenSource();
+        using var replacementRegistration = replacementOwner.RegisterActiveAttempt("run-after-successor-listener-failure", replacementCancellation);
+        var replacementConfirmation = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var replacementObservation = replacementCancellation.Token.Register(() => replacementConfirmation.TrySetResult(replacementRegistration.TryConfirmProviderInterruption(replacementCancellation.Token)));
+
+        var routedThroughReplacement = await owner.RequestCancellationAsync("run-after-successor-listener-failure", "cancel-through-replacement");
+
+        Assert.Equal(CustomLoopAttemptCancellationStatus.ProviderInterruptionConfirmed, routedThroughReplacement.Status);
+        Assert.True(await replacementConfirmation.Task);
+    }
+
+    [Fact]
+    public async Task Windows_faulted_idle_host_returns_unavailable_before_fault_retirement_and_retries_afterward()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        using var observer = new WindowsBrokerFaultLifecycleObserver(blockFaultRetirement: true);
+        await using var owner = new CustomLoopWorkspaceExecutionGate(paths, observer);
+        var descriptor = JsonNode.Parse(await File.ReadAllBytesAsync(paths.CustomLoopCancellationOwnerPath))!.AsObject();
+        using var occupiedSuccessor = new NamedPipeServerStream(descriptor["pipeName"]!.GetValue<string>(), PipeDirection.InOut, 2, PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+        using var firstClient = new NamedPipeClientStream(".", descriptor["pipeName"]!.GetValue<string>(), PipeDirection.InOut, PipeOptions.Asynchronous);
+        using var secondClient = new NamedPipeClientStream(".", descriptor["pipeName"]!.GetValue<string>(), PipeDirection.InOut, PipeOptions.Asynchronous);
+
+        await firstClient.ConnectAsync().WaitAsync(TimeSpan.FromSeconds(2));
+        try
+        {
+            await secondClient.ConnectAsync().WaitAsync(TimeSpan.FromSeconds(2));
+        }
+        catch (Exception exception) when (exception is IOException or TimeoutException)
+        {
+            // The first client may already have selected the live listener and faulted the broker.
+        }
+
+        Assert.True(await observer.BrokerFaulted.Task.WaitAsync(TimeSpan.FromSeconds(10)), "The broker fault did not reach the retirement barrier.");
+        try
+        {
+            Assert.False(File.Exists(paths.CustomLoopCancellationOwnerPath));
+            Assert.Equal(CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable, owner.TryAcquire("invoke-faulted-idle-host", _firstHash).Status);
+            Assert.Equal(CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable, owner.TryReserveWorkspaceBusyOutcome("invoke-faulted-idle-host", _firstHash).Status);
+        }
+        finally
+        {
+            observer.ContinueFaultRetirement();
+        }
+
+        Assert.True(SpinWait.SpinUntil(() => owner.IsWorkspaceHostAvailable, TimeSpan.FromSeconds(10)), "The faulted idle host was not retired after the acquire barrier released.");
+        using var replacement = owner.TryAcquire("invoke-after-faulted-idle-host", _secondHash).Lease;
+        Assert.NotNull(replacement);
     }
 
     [Fact]
     public async Task Child_process_owner_authenticates_and_confirms_provider_interruption()
     {
         using var workspace = new TestWorkspace();
-        using var process = StartCancellationHost(workspace.RootPath, "run-cross-process-owner");
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var readinessPath = workspace.File("cancellation-host-ready");
+        using var process = StartCancellationHost(workspace.RootPath, "run-cross-process-owner", readinessPath);
         try
         {
-            Assert.Equal("ready", await process.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(10)));
-            await using var requester = new CustomLoopWorkspaceExecutionGate(new WorkspacePaths(workspace.RootPath));
+            await WaitForCancellationHostBrokerReadyAsync("child-owner-cancellation", process, paths, readinessPath);
+            await using var requester = new CustomLoopWorkspaceExecutionGate(paths);
 
             var result = await requester.RequestCancellationAsync("run-cross-process-owner", "cancel-cross-process-owner");
 
@@ -429,7 +575,7 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
         {
             if (!process.HasExited)
             {
-                process.Kill(entireProcessTree: true);
+                process.Ownership.TerminateProcessTree();
                 await process.WaitForExitAsync();
             }
         }
@@ -441,10 +587,11 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
         const string RunId = "run-public-cross-process";
-        using var process = StartCancellationHost(workspace.RootPath, RunId);
+        var readinessPath = workspace.File("cancellation-host-ready");
+        using var process = StartCancellationHost(workspace.RootPath, RunId, readinessPath);
         try
         {
-            Assert.Equal("ready", await process.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(10)));
+            await WaitForCancellationHostBrokerReadyAsync("public-lifecycle-cancellation", process, paths, readinessPath);
             var runStore = new CustomLoopRunStore(paths);
             var operationStore = new CustomLoopControlOperationStore(paths);
             var running = RunningRun(RunId);
@@ -480,7 +627,7 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
         {
             if (!process.HasExited)
             {
-                process.Kill(entireProcessTree: true);
+                process.Ownership.TerminateProcessTree();
                 await process.WaitForExitAsync();
             }
         }
@@ -490,16 +637,19 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
     public async Task Owner_exit_is_unavailable_and_a_new_generation_accepts_the_same_retry()
     {
         using var workspace = new TestWorkspace();
-        using var process = StartCancellationHost(workspace.RootPath, "run-owner-restart");
-        Assert.Equal("ready", await process.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(10)));
-        await using var requester = new CustomLoopWorkspaceExecutionGate(new WorkspacePaths(workspace.RootPath));
-        process.Kill(entireProcessTree: true);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var readinessPath = workspace.File("cancellation-host-ready");
+        using var process = StartCancellationHost(workspace.RootPath, "run-owner-restart", readinessPath);
+        await WaitForCancellationHostBrokerReadyAsync("owner-replacement-cancellation", process, paths, readinessPath);
+        var exitedOwnerProcessId = process.Id;
+        await using var requester = new CustomLoopWorkspaceExecutionGate(paths);
+        process.Ownership.TerminateProcessTree();
         await process.WaitForExitAsync();
 
         var unavailable = await requester.RequestCancellationAsync("run-owner-restart", "cancel-owner-restart");
 
         Assert.Equal(CustomLoopAttemptCancellationStatus.OwnerUnavailable, unavailable.Status);
-        await using var replacement = new CustomLoopWorkspaceExecutionGate(new WorkspacePaths(workspace.RootPath));
+        await using var replacement = new CustomLoopWorkspaceExecutionGate(paths);
         using var cancellation = new CancellationTokenSource();
         using var registration = replacement.RegisterActiveAttempt("run-owner-restart", cancellation);
         var confirmation = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -507,6 +657,7 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
         var retried = await requester.RequestCancellationAsync("run-owner-restart", "cancel-owner-restart");
 
         Assert.Equal(CustomLoopAttemptCancellationStatus.ProviderInterruptionConfirmed, retried.Status);
+        Assert.NotEqual(exitedOwnerProcessId, retried.OwnerProcessId);
         Assert.True(await confirmation.Task);
     }
 
@@ -531,37 +682,21 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
         Assert.Contains("reparse points or junctions", exception.Message, StringComparison.Ordinal);
     }
 
-    private static string FindRepositoryRoot()
-    {
-        var directory = new DirectoryInfo(AppContext.BaseDirectory);
-        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "EmbodySense.sln")))
-        {
-            directory = directory.Parent;
-        }
+    private static CrossProcessProcess StartCancellationHost(string workspaceRoot, string runId, string readinessPath)
+        => CancellationHostProcess.StartOwned("cancellation-host", workspaceRoot, runId, readinessPath);
 
-        return directory?.FullName ?? throw new DirectoryNotFoundException("The repository root could not be located from the test output directory.");
-    }
-
-    private static Process StartCancellationHost(string workspaceRoot, string runId)
+    private static async Task WaitForCancellationHostBrokerReadyAsync(string operation, CrossProcessProcess process, WorkspacePaths paths, string readinessPath)
     {
-        var outputDirectory = new DirectoryInfo(AppContext.BaseDirectory);
-        var targetFramework = outputDirectory.Name;
-        var configuration = outputDirectory.Parent?.Name ?? throw new DirectoryNotFoundException("The active test build configuration could not be resolved.");
-        var hostAssembly = Path.Combine(FindRepositoryRoot(), "tests", "EmbodySense.CancellationHost", "bin", configuration, targetFramework, "EmbodySense.CancellationHost.dll");
-        Assert.True(File.Exists(hostAssembly), $"Cancellation host assembly was not built at `{hostAssembly}`.");
-        var startInfo = new ProcessStartInfo("dotnet")
-        {
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false
-        };
-        startInfo.ArgumentList.Add("exec");
-        startInfo.ArgumentList.Add(hostAssembly);
-        startInfo.ArgumentList.Add(workspaceRoot);
-        startInfo.ArgumentList.Add(runId);
-        startInfo.Environment["DOTNET_ROLL_FORWARD"] = "Major";
-        return Process.Start(startInfo) ?? throw new InvalidOperationException("The cancellation owner process could not be started.");
+        var child = new CrossProcessReadinessChild("cancellation-host", process, readinessPath, paths.CustomLoopCancellationOwnerPath);
+        await CrossProcessReadinessDiagnostics.WaitForChildrenReadyAsync(operation, [child], TimeSpan.FromSeconds(10));
+        Assert.Equal("broker-ready", await process.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(10)));
+
+        await using var requester = new CustomLoopWorkspaceExecutionGate(paths);
+        var probe = await requester.RequestCancellationAsync("run-broker-ready-probe", "cancel-broker-ready-probe");
+
+        Assert.Equal(CustomLoopAttemptCancellationStatus.NoActiveAttempt, probe.Status);
+        Assert.Equal(process.Id, probe.OwnerProcessId);
+        Assert.StartsWith("owner-", probe.OwnerId);
     }
 
     private static async Task<JsonObject> ExchangePipeFrameAsync(JsonObject descriptor, JsonObject request)

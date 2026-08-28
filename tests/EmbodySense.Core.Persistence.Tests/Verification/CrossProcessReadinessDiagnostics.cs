@@ -165,9 +165,10 @@ internal static class CrossProcessReadinessDiagnostics
             return $"{operation}/{stage}/{child.Label}: pid={child.Process.Id} state=still-running exit=<unavailable> ready={File.Exists(child.ReadyPath)} result={File.Exists(child.ResultPath)} stdout=<unavailable> stderr=<unavailable>";
         }
 
-        using var cancellation = new CancellationTokenSource();
-        var outputTask = ReadChildStreamAsync(child.Process.ReadStandardOutputToEndAsync(cancellation.Token));
-        var errorTask = ReadChildStreamAsync(child.Process.ReadStandardErrorToEndAsync(cancellation.Token));
+        using var fallbackCancellation = child.EvidenceCancellation is null ? new CancellationTokenSource() : null;
+        var cancellation = child.EvidenceCancellation ?? fallbackCancellation!;
+        var outputTask = child.StandardOutputTask ?? ReadChildStreamAsync(child.Process.ReadStandardOutputToEndAsync(cancellation.Token));
+        var errorTask = child.StandardErrorTask ?? ReadChildStreamAsync(child.Process.ReadStandardErrorToEndAsync(cancellation.Token));
         var drainTask = Task.WhenAll(outputTask, errorTask);
         try
         {
@@ -176,6 +177,7 @@ internal static class CrossProcessReadinessDiagnostics
         catch (TimeoutException)
         {
             cancellation.Cancel();
+            await drainTask.WaitAsync(_childEvidenceReadTimeout);
         }
 
         return $"{operation}/{stage}/{child.Label}: pid={child.Process.Id} state=exited exit={child.Process.ExitCode} ready={File.Exists(child.ReadyPath)} result={File.Exists(child.ResultPath)} stdout={GetChildStreamEvidence(outputTask)} stderr={GetChildStreamEvidence(errorTask)}";
