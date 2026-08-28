@@ -1,7 +1,9 @@
 using EmbodySense.Core.Application.HumanInput.Policies;
 using EmbodySense.Core.Application.HumanInput.Policies.Models;
+using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
 using EmbodySense.Core.Application.Loops.Execution.Custom.Models;
+using EmbodySense.Core.Application.Tests.Loops.Execution.Authority;
 using EmbodySense.Core.Application.Loops.GraphValidation;
 using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Loops.Sequential;
@@ -168,6 +170,36 @@ public sealed partial class CustomLoopOrderedRunnerTests
     }
 
     [Fact]
+    public async Task Human_input_admission_fails_closed_when_a_post_commit_checkpoint_acknowledgement_cannot_be_reconciled()
+    {
+        var context = await HumanInputContextAsync();
+        var store = new FakeRunStore(context.Run);
+        var executor = new QueueExecutor();
+        var publisher = new RecordingPublisher();
+        var postCommitAcknowledgementLost = false;
+        store.AfterUpdate = run =>
+        {
+            if (!postCommitAcknowledgementLost && run.HumanInputWaitingCheckpoints.Count == 1)
+            {
+                postCommitAcknowledgementLost = true;
+                store.GetException = new IOException("The committed checkpoint cannot be read for acknowledgement reconciliation.");
+                throw new IOException("The checkpoint acknowledgement was lost after the durable write.");
+            }
+
+            return Task.CompletedTask;
+        };
+
+        var result = await Runtime(context, store, executor, publisher, HumanInputPolicyResolver(context)).RunAsync(Request(context));
+
+        Assert.True(postCommitAcknowledgementLost);
+        Assert.Equal(CustomLoopOrderedRunStatus.Failed, result.Status);
+        Assert.Equal(CustomLoopRunStatus.Waiting, store.Current.Status);
+        Assert.Single(store.Current.HumanInputWaitingCheckpoints);
+        Assert.Empty(executor.Requests);
+        Assert.Empty(publisher.Requests);
+    }
+
+    [Fact]
     public async Task Human_input_admission_reconciles_a_durable_checkpoint_superseded_by_cancellation_without_delivery()
     {
         var context = await HumanInputContextAsync();
@@ -186,6 +218,191 @@ public sealed partial class CustomLoopOrderedRunnerTests
         Assert.Equal(CustomLoopRunStatus.Cancelled, store.Current.Status);
         Assert.Single(store.Current.HumanInputWaitingCheckpoints);
         Assert.True(CustomLoopRunValidator.Validate(store.Current).IsValid);
+        Assert.Empty(executor.Requests);
+        Assert.Empty(publisher.Requests);
+    }
+
+    [Fact]
+    public async Task Human_input_admission_fails_closed_when_exact_policy_resolution_source_throws()
+    {
+        var context = await HumanInputContextAsync();
+        var source = new HumanInputPolicyResolutionTestSource
+        {
+            BeforeRead = (_, _) => throw new IOException("The exact policy source is unavailable."),
+        };
+        var store = new FakeRunStore(context.Run);
+        var executor = new QueueExecutor();
+        var publisher = new RecordingPublisher();
+
+        var result = await Runtime(context, store, executor, publisher, HumanInputPolicyResolver(context, source: source)).RunAsync(Request(context));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.NeedsReview, result.Status);
+        Assert.Equal(CustomLoopRunStatus.NeedsReview, store.Current.Status);
+        Assert.Equal("human_input_policy_resolution_unavailable", store.Current.FailureCode);
+        Assert.Empty(store.Current.HumanInputWaitingCheckpoints);
+        Assert.Empty(executor.Requests);
+        Assert.Empty(publisher.Requests);
+    }
+
+    [Fact]
+    public async Task Human_input_admission_propagates_cancellation_during_exact_policy_resolution_without_checkpoint_or_delivery()
+    {
+        var interrupted = await InterruptHumanInputDuringPolicyResolutionAsync();
+
+        Assert.Equal(CustomLoopRunStatus.Running, interrupted.Store.Current.Status);
+        Assert.Empty(interrupted.Store.Current.HumanInputWaitingCheckpoints);
+        Assert.Empty(interrupted.Executor.Requests);
+        Assert.Empty(interrupted.Publisher.Requests);
+    }
+
+    [Fact]
+    public async Task Restart_recovery_propagates_cancellation_while_parking_an_interrupted_human_input_admission()
+    {
+        var interrupted = await InterruptHumanInputDuringPolicyResolutionAsync();
+        var writesBeforeRecovery = interrupted.Store.Writes.Count;
+        CustomLoopRunRecord? attemptedRecovery = null;
+        using var cancellation = new CancellationTokenSource();
+        interrupted.Store.BeforeUpdate = (candidate, _) =>
+        {
+            attemptedRecovery = candidate;
+            cancellation.Cancel();
+            throw new OperationCanceledException(cancellation.Token);
+        };
+        var recovery = new CustomLoopRecoveryService(
+            interrupted.Store,
+            new RecordingAuditLog(),
+            new FixedTimeProvider(interrupted.Store.Current.UpdatedAtUtc.AddSeconds(1)));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => recovery.RecoverAsync(AuditSchema.Actors.Web, cancellation.Token));
+
+        AssertInterruptedHumanInputRecoveryCandidate(attemptedRecovery);
+        Assert.Equal(CustomLoopRunStatus.Running, interrupted.Store.Current.Status);
+        Assert.Equal(writesBeforeRecovery, interrupted.Store.Writes.Count);
+        Assert.Empty(interrupted.Executor.Requests);
+        Assert.Empty(interrupted.Publisher.Requests);
+    }
+
+    [Fact]
+    public async Task Restart_recovery_fails_closed_when_parking_an_interrupted_human_input_admission_cannot_be_persisted()
+    {
+        var interrupted = await InterruptHumanInputDuringPolicyResolutionAsync();
+        var writesBeforeRecovery = interrupted.Store.Writes.Count;
+        CustomLoopRunRecord? attemptedRecovery = null;
+        interrupted.Store.BeforeUpdate = (candidate, _) =>
+        {
+            attemptedRecovery = candidate;
+            throw new IOException("The recovery write is unavailable.");
+        };
+
+        var result = Assert.Single(await new CustomLoopRecoveryService(
+            interrupted.Store,
+            new RecordingAuditLog(),
+            new FixedTimeProvider(interrupted.Store.Current.UpdatedAtUtc.AddSeconds(1))).RecoverAsync(AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopRecoveryStatus.Failed, result.Status);
+        AssertInterruptedHumanInputRecoveryCandidate(attemptedRecovery);
+        Assert.Same(interrupted.Store.Current, result.Run);
+        Assert.Contains("recovery transition failed", result.Detail, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(CustomLoopRunStatus.Running, interrupted.Store.Current.Status);
+        Assert.Equal(writesBeforeRecovery, interrupted.Store.Writes.Count);
+        Assert.Empty(interrupted.Executor.Requests);
+        Assert.Empty(interrupted.Publisher.Requests);
+    }
+
+    [Fact]
+    public async Task Restart_recovery_reports_conflict_when_an_interrupted_human_input_admission_changes_and_cannot_be_reloaded()
+    {
+        var interrupted = await InterruptHumanInputDuringPolicyResolutionAsync();
+        var writesBeforeRecovery = interrupted.Store.Writes.Count;
+        CustomLoopRunRecord? attemptedRecovery = null;
+        interrupted.Store.RawConflictSuccessorFactory = (current, candidate) =>
+        {
+            attemptedRecovery = candidate;
+            return current;
+        };
+        interrupted.Store.GetException = new IOException("The concurrent recovery state cannot be reloaded.");
+
+        var result = Assert.Single(await new CustomLoopRecoveryService(
+            interrupted.Store,
+            new RecordingAuditLog(),
+            new FixedTimeProvider(interrupted.Store.Current.UpdatedAtUtc.AddSeconds(1))).RecoverAsync(AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopRecoveryStatus.Conflict, result.Status);
+        AssertInterruptedHumanInputRecoveryCandidate(attemptedRecovery);
+        Assert.Same(interrupted.Store.Current, result.Run);
+        Assert.Contains("changed concurrently", result.Detail, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(CustomLoopRunStatus.Running, interrupted.Store.Current.Status);
+        Assert.Equal(writesBeforeRecovery + 1, interrupted.Store.Writes.Count);
+        Assert.Empty(interrupted.Executor.Requests);
+        Assert.Empty(interrupted.Publisher.Requests);
+    }
+
+    [Fact]
+    public async Task Restart_recovery_fails_closed_when_parking_an_interrupted_human_input_admission_is_rejected()
+    {
+        var interrupted = await InterruptHumanInputDuringPolicyResolutionAsync();
+        var writesBeforeRecovery = interrupted.Store.Writes.Count;
+        CustomLoopRunRecord? attemptedRecovery = null;
+        interrupted.Store.BeforeUpdate = (candidate, _) => attemptedRecovery = candidate;
+        interrupted.Store.UpdateResultOverride = CustomLoopRunStoreResult.NotFound();
+
+        var result = Assert.Single(await new CustomLoopRecoveryService(
+            interrupted.Store,
+            new RecordingAuditLog(),
+            new FixedTimeProvider(interrupted.Store.Current.UpdatedAtUtc.AddSeconds(1))).RecoverAsync(AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopRecoveryStatus.Failed, result.Status);
+        AssertInterruptedHumanInputRecoveryCandidate(attemptedRecovery);
+        Assert.Same(interrupted.Store.Current, result.Run);
+        Assert.Contains("transition was rejected", result.Detail, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(CustomLoopRunStatus.Running, interrupted.Store.Current.Status);
+        Assert.Equal(writesBeforeRecovery, interrupted.Store.Writes.Count);
+        Assert.Empty(interrupted.Executor.Requests);
+        Assert.Empty(interrupted.Publisher.Requests);
+    }
+
+    [Fact]
+    public async Task Human_input_admission_fails_closed_when_trusted_policy_resolution_time_is_unavailable()
+    {
+        var context = await HumanInputContextAsync();
+        var store = new FakeRunStore(context.Run);
+        var executor = new QueueExecutor();
+        var publisher = new RecordingPublisher();
+
+        var result = await Runtime(
+            context,
+            store,
+            executor,
+            publisher,
+            HumanInputPolicyResolver(context, timeProvider: new FixedTimeProvider(default))).RunAsync(Request(context));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.NeedsReview, result.Status);
+        Assert.Equal(CustomLoopRunStatus.NeedsReview, store.Current.Status);
+        Assert.Equal("human_input_policy_resolution_unavailable", store.Current.FailureCode);
+        Assert.Empty(store.Current.HumanInputWaitingCheckpoints);
+        Assert.Empty(executor.Requests);
+        Assert.Empty(publisher.Requests);
+    }
+
+    [Fact]
+    public async Task Human_input_admission_fails_closed_when_the_trusted_policy_clock_throws()
+    {
+        var context = await HumanInputContextAsync();
+        var store = new FakeRunStore(context.Run);
+        var executor = new QueueExecutor();
+        var publisher = new RecordingPublisher();
+
+        var result = await Runtime(
+            context,
+            store,
+            executor,
+            publisher,
+            HumanInputPolicyResolver(context, timeProvider: new ThrowingEffectAuthorityTimeProvider())).RunAsync(Request(context));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.NeedsReview, result.Status);
+        Assert.Equal(CustomLoopRunStatus.NeedsReview, store.Current.Status);
+        Assert.Equal("human_input_policy_resolution_unavailable", store.Current.FailureCode);
+        Assert.Empty(store.Current.HumanInputWaitingCheckpoints);
         Assert.Empty(executor.Requests);
         Assert.Empty(publisher.Requests);
     }
@@ -442,6 +659,104 @@ public sealed partial class CustomLoopOrderedRunnerTests
     }
 
     [Fact]
+    public async Task Resume_rejects_a_paused_human_input_checkpoint_that_is_no_longer_pending_without_ordered_dispatch()
+    {
+        var context = await HumanInputContextAsync();
+        var store = new FakeRunStore(context.Run);
+        var executor = new QueueExecutor();
+        var publisher = new RecordingPublisher();
+        var parked = await Runtime(context, store, executor, publisher, HumanInputPolicyResolver(context)).RunAsync(Request(context));
+        var resumeExecutor = new NoopWaitLifecycleResumeExecutor(store.Current);
+        var service = new CustomLoopLifecycleService(
+            store,
+            new FakeControlOperationStore(),
+            resumeExecutor,
+            new AvailableModel(),
+            new NoActiveAttemptCancellationSignal(),
+            new RecordingAuditLog(),
+            new TestExecutionGate(),
+            new FixedTimeProvider(_now.AddSeconds(1)));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Waiting, parked.Status);
+        var pause = await service.PauseAsync(new CustomLoopPauseRequest(
+            store.Current.Id,
+            store.Current.LifecycleVersion,
+            "pause-before-expired-human-input-resume",
+            AuditSchema.Actors.Web));
+        Assert.Equal(CustomLoopControlStatus.Paused, pause.Status);
+        var expired = ExpireHumanInputWaitingCheckpoint(store.Current);
+        Assert.True(CustomLoopRunValidator.Validate(expired).IsValid);
+        store.ReplaceCurrent(expired);
+        var writesBeforeResume = store.Writes.Count;
+
+        var result = await service.ResumeAsync(new CustomLoopResumeRequest(
+            expired.Id,
+            expired.LifecycleVersion,
+            "resume-expired-human-input",
+            AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopControlStatus.InvalidState, result.Status);
+        Assert.Same(expired, store.Current);
+        Assert.Equal(writesBeforeResume, store.Writes.Count);
+        Assert.Equal(0, resumeExecutor.ResumeCount);
+        Assert.Empty(executor.Requests);
+        Assert.Empty(publisher.Requests);
+    }
+
+    [Theory]
+    [InlineData(CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable, CustomLoopControlStatus.WorkspaceHostUnavailable, 0)]
+    [InlineData(CustomLoopExecutionLeaseStatus.WorkspaceBusy, CustomLoopControlStatus.WorkspaceExecutionBusy, 1)]
+    [InlineData(CustomLoopExecutionLeaseStatus.OperationInProgress, CustomLoopControlStatus.OperationInProgress, 1)]
+    [InlineData(CustomLoopExecutionLeaseStatus.OperationConflict, CustomLoopControlStatus.Conflict, 1)]
+    public async Task Resume_fails_closed_when_a_paused_human_input_checkpoint_cannot_reacquire_execution_ownership(
+        CustomLoopExecutionLeaseStatus leaseStatus,
+        CustomLoopControlStatus expectedStatus,
+        int expectedAcquisitionCount)
+    {
+        var context = await HumanInputContextAsync();
+        var store = new FakeRunStore(context.Run);
+        var executor = new QueueExecutor();
+        var publisher = new RecordingPublisher();
+        var parked = await Runtime(context, store, executor, publisher, HumanInputPolicyResolver(context)).RunAsync(Request(context));
+        var resumeExecutor = new NoopWaitLifecycleResumeExecutor(store.Current);
+        var gate = new TestExecutionGate(leaseStatus);
+        var service = new CustomLoopLifecycleService(
+            store,
+            new FakeControlOperationStore(),
+            resumeExecutor,
+            new AvailableModel(),
+            new NoActiveAttemptCancellationSignal(),
+            new RecordingAuditLog(),
+            gate,
+            new FixedTimeProvider(_now.AddSeconds(1)));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Waiting, parked.Status);
+        var pause = await service.PauseAsync(new CustomLoopPauseRequest(
+            store.Current.Id,
+            store.Current.LifecycleVersion,
+            $"pause-before-{leaseStatus.ToString().ToLowerInvariant()}-human-input-resume",
+            AuditSchema.Actors.Web));
+        Assert.Equal(CustomLoopControlStatus.Paused, pause.Status);
+        var paused = store.Current;
+        var writesBeforeResume = store.Writes.Count;
+
+        var result = await service.ResumeAsync(new CustomLoopResumeRequest(
+            paused.Id,
+            paused.LifecycleVersion,
+            $"resume-{leaseStatus.ToString().ToLowerInvariant()}-human-input",
+            AuditSchema.Actors.Web));
+
+        Assert.Equal(expectedStatus, result.Status);
+        Assert.Same(paused, store.Current);
+        Assert.Equal(writesBeforeResume, store.Writes.Count);
+        Assert.Single(store.Current.HumanInputWaitingCheckpoints);
+        Assert.Equal(expectedAcquisitionCount, gate.AcquisitionCount);
+        Assert.Equal(0, resumeExecutor.ResumeCount);
+        Assert.Empty(executor.Requests);
+        Assert.Empty(publisher.Requests);
+    }
+
+    [Fact]
     public async Task Pause_and_resume_rearm_parallel_pending_human_input_checkpoints_across_aggregate_frontier_evolution()
     {
         var parked = await ParkParallelHumanInputAsync();
@@ -508,6 +823,58 @@ public sealed partial class CustomLoopOrderedRunnerTests
             checkpoint.Evidence,
             string.Empty));
         return run with { HumanInputWaitingCheckpoints = [futureCheckpoint] };
+    }
+
+    private static CustomLoopRunRecord ExpireHumanInputWaitingCheckpoint(CustomLoopRunRecord run)
+    {
+        var checkpoint = Assert.Single(run.HumanInputWaitingCheckpoints);
+        var expiredEvidence = GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(new GovernedLoopHumanInputWaitingCheckpointEvidence(
+            GovernedLoopHumanInputWaitingCheckpointContractLimits.CurrentSchemaVersion,
+            2,
+            GovernedLoopHumanInputWaitingCheckpointEvidenceKind.Expired,
+            checkpoint.Request.Timing.ExpiresAtUtc.AddTicks(1),
+            null,
+            null,
+            null,
+            null,
+            null,
+            Assert.Single(checkpoint.Evidence).EvidenceHash,
+            string.Empty));
+        var expired = GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(new GovernedLoopHumanInputWaitingCheckpoint(
+            checkpoint.SchemaVersion,
+            checkpoint.Binding,
+            checkpoint.NodeConfiguration,
+            checkpoint.ResolvedPolicy,
+            checkpoint.Request,
+            GovernedLoopHumanInputWaitingCheckpointPosture.Expired,
+            [.. checkpoint.Evidence, expiredEvidence],
+            string.Empty));
+        return run with { HumanInputWaitingCheckpoints = [expired] };
+    }
+
+    private static async Task<(FakeRunStore Store, QueueExecutor Executor, RecordingPublisher Publisher)> InterruptHumanInputDuringPolicyResolutionAsync()
+    {
+        var context = await HumanInputContextAsync();
+        using var cancellation = new CancellationTokenSource();
+        var source = new HumanInputPolicyResolutionTestSource
+        {
+            BeforeRead = (_, _) => cancellation.Cancel(),
+        };
+        var store = new FakeRunStore(context.Run);
+        var executor = new QueueExecutor();
+        var publisher = new RecordingPublisher();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Runtime(context, store, executor, publisher, HumanInputPolicyResolver(context, source: source)).RunAsync(Request(context), cancellation.Token));
+        Assert.True(CustomLoopRunValidator.Validate(store.Current).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(store.Current).Errors));
+        return (store, executor, publisher);
+    }
+
+    private static void AssertInterruptedHumanInputRecoveryCandidate(CustomLoopRunRecord? candidate)
+    {
+        var attempted = Assert.IsType<CustomLoopRunRecord>(candidate);
+        Assert.Equal(CustomLoopRunStatus.NeedsReview, attempted.Status);
+        Assert.Equal("recovery_open_attempt", attempted.FailureCode);
+        Assert.Equal(GovernedLoopFrontierStatus.ReviewBlocked, attempted.Frontier?.Payload.Status);
     }
 
     private static async Task<(FakeRunStore Store, QueueExecutor Executor, RecordingPublisher Publisher)> ParkParallelHumanInputAsync()
@@ -638,15 +1005,19 @@ public sealed partial class CustomLoopOrderedRunnerTests
             "timeout-policy-one@revision-one",
             "failure-policy-one@revision-one");
 
-    private static HumanInputPolicyResolutionService HumanInputPolicyResolver(SequentialTestContext context, DateTimeOffset? resolvedAtUtc = null)
+    private static HumanInputPolicyResolutionService HumanInputPolicyResolver(
+        SequentialTestContext context,
+        DateTimeOffset? resolvedAtUtc = null,
+        HumanInputPolicyResolutionTestSource? source = null,
+        TimeProvider? timeProvider = null)
     {
-        var source = new HumanInputPolicyResolutionTestSource();
+        source ??= new HumanInputPolicyResolutionTestSource();
         var binding = context.Anchor.AdapterBinding;
         var timeout = TimeoutPolicy(binding, context.Run.AdmissionActor);
         var failure = FailurePolicy(binding, context.Run.AdmissionActor);
-        source.Results.Add(timeout.Reference, new HumanInputPolicySourceReadResult(HumanInputPolicySourceReadStatus.Ready, timeout, 1));
-        source.Results.Add(failure.Reference, new HumanInputPolicySourceReadResult(HumanInputPolicySourceReadStatus.Ready, failure, 1));
-        return new HumanInputPolicyResolutionService(source, new FixedTimeProvider(resolvedAtUtc ?? _now));
+        source.Results.TryAdd(timeout.Reference, new HumanInputPolicySourceReadResult(HumanInputPolicySourceReadStatus.Ready, timeout, 1));
+        source.Results.TryAdd(failure.Reference, new HumanInputPolicySourceReadResult(HumanInputPolicySourceReadStatus.Ready, failure, 1));
+        return new HumanInputPolicyResolutionService(source, timeProvider ?? new FixedTimeProvider(resolvedAtUtc ?? _now));
     }
 
     private static HumanInputPolicyArtifact TimeoutPolicy(GovernedLoopSequentialAdapterBinding binding, string actorId)
