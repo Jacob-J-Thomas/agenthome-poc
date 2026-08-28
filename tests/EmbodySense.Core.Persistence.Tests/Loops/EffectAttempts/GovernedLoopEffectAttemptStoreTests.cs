@@ -884,7 +884,7 @@ public sealed class GovernedLoopEffectAttemptStoreTests
     }
 
     [Fact]
-    public async Task Compare_exchange_fails_closed_while_mutation_lock_is_held()
+    public async Task Compare_exchange_lock_retry_exhaustion_fails_closed()
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
@@ -897,13 +897,8 @@ public sealed class GovernedLoopEffectAttemptStoreTests
             FileMode.OpenOrCreate,
             FileAccess.ReadWrite,
             FileShare.None);
-        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(2));
 
-        var result = await store.CompareExchangeAsync(
-            prepared.ContentHash,
-            authorized,
-            begun.Lease!,
-            cancellation.Token);
+        var result = await store.CompareExchangeAsync(prepared.ContentHash, authorized, begun.Lease!);
         Assert.Equal(GovernedLoopEffectAttemptStoreStatus.Unavailable, result.Status);
         begun.Lease!.Dispose();
     }
