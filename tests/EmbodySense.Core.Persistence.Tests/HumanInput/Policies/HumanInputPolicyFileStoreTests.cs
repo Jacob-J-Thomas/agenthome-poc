@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 using EmbodySense.Core.Application.HumanInput.Policies.Models;
 using EmbodySense.Core.Common.HumanInput;
@@ -282,6 +283,38 @@ public sealed class HumanInputPolicyFileStoreTests
         Assert.Equal(1, committed.StoreGeneration);
         Assert.Equal(HumanInputPolicySourceReadStatus.Ready, read.Status);
         Assert.Equal(policy, read.Policy);
+    }
+
+    [Fact]
+    public async Task Maximum_length_catalog_fills_configured_capacity_and_rejects_overflow_before_publication_intent()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var boundaries = new List<HumanInputPolicyFileStorePublicationBoundary>();
+        var options = new HumanInputPolicyFileStoreOptions { MaximumArtifacts = 128, MaximumArtifactUtf8Bytes = 900, DurableBoundaryObserver = boundaries.Add };
+        var store = new HumanInputPolicyFileStore(paths, options);
+        HumanInputPolicyArtifact? final = null;
+
+        for (var index = 0; index < options.MaximumArtifacts; index++)
+        {
+            var policy = MaximumLengthTimeout(index);
+            Assert.InRange(HumanInputPolicyArtifactJson.Serialize(policy).Length, 1, options.MaximumArtifactUtf8Bytes);
+            var committed = await store.CommitAsync(policy, index);
+            Assert.Equal(HumanInputPolicyFileStoreWriteStatus.Committed, committed.Status);
+            Assert.Equal(index + 1, committed.StoreGeneration);
+            final = policy;
+        }
+
+        boundaries.Clear();
+        var overflow = await store.CommitAsync(MaximumLengthTimeout(options.MaximumArtifacts), options.MaximumArtifacts);
+        var restarted = await new HumanInputPolicyFileStore(paths, options).ReadAsync(final!.Reference);
+
+        Assert.Equal(HumanInputPolicyFileStoreWriteStatus.Unavailable, overflow.Status);
+        Assert.Equal(options.MaximumArtifacts, overflow.StoreGeneration);
+        Assert.Empty(boundaries);
+        Assert.False(File.Exists(Path.Combine(PolicyRoot(paths), "publication.intent")));
+        Assert.Equal(HumanInputPolicySourceReadStatus.Ready, restarted.Status);
+        Assert.Equal(final, restarted.Policy);
     }
 
     [Fact]
@@ -1155,6 +1188,15 @@ public sealed class HumanInputPolicyFileStoreTests
 
     private static HumanInputPolicyArtifact Failure()
         => HumanInputPolicyArtifactHash.Apply(new HumanInputPolicyArtifact(1, "failure-one", "revision-one", HumanInputPolicyKind.DeadlineDisposition, "workspace-one", "graph-one", "actor-one", null, HumanInputTerminalDisposition.Expired, string.Empty));
+
+    private static HumanInputPolicyArtifact MaximumLengthTimeout(int index)
+        => HumanInputPolicyArtifactHash.Apply(new HumanInputPolicyArtifact(1, MaximumLengthIdentifier('p', index), MaximumLengthIdentifier('r', index), HumanInputPolicyKind.ResponseWindow, MaximumLengthIdentifier('w', index), MaximumLengthIdentifier('g', index), MaximumLengthIdentifier('a', index), 3_600_000, HumanInputTerminalDisposition.Unknown, string.Empty));
+
+    private static string MaximumLengthIdentifier(char prefix, int index)
+    {
+        var suffix = index.ToString("D4", CultureInfo.InvariantCulture);
+        return string.Concat(prefix, new string('x', HumanInputLimits.MaxIdentifierCharacters - suffix.Length - 1), suffix);
+    }
 
     private static string PolicyRoot(WorkspacePaths paths) => Path.Combine(paths.AgentPath, "human-input", "policies");
 }

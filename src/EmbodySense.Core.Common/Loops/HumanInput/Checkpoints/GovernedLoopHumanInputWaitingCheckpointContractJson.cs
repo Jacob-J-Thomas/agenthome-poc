@@ -484,7 +484,10 @@ public static class GovernedLoopHumanInputWaitingCheckpointContractJson
     private static HumanInputPolicyResolutionSnapshot? ReadResolvedPolicy(JsonElement value, string path, List<GovernedLoopHumanInputWaitingCheckpointValidationError> errors)
     {
         if (!Shape(value, path, _resolvedPolicyProperties, errors)) return null;
-        return new HumanInputPolicyResolutionSnapshot(ReadInt(value, "schemaVersion", path, errors), ReadString(value, "workspaceId", path, errors)!, ReadString(value, "graphId", path, errors)!, ReadString(value, "graphRevisionId", path, errors)!, ReadString(value, "nodeId", path, errors)!, ReadString(value, "actorId", path, errors)!, ReadResolvedPolicyArtifact(value.GetProperty("timeoutPolicy"), path + ".timeoutPolicy", errors)!, ReadResolvedPolicyArtifact(value.GetProperty("failurePolicy"), path + ".failurePolicy", errors)!, ReadTime(value, "resolvedAtUtc", path, errors), ReadTime(value, "expiresAtUtc", path, errors), (HumanInputTerminalDisposition)ReadInt(value, "terminalDisposition", path, errors), ReadString(value, "resolutionHash", path, errors)!);
+        var timeoutPolicy = ReadResolvedPolicyArtifact(value.GetProperty("timeoutPolicy"), path + ".timeoutPolicy", errors);
+        var failurePolicy = ReadResolvedPolicyArtifact(value.GetProperty("failurePolicy"), path + ".failurePolicy", errors);
+        if (timeoutPolicy is null || failurePolicy is null) return null;
+        return new HumanInputPolicyResolutionSnapshot(ReadInt(value, "schemaVersion", path, errors), ReadString(value, "workspaceId", path, errors)!, ReadString(value, "graphId", path, errors)!, ReadString(value, "graphRevisionId", path, errors)!, ReadString(value, "nodeId", path, errors)!, ReadString(value, "actorId", path, errors)!, timeoutPolicy, failurePolicy, ReadTime(value, "resolvedAtUtc", path, errors), ReadTime(value, "expiresAtUtc", path, errors), (HumanInputTerminalDisposition)ReadInt(value, "terminalDisposition", path, errors), ReadString(value, "resolutionHash", path, errors)!);
     }
 
     private static HumanInputPolicyArtifact? ReadResolvedPolicyArtifact(JsonElement value, string path, List<GovernedLoopHumanInputWaitingCheckpointValidationError> errors)

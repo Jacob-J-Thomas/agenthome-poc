@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using EmbodySense.Core.Common.HumanInput;
 using EmbodySense.Core.Common.Loops.HumanInput.Policies;
 using EmbodySense.Core.Persistence.HumanInput.Policies.Models;
 
@@ -9,11 +10,26 @@ namespace EmbodySense.Core.Persistence.HumanInput.Policies;
 internal static class HumanInputPolicyFileStoreGenerationJson
 {
     private const int SchemaVersion = 1;
+    internal const int MaximumArtifactCount = 1_024;
+    private const string GenerationPrefix = "{\"schemaVersion\":1,\"storeGeneration\":";
+    private const string ArtifactsPrefix = ",\"artifacts\":[";
+    private const string PolicyIdPrefix = "{\"policyId\":";
+    private const string RevisionIdPrefix = ",\"revisionId\":";
+    private const string ContentHashPrefix = ",\"contentHash\":";
+    private const string GenerationSuffix = "]}";
+    private static readonly int _maximumEntryFixedUtf8Bytes = Encoding.UTF8.GetByteCount(PolicyIdPrefix) + 2 + Encoding.UTF8.GetByteCount(RevisionIdPrefix) + 2 + Encoding.UTF8.GetByteCount(ContentHashPrefix) + 2 + 1;
+
+    internal static int GetMaximumSerializedUtf8Bytes(int maximumArtifacts)
+    {
+        if (maximumArtifacts is < 1 or > MaximumArtifactCount) throw new ArgumentOutOfRangeException(nameof(maximumArtifacts));
+        var maximumEntryUtf8Bytes = checked(_maximumEntryFixedUtf8Bytes + (HumanInputLimits.MaxIdentifierCharacters * 2) + HumanInputLimits.Sha256HexCharacters);
+        return checked(Encoding.UTF8.GetByteCount(GenerationPrefix) + maximumArtifacts.ToString(System.Globalization.CultureInfo.InvariantCulture).Length + Encoding.UTF8.GetByteCount(ArtifactsPrefix) + (maximumArtifacts * maximumEntryUtf8Bytes) + (maximumArtifacts - 1) + Encoding.UTF8.GetByteCount(GenerationSuffix));
+    }
 
     public static byte[] Serialize(HumanInputPolicyFileStoreGeneration generation)
     {
         ArgumentNullException.ThrowIfNull(generation);
-        if (generation.StoreGeneration < 0 || generation.StoreGeneration != generation.Artifacts.Count || generation.Artifacts.Count > 1_024)
+        if (generation.StoreGeneration < 0 || generation.StoreGeneration != generation.Artifacts.Count || generation.Artifacts.Count > MaximumArtifactCount)
         {
             throw new ArgumentOutOfRangeException(nameof(generation));
         }
@@ -25,22 +41,22 @@ internal static class HumanInputPolicyFileStoreGenerationJson
         }
 
         var builder = new StringBuilder();
-        builder.Append("{\"schemaVersion\":1,\"storeGeneration\":");
+        builder.Append(GenerationPrefix);
         builder.Append(generation.StoreGeneration.ToString(System.Globalization.CultureInfo.InvariantCulture));
-        builder.Append(",\"artifacts\":[");
+        builder.Append(ArtifactsPrefix);
         for (var index = 0; index < artifacts.Length; index++)
         {
             if (index > 0) builder.Append(',');
             var entry = artifacts[index];
-            builder.Append("{\"policyId\":");
+            builder.Append(PolicyIdPrefix);
             builder.Append(JsonSerializer.Serialize(entry.Reference.PolicyId));
-            builder.Append(",\"revisionId\":");
+            builder.Append(RevisionIdPrefix);
             builder.Append(JsonSerializer.Serialize(entry.Reference.RevisionId));
-            builder.Append(",\"contentHash\":");
+            builder.Append(ContentHashPrefix);
             builder.Append(JsonSerializer.Serialize(entry.ContentHash));
             builder.Append('}');
         }
-        builder.Append("]}");
+        builder.Append(GenerationSuffix);
         return Encoding.UTF8.GetBytes(builder.ToString());
     }
 
@@ -70,7 +86,7 @@ internal static class HumanInputPolicyFileStoreGenerationJson
         var entries = new List<HumanInputPolicyFileStoreCatalogEntry>();
         foreach (var element in properties[2].Value.EnumerateArray())
         {
-            if (entries.Count >= 1_024 || element.ValueKind != JsonValueKind.Object) throw new FormatException("The Human Input policy generation is invalid.");
+            if (entries.Count >= MaximumArtifactCount || element.ValueKind != JsonValueKind.Object) throw new FormatException("The Human Input policy generation is invalid.");
             var entryProperties = element.EnumerateObject().ToArray();
             if (entryProperties.Length != 3
                 || !string.Equals(entryProperties[0].Name, "policyId", StringComparison.Ordinal)

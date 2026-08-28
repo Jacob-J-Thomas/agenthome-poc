@@ -1,6 +1,5 @@
 using EmbodySense.Core.Application.HumanInput.Policies;
 using EmbodySense.Core.Application.HumanInput.Policies.Models;
-using EmbodySense.Core.Common.HumanInput;
 using EmbodySense.Core.Common.Loops.HumanInput.Policies;
 using EmbodySense.Core.Common.Loops.HumanInput.Policies.Models;
 using EmbodySense.Core.Common.Workspace;
@@ -21,10 +20,6 @@ public sealed class HumanInputPolicyFileStore : IHumanInputPolicySource
 {
     private const int MaximumInterruptedTemporaryArtifacts = 1;
     private const int SupportingFileCount = 3;
-    // The generation serializer emits two 120-character identifiers, one 64-character SHA-256 digest, and fixed JSON punctuation per entry.
-    private const int MaximumGenerationEntryBytes = (HumanInputLimits.MaxIdentifierCharacters * 2) + HumanInputLimits.Sha256HexCharacters + 49;
-    // This includes the schema/store-generation properties, array framing, separators, and the four digits of the maximum generation.
-    private const int MaximumGenerationFixedBytes = 56;
     private readonly string _rootPath;
     private readonly string _generationPath;
     private readonly string _publicationIntentPath;
@@ -224,9 +219,7 @@ public sealed class HumanInputPolicyFileStore : IHumanInputPolicySource
 
     private async Task<(bool Exists, HumanInputPolicyFileStoreGeneration Generation, byte[]? Bytes)> ReadStoredGenerationAsync(CapabilityCatalogPathSession session, CancellationToken cancellationToken)
     {
-        var maximumGenerationBytes = checked((long)MaximumGenerationEntryBytes * _options.MaximumArtifacts + MaximumGenerationFixedBytes);
-        if (maximumGenerationBytes > int.MaxValue) throw new FormatException("The Human Input policy generation bound is unavailable.");
-        var bytes = await session.TryReadAllBytesBoundAsync(_generationPath, checked((int)maximumGenerationBytes), cancellationToken).ConfigureAwait(false);
+        var bytes = await session.TryReadAllBytesBoundAsync(_generationPath, MaximumGenerationUtf8Bytes(), cancellationToken).ConfigureAwait(false);
         if (bytes is null) return (false, new HumanInputPolicyFileStoreGeneration(0, []), null);
 
         return (true, HumanInputPolicyFileStoreGenerationJson.Deserialize(bytes), bytes);
@@ -311,7 +304,7 @@ public sealed class HumanInputPolicyFileStore : IHumanInputPolicySource
 
     private async Task EnsureGenerationStateAsync(CapabilityCatalogPathSession session, bool generationExists, byte[]? generationBytes, IReadOnlyList<HumanInputPolicyFileStoreCatalogEntry> artifacts, CancellationToken cancellationToken)
     {
-        var observedGenerationBytes = await session.TryReadAllBytesBoundAsync(_generationPath, checked((int)((long)MaximumGenerationEntryBytes * _options.MaximumArtifacts + MaximumGenerationFixedBytes)), cancellationToken).ConfigureAwait(false);
+        var observedGenerationBytes = await session.TryReadAllBytesBoundAsync(_generationPath, MaximumGenerationUtf8Bytes(), cancellationToken).ConfigureAwait(false);
         if (generationExists)
         {
             if (generationBytes is null || observedGenerationBytes is null || !observedGenerationBytes.AsSpan().SequenceEqual(generationBytes))
@@ -396,9 +389,11 @@ public sealed class HumanInputPolicyFileStore : IHumanInputPolicySource
     private IReadOnlyList<(string Name, long Length)> EnumerateSourceFiles(CapabilityCatalogPathSession session)
     {
         var maximumEntries = checked(_options.MaximumArtifacts + SupportingFileCount + MaximumInterruptedTemporaryArtifacts);
-        var maximumBytes = checked(((long)_options.MaximumArtifactUtf8Bytes * (_options.MaximumArtifacts + 2)) + ((long)_options.MaximumArtifacts * 256) + 128);
+        var maximumBytes = checked(((long)_options.MaximumArtifactUtf8Bytes * (_options.MaximumArtifacts + 2)) + (2L * MaximumGenerationUtf8Bytes()));
         return session.EnumerateRegularFiles(_rootPath, maximumEntries, maximumBytes);
     }
+
+    private int MaximumGenerationUtf8Bytes() => HumanInputPolicyFileStoreGenerationJson.GetMaximumSerializedUtf8Bytes(_options.MaximumArtifacts);
 
     private async Task<IReadOnlyList<HumanInputPolicyFileStoreCatalogEntry>> ReadArtifactCatalogAsync(CapabilityCatalogPathSession session, CancellationToken cancellationToken)
     {
@@ -442,7 +437,7 @@ public sealed class HumanInputPolicyFileStore : IHumanInputPolicySource
 
     private static HumanInputPolicyFileStoreOptions Validate(HumanInputPolicyFileStoreOptions options)
     {
-        if (options.MaximumArtifacts is < 1 or > 1_024 || options.MaximumArtifactUtf8Bytes is < 256 or > 1024 * 1024) throw new ArgumentOutOfRangeException(nameof(options));
+        if (options.MaximumArtifacts is < 1 or > HumanInputPolicyFileStoreGenerationJson.MaximumArtifactCount || options.MaximumArtifactUtf8Bytes is < 256 or > 1024 * 1024) throw new ArgumentOutOfRangeException(nameof(options));
         return options;
     }
 

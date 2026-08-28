@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using EmbodySense.Core.Common.HumanInput;
 using EmbodySense.Core.Common.HumanInput.Models;
 using EmbodySense.Core.Common.Loops.HumanInput.Checkpoints;
@@ -83,6 +84,21 @@ public sealed class GovernedLoopHumanInputWaitingCheckpointContractTests
         Assert.False(GovernedLoopHumanInputWaitingCheckpointContractJson.TryDeserialize(unsupportedJson, out _, out var unsupported));
         Assert.Contains(unsupported.Errors, error => error.Code == "unsupported_schema_version");
         Assert.False(GovernedLoopHumanInputWaitingCheckpointContractJson.TryDeserialize("{", out _, out _));
+    }
+
+    [Theory]
+    [InlineData("timeoutPolicy")]
+    [InlineData("failurePolicy")]
+    public void Malformed_resolved_policy_artifacts_fail_closed_with_contract_errors(string propertyName)
+    {
+        var checkpoint = GovernedLoopHumanInputWaitingCheckpointTestData.Terminal();
+        Assert.True(GovernedLoopHumanInputWaitingCheckpointContractJson.TrySerialize(checkpoint, out var json, out _));
+        var document = JsonNode.Parse(json!)!.AsObject();
+        document["resolvedPolicy"]!.AsObject()[propertyName] = new JsonArray();
+
+        Assert.False(GovernedLoopHumanInputWaitingCheckpointContractJson.TryDeserialize(document.ToJsonString(), out var restarted, out var validation));
+        Assert.Null(restarted);
+        Assert.Contains(validation.Errors, error => error.Code == "invalid_json_type" && error.Path == "$.resolvedPolicy." + propertyName);
     }
 
     [Fact]
