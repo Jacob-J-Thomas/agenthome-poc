@@ -256,6 +256,85 @@ public sealed class GovernedLoopEffectAttemptStoreTests
     }
 
     [Fact]
+    public async Task Read_only_current_head_rejects_initialized_directories_without_a_mutation_lock()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        Directory.CreateDirectory(paths.GovernedLoopEffectAttemptsPath);
+
+        var result = await ((IGovernedLoopEffectAttemptReadStore)new GovernedLoopEffectAttemptStore(paths)).ReadAsync(CapabilityWorkspaceScopeId.Create(paths.RootPath), "effect-operation-1", 1);
+
+        Assert.Equal(GovernedLoopEffectAttemptReadStatus.Corrupt, result.Status);
+        Assert.Empty(Directory.EnumerateFileSystemEntries(paths.GovernedLoopEffectAttemptsPath));
+    }
+
+    [Fact]
+    public async Task Read_only_current_head_fails_closed_while_the_mutation_lock_is_exclusively_held()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var workspaceId = CapabilityWorkspaceScopeId.Create(paths.RootPath);
+        var store = new GovernedLoopEffectAttemptStore(paths);
+        var prepared = Prepare();
+        var begun = await store.BeginAsync(prepared);
+        begun.Lease!.Dispose();
+        var before = Directory.EnumerateFiles(paths.GovernedLoopEffectAttemptsPath).Order().ToArray();
+
+        await using var externalLock = new FileStream(
+            Path.Combine(paths.GovernedLoopEffectAttemptsPath, ".custom-loop-mutations.lock"),
+            FileMode.Open,
+            FileAccess.ReadWrite,
+            FileShare.None);
+        var result = await ((IGovernedLoopEffectAttemptReadStore)store).ReadAsync(workspaceId, prepared.Payload.OperationId, prepared.Payload.EffectGeneration);
+
+        Assert.Equal(GovernedLoopEffectAttemptReadStatus.Unavailable, result.Status);
+        Assert.Equal(before, Directory.EnumerateFiles(paths.GovernedLoopEffectAttemptsPath).Order().ToArray());
+    }
+
+    [Fact]
+    public async Task Read_only_current_head_rejects_malformed_head_evidence_without_rewriting_it()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var workspaceId = CapabilityWorkspaceScopeId.Create(paths.RootPath);
+        var prepared = Prepare();
+        var store = new GovernedLoopEffectAttemptStore(paths);
+        var begun = await store.BeginAsync(prepared);
+        begun.Lease!.Dispose();
+        var headPath = Directory.EnumerateFiles(paths.GovernedLoopEffectAttemptsPath, "*.head").Single();
+        var malformedHead = new string('g', GovernedLoopExecutionLimits.Sha256HexCharacters);
+        await File.WriteAllTextAsync(headPath, malformedHead);
+        var before = Directory.EnumerateFiles(paths.GovernedLoopEffectAttemptsPath).Order().ToArray();
+
+        var result = await ((IGovernedLoopEffectAttemptReadStore)store).ReadAsync(workspaceId, prepared.Payload.OperationId, prepared.Payload.EffectGeneration);
+
+        Assert.Equal(GovernedLoopEffectAttemptReadStatus.Corrupt, result.Status);
+        Assert.Equal(malformedHead, await File.ReadAllTextAsync(headPath));
+        Assert.Equal(before, Directory.EnumerateFiles(paths.GovernedLoopEffectAttemptsPath).Order().ToArray());
+    }
+
+    [Fact]
+    public async Task Read_only_current_head_rejects_retained_versions_above_its_configured_bound()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var workspaceId = CapabilityWorkspaceScopeId.Create(paths.RootPath);
+        var prepared = Prepare();
+        var writer = new GovernedLoopEffectAttemptStore(paths);
+        var begun = await writer.BeginAsync(prepared);
+        var authorized = GovernedLoopEffectAttemptContract.AttachDispatchAuthority(prepared, Hash('8'), _now.AddSeconds(1));
+        Assert.Equal(GovernedLoopEffectAttemptStoreStatus.Created, (await writer.CompareExchangeAsync(prepared.ContentHash, authorized, begun.Lease!)).Status);
+        begun.Lease!.Dispose();
+        var before = Directory.EnumerateFiles(paths.GovernedLoopEffectAttemptsPath).Order().ToArray();
+        var constrained = (IGovernedLoopEffectAttemptReadStore)new GovernedLoopEffectAttemptStore(paths, new GovernedLoopEffectAttemptStoreOptions { MaxVersionsPerAttempt = 1 });
+
+        var result = await constrained.ReadAsync(workspaceId, prepared.Payload.OperationId, prepared.Payload.EffectGeneration);
+
+        Assert.Equal(GovernedLoopEffectAttemptReadStatus.Corrupt, result.Status);
+        Assert.Equal(before, Directory.EnumerateFiles(paths.GovernedLoopEffectAttemptsPath).Order().ToArray());
+    }
+
+    [Fact]
     public async Task Headless_recovery_reserves_head_bytes_before_republishing_the_unique_tip()
     {
         using var workspace = new TestWorkspace();
