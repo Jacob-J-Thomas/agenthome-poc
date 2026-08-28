@@ -563,6 +563,7 @@ try {
     }
     Write-Output "VERIFY_ARTIFACT_ISOLATION_COMPLETE projects=$($isolations.Count) lanes=$($testResults.Count)"
 
+    # TODO(https://github.com/Jacob-J-Thomas/agenthome-poc/issues/430): make per-platform behavior inventory explicit while Windows remains authoritative for coverage.
     $inventoryArguments = @("-NoProfile")
     if ($runningOnWindows) { $inventoryArguments += @("-ExecutionPolicy", "Bypass") }
     $inventoryArguments += @("-File", (Join-Path $PSScriptRoot "verify-test-inventory.ps1"), "-ExpectedInventoryPath", $verificationInventoryPath, "-ResultsRoot", $standardTestResultsRoot, "-ReportPath", $verificationInventoryReportPath)
