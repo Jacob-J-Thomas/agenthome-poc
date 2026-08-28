@@ -632,7 +632,7 @@ public sealed class HumanInputResponseLifecycleAdversarialSnapshotTests
             HumanInputResponseActorAuthenticationStatus.Authenticated,
             command.OperationId,
             command.CommandHash,
-            "workspace-one",
+            "workspace-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             harness.Time.UtcNow,
             HumanInputResponseLifecycleTestData.Actor("user-one"),
             HumanInputResponseLifecycleTestData.Hash('e'));

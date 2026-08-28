@@ -29,6 +29,30 @@ public sealed class GovernedLoopHumanInputWaitingCheckpointContractTests
     }
 
     [Fact]
+    public void Waiting_checkpoint_rejects_noncanonical_or_cross_workspace_bindings_before_publication()
+    {
+        var pending = GovernedLoopHumanInputWaitingCheckpointTestData.Pending();
+        var invalidWorkspaceIds = new[]
+        {
+            "workspace-one",
+            "workspace-sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "workspace-sha256:" + new string('a', 63),
+            "workspace-sha256:" + new string('a', 65),
+            "workspace-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:extra",
+            "workspace-sha512:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        };
+
+        foreach (var workspaceId in invalidWorkspaceIds)
+        {
+            var checkpoint = GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(new GovernedLoopHumanInputWaitingCheckpoint(1, pending.Binding with { WorkspaceId = workspaceId }, pending.NodeConfiguration, pending.ResolvedPolicy, pending.Request, pending.Posture, pending.Evidence, string.Empty));
+            Assert.Contains(GovernedLoopHumanInputWaitingCheckpointContractValidator.Validate(checkpoint).Errors, error => error.Code == "invalid_workspace_id" && error.Path == "$.binding.workspaceId");
+        }
+
+        var crossWorkspace = GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(new GovernedLoopHumanInputWaitingCheckpoint(1, pending.Binding with { WorkspaceId = "workspace-sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }, pending.NodeConfiguration, pending.ResolvedPolicy, pending.Request, pending.Posture, pending.Evidence, string.Empty));
+        Assert.Contains(GovernedLoopHumanInputWaitingCheckpointContractValidator.Validate(crossWorkspace).Errors, error => error.Code == "request_binding_mismatch");
+    }
+
+    [Fact]
     public void Every_closed_posture_is_valid_and_only_legal_single_boundary_transitions_are_admitted()
     {
         var pending = GovernedLoopHumanInputWaitingCheckpointTestData.Pending();

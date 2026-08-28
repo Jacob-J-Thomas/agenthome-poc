@@ -1,4 +1,5 @@
 using EmbodySense.Core.Application.HumanInput.Responses.Models;
+using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.HumanInput;
 using EmbodySense.Core.Common.HumanInput.Lifecycle;
 using EmbodySense.Core.Common.HumanInput.Lifecycle.Models;
@@ -118,7 +119,7 @@ public static class HumanInputResponseLifecycleCommandValidator
         List<HumanInputResponseLifecycleMutationValidationError> errors)
     {
         if (binding is null
-            || !HumanInputIdentifier.IsValid(binding.WorkspaceId)
+            || !ContextualRoleWorkspaceId.IsValid(binding.WorkspaceId)
             || !HumanInputIdentifier.IsValid(binding.LoopGraphId)
             || !HumanInputIdentifier.IsValid(binding.LoopRevisionId)
             || !HumanInputIdentifier.IsValid(binding.NodeId)

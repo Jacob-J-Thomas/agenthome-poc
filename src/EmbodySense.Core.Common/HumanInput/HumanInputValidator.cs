@@ -1,4 +1,5 @@
 using EmbodySense.Core.Common.HumanInput.Models;
+using EmbodySense.Core.Common.ContextualRoles;
 using System.Collections.Immutable;
 
 namespace EmbodySense.Core.Common.HumanInput;
@@ -129,7 +130,7 @@ public static class HumanInputValidator
             return;
         }
 
-        ValidateId(binding.WorkspaceId, $"{field}.workspaceId", errors);
+        ValidateWorkspaceId(binding.WorkspaceId, $"{field}.workspaceId", errors);
         ValidateId(binding.LoopGraphId, $"{field}.loopGraphId", errors);
         ValidateId(binding.LoopRevisionId, $"{field}.loopRevisionId", errors);
         ValidateId(binding.NodeId, $"{field}.nodeId", errors);
@@ -630,6 +631,11 @@ public static class HumanInputValidator
         {
             Add(errors, "invalid_identifier", field, "Value must be a bounded canonical lowercase ASCII identifier.");
         }
+    }
+
+    private static void ValidateWorkspaceId(string? value, string field, List<HumanInputValidationError> errors)
+    {
+        if (!ContextualRoleWorkspaceId.IsValid(value)) Add(errors, "invalid_workspace_id", field, "A canonical workspace-sha256 workspace scope is required.");
     }
 
     private static void ValidateText(string? value, string field, int maximum, bool required, List<HumanInputValidationError> errors)

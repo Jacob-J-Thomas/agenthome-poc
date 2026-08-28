@@ -23,7 +23,7 @@ public sealed class HumanInputRequestLifecyclePrivacyTests
             HumanInputRequestLifecycleActorAuthorizationStatus.Authorized,
             command.OperationId,
             command.RequestHash,
-            "workspace-one",
+            "workspace-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             HumanInputRequestLifecycleTestData.Now,
             AuthorityGrantApplicationTestFixture.Actor("human-input-actor"),
             HumanInputRequestLifecycleTestData.Hash('a'));
@@ -67,7 +67,7 @@ public sealed class HumanInputRequestLifecyclePrivacyTests
         {
             Assert.DoesNotContain(request.Prompt, value, StringComparison.Ordinal);
             Assert.DoesNotContain("private-route-one", value, StringComparison.Ordinal);
-            Assert.DoesNotContain("workspace-one", value, StringComparison.Ordinal);
+            Assert.DoesNotContain("workspace-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", value, StringComparison.Ordinal);
             Assert.DoesNotContain("governed-loop", value, StringComparison.Ordinal);
             Assert.DoesNotContain("revision-1", value, StringComparison.Ordinal);
             Assert.DoesNotContain("node-one", value, StringComparison.Ordinal);

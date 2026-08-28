@@ -16,7 +16,7 @@ internal static class HumanInputRequestLifecycleTestData
     internal static HumanInputRequest Request(
         string requestId = "request-one",
         string requestVersionId = "request-version-one",
-        string workspaceId = "workspace-one",
+        string workspaceId = "workspace-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         string loopGraphId = "governed-loop",
         string loopRevisionId = "revision-1",
         string prompt = "Private prompt value",
@@ -51,7 +51,7 @@ internal static class HumanInputRequestLifecycleTestData
     }
 
     internal static HumanInputRequestBinding Binding(
-        string workspaceId = "workspace-one",
+        string workspaceId = "workspace-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         string loopGraphId = "governed-loop",
         string loopRevisionId = "revision-1")
         => new(

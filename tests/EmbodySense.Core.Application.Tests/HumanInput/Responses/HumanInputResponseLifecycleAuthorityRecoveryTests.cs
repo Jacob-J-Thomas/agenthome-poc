@@ -21,7 +21,7 @@ public sealed class HumanInputResponseLifecycleAuthorityRecoveryTests
             head,
             "cross-workspace-submit",
             "cross-workspace-response",
-            expectedBinding: harness.Request.Binding with { WorkspaceId = "workspace-two" });
+            expectedBinding: harness.Request.Binding with { WorkspaceId = "workspace-sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" });
 
         var rejected = await harness.Service.MutateAsync(crossWorkspace);
         Assert.Equal(HumanInputResponseLifecycleMutationStatus.Conflict, rejected.Status);
@@ -256,7 +256,7 @@ public sealed class HumanInputResponseLifecycleAuthorityRecoveryTests
             harness.Store,
             secondAuthenticator,
             new StubCapabilityAuthorityTransaction(),
-            "workspace-one",
+            "workspace-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             secondTime);
         using var barrier = new Barrier(2);
         harness.Store.ReadyReadBarrier = barrier;

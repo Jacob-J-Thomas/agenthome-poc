@@ -38,7 +38,7 @@ public static class GovernedLoopHumanInputNodeConfigurationValidator
                 HumanInputRequest.CurrentSchemaVersion,
                 "graph-human-input-request",
                 "graph-human-input-version",
-                new HumanInputRequestBinding("workspace-1", "graph-1", "revision-1", "node-1", "run-1", "checkpoint-1"),
+                new HumanInputRequestBinding("workspace-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "graph-1", "revision-1", "node-1", "run-1", "checkpoint-1"),
                 configuration.Purpose!,
                 configuration.Prompt!,
                 configuration.ResponseSchema!,

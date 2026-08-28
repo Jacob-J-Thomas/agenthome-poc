@@ -76,16 +76,16 @@ public sealed class HumanInputPolicyResolutionServiceTests
         return source;
     }
 
-    private static HumanInputPolicyResolutionRequest Request() => new("workspace-one", "graph-one", "revision-one", "node-one", "actor-one", Configuration("timeout-one@revision-one", "failure-one@revision-one"));
+    private static HumanInputPolicyResolutionRequest Request() => new("workspace-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "graph-one", "revision-one", "node-one", "actor-one", Configuration("timeout-one@revision-one", "failure-one@revision-one"));
 
     private static GovernedLoopHumanInputNodeConfiguration Configuration(string timeout, string failure)
         => new(1, "response-schema-one", "Collect data.", "Provide data.", new HumanInputResponseSchema(HumanInputResponseKind.Text, 32, null, null, null), HumanInputPrivacyClass.Private, [new HumanInputEligibleRespondent("actor-one", "role-one", "route-one")], new HumanInputResponsePolicy(HumanInputResponsePolicyKind.FirstValid, null, null), timeout, failure);
 
     private static HumanInputPolicyArtifact Timeout()
-        => HumanInputPolicyArtifactHash.Apply(new HumanInputPolicyArtifact(1, "timeout-one", "revision-one", HumanInputPolicyKind.ResponseWindow, "workspace-one", "graph-one", "actor-one", 3_600_000, HumanInputTerminalDisposition.Unknown, string.Empty));
+        => HumanInputPolicyArtifactHash.Apply(new HumanInputPolicyArtifact(1, "timeout-one", "revision-one", HumanInputPolicyKind.ResponseWindow, "workspace-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "graph-one", "actor-one", 3_600_000, HumanInputTerminalDisposition.Unknown, string.Empty));
 
     private static HumanInputPolicyArtifact Failure()
-        => HumanInputPolicyArtifactHash.Apply(new HumanInputPolicyArtifact(1, "failure-one", "revision-one", HumanInputPolicyKind.DeadlineDisposition, "workspace-one", "graph-one", "actor-one", null, HumanInputTerminalDisposition.Expired, string.Empty));
+        => HumanInputPolicyArtifactHash.Apply(new HumanInputPolicyArtifact(1, "failure-one", "revision-one", HumanInputPolicyKind.DeadlineDisposition, "workspace-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "graph-one", "actor-one", null, HumanInputTerminalDisposition.Expired, string.Empty));
 
     private static readonly DateTimeOffset _at = new(2026, 8, 26, 15, 0, 0, TimeSpan.Zero);
 }

@@ -1,4 +1,5 @@
 using EmbodySense.Core.Common.Authority;
+using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.HumanInput.Lifecycle;
 using EmbodySense.Core.Common.HumanInput.Lifecycle.Models;
 using EmbodySense.Core.Common.HumanInput.Models;
@@ -728,7 +729,7 @@ public static class HumanInputResponseContractValidator
             Add(errors, HumanInputResponseValidationErrorCode.InvalidBinding, path, "An exact request binding is required.");
             return;
         }
-        ValidateIdentifier(binding.WorkspaceId, path + ".workspaceId", HumanInputResponseValidationErrorCode.InvalidBinding, errors);
+        ValidateWorkspaceId(binding.WorkspaceId, path + ".workspaceId", errors);
         ValidateIdentifier(binding.LoopGraphId, path + ".loopGraphId", HumanInputResponseValidationErrorCode.InvalidBinding, errors);
         ValidateIdentifier(binding.LoopRevisionId, path + ".loopRevisionId", HumanInputResponseValidationErrorCode.InvalidBinding, errors);
         ValidateIdentifier(binding.NodeId, path + ".nodeId", HumanInputResponseValidationErrorCode.InvalidBinding, errors);
@@ -758,6 +759,11 @@ public static class HumanInputResponseContractValidator
         {
             Add(errors, code, path, "A bounded canonical lowercase Human Input identifier is required.");
         }
+    }
+
+    private static void ValidateWorkspaceId(string? value, string path, List<HumanInputResponseValidationError> errors)
+    {
+        if (!ContextualRoleWorkspaceId.IsValid(value)) Add(errors, HumanInputResponseValidationErrorCode.InvalidBinding, path, "A canonical workspace-sha256 workspace scope is required.");
     }
 
     private static void ValidateSha256(string? value, string path, HumanInputResponseValidationErrorCode code, List<HumanInputResponseValidationError> errors)

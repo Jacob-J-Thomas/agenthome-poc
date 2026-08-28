@@ -34,7 +34,7 @@ public sealed class HumanInputRequestLifecycleCreateTests
         Assert.Equal(command.CandidateRequest?.RequestHash, authorization.Command.CandidateRequest?.RequestHash);
         Assert.NotSame(command.CandidateRequest?.EligibleRespondents, authorization.Command.CandidateRequest?.EligibleRespondents);
         Assert.Equal(command.RequestHash, authorization.RequestHash);
-        Assert.Equal("workspace-one", authorization.WorkspaceId);
+        Assert.Equal("workspace-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", authorization.WorkspaceId);
         Assert.Equal(HumanInputRequestLifecycleTestData.Now, authorization.EvaluatedAtUtc);
         Assert.Equal(0, harness.Time.Calls);
 

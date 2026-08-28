@@ -1,5 +1,6 @@
 using EmbodySense.Core.Common.Authority.Grants;
 using EmbodySense.Core.Common.Authority.Grants.Models;
+using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.HumanInput.Lifecycle.Models;
 using EmbodySense.Core.Common.HumanInput.Models;
 using EmbodySense.Core.Common.HumanInput.Responses.Models;
@@ -498,7 +499,7 @@ public static class HumanInputRequestLifecycleValidator
             return;
         }
 
-        ValidateIdentifier(binding.WorkspaceId, "$.expectedBinding.workspaceId", HumanInputLimits.MaxIdentifierCharacters, errors);
+        ValidateWorkspaceId(binding.WorkspaceId, "$.expectedBinding.workspaceId", errors);
         ValidateIdentifier(binding.LoopGraphId, "$.expectedBinding.loopGraphId", HumanInputLimits.MaxIdentifierCharacters, errors);
         ValidateIdentifier(binding.LoopRevisionId, "$.expectedBinding.loopRevisionId", HumanInputLimits.MaxIdentifierCharacters, errors);
         ValidateIdentifier(binding.NodeId, "$.expectedBinding.nodeId", HumanInputLimits.MaxIdentifierCharacters, errors);
@@ -936,6 +937,11 @@ public static class HumanInputRequestLifecycleValidator
         {
             Add(errors, HumanInputRequestLifecycleValidationErrorCode.InvalidIdentifier, path, "A bounded canonical lowercase Human Input identifier is required.");
         }
+    }
+
+    private static void ValidateWorkspaceId(string? value, string path, List<HumanInputRequestLifecycleValidationError> errors)
+    {
+        if (!ContextualRoleWorkspaceId.IsValid(value)) Add(errors, HumanInputRequestLifecycleValidationErrorCode.InvalidIdentifier, path, "A canonical workspace-sha256 workspace scope is required.");
     }
 
     private static void ValidateOptionalIdentifier(string? value, string path, List<HumanInputRequestLifecycleValidationError> errors)

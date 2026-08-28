@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using EmbodySense.Core.Application.HumanInput.Responses.Models;
+using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.HumanInput;
 using EmbodySense.Core.Common.HumanInput.Models;
 using EmbodySense.Core.Common.HumanInput.Responses;
@@ -132,7 +133,7 @@ public static class HumanInputResponseLifecycleCommandHash
 
     private static bool BindingIsWithin(HumanInputRequestBinding? binding)
         => binding is not null
-            && HumanInputIdentifier.IsValid(binding.WorkspaceId)
+            && ContextualRoleWorkspaceId.IsValid(binding.WorkspaceId)
             && HumanInputIdentifier.IsValid(binding.LoopGraphId)
             && HumanInputIdentifier.IsValid(binding.LoopRevisionId)
             && HumanInputIdentifier.IsValid(binding.NodeId)

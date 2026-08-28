@@ -22,6 +22,29 @@ public sealed class HumanInputContractsTests
     }
 
     [Fact]
+    public void Workspace_binding_requires_the_exact_canonical_runtime_scope_shape()
+    {
+        var canonical = Request(HumanInputResponseKind.Text);
+        var invalidWorkspaceIds = new[]
+        {
+            "workspace-one",
+            "workspace-sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "workspace-sha256:" + new string('a', 63),
+            "workspace-sha256:" + new string('a', 65),
+            "workspace-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:extra",
+            "workspace-sha512:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        };
+
+        Assert.True(HumanInputValidator.ValidateRequest(canonical).IsValid);
+        foreach (var workspaceId in invalidWorkspaceIds)
+        {
+            var candidate = canonical with { Binding = canonical.Binding with { WorkspaceId = workspaceId } };
+            Assert.Throws<ArgumentException>(() => HumanInputRequestHash.Compute(candidate));
+            Assert.Contains(HumanInputValidator.ValidateRequest(candidate).Errors, error => error.Code == "invalid_workspace_id" && error.Field == "binding.workspaceId");
+        }
+    }
+
+    [Fact]
     public void Canonical_hash_covers_every_behavior_affecting_request_field()
     {
         var request = Request(HumanInputResponseKind.Text);
@@ -30,7 +53,7 @@ public sealed class HumanInputContractsTests
             request with { SchemaVersion = 2 },
             request with { RequestId = "request-other" },
             request with { RequestVersionId = "request-version-other" },
-            request with { Binding = request.Binding with { WorkspaceId = "workspace-other" } },
+            request with { Binding = request.Binding with { WorkspaceId = "workspace-sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" } },
             request with { Binding = request.Binding with { LoopGraphId = "governed-loop-other" } },
             request with { Binding = request.Binding with { LoopRevisionId = "revision-other" } },
             request with { Binding = request.Binding with { NodeId = "node-other" } },
@@ -195,7 +218,7 @@ public sealed class HumanInputContractsTests
         var response = Response(request);
         var bindings = new[]
         {
-            request.Binding with { WorkspaceId = "workspace-other" },
+            request.Binding with { WorkspaceId = "workspace-sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
             request.Binding with { LoopGraphId = "governed-loop-other" },
             request.Binding with { LoopRevisionId = "revision-other" },
             request.Binding with { NodeId = "node-other" },
@@ -655,7 +678,7 @@ public sealed class HumanInputContractsTests
             HumanInputResponseKind.Reference => new HumanInputResponseSchema(kind, null, null, null, new HumanInputReferencePolicy(HumanInputReferenceKind.Reference, 64)),
             _ => throw new ArgumentOutOfRangeException(nameof(kind))
         };
-        var request = new HumanInputRequest(1, "request-one", "request-version-one", new HumanInputRequestBinding("workspace-one", "governed-loop", "revision-one", "node-one", "run-one", "checkpoint-one"), "Collect data", "Provide data only.", schema, HumanInputPrivacyClass.Private, [new HumanInputEligibleRespondent("user-one", "role-one", "route-one")], new HumanInputTiming(_at, _at.AddHours(1)), new HumanInputResponsePolicy(HumanInputResponsePolicyKind.FirstValid, null, null), new HumanInputContinuationBinding(HumanInputContinuationPolicyKind.BoundNodeAndCheckpointOnly, "node-one", "checkpoint-one"), string.Empty);
+        var request = new HumanInputRequest(1, "request-one", "request-version-one", new HumanInputRequestBinding("workspace-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "governed-loop", "revision-one", "node-one", "run-one", "checkpoint-one"), "Collect data", "Provide data only.", schema, HumanInputPrivacyClass.Private, [new HumanInputEligibleRespondent("user-one", "role-one", "route-one")], new HumanInputTiming(_at, _at.AddHours(1)), new HumanInputResponsePolicy(HumanInputResponsePolicyKind.FirstValid, null, null), new HumanInputContinuationBinding(HumanInputContinuationPolicyKind.BoundNodeAndCheckpointOnly, "node-one", "checkpoint-one"), string.Empty);
         return HumanInputRequestHash.Apply(request);
     }
 

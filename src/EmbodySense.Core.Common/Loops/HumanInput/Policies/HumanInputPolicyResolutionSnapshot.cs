@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.HumanInput;
 using EmbodySense.Core.Common.Loops.HumanInput.Policies.Models;
 
@@ -64,7 +65,7 @@ public sealed record HumanInputPolicyResolutionSnapshot(
         HumanInputPolicyArtifact? failurePolicy,
         DateTimeOffset resolvedAtUtc)
     {
-        if (!HumanInputIdentifier.IsValid(workspaceId)
+        if (!ContextualRoleWorkspaceId.IsValid(workspaceId)
             || !HumanInputIdentifier.IsValid(graphId)
             || !HumanInputIdentifier.IsValid(graphRevisionId)
             || !HumanInputIdentifier.IsValid(nodeId)
@@ -104,7 +105,7 @@ public sealed record HumanInputPolicyResolutionSnapshot(
     {
         if (snapshot is null
             || snapshot.SchemaVersion != CurrentSchemaVersion
-            || !HumanInputIdentifier.IsValid(snapshot.WorkspaceId)
+            || !ContextualRoleWorkspaceId.IsValid(snapshot.WorkspaceId)
             || !HumanInputIdentifier.IsValid(snapshot.GraphId)
             || !HumanInputIdentifier.IsValid(snapshot.GraphRevisionId)
             || !HumanInputIdentifier.IsValid(snapshot.NodeId)

@@ -14,7 +14,7 @@ internal sealed class HumanInputResponseLifecycleHarness
         Request = request;
         LifecycleHarness = lifecycleHarness;
         Store = new InMemoryHumanInputResponseLifecycleStore(lifecycleHarness.Store.Snapshot(request.RequestId));
-        Service = new HumanInputResponseLifecycleService(Store, Authenticator, Transaction, "workspace-one", Time);
+        Service = new HumanInputResponseLifecycleService(Store, Authenticator, Transaction, "workspace-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Time);
     }
 
     internal HumanInputRequest Request { get; }

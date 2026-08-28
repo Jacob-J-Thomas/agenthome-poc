@@ -176,7 +176,7 @@ internal static class HumanInputRequestStoreTestData
             HumanInputRequest.CurrentSchemaVersion,
             requestId,
             requestVersionId,
-            binding ?? new HumanInputRequestBinding("workspace-one", "governed-loop", "loop-revision-one", "node-one", "run-one", "checkpoint-one"),
+            binding ?? new HumanInputRequestBinding("workspace-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "governed-loop", "loop-revision-one", "node-one", "run-one", "checkpoint-one"),
             "Collect one bounded datum.",
             prompt,
             new HumanInputResponseSchema(HumanInputResponseKind.Text, 128, null, null, null),
@@ -243,7 +243,7 @@ internal static class HumanInputRequestStoreTestData
             kind == HumanInputRequestLifecycleOperationKind.Create ? null : previousHead?.CurrentRequest,
             kind == HumanInputRequestLifecycleOperationKind.Create
                 ? null
-                : candidate?.Binding ?? new HumanInputRequestBinding("workspace-one", "governed-loop", "loop-revision-one", "node-one", "run-one", "checkpoint-one"),
+                : candidate?.Binding ?? new HumanInputRequestBinding("workspace-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "governed-loop", "loop-revision-one", "node-one", "run-one", "checkpoint-one"),
             previousHead,
             resultHead,
             relatedRequestId,
