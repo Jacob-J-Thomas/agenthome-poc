@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using EmbodySense.Core.Application.HumanInput.Lifecycle.Models;
+using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.Authority;
 using EmbodySense.Core.Common.Authority.Grants;
 using EmbodySense.Core.Common.HumanInput;
@@ -232,7 +233,7 @@ public static class HumanInputRequestLifecycleCommandHash
     }
 
     private static bool BindingIsWithinBounds(HumanInputRequestBinding binding)
-        => IsWithin(binding.WorkspaceId, HumanInputLimits.MaxIdentifierCharacters)
+        => ContextualRoleWorkspaceId.IsValid(binding.WorkspaceId)
             && IsWithin(binding.LoopGraphId, HumanInputLimits.MaxIdentifierCharacters)
             && IsWithin(binding.LoopRevisionId, HumanInputLimits.MaxIdentifierCharacters)
             && IsWithin(binding.NodeId, HumanInputLimits.MaxIdentifierCharacters)

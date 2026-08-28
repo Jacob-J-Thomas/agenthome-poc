@@ -268,7 +268,7 @@ public sealed class HumanInputPolicyFileStoreTests
             new string('a', HumanInputLimits.MaxIdentifierCharacters),
             new string('b', HumanInputLimits.MaxIdentifierCharacters),
             HumanInputPolicyKind.ResponseWindow,
-            "workspace-one",
+            "workspace-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "graph-one",
             "actor-one",
             3_600_000,
@@ -1184,13 +1184,13 @@ public sealed class HumanInputPolicyFileStoreTests
     }
 
     private static HumanInputPolicyArtifact Timeout()
-        => HumanInputPolicyArtifactHash.Apply(new HumanInputPolicyArtifact(1, "timeout-one", "revision-one", HumanInputPolicyKind.ResponseWindow, "workspace-one", "graph-one", "actor-one", 3_600_000, HumanInputTerminalDisposition.Unknown, string.Empty));
+        => HumanInputPolicyArtifactHash.Apply(new HumanInputPolicyArtifact(1, "timeout-one", "revision-one", HumanInputPolicyKind.ResponseWindow, "workspace-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "graph-one", "actor-one", 3_600_000, HumanInputTerminalDisposition.Unknown, string.Empty));
 
     private static HumanInputPolicyArtifact Failure()
-        => HumanInputPolicyArtifactHash.Apply(new HumanInputPolicyArtifact(1, "failure-one", "revision-one", HumanInputPolicyKind.DeadlineDisposition, "workspace-one", "graph-one", "actor-one", null, HumanInputTerminalDisposition.Expired, string.Empty));
+        => HumanInputPolicyArtifactHash.Apply(new HumanInputPolicyArtifact(1, "failure-one", "revision-one", HumanInputPolicyKind.DeadlineDisposition, "workspace-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "graph-one", "actor-one", null, HumanInputTerminalDisposition.Expired, string.Empty));
 
     private static HumanInputPolicyArtifact MaximumLengthTimeout(int index)
-        => HumanInputPolicyArtifactHash.Apply(new HumanInputPolicyArtifact(1, MaximumLengthIdentifier('p', index), MaximumLengthIdentifier('r', index), HumanInputPolicyKind.ResponseWindow, MaximumLengthIdentifier('w', index), MaximumLengthIdentifier('g', index), MaximumLengthIdentifier('a', index), 3_600_000, HumanInputTerminalDisposition.Unknown, string.Empty));
+        => HumanInputPolicyArtifactHash.Apply(new HumanInputPolicyArtifact(1, MaximumLengthIdentifier('p', index), MaximumLengthIdentifier('r', index), HumanInputPolicyKind.ResponseWindow, "workspace-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", MaximumLengthIdentifier('g', index), MaximumLengthIdentifier('a', index), 3_600_000, HumanInputTerminalDisposition.Unknown, string.Empty));
 
     private static string MaximumLengthIdentifier(char prefix, int index)
     {

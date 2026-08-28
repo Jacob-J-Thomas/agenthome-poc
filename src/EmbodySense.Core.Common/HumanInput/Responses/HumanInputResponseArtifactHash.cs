@@ -2,6 +2,7 @@ using System.Buffers;
 using System.Security.Cryptography;
 using System.Text.Json;
 using EmbodySense.Core.Common.Authority;
+using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.HumanInput.Responses.Models;
 
 namespace EmbodySense.Core.Common.HumanInput.Responses;
@@ -84,7 +85,7 @@ public static class HumanInputResponseArtifactHash
             || !HumanInputIdentifier.IsValid(artifact.Request.RequestVersionId)
             || !HumanInputResponseHashRules.IsSha256(artifact.Request.RequestHash)
             || artifact.Binding is null
-            || !HumanInputIdentifier.IsValid(artifact.Binding.WorkspaceId)
+            || !ContextualRoleWorkspaceId.IsValid(artifact.Binding.WorkspaceId)
             || !HumanInputIdentifier.IsValid(artifact.Binding.LoopGraphId)
             || !HumanInputIdentifier.IsValid(artifact.Binding.LoopRevisionId)
             || !HumanInputIdentifier.IsValid(artifact.Binding.NodeId)

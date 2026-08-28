@@ -4,6 +4,7 @@ using System.Text;
 using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Application.HumanInput.Responses.Models;
 using EmbodySense.Core.Common.Authority;
+using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.HumanInput;
 using EmbodySense.Core.Common.HumanInput.Lifecycle;
 using EmbodySense.Core.Common.HumanInput.Lifecycle.Models;
@@ -39,7 +40,8 @@ public sealed class HumanInputResponseLifecycleService : IHumanInputResponseLife
         _store = store ?? throw new ArgumentNullException(nameof(store));
         _authenticator = authenticator ?? throw new ArgumentNullException(nameof(authenticator));
         _authorityTransaction = authorityTransaction ?? throw new ArgumentNullException(nameof(authorityTransaction));
-        _workspaceId = HumanInputIdentifier.Require(workspaceId, nameof(workspaceId));
+        if (!ContextualRoleWorkspaceId.IsValid(workspaceId)) throw new ArgumentException("Workspace id must use the canonical workspace-sha256 scope contract.", nameof(workspaceId));
+        _workspaceId = workspaceId;
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 

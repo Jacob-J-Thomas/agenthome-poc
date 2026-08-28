@@ -23,7 +23,7 @@ internal static class GovernedLoopHumanInputWaitingCheckpointTestData
         var revision = GovernedLoopRevisionReference.Create(1, "graph-one", "revision-one", Hash('a'));
         return new GovernedLoopHumanInputWaitingCheckpointBinding(
             1,
-            "workspace-one",
+            "workspace-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             GovernedLoopExecutionBinding.Create(1, "run-one", revision, generation),
             new GovernedLoopRevisionPublicationPin(1, revision, "publication-one", Hash('b')),
             Hash('c'),

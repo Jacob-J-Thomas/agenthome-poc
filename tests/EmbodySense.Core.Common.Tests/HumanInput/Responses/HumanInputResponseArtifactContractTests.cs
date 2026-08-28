@@ -260,7 +260,7 @@ public sealed class HumanInputResponseArtifactContractTests
             artifact with { SchemaVersion = 2 },
             artifact with { ResponseId = "Invalid" },
             artifact with { Request = artifact.Request with { RequestHash = HumanInputResponseTestData.Hash('d') } },
-            artifact with { Binding = artifact.Binding with { WorkspaceId = "workspace-other" } },
+            artifact with { Binding = artifact.Binding with { WorkspaceId = "workspace-sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" } },
             artifact with { ActorId = null! },
             artifact with { RespondentRoleId = "role-other" },
             artifact with { SubmittedAtUtc = request.Timing.ExpiresAtUtc.AddTicks(1) },

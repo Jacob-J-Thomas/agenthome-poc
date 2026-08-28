@@ -3,6 +3,7 @@ using EmbodySense.Core.Application.Governance.Authority.Grants;
 using EmbodySense.Core.Application.Governance.Authority.Grants.Models;
 using EmbodySense.Core.Application.HumanInput.Lifecycle.Models;
 using EmbodySense.Core.Common.Authority;
+using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.Authority.Grants;
 using EmbodySense.Core.Common.Authority.Grants.Models;
 using EmbodySense.Core.Common.HumanInput;
@@ -44,7 +45,8 @@ public sealed class HumanInputRequestLifecycleService : IHumanInputRequestLifecy
         _authorizer = authorizer ?? throw new ArgumentNullException(nameof(authorizer));
         _grantResolver = grantResolver ?? throw new ArgumentNullException(nameof(grantResolver));
         _authorityTransaction = authorityTransaction ?? throw new ArgumentNullException(nameof(authorityTransaction));
-        _workspaceId = HumanInputIdentifier.Require(workspaceId, nameof(workspaceId));
+        if (!ContextualRoleWorkspaceId.IsValid(workspaceId)) throw new ArgumentException("Workspace id must use the canonical workspace-sha256 scope contract.", nameof(workspaceId));
+        _workspaceId = workspaceId;
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
