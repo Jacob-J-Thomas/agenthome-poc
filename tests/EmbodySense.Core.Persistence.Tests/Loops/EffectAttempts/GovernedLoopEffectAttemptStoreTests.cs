@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Application.Loops.EffectAttempts;
 using EmbodySense.Core.Application.Loops.EffectAttempts.Models;
 using EmbodySense.Core.Common.Capabilities;
@@ -174,7 +175,8 @@ public sealed class GovernedLoopEffectAttemptStoreTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        var missing = await ((IGovernedLoopEffectAttemptReadStore)new GovernedLoopEffectAttemptStore(paths)).ReadAsync("effect-operation-1", 1);
+        var workspaceId = CapabilityWorkspaceScopeId.Create(paths.RootPath);
+        var missing = await ((IGovernedLoopEffectAttemptReadStore)new GovernedLoopEffectAttemptStore(paths)).ReadAsync(workspaceId, "effect-operation-1", 1);
 
         Assert.Equal(GovernedLoopEffectAttemptReadStatus.Missing, missing.Status);
         Assert.False(Directory.Exists(paths.GovernedLoopEffectAttemptsPath));
@@ -185,17 +187,44 @@ public sealed class GovernedLoopEffectAttemptStoreTests
         begun.Lease!.Dispose();
 
         var before = Directory.EnumerateFiles(paths.GovernedLoopEffectAttemptsPath).Order().ToArray();
-        var read = await ((IGovernedLoopEffectAttemptReadStore)store).ReadAsync(prepared.Payload.OperationId, prepared.Payload.EffectGeneration);
+        var read = await ((IGovernedLoopEffectAttemptReadStore)store).ReadAsync(workspaceId, prepared.Payload.OperationId, prepared.Payload.EffectGeneration);
 
         Assert.Equal(GovernedLoopEffectAttemptReadStatus.Current, read.Status);
         Assert.Equal(prepared.ContentHash, read.Attempt?.ContentHash);
         Assert.Equal(before, Directory.EnumerateFiles(paths.GovernedLoopEffectAttemptsPath).Order().ToArray());
 
         File.Delete(Directory.EnumerateFiles(paths.GovernedLoopEffectAttemptsPath, "*.head").Single());
-        var headless = await ((IGovernedLoopEffectAttemptReadStore)new GovernedLoopEffectAttemptStore(paths)).ReadAsync(prepared.Payload.OperationId, prepared.Payload.EffectGeneration);
+        var headless = await ((IGovernedLoopEffectAttemptReadStore)new GovernedLoopEffectAttemptStore(paths)).ReadAsync(workspaceId, prepared.Payload.OperationId, prepared.Payload.EffectGeneration);
 
         Assert.Equal(GovernedLoopEffectAttemptReadStatus.Corrupt, headless.Status);
         Assert.Empty(Directory.EnumerateFiles(paths.GovernedLoopEffectAttemptsPath, "*.head"));
+    }
+
+    [Fact]
+    public async Task Read_only_current_head_rejects_invalid_or_foreign_workspaces_without_touching_persistence()
+    {
+        using var workspace = new TestWorkspace();
+        using var foreignWorkspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var workspaceId = CapabilityWorkspaceScopeId.Create(paths.RootPath);
+        var foreignWorkspaceId = CapabilityWorkspaceScopeId.Create(foreignWorkspace.RootPath);
+        var store = new GovernedLoopEffectAttemptStore(paths);
+
+        var invalid = await ((IGovernedLoopEffectAttemptReadStore)store).ReadAsync("invalid-workspace", "effect-operation-1", 1);
+
+        Assert.Equal(GovernedLoopEffectAttemptReadStatus.Unavailable, invalid.Status);
+        Assert.False(Directory.Exists(paths.GovernedLoopEffectAttemptsPath));
+
+        var prepared = Prepare();
+        var begun = await store.BeginAsync(prepared);
+        begun.Lease!.Dispose();
+        var before = Directory.EnumerateFiles(paths.GovernedLoopEffectAttemptsPath).Order().ToArray();
+
+        var rejected = await ((IGovernedLoopEffectAttemptReadStore)store).ReadAsync(foreignWorkspaceId, prepared.Payload.OperationId, prepared.Payload.EffectGeneration);
+
+        Assert.Equal(GovernedLoopEffectAttemptReadStatus.Unavailable, rejected.Status);
+        Assert.Equal(before, Directory.EnumerateFiles(paths.GovernedLoopEffectAttemptsPath).Order().ToArray());
+        Assert.Equal(GovernedLoopEffectAttemptReadStatus.Current, (await ((IGovernedLoopEffectAttemptReadStore)store).ReadAsync(workspaceId, prepared.Payload.OperationId, prepared.Payload.EffectGeneration)).Status);
     }
 
     [Fact]

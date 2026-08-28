@@ -37,7 +37,7 @@ public sealed class CanonicalHumanReviewEffectEvidenceSource : IHumanReviewCurre
             return new HumanReviewCurrentEffectAttemptEvidenceReadResult(HumanReviewCurrentEffectAttemptEvidenceReadStatus.Corrupt);
         }
 
-        var source = await ReadSourceAsync(query.Binding.RunId, query.EffectAttempt.OperationId, query.EffectAttempt.EffectGeneration, cancellationToken).ConfigureAwait(false);
+        var source = await ReadSourceAsync(query.Binding.WorkspaceId, query.Binding.RunId, query.EffectAttempt.OperationId, query.EffectAttempt.EffectGeneration, cancellationToken).ConfigureAwait(false);
         if (source.Status != GovernedLoopEffectAttemptReadStatus.Current || source.Run is null || source.Attempt is null)
         {
             return new HumanReviewCurrentEffectAttemptEvidenceReadResult(MapEvidenceStatus(source.Status));
@@ -68,7 +68,7 @@ public sealed class CanonicalHumanReviewEffectEvidenceSource : IHumanReviewCurre
             return new GovernedLoopEffectCertaintySnapshotResult(GovernedLoopEffectCertaintySnapshotStatus.Corrupt);
         }
 
-        var source = await ReadSourceAsync(expectedIdentity.RunId, expectedIdentity.OperationId, expectedIdentity.EffectGeneration, cancellationToken).ConfigureAwait(false);
+        var source = await ReadSourceAsync(expectedIdentity.WorkspaceId, expectedIdentity.RunId, expectedIdentity.OperationId, expectedIdentity.EffectGeneration, cancellationToken).ConfigureAwait(false);
         if (source.Status != GovernedLoopEffectAttemptReadStatus.Current || source.Run is null || source.Attempt is null)
         {
             return new GovernedLoopEffectCertaintySnapshotResult(MapCertaintyStatus(source.Status));
@@ -87,7 +87,7 @@ public sealed class CanonicalHumanReviewEffectEvidenceSource : IHumanReviewCurre
         return new GovernedLoopEffectCertaintySnapshotResult(GovernedLoopEffectCertaintySnapshotStatus.Current, snapshot);
     }
 
-    private async Task<CanonicalHumanReviewEffectSourceRead> ReadSourceAsync(string runId, string operationId, long effectGeneration, CancellationToken cancellationToken)
+    private async Task<CanonicalHumanReviewEffectSourceRead> ReadSourceAsync(string workspaceId, string runId, string operationId, long effectGeneration, CancellationToken cancellationToken)
     {
         CustomLoopRunRecord? run;
         try
@@ -115,7 +115,7 @@ public sealed class CanonicalHumanReviewEffectEvidenceSource : IHumanReviewCurre
         GovernedLoopEffectAttemptReadResult? attempt;
         try
         {
-            attempt = await _attempts.ReadAsync(operationId, effectGeneration, cancellationToken).ConfigureAwait(false);
+            attempt = await _attempts.ReadAsync(workspaceId, operationId, effectGeneration, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

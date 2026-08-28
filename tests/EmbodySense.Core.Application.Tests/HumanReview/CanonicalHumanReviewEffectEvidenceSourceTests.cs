@@ -27,6 +27,7 @@ public sealed class CanonicalHumanReviewEffectEvidenceSourceTests
         Assert.Equal(reviewed.EffectAttemptId, evidence.Evidence?.Identity.EffectId);
         Assert.Equal(reviewed.PreparationHash, evidence.Evidence?.Preparation.PreparationHash);
         Assert.Equal(1, readStore.ReadCount);
+        Assert.Equal(fixture.Request.Binding.WorkspaceId, readStore.LastWorkspaceId);
 
         var dispatched = GovernedLoopEffectAttemptContract.Advance(
             GovernedLoopEffectAttemptContract.AttachDispatchAuthority(attempt, Hash('9'), attempt.Payload.UpdatedAtUtc.AddSeconds(1)),
@@ -44,6 +45,7 @@ public sealed class CanonicalHumanReviewEffectEvidenceSourceTests
         Assert.Equal(GovernedLoopEffectPhase.DispatchBoundaryReached, certainty.Snapshot?.Phase);
         Assert.NotNull(certainty.Snapshot?.SnapshotHash);
         Assert.Equal(2, readStore.ReadCount);
+        Assert.Equal(fixture.Request.Binding.WorkspaceId, readStore.LastWorkspaceId);
     }
 
     [Fact]
@@ -108,6 +110,30 @@ public sealed class CanonicalHumanReviewEffectEvidenceSourceTests
     }
 
     [Fact]
+    public async Task Root_rejected_effect_attempt_reads_fail_closed_after_forwarding_the_exact_review_workspace()
+    {
+        var fixture = await HumanReviewDecisionTestData.CreateAsync(includeEffectAttempt: true);
+        var attempt = Assert.IsType<GovernedLoopEffectAttempt>(fixture.EffectAttempt);
+        var reviewed = Assert.IsType<EmbodySense.Core.Common.HumanReview.Models.HumanReviewEffectAttemptBinding>(fixture.Request.Binding.EffectAttempt);
+        var readStore = new RecordingHumanReviewEffectAttemptReadStore(new GovernedLoopEffectAttemptReadResult(GovernedLoopEffectAttemptReadStatus.Current, attempt))
+        {
+            RequiredWorkspaceId = DifferentWorkspaceId(fixture.Request.Binding.WorkspaceId),
+        };
+        var source = new CanonicalHumanReviewEffectEvidenceSource(new HumanReviewDecisionTestStore(fixture.Run), readStore);
+        var identity = HumanReviewEffectReleaseContract.CreateIdentity(fixture.Request.Binding, attempt);
+        var preparation = HumanReviewEffectReleaseContract.CreatePreparation(fixture.Request.Binding, attempt);
+
+        var evidence = await ((IHumanReviewCurrentEffectAttemptEvidenceSource)source).ReadAsync(new HumanReviewCurrentEffectAttemptEvidenceQuery(fixture.Request.Binding, reviewed));
+        Assert.Equal(HumanReviewCurrentEffectAttemptEvidenceReadStatus.Unavailable, evidence.Status);
+        Assert.Equal(fixture.Request.Binding.WorkspaceId, readStore.LastWorkspaceId);
+
+        var certainty = await ((IGovernedLoopEffectCertaintySnapshotSource)source).ReadAsync(new GovernedLoopEffectCertaintySnapshotQuery(identity, preparation));
+        Assert.Equal(GovernedLoopEffectCertaintySnapshotStatus.Unavailable, certainty.Status);
+        Assert.Equal(fixture.Request.Binding.WorkspaceId, readStore.LastWorkspaceId);
+        Assert.Equal(2, readStore.ReadCount);
+    }
+
+    [Fact]
     public async Task Canonical_read_distinguishes_conclusive_and_ambiguous_effect_certainty()
     {
         var fixture = await HumanReviewDecisionTestData.CreateAsync(includeEffectAttempt: true);
@@ -147,6 +173,9 @@ public sealed class CanonicalHumanReviewEffectEvidenceSourceTests
         var authorized = GovernedLoopEffectAttemptContract.AttachDispatchAuthority(attempt, Hash('a'), attempt.Payload.UpdatedAtUtc.AddSeconds(1));
         return GovernedLoopEffectAttemptContract.Advance(authorized, GovernedLoopEffectPhase.DispatchBoundaryReached, GovernedLoopEffectOutcome.OutcomeUnknown, GovernedLoopEffectEvidenceStatus.Pending, null, null, authorized.Payload.UpdatedAtUtc.AddSeconds(1));
     }
+
+    private static string DifferentWorkspaceId(string workspaceId)
+        => workspaceId[..^1] + (workspaceId[^1] == 'a' ? "b" : "a");
 
     private static string Hash(char character) => new(character, HumanReviewContractLimits.Sha256HexCharacters);
 }

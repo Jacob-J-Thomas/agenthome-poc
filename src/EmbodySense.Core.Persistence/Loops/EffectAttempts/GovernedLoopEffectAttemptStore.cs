@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Application.Loops.EffectAttempts;
 using EmbodySense.Core.Application.Loops.EffectAttempts.Models;
 using EmbodySense.Core.Common.Loops.Execution;
@@ -7,6 +8,7 @@ using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Execution.Effects;
 using EmbodySense.Core.Common.Loops.Execution.Effects.Models;
 using EmbodySense.Core.Common.Loops.Execution.Models;
+using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Loops.EffectAttempts.Models;
 
@@ -31,6 +33,7 @@ public sealed class GovernedLoopEffectAttemptStore : IGovernedLoopEffectAttemptS
     private readonly long _maximumStoreBytes;
     private readonly int _maximumVersionsPerAttempt;
     private readonly string _root;
+    private readonly string _workspaceId;
 
     /// <summary>Creates one bounded workspace-scoped effect-attempt store.</summary>
     public GovernedLoopEffectAttemptStore(
@@ -62,6 +65,11 @@ public sealed class GovernedLoopEffectAttemptStore : IGovernedLoopEffectAttemptS
         _maximumStoreBytes = options.MaxStoreUtf8Bytes;
         _maximumVersionsPerAttempt = options.MaxVersionsPerAttempt;
         _root = paths.GovernedLoopEffectAttemptsPath;
+        _workspaceId = CapabilityWorkspaceScopeId.Create(paths.RootPath);
+        if (!ContextualRoleWorkspaceId.IsValid(_workspaceId))
+        {
+            throw new InvalidOperationException("The physical workspace did not produce a canonical workspace scope.");
+        }
         _guard = new CustomLoopArtifactPathGuard(paths.RootPath);
     }
 
@@ -119,10 +127,16 @@ public sealed class GovernedLoopEffectAttemptStore : IGovernedLoopEffectAttemptS
 
     /// <inheritdoc />
     public async Task<GovernedLoopEffectAttemptReadResult> ReadAsync(
+        string workspaceId,
         string operationId,
         long effectGeneration,
         CancellationToken cancellationToken = default)
     {
+        if (!ContextualRoleWorkspaceId.IsValid(workspaceId)
+            || !string.Equals(workspaceId, _workspaceId, StringComparison.Ordinal))
+        {
+            return ReadResult(GovernedLoopEffectAttemptReadStatus.Unavailable);
+        }
         if (!CustomLoopArtifactIdentifier.IsValid(operationId, GovernedLoopExecutionLimits.MaxIdentifierCharacters)
             || effectGeneration is < 1 or > GovernedLoopExecutionLimits.MaxVersion)
         {

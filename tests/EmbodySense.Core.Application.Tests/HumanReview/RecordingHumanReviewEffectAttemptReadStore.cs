@@ -7,12 +7,19 @@ internal sealed class RecordingHumanReviewEffectAttemptReadStore(GovernedLoopEff
 {
     public int ReadCount { get; private set; }
 
+    public string? RequiredWorkspaceId { get; set; }
+
     public GovernedLoopEffectAttemptReadResult Result { get; set; } = result;
 
-    public Task<GovernedLoopEffectAttemptReadResult> ReadAsync(string operationId, long effectGeneration, CancellationToken cancellationToken = default)
+    public string? LastWorkspaceId { get; private set; }
+
+    public Task<GovernedLoopEffectAttemptReadResult> ReadAsync(string workspaceId, string operationId, long effectGeneration, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         ReadCount++;
-        return Task.FromResult(Result);
+        LastWorkspaceId = workspaceId;
+        return Task.FromResult(RequiredWorkspaceId is not null && !string.Equals(workspaceId, RequiredWorkspaceId, StringComparison.Ordinal)
+            ? new GovernedLoopEffectAttemptReadResult(GovernedLoopEffectAttemptReadStatus.Unavailable)
+            : Result);
     }
 }
