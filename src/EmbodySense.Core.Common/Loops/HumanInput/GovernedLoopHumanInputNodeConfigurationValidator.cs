@@ -2,6 +2,8 @@ using EmbodySense.Core.Common.HumanInput;
 using EmbodySense.Core.Common.HumanInput.Models;
 using EmbodySense.Core.Common.HumanReview;
 using EmbodySense.Core.Common.Loops.Custom;
+using EmbodySense.Core.Common.Loops.HumanInput.Policies;
+using EmbodySense.Core.Common.Loops.HumanInput.Policies.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 
 namespace EmbodySense.Core.Common.Loops.HumanInput;
@@ -19,8 +21,8 @@ public static class GovernedLoopHumanInputNodeConfigurationValidator
         if (configuration is null
             || configuration.SchemaVersion != GovernedLoopHumanInputNodeConfiguration.CurrentSchemaVersion
             || !IsSafeReference(configuration.RequestSchemaReference)
-            || !IsSafeReference(configuration.TimeoutPolicyReference)
-            || !IsSafeReference(configuration.FailurePolicyReference)
+            || !HumanInputPolicyReference.TryParse(configuration.TimeoutPolicyReference, out _)
+            || !HumanInputPolicyReference.TryParse(configuration.FailurePolicyReference, out _)
             || !IsSafeText(configuration.Purpose, HumanInputLimits.MaxPurposeCharacters)
             || !IsSafeText(configuration.Prompt, HumanInputLimits.MaxPromptCharacters)
             || !HasCanonicalSafeRespondents(configuration.EligibleRespondents)
