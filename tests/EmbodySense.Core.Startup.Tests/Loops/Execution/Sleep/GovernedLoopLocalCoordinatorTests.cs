@@ -1138,16 +1138,17 @@ public sealed class GovernedLoopLocalCoordinatorTests
     public async Task Heartbeat_clock_failure_fails_closed_without_stopped_evidence()
     {
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var release = new TaskCompletionSource<GovernedLoopLocalWorkResult?>(TaskCreationOptions.RunContinuationsAsynchronously);
         var evidence = new RecordingCoordinatorEvidencePort();
         var clock = Clock();
         var observer = new SignalingCoordinatorBoundaryObserver();
         var work = new ScriptedLocalWorkRunner
         {
-            Handler = (_, _) =>
+            Handler = async (_, cancellationToken) =>
             {
                 entered.TrySetResult();
-                return release.Task;
+                // Regression: https://github.com/Jacob-J-Thomas/agenthome-poc/issues/639 keeps this fixture parked until heartbeat failure cancels work admission.
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                return new GovernedLoopLocalWorkResult(GovernedLoopLocalWorkResultStatus.Empty, "safe-boundary");
             }
         };
         await using var coordinator = Coordinator(
@@ -1158,23 +1159,15 @@ public sealed class GovernedLoopLocalCoordinatorTests
             heartbeat: TimeSpan.FromMilliseconds(10),
             boundaryObserver: observer);
 
-        try
-        {
-            Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Started, (await coordinator.StartAsync()).Status);
-            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            clock.ThrowOnNext = true;
-            await observer.HeartbeatDue.WaitAsync(TimeSpan.FromSeconds(5));
-            release.TrySetResult(new GovernedLoopLocalWorkResult(GovernedLoopLocalWorkResultStatus.Empty, "safe-boundary"));
-            await WaitUntilAsync(() => evidence.Snapshot?.LatestLifecycle.Status == GovernedLoopCoordinatorStatus.Failed);
-            var result = await coordinator.StopAsync();
+        Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Started, (await coordinator.StartAsync()).Status);
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        clock.ThrowOnNext = true;
+        await observer.HeartbeatDue.WaitAsync(TimeSpan.FromSeconds(5));
+        await WaitUntilAsync(() => evidence.Snapshot?.LatestLifecycle.Status == GovernedLoopCoordinatorStatus.Failed);
+        var result = await coordinator.StopAsync();
 
-            Assert.Equal(GovernedLoopLocalCoordinatorStopStatus.Failed, result.Status);
-            Assert.Contains(evidence.Failures, item => item.DetailEvidenceReference == "heartbeat-clock-unavailable");
-        }
-        finally
-        {
-            release.TrySetResult(new GovernedLoopLocalWorkResult(GovernedLoopLocalWorkResultStatus.Empty, "safe-boundary"));
-        }
+        Assert.Equal(GovernedLoopLocalCoordinatorStopStatus.Failed, result.Status);
+        Assert.Contains(evidence.Failures, item => item.DetailEvidenceReference == "heartbeat-clock-unavailable");
     }
 
     [Fact]
