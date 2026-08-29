@@ -8,6 +8,7 @@ using EmbodySense.Core.Application.HumanInput.Lifecycle.Models;
 using EmbodySense.Core.Application.HumanInput.Responses;
 using EmbodySense.Core.Application.HumanInput.Responses.Models;
 using EmbodySense.Core.Common.Authority;
+using EmbodySense.Core.Common.HumanInput.Lifecycle;
 using EmbodySense.Core.Common.HumanInput.Lifecycle.Models;
 using EmbodySense.Core.Common.HumanInput.Models;
 using EmbodySense.Core.Common.HumanInput.Responses.Models;
@@ -109,6 +110,9 @@ public sealed class HumanInputRuntimeFacade
     /// <param name="cancellationToken">A token that cancels before durable lifecycle intent begins.</param>
     /// <returns>The canonical redacted lifecycle operation result.</returns>
     /// <exception cref="OperationCanceledException">Thrown when cancellation is requested before durable intent begins.</exception>
+    /// <remarks>When one exact same-target operation is already durable, the facade reconstructs its server-owned binding,
+    /// candidate, grant, and reason from authenticated evidence instead of resolving mutable current terms. The lifecycle service
+    /// still reauthorizes the current actor before returning replay evidence.</remarks>
     public async Task<HumanInputOperationResult> SubmitLifecycleAsync(
         HumanInputLifecycleOperationInput? input,
         CancellationToken cancellationToken = default)
@@ -121,6 +125,40 @@ public sealed class HumanInputRuntimeFacade
         if (_provider is null)
         {
             return Unavailable(input.OperationId);
+        }
+
+        var observed = await ReadCatalogAsync(input.RequestId, cancellationToken).ConfigureAwait(false);
+        var observedFailure = MapReplayTargetReadFailure(input.OperationId, observed);
+        if (observedFailure is not null)
+        {
+            return observedFailure;
+        }
+
+        if (observed.Entry is not null)
+        {
+            HumanInputRequestLifecycleOperationEvidence[] persisted;
+            try
+            {
+                persisted = observed.Entry.Lifecycle.Operations
+                    .Where(operation => string.Equals(operation.OperationId, input.OperationId, StringComparison.Ordinal)
+                        && string.Equals(operation.TargetRequestId, input.RequestId, StringComparison.Ordinal))
+                    .Take(2)
+                    .ToArray();
+            }
+            catch (Exception)
+            {
+                return Ambiguous(input.OperationId);
+            }
+
+            if (persisted.Length > 1)
+            {
+                return Ambiguous(input.OperationId);
+            }
+
+            if (persisted.Length == 1)
+            {
+                return await SubmitPersistedLifecycleReplayAsync(input, observed.Entry, persisted[0], reason!, cancellationToken).ConfigureAwait(false);
+            }
         }
 
         AgentRuntimeHumanInputLifecycleTerms terms;
@@ -205,15 +243,7 @@ public sealed class HumanInputRuntimeFacade
             return Invalid(input.OperationId);
         }
 
-        var service = new HumanInputRequestLifecycleService(
-            _lifecycleStore,
-            new AgentRuntimeHumanInputLifecycleActorAuthorizer(_provider),
-            _grantResolver,
-            _authorityTransaction,
-            _workspaceId,
-            _timeProvider);
-        var result = await service.MutateAsync(command, cancellationToken).ConfigureAwait(false);
-        return await MapLifecycleResultAsync(result, input.RequestId, CancellationToken.None).ConfigureAwait(false);
+        return await MutateLifecycleAsync(command, input.RequestId, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Submits one exact response operation through canonical persistence and server-owned authentication.</summary>
@@ -310,9 +340,17 @@ public sealed class HumanInputRuntimeFacade
             return new HumanInputRequestCatalogReadResult(HumanInputRequestCatalogReadStatus.Invalid, 0, null);
         }
 
+        return await ReadCatalogAsync(requestId, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<HumanInputRequestCatalogReadResult> ReadCatalogAsync(
+        string requestId,
+        CancellationToken cancellationToken)
+    {
         try
         {
-            return await _catalog.ReadAsync(requestId, cancellationToken).ConfigureAwait(false);
+            var result = await _catalog.ReadAsync(requestId, cancellationToken).ConfigureAwait(false);
+            return result ?? new HumanInputRequestCatalogReadResult(HumanInputRequestCatalogReadStatus.Ambiguous, 0, null);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -322,6 +360,109 @@ public sealed class HumanInputRuntimeFacade
         {
             return new HumanInputRequestCatalogReadResult(HumanInputRequestCatalogReadStatus.Unavailable, 0, null);
         }
+    }
+
+    private async Task<HumanInputOperationResult> SubmitPersistedLifecycleReplayAsync(
+        HumanInputLifecycleOperationInput input,
+        HumanInputRequestCatalogEntry target,
+        HumanInputRequestLifecycleOperationEvidence evidence,
+        AuthorityPurpose surfaceReason,
+        CancellationToken cancellationToken)
+    {
+        bool evidenceIsValid;
+        try
+        {
+            evidenceIsValid = HumanInputRequestLifecycleValidator.ValidateEvidence(evidence).IsValid;
+        }
+        catch (Exception)
+        {
+            return Ambiguous(input.OperationId);
+        }
+
+        if (!evidenceIsValid)
+        {
+            return Ambiguous(input.OperationId);
+        }
+
+        if (!MatchesReplayIntent(input, evidence, surfaceReason))
+        {
+            return Conflict(input.OperationId);
+        }
+
+        HumanInputRequest? candidate = null;
+        if (evidence.CandidateRequest is { } candidateReference)
+        {
+            var candidateRead = string.Equals(candidateReference.RequestId, input.RequestId, StringComparison.Ordinal)
+                ? new HumanInputRequestCatalogReadResult(HumanInputRequestCatalogReadStatus.Ready, 0, target)
+                : await ReadCatalogAsync(candidateReference.RequestId, cancellationToken).ConfigureAwait(false);
+            var candidateFailure = MapReplayCandidateReadFailure(input.OperationId, candidateRead);
+            if (candidateFailure is not null)
+            {
+                return candidateFailure;
+            }
+
+            try
+            {
+                var candidates = candidateRead.Entry!.Lifecycle.RequestVersions
+                    .Where(request => Matches(request, candidateReference))
+                    .Take(2)
+                    .ToArray();
+                if (candidates.Length != 1)
+                {
+                    return Ambiguous(input.OperationId);
+                }
+
+                candidate = candidates[0];
+            }
+            catch (Exception)
+            {
+                return Ambiguous(input.OperationId);
+            }
+        }
+
+        HumanInputRequestLifecycleCommand command;
+        try
+        {
+            command = new HumanInputRequestLifecycleCommand(
+                HumanInputRequestLifecycleCommand.CurrentSchemaVersion,
+                input.OperationId,
+                input.Kind,
+                input.RequestId,
+                input.ExpectedLifecycleVersion,
+                input.ExpectedLifecycleStatus,
+                input.ExpectedRequest,
+                evidence.ExpectedBinding,
+                candidate,
+                evidence.GrantReference,
+                evidence.Reason,
+                evidence.RequestHash);
+            if (!HumanInputRequestLifecycleCommandHash.Matches(command))
+            {
+                return Ambiguous(input.OperationId);
+            }
+        }
+        catch (ArgumentException)
+        {
+            return Ambiguous(input.OperationId);
+        }
+
+        return await MutateLifecycleAsync(command, input.RequestId, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<HumanInputOperationResult> MutateLifecycleAsync(
+        HumanInputRequestLifecycleCommand command,
+        string requestId,
+        CancellationToken cancellationToken)
+    {
+        var service = new HumanInputRequestLifecycleService(
+            _lifecycleStore,
+            new AgentRuntimeHumanInputLifecycleActorAuthorizer(_provider!),
+            _grantResolver,
+            _authorityTransaction,
+            _workspaceId,
+            _timeProvider);
+        var result = await service.MutateAsync(command, cancellationToken).ConfigureAwait(false);
+        return await MapLifecycleResultAsync(result, requestId, CancellationToken.None).ConfigureAwait(false);
     }
 
     private async Task<HumanInputOperationResult> MapLifecycleResultAsync(
@@ -464,6 +605,17 @@ public sealed class HumanInputRuntimeFacade
             && string.Equals(request.RequestVersionId, reference.RequestVersionId, StringComparison.Ordinal)
             && string.Equals(request.RequestHash, reference.RequestHash, StringComparison.Ordinal);
 
+    private static bool MatchesReplayIntent(
+        HumanInputLifecycleOperationInput input,
+        HumanInputRequestLifecycleOperationEvidence evidence,
+        AuthorityPurpose surfaceReason)
+        => input.Kind == evidence.Kind
+            && string.Equals(input.RequestId, evidence.TargetRequestId, StringComparison.Ordinal)
+            && input.ExpectedLifecycleVersion == evidence.ExpectedLifecycleVersion
+            && input.ExpectedLifecycleStatus == evidence.ExpectedLifecycleStatus
+            && Equals(input.ExpectedRequest, evidence.ExpectedRequest)
+            && Equals(surfaceReason, evidence.Reason);
+
     private static bool RequiresCandidate(HumanInputRequestLifecycleOperationKind kind)
         => kind is HumanInputRequestLifecycleOperationKind.Create
             or HumanInputRequestLifecycleOperationKind.Reroute
@@ -539,6 +691,28 @@ public sealed class HumanInputRuntimeFacade
             _ => new HumanInputOperationResult(HumanInputOperationStatus.Ambiguous, operationId, null, null, []),
         };
 
+    private static HumanInputOperationResult? MapReplayTargetReadFailure(
+        string operationId,
+        HumanInputRequestCatalogReadResult result)
+        => result.Status switch
+        {
+            HumanInputRequestCatalogReadStatus.Ready when result.Entry is not null => null,
+            HumanInputRequestCatalogReadStatus.NotFound => null,
+            HumanInputRequestCatalogReadStatus.Invalid => Invalid(operationId),
+            HumanInputRequestCatalogReadStatus.Unavailable => Unavailable(operationId),
+            _ => Ambiguous(operationId),
+        };
+
+    private static HumanInputOperationResult? MapReplayCandidateReadFailure(
+        string operationId,
+        HumanInputRequestCatalogReadResult result)
+        => result.Status switch
+        {
+            HumanInputRequestCatalogReadStatus.Ready when result.Entry is not null => null,
+            HumanInputRequestCatalogReadStatus.Unavailable => Unavailable(operationId),
+            _ => Ambiguous(operationId),
+        };
+
     private static HumanInputOperationResult MapResponseReadFailure(
         string operationId,
         HumanInputResponseLifecycleStoreReadStatus status)
@@ -554,6 +728,12 @@ public sealed class HumanInputRuntimeFacade
 
     private static HumanInputOperationResult Denied(string operationId)
         => new(HumanInputOperationStatus.Denied, operationId, null, null, []);
+
+    private static HumanInputOperationResult Conflict(string operationId)
+        => new(HumanInputOperationStatus.Conflict, operationId, null, null, []);
+
+    private static HumanInputOperationResult Ambiguous(string operationId)
+        => new(HumanInputOperationStatus.Ambiguous, operationId, null, null, []);
 
     private static HumanInputOperationResult Unavailable(string? operationId)
         => new(HumanInputOperationStatus.Unavailable, operationId ?? string.Empty, null, null, []);

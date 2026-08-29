@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using EmbodySense.Core.Common.Authority;
+using EmbodySense.Core.Common.Authority.Grants;
 using EmbodySense.Core.Common.Authority.Grants.Models;
 using EmbodySense.Core.Common.Authority.Models;
 using EmbodySense.Core.Common.ContextualRoles.Models;
@@ -43,6 +44,7 @@ using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Application.Loops.Protocol;
 using EmbodySense.Core.Application.HumanInput.Lifecycle.Models;
+using EmbodySense.Core.Application.HumanInput.Lifecycle;
 using EmbodySense.Core.Application.HumanInput.Responses;
 using EmbodySense.Core.Application.HumanInput.Responses.Models;
 using EmbodySense.Core.Application.Loops;
@@ -2007,6 +2009,7 @@ public sealed class AgentRuntimeFactoryTests
             RequestId = "different-request-id"
         });
         var invalidLifecycleOperation = await runtime.HumanInput.SubmitLifecycleAsync(cancel with { OperationId = string.Empty });
+        var invalidLifecycleReason = await runtime.HumanInput.SubmitLifecycleAsync(cancel with { OperationId = "cancel-invalid-reason", Reason = string.Empty });
         provider.LifecycleTermsStatus = AgentRuntimeHumanInputAuthorityStatus.Denied;
         var deniedTerms = await runtime.HumanInput.SubmitLifecycleAsync(cancel with { OperationId = "cancel-terms-denied" });
         provider.LifecycleTermsStatus = AgentRuntimeHumanInputAuthorityStatus.Unavailable;
@@ -2037,6 +2040,7 @@ public sealed class AgentRuntimeFactoryTests
         Assert.Equal(HumanInputOperationStatus.NotFound, missingLifecycleBinding.Status);
         Assert.Equal(HumanInputOperationStatus.Invalid, mismatchedLifecycleRequest.Status);
         Assert.Equal(HumanInputOperationStatus.Invalid, invalidLifecycleOperation.Status);
+        Assert.Equal(HumanInputOperationStatus.Invalid, invalidLifecycleReason.Status);
         Assert.Equal(HumanInputOperationStatus.Denied, deniedTerms.Status);
         Assert.Equal(HumanInputOperationStatus.Unavailable, unavailableTerms.Status);
         Assert.Equal(HumanInputOperationStatus.Unavailable, thrownTerms.Status);
@@ -2078,6 +2082,126 @@ public sealed class AgentRuntimeFactoryTests
         var unchanged = await runtime.HumanInput.ReadAsync("request-cancel");
 
         Assert.Equal(HumanInputRequestLifecycleStatus.Cancelled, unchanged.Request!.Status);
+    }
+
+    [Fact]
+    public async Task Human_input_facade_replays_durable_grant_and_candidate_operations_without_current_lifecycle_terms()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new HumanInputRequestStore(paths, new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath));
+
+        var remindCreate = CreateFreshHumanInputMutation(workspace.RootPath, "request-replay-remind", "version-replay-remind", "create-replay-remind", HumanInputRequestStoreTestData.HashA);
+        var remindRequest = Assert.IsType<HumanInputRequest>(remindCreate.RequestToAppend);
+        var remindHead = Assert.IsType<HumanInputRequestLifecycleHead>(remindCreate.PrimaryHeadToWrite);
+        var remind = CreateDurableLifecycleReplayMutation(
+            HumanInputRequestLifecycleOperationKind.Remind,
+            remindRequest,
+            remindHead,
+            1,
+            "replay-after-expired-grant",
+            null);
+        Assert.Equal(HumanInputRequestLifecycleStoreCommitStatus.Committed, (await store.CommitAsync(remindCreate)).Status);
+        Assert.Equal(HumanInputRequestLifecycleStoreCommitStatus.Committed, (await store.CommitAsync(remind)).Status);
+
+        var amendCreate = CreateFreshHumanInputMutation(workspace.RootPath, "request-replay-amend", "version-replay-amend", "create-replay-amend", HumanInputRequestStoreTestData.HashB, 2);
+        var amendRequest = Assert.IsType<HumanInputRequest>(amendCreate.RequestToAppend);
+        var amendHead = Assert.IsType<HumanInputRequestLifecycleHead>(amendCreate.PrimaryHeadToWrite);
+        var persistedCandidate = HumanInputRequestStoreTestData.Rehash(amendRequest with
+        {
+            RequestVersionId = "version-replay-amend-persisted",
+            Prompt = "Private persisted replacement prompt."
+        });
+        var amend = CreateDurableLifecycleReplayMutation(
+            HumanInputRequestLifecycleOperationKind.Amend,
+            amendRequest,
+            amendHead,
+            3,
+            "replay-after-terms-rotate",
+            persistedCandidate);
+        Assert.Equal(HumanInputRequestLifecycleStoreCommitStatus.Committed, (await store.CommitAsync(amendCreate)).Status);
+        Assert.Equal(HumanInputRequestLifecycleStoreCommitStatus.Committed, (await store.CommitAsync(amend)).Status);
+
+        var supersedeCreate = CreateFreshHumanInputMutation(workspace.RootPath, "request-replay-supersede", "version-replay-supersede", "create-replay-supersede", HumanInputRequestStoreTestData.HashC, 4);
+        var supersedeRequest = Assert.IsType<HumanInputRequest>(supersedeCreate.RequestToAppend);
+        var supersedeHead = Assert.IsType<HumanInputRequestLifecycleHead>(supersedeCreate.PrimaryHeadToWrite);
+        var persistedSupersedeCandidate = HumanInputRequestStoreTestData.Request(
+            "request-replay-supersede-related",
+            "version-replay-supersede-related",
+            supersedeHead.UpdatedAtUtc.AddSeconds(1),
+            supersedeRequest.Binding,
+            prompt: "Private persisted supersede prompt.");
+        var supersede = CreateDurableLifecycleReplayMutation(
+            HumanInputRequestLifecycleOperationKind.Supersede,
+            supersedeRequest,
+            supersedeHead,
+            5,
+            "replay-supersede-related-candidate",
+            persistedSupersedeCandidate);
+        Assert.Equal(HumanInputRequestLifecycleStoreCommitStatus.Committed, (await store.CommitAsync(supersedeCreate)).Status);
+        Assert.Equal(HumanInputRequestLifecycleStoreCommitStatus.Committed, (await store.CommitAsync(supersede)).Status);
+
+        var provider = new HumanInputRuntimeFacadeTestAuthorityProvider
+        {
+            LifecycleTermsStatus = AgentRuntimeHumanInputAuthorityStatus.Unavailable
+        };
+        await using var runtime = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Web, humanInputAuthorityProvider: provider);
+        var replayReason = "Replay one exact lifecycle operation.";
+        var remindInput = new HumanInputLifecycleOperationInput(
+            "replay-after-expired-grant",
+            HumanInputRequestLifecycleOperationKind.Remind,
+            remindRequest.RequestId,
+            remindHead.LifecycleVersion,
+            remindHead.Status,
+            HumanInputRequestStoreTestData.Reference(remindRequest),
+            null,
+            replayReason);
+
+        var grantReplay = await runtime.HumanInput.SubmitLifecycleAsync(remindInput);
+        provider.LifecycleAuthorizationStatus = AgentRuntimeHumanInputAuthorityStatus.Denied;
+        var deniedReplay = await runtime.HumanInput.SubmitLifecycleAsync(remindInput);
+        provider.LifecycleAuthorizationStatus = AgentRuntimeHumanInputAuthorityStatus.Ready;
+        provider.UseActor("user-two");
+        var differentActorReplay = await runtime.HumanInput.SubmitLifecycleAsync(remindInput);
+        provider.UseActor("user-one");
+
+        var rotatedCandidate = HumanInputRequestStoreTestData.Rehash(amendRequest with
+        {
+            RequestVersionId = "version-replay-amend-rotated",
+            Prompt = "Private rotated replacement prompt."
+        });
+        provider.LifecycleTermsStatus = AgentRuntimeHumanInputAuthorityStatus.Ready;
+        provider.LifecycleCandidateRequest = rotatedCandidate;
+        provider.LifecycleGrantReference = CreateReplayGrantReference("grant-rotated");
+        var candidateReplay = await runtime.HumanInput.SubmitLifecycleAsync(new HumanInputLifecycleOperationInput(
+            "replay-after-terms-rotate",
+            HumanInputRequestLifecycleOperationKind.Amend,
+            amendRequest.RequestId,
+            amendHead.LifecycleVersion,
+            amendHead.Status,
+            HumanInputRequestStoreTestData.Reference(amendRequest),
+            "rotated-selector",
+            replayReason));
+        var supersedeReplay = await runtime.HumanInput.SubmitLifecycleAsync(new HumanInputLifecycleOperationInput(
+            "replay-supersede-related-candidate",
+            HumanInputRequestLifecycleOperationKind.Supersede,
+            supersedeRequest.RequestId,
+            supersedeHead.LifecycleVersion,
+            supersedeHead.Status,
+            HumanInputRequestStoreTestData.Reference(supersedeRequest),
+            "rotated-selector",
+            replayReason));
+
+        Assert.Equal(HumanInputOperationStatus.Replayed, grantReplay.Status);
+        Assert.Equal(HumanInputOperationStatus.Denied, deniedReplay.Status);
+        Assert.Equal(HumanInputOperationStatus.Denied, differentActorReplay.Status);
+        Assert.Equal(HumanInputOperationStatus.Replayed, candidateReplay.Status);
+        Assert.Equal(persistedCandidate.RequestVersionId, candidateReplay.Request!.CurrentRequest.RequestVersionId);
+        Assert.Equal(HumanInputOperationStatus.Replayed, supersedeReplay.Status);
+        Assert.Equal(HumanInputRequestLifecycleStatus.Superseded, supersedeReplay.Request!.Status);
+        Assert.Equal(0, provider.LifecycleTermsResolutions);
+        Assert.Equal(5, provider.LifecycleAuthorizations);
     }
 
     [Fact]
@@ -3619,6 +3743,87 @@ public sealed class AgentRuntimeFactoryTests
             head,
             request);
         return new HumanInputRequestLifecycleStoreMutation(generation, evidence, request, head, null);
+    }
+
+    private static HumanInputRequestLifecycleStoreMutation CreateDurableLifecycleReplayMutation(
+        HumanInputRequestLifecycleOperationKind kind,
+        HumanInputRequest previousRequest,
+        HumanInputRequestLifecycleHead previousHead,
+        long generation,
+        string operationId,
+        HumanInputRequest? candidate)
+    {
+        var supersede = kind == HumanInputRequestLifecycleOperationKind.Supersede;
+        var resultRequest = candidate ?? previousRequest;
+        var recordedAtUtc = previousHead.UpdatedAtUtc.AddSeconds(1);
+        var resultHead = HumanInputRequestStoreTestData.Head(
+            supersede ? previousRequest : resultRequest,
+            previousHead.LifecycleVersion + 1,
+            supersede ? HumanInputRequestLifecycleStatus.Superseded : HumanInputRequestLifecycleStatus.Pending,
+            kind == HumanInputRequestLifecycleOperationKind.Remind ? previousHead.ReminderCount + 1 : previousHead.ReminderCount,
+            previousHead.SupersedesRequestId,
+            supersede ? candidate!.RequestId : previousHead.SupersededByRequestId,
+            operationId,
+            recordedAtUtc);
+        var relatedResultHead = supersede
+            ? HumanInputRequestStoreTestData.Head(
+                candidate!,
+                1,
+                HumanInputRequestLifecycleStatus.Pending,
+                0,
+                previousRequest.RequestId,
+                null,
+                operationId,
+                recordedAtUtc)
+            : null;
+        Assert.True(AuthorityActorId.TryParse("user-one", out var actor, out _));
+        Assert.True(AuthorityPurpose.TryParse("Replay one exact lifecycle operation.", out var reason, out _));
+        var grant = CreateReplayGrantReference("grant-replay");
+        var command = HumanInputRequestLifecycleCommandHash.Apply(new HumanInputRequestLifecycleCommand(
+            HumanInputRequestLifecycleCommand.CurrentSchemaVersion,
+            operationId,
+            kind,
+            previousRequest.RequestId,
+            previousHead.LifecycleVersion,
+            previousHead.Status,
+            previousHead.CurrentRequest,
+            previousRequest.Binding,
+            candidate,
+            grant,
+            reason!,
+            string.Empty));
+        var evidence = new HumanInputRequestLifecycleOperationEvidence(
+            1,
+            operationId,
+            command.RequestHash,
+            kind,
+            HumanInputRequestLifecycleOperationOutcome.Committed,
+            HumanInputRequestLifecycleOperationFailureCode.None,
+            previousRequest.RequestId,
+            previousHead.LifecycleVersion,
+            previousHead.Status,
+            previousHead.CurrentRequest,
+            previousRequest.Binding,
+            previousHead,
+            resultHead,
+            supersede ? candidate!.RequestId : null,
+            null,
+            relatedResultHead,
+            candidate is null ? null : HumanInputRequestStoreTestData.Reference(candidate),
+            actor!,
+            reason!,
+            grant,
+            HumanInputRequestStoreTestData.HashA,
+            HumanInputRequestStoreTestData.HashB,
+            recordedAtUtc);
+        return new HumanInputRequestLifecycleStoreMutation(generation, evidence, candidate, resultHead, relatedResultHead);
+    }
+
+    private static AuthorityGrantReference CreateReplayGrantReference(string grantId)
+    {
+        Assert.True(AuthorityGrantId.TryParse(grantId, out var parsedGrantId, out _));
+        Assert.True(AuthorityGrantRevision.TryParse("1", out var revision, out _));
+        return new AuthorityGrantReference(parsedGrantId!, revision!, "sha256:" + HumanInputRequestStoreTestData.HashA);
     }
 
     private static HumanInputRequestLifecycleStoreMutation CreateFreshTerminalHumanInputMutation(

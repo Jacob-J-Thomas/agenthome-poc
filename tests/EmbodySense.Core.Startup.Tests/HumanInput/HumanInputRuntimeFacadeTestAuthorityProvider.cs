@@ -1,6 +1,8 @@
 using System.Security.Cryptography;
 using System.Text;
 using EmbodySense.Core.Common.Authority;
+using EmbodySense.Core.Common.Authority.Grants.Models;
+using EmbodySense.Core.Common.HumanInput.Models;
 using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Runtime.Models;
 
@@ -22,11 +24,17 @@ internal sealed class HumanInputRuntimeFacadeTestAuthorityProvider : IAgentRunti
 
     internal AgentRuntimeHumanInputAuthorityStatus ResponseAuthenticationStatus { get; set; } = AgentRuntimeHumanInputAuthorityStatus.Ready;
 
+    internal HumanInputRequest? LifecycleCandidateRequest { get; set; }
+
+    internal AuthorityGrantReference? LifecycleGrantReference { get; set; }
+
     internal bool DelayLifecycleTermsUntilCancellation { get; set; }
 
     internal bool ThrowDuringLifecycleTerms { get; set; }
 
     internal int LifecycleAuthorizations { get; private set; }
+
+    internal int LifecycleTermsResolutions { get; private set; }
 
     internal int ResponseAuthentications { get; private set; }
 
@@ -40,6 +48,7 @@ internal sealed class HumanInputRuntimeFacadeTestAuthorityProvider : IAgentRunti
         AgentRuntimeHumanInputLifecycleTermsRequest request,
         CancellationToken cancellationToken = default)
     {
+        LifecycleTermsResolutions++;
         if (ThrowDuringLifecycleTerms)
         {
             throw new InvalidOperationException("The test authority boundary is unavailable.");
@@ -50,7 +59,7 @@ internal sealed class HumanInputRuntimeFacadeTestAuthorityProvider : IAgentRunti
             await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
         }
 
-        return new AgentRuntimeHumanInputLifecycleTerms(LifecycleTermsStatus, null, null);
+        return new AgentRuntimeHumanInputLifecycleTerms(LifecycleTermsStatus, LifecycleCandidateRequest, LifecycleGrantReference);
     }
 
     public Task<AgentRuntimeHumanInputLifecycleAuthorization> AuthorizeLifecycleAsync(
