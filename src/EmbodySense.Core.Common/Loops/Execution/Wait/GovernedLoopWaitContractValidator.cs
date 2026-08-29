@@ -3,6 +3,7 @@ using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Execution.Sleep;
 using EmbodySense.Core.Common.Loops.Execution.Sleep.Models;
 using EmbodySense.Core.Common.Loops.Execution.Wait.Models;
+using EmbodySense.Core.Common.Loops.HumanInput;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 
 namespace EmbodySense.Core.Common.Loops.Execution.Wait;
@@ -207,7 +208,8 @@ public static class GovernedLoopWaitContractValidator
                 Add(errors, GovernedLoopWaitValidationErrorCode.InvalidTimestamp, "$.parameters[deadline-utc]");
             }
         }
-        else if (!CustomLoopArtifactIdentifier.IsValid(parameter.Value, GovernedLoopWaitContractLimits.MaxEventReferenceCharacters))
+        else if (!CustomLoopArtifactIdentifier.IsValid(parameter.Value, GovernedLoopWaitContractLimits.MaxEventReferenceCharacters)
+            || parameter.Value.StartsWith(GovernedLoopHumanInputContinuationVocabulary.AuthenticatedEventReferencePrefix, StringComparison.Ordinal))
         {
             Add(errors, parameter.Value.Length > GovernedLoopWaitContractLimits.MaxEventReferenceCharacters
                 ? GovernedLoopWaitValidationErrorCode.LimitExceeded
@@ -252,7 +254,9 @@ public static class GovernedLoopWaitContractValidator
             var eventShape = condition.Descriptor.TypeId == GovernedLoopWaitVocabulary.AuthenticatedEvent
                 && condition.ParameterKind == GovernedLoopWaitParameterKind.AuthenticatedEventReference
                 && condition.WakeDeadlineUtc is null
-                && CustomLoopArtifactIdentifier.IsValid(condition.AuthenticatedEventReference, GovernedLoopWaitContractLimits.MaxEventReferenceCharacters);
+                && condition.AuthenticatedEventReference is { } eventReference
+                && CustomLoopArtifactIdentifier.IsValid(eventReference, GovernedLoopWaitContractLimits.MaxEventReferenceCharacters)
+                && !eventReference.StartsWith(GovernedLoopHumanInputContinuationVocabulary.AuthenticatedEventReferencePrefix, StringComparison.Ordinal);
             if (!timestampShape && !eventShape)
             {
                 Add(errors, GovernedLoopWaitValidationErrorCode.InvalidComposition, path);

@@ -16,6 +16,7 @@
     <ProjectReference Include="..\..\src\EmbodySense.Core.Common\EmbodySense.Core.Common.csproj" />
     <ProjectReference Include="..\..\src\EmbodySense.Core.Persistence\EmbodySense.Core.Persistence.csproj" />
     <ProjectReference Include="..\EmbodySense.CancellationHost\EmbodySense.CancellationHost.csproj" ReferenceOutputAssembly="false" AdditionalProperties="Configuration=$(Configuration)" />
+    <ProjectReference Include="..\EmbodySense.HumanInputContinuationHost\EmbodySense.HumanInputContinuationHost.csproj" ReferenceOutputAssembly="false" AdditionalProperties="Configuration=$(Configuration)" />
     <ProjectReference Include="..\EmbodySense.Tests.Support\EmbodySense.Tests.Support.csproj" />
   </ItemGroup>
 
@@ -27,11 +28,16 @@
     <Compile Include="..\EmbodySense.Core.Common.Tests\Loops\Admission\GovernedLoopAdmissionTestFixture.cs" Link="Support\GovernedLoopAdmissionTestFixture.cs" />
     <Compile Include="..\EmbodySense.Core.Common.Tests\Loops\Execution\Authority\GovernedLoopEffectAuthorityTestFixture.cs" Link="Support\GovernedLoopEffectAuthorityTestFixture.cs" />
     <Compile Include="..\EmbodySense.Core.Common.Tests\Loops\Execution\Sleep\GovernedLoopSleepContractTestFixture.cs" Link="Support\GovernedLoopSleepContractTestFixture.cs" />
-    <Compile Include="..\EmbodySense.Core.Application.Tests\Loops\Sleep\GovernedLoopSleepApplicationTestFixture.cs" Link="Support\GovernedLoopSleepApplicationTestFixture.cs" />
     <Compile Include="..\EmbodySense.Core.Application.Tests\Loops\Sleep\StubGovernedLoopAuthenticatedWakeVerificationPort.cs" Link="Support\StubGovernedLoopAuthenticatedWakeVerificationPort.cs" />
     <Compile Include="..\EmbodySense.Core.Application.Tests\Loops\Sleep\StubGovernedLoopSleepCurrentPosturePort.cs" Link="Support\StubGovernedLoopSleepCurrentPosturePort.cs" />
     <Compile Include="..\EmbodySense.Core.Application.Tests\Loops\Sleep\StubGovernedLoopSleepTimeProvider.cs" Link="Support\StubGovernedLoopSleepTimeProvider.cs" />
     <Compile Include="..\EmbodySense.Core.Application.Tests\Loops\Sleep\StubGovernedLoopWakeContinuationPort.cs" Link="Support\StubGovernedLoopWakeContinuationPort.cs" />
+    <Compile Include="..\EmbodySense.Core.Application.Tests\Loops\Sleep\GovernedLoopSleepApplicationTestFixture.cs" Link="Support\GovernedLoopSleepApplicationTestFixture.cs" />
+    <Compile Include="..\EmbodySense.Core.Application.Tests\Loops\Sequential\GovernedLoopSequentialApplicationTestFixture.cs" Link="Support\GovernedLoopSequentialApplicationTestFixture.cs" />
+    <Compile Include="..\EmbodySense.Core.Application.Tests\CommandActions\CommandActionApplicationTestData.cs" Link="Support\CommandActionApplicationTestData.cs" />
+    <Compile Include="..\EmbodySense.Core.Application.Tests\GovernedModelProfileApplicationTestFixture.cs" Link="Support\GovernedModelProfileApplicationTestFixture.cs" />
+    <Compile Include="..\EmbodySense.Core.Application.Tests\Governance\Authority\Grants\AuthorityGrantApplicationTestFixture.cs" Link="Support\AuthorityGrantApplicationTestFixture.cs" />
+    <Compile Include="..\EmbodySense.HumanInputContinuationHost\HumanInputResponseContinuationGraphFixture.cs" Link="Support\HumanInputResponseContinuationGraphFixture.cs" />
     <Compile Include="..\EmbodySense.Core.Common.Tests\TriggerDeliveryTestData.cs" Link="Support\TriggerDeliveryTestData.cs" />
     <Compile Include="..\EmbodySense.Core.Common.Tests\Triggers\Schedules\ScheduleContractTestData.cs" Link="Support\ScheduleContractTestData.cs" />
   </ItemGroup>

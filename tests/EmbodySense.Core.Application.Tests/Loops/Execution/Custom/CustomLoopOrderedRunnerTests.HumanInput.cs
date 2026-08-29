@@ -1,8 +1,11 @@
+using System.Collections.Immutable;
 using EmbodySense.Core.Application.HumanInput.Policies;
 using EmbodySense.Core.Application.HumanInput.Policies.Models;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
 using EmbodySense.Core.Application.Loops.Execution.Custom.Models;
+using EmbodySense.Core.Application.Loops.Failures;
+using EmbodySense.Core.Application.Loops.Failures.Models;
 using EmbodySense.Core.Application.Tests.Loops.Execution.Authority;
 using EmbodySense.Core.Application.Loops.GraphValidation;
 using EmbodySense.Core.Application.Loops.Models;
@@ -14,11 +17,15 @@ using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.HumanInput.Models;
+using EmbodySense.Core.Common.HumanInput.Responses;
+using EmbodySense.Core.Common.HumanInput.Responses.Models;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Execution.Models;
+using EmbodySense.Core.Common.Loops.Failures;
+using EmbodySense.Core.Common.Loops.Failures.Models;
 using EmbodySense.Core.Common.Loops.HumanInput;
 using EmbodySense.Core.Common.Loops.HumanInput.Checkpoints;
 using EmbodySense.Core.Common.Loops.HumanInput.Checkpoints.Models;
@@ -27,6 +34,7 @@ using EmbodySense.Core.Common.Loops.HumanInput.Policies.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using EmbodySense.Core.Common.Loops.PureNodes;
 using EmbodySense.Core.Common.Loops.Sequential;
 using EmbodySense.Core.Common.Loops.Sequential.Models;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
@@ -482,6 +490,423 @@ public sealed partial class CustomLoopOrderedRunnerTests
     }
 
     [Fact]
+    public async Task Human_input_terminal_resume_rehydrates_the_exact_response_for_a_non_retaining_condition_without_leaking_it_into_continuation_evidence()
+    {
+        const string PrivateResponse = "response-private-condition-token";
+        var context = await HumanInputConditionContextAsync();
+        var store = new FakeRunStore(context.Run);
+        var executor = new QueueExecutor();
+        var publisher = new RecordingPublisher();
+        var audit = new RecordingAuditLog();
+        Assert.True(GovernedLoopTypedValue.TryCreate(
+            GovernedLoopTypedValue.CurrentSchemaVersion,
+            GovernedLoopValueKind.Text,
+            "\"response-private-condition-token\"",
+            out var value,
+            out _));
+        var source = new ExactHumanInputBindingSource(Assert.IsType<GovernedLoopTypedValue>(value));
+        var runtime = Runtime(
+            context,
+            store,
+            executor,
+            publisher,
+            HumanInputPolicyResolver(context),
+            audit: audit,
+            humanInputBindingSource: source);
+
+        var parked = await runtime.RunAsync(Request(context));
+        Assert.Equal(CustomLoopOrderedRunStatus.Waiting, parked.Status);
+        store.ReplaceCurrent(AnswerHumanInputCheckpointForOrderedReentry(store.Current, _now.AddMilliseconds(500)));
+        var terminal = CompleteHumanInputCheckpointForOrderedReentry(store.Current, context, _now.AddSeconds(1));
+        store.ReplaceCurrent(terminal.Run);
+
+        var resumed = await runtime.ResumeHumanInputAsync(new GovernedLoopSequentialOrderedHumanInputResumeRequest(
+            GovernedLoopSequentialOrderedHumanInputResumeRequest.CurrentSchemaVersion,
+            context.Anchor,
+            context.Plan,
+            context.Artifact,
+            terminal.Checkpoint.Binding.CheckpointId,
+            terminal.ReceiptHash,
+            terminal.Run.AdmissionActor));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Completed, resumed.Status);
+        Assert.Equal(CustomLoopRunStatus.Completed, store.Current.Status);
+        Assert.Equal(1, source.ReadCount);
+        var condition = Assert.Single(store.Current.Frontier!.Payload.Nodes, node => node.NodeId == "response-condition");
+        Assert.Equal(GovernedLoopNodeExecutionStatus.Completed, condition.Status);
+        Assert.Equal(GovernedLoopControlCondition.False, condition.ControlOutcome);
+        Assert.Empty(executor.Requests);
+        Assert.DoesNotContain(PrivateResponse, Assert.Single(store.Current.HumanInputWaitingCheckpoints).ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain(PrivateResponse, source.LastBinding!.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain(PrivateResponse, store.Current.Events.Select(item => item.Detail ?? string.Empty));
+        Assert.DoesNotContain(PrivateResponse, audit.Events.Select(item => item.Detail));
+        Assert.True(CustomLoopRunValidator.Validate(store.Current).IsValid);
+    }
+
+    [Fact]
+    public async Task Human_input_terminal_resume_leaves_the_durable_run_unchanged_for_binding_source_unavailability_then_rereads_on_the_next_entry()
+    {
+        var context = await HumanInputConditionContextAsync();
+        var store = new FakeRunStore(context.Run);
+        Assert.True(GovernedLoopTypedValue.TryCreate(
+            GovernedLoopTypedValue.CurrentSchemaVersion,
+            GovernedLoopValueKind.Text,
+            "\"response-private-condition-token\"",
+            out var value,
+            out _));
+        var source = new ExactHumanInputBindingSource(Assert.IsType<GovernedLoopTypedValue>(value)) { IsUnavailable = true };
+        var runtime = Runtime(
+            context,
+            store,
+            new QueueExecutor(),
+            new RecordingPublisher(),
+            HumanInputPolicyResolver(context),
+            humanInputBindingSource: source);
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Waiting, (await runtime.RunAsync(Request(context))).Status);
+        store.ReplaceCurrent(AnswerHumanInputCheckpointForOrderedReentry(store.Current, _now.AddMilliseconds(500)));
+        var terminal = CompleteHumanInputCheckpointForOrderedReentry(store.Current, context, _now.AddSeconds(1));
+        store.ReplaceCurrent(terminal.Run);
+        var writesBeforeUnavailable = store.Writes.Count;
+        var unavailable = await runtime.ResumeHumanInputAsync(new GovernedLoopSequentialOrderedHumanInputResumeRequest(
+            GovernedLoopSequentialOrderedHumanInputResumeRequest.CurrentSchemaVersion,
+            context.Anchor,
+            context.Plan,
+            context.Artifact,
+            terminal.Checkpoint.Binding.CheckpointId,
+            terminal.ReceiptHash,
+            terminal.Run.AdmissionActor));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Failed, unavailable.Status);
+        Assert.Same(terminal.Run, store.Current);
+        Assert.Equal(writesBeforeUnavailable, store.Writes.Count);
+        Assert.Equal(1, source.ReadCount);
+        source.IsUnavailable = false;
+
+        var recovered = await runtime.ResumeHumanInputAsync(new GovernedLoopSequentialOrderedHumanInputResumeRequest(
+            GovernedLoopSequentialOrderedHumanInputResumeRequest.CurrentSchemaVersion,
+            context.Anchor,
+            context.Plan,
+            context.Artifact,
+            terminal.Checkpoint.Binding.CheckpointId,
+            terminal.ReceiptHash,
+            terminal.Run.AdmissionActor));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Completed, recovered.Status);
+        Assert.Equal(CustomLoopRunStatus.Completed, store.Current.Status);
+        Assert.Equal(2, source.ReadCount);
+        Assert.True(CustomLoopRunValidator.Validate(store.Current).IsValid);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Human_input_terminal_condition_escalates_to_review_when_the_exact_binding_is_invalid_or_malformed(bool malformed)
+    {
+        var context = await HumanInputConditionContextAsync();
+        var store = new FakeRunStore(context.Run);
+        Assert.True(GovernedLoopTypedValue.TryCreate(
+            GovernedLoopTypedValue.CurrentSchemaVersion,
+            GovernedLoopValueKind.Text,
+            "\"response-private-condition-token\"",
+            out var value,
+            out _));
+        var source = new ExactHumanInputBindingSource(Assert.IsType<GovernedLoopTypedValue>(value))
+        {
+            IsInvalid = !malformed,
+            ReturnMalformedReady = malformed,
+        };
+        var runtime = Runtime(
+            context,
+            store,
+            new QueueExecutor(),
+            new RecordingPublisher(),
+            HumanInputPolicyResolver(context),
+            humanInputBindingSource: source);
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Waiting, (await runtime.RunAsync(Request(context))).Status);
+        store.ReplaceCurrent(AnswerHumanInputCheckpointForOrderedReentry(store.Current, _now.AddMilliseconds(500)));
+        var terminal = CompleteHumanInputCheckpointForOrderedReentry(store.Current, context, _now.AddSeconds(1));
+        store.ReplaceCurrent(terminal.Run);
+
+        var result = await runtime.ResumeHumanInputAsync(new GovernedLoopSequentialOrderedHumanInputResumeRequest(
+            GovernedLoopSequentialOrderedHumanInputResumeRequest.CurrentSchemaVersion,
+            context.Anchor,
+            context.Plan,
+            context.Artifact,
+            terminal.Checkpoint.Binding.CheckpointId,
+            terminal.ReceiptHash,
+            terminal.Run.AdmissionActor));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.NeedsReview, result.Status);
+        Assert.Equal(CustomLoopRunStatus.NeedsReview, store.Current.Status);
+        Assert.Equal("human_input_binding_invalid", store.Current.FailureCode);
+        Assert.Equal(1, source.ReadCount);
+        Assert.Null(source.LastBinding);
+        Assert.DoesNotContain("response-private-condition-token", store.Current.Events.Select(item => item.Detail ?? string.Empty));
+        Assert.True(CustomLoopRunValidator.Validate(store.Current).IsValid);
+    }
+
+    [Fact]
+    public async Task Human_input_terminal_condition_leaves_the_run_unchanged_when_the_binding_source_throws()
+    {
+        var context = await HumanInputConditionContextAsync();
+        var store = new FakeRunStore(context.Run);
+        Assert.True(GovernedLoopTypedValue.TryCreate(
+            GovernedLoopTypedValue.CurrentSchemaVersion,
+            GovernedLoopValueKind.Text,
+            "\"response-private-condition-token\"",
+            out var value,
+            out _));
+        var source = new ExactHumanInputBindingSource(Assert.IsType<GovernedLoopTypedValue>(value))
+        {
+            ResolveException = new IOException("simulated response-store outage"),
+        };
+        var runtime = Runtime(
+            context,
+            store,
+            new QueueExecutor(),
+            new RecordingPublisher(),
+            HumanInputPolicyResolver(context),
+            humanInputBindingSource: source);
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Waiting, (await runtime.RunAsync(Request(context))).Status);
+        store.ReplaceCurrent(AnswerHumanInputCheckpointForOrderedReentry(store.Current, _now.AddMilliseconds(500)));
+        var terminal = CompleteHumanInputCheckpointForOrderedReentry(store.Current, context, _now.AddSeconds(1));
+        store.ReplaceCurrent(terminal.Run);
+        var writesBeforeResolution = store.Writes.Count;
+
+        var result = await runtime.ResumeHumanInputAsync(new GovernedLoopSequentialOrderedHumanInputResumeRequest(
+            GovernedLoopSequentialOrderedHumanInputResumeRequest.CurrentSchemaVersion,
+            context.Anchor,
+            context.Plan,
+            context.Artifact,
+            terminal.Checkpoint.Binding.CheckpointId,
+            terminal.ReceiptHash,
+            terminal.Run.AdmissionActor));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Failed, result.Status);
+        Assert.Same(terminal.Run, store.Current);
+        Assert.Equal(writesBeforeResolution, store.Writes.Count);
+        Assert.Equal(1, source.ReadCount);
+        Assert.Null(source.LastBinding);
+        Assert.True(CustomLoopRunValidator.Validate(store.Current).IsValid);
+    }
+
+    [Fact]
+    public async Task Human_input_terminal_condition_propagates_caller_cancellation_from_the_exact_binding_source()
+    {
+        var context = await HumanInputConditionContextAsync();
+        var store = new FakeRunStore(context.Run);
+        Assert.True(GovernedLoopTypedValue.TryCreate(
+            GovernedLoopTypedValue.CurrentSchemaVersion,
+            GovernedLoopValueKind.Text,
+            "\"response-private-condition-token\"",
+            out var value,
+            out _));
+        using var cancellation = new CancellationTokenSource();
+        var source = new ExactHumanInputBindingSource(Assert.IsType<GovernedLoopTypedValue>(value))
+        {
+            BeforeResolve = cancellation.Cancel,
+            ResolveException = new OperationCanceledException("simulated caller cancellation", cancellation.Token),
+        };
+        var runtime = Runtime(
+            context,
+            store,
+            new QueueExecutor(),
+            new RecordingPublisher(),
+            HumanInputPolicyResolver(context),
+            humanInputBindingSource: source);
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Waiting, (await runtime.RunAsync(Request(context))).Status);
+        store.ReplaceCurrent(AnswerHumanInputCheckpointForOrderedReentry(store.Current, _now.AddMilliseconds(500)));
+        var terminal = CompleteHumanInputCheckpointForOrderedReentry(store.Current, context, _now.AddSeconds(1));
+        store.ReplaceCurrent(terminal.Run);
+        var writesBeforeResolution = store.Writes.Count;
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => runtime.ResumeHumanInputAsync(
+            new GovernedLoopSequentialOrderedHumanInputResumeRequest(
+                GovernedLoopSequentialOrderedHumanInputResumeRequest.CurrentSchemaVersion,
+                context.Anchor,
+                context.Plan,
+                context.Artifact,
+                terminal.Checkpoint.Binding.CheckpointId,
+                terminal.ReceiptHash,
+                terminal.Run.AdmissionActor),
+            cancellation.Token));
+
+        Assert.Same(terminal.Run, store.Current);
+        Assert.Equal(writesBeforeResolution, store.Writes.Count);
+        Assert.Equal(1, source.ReadCount);
+        Assert.Null(source.LastBinding);
+        Assert.True(CustomLoopRunValidator.Validate(store.Current).IsValid);
+    }
+
+    [Fact]
+    public async Task Human_input_terminal_condition_leaves_the_run_unchanged_without_a_configured_binding_source()
+    {
+        var context = await HumanInputConditionContextAsync();
+        var store = new FakeRunStore(context.Run);
+        var runtime = Runtime(
+            context,
+            store,
+            new QueueExecutor(),
+            new RecordingPublisher(),
+            HumanInputPolicyResolver(context));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Waiting, (await runtime.RunAsync(Request(context))).Status);
+        store.ReplaceCurrent(AnswerHumanInputCheckpointForOrderedReentry(store.Current, _now.AddMilliseconds(500)));
+        var terminal = CompleteHumanInputCheckpointForOrderedReentry(store.Current, context, _now.AddSeconds(1));
+        store.ReplaceCurrent(terminal.Run);
+        var writesBeforeResolution = store.Writes.Count;
+
+        var result = await runtime.ResumeHumanInputAsync(new GovernedLoopSequentialOrderedHumanInputResumeRequest(
+            GovernedLoopSequentialOrderedHumanInputResumeRequest.CurrentSchemaVersion,
+            context.Anchor,
+            context.Plan,
+            context.Artifact,
+            terminal.Checkpoint.Binding.CheckpointId,
+            terminal.ReceiptHash,
+            terminal.Run.AdmissionActor));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Failed, result.Status);
+        Assert.Same(terminal.Run, store.Current);
+        Assert.Equal(writesBeforeResolution, store.Writes.Count);
+        Assert.True(CustomLoopRunValidator.Validate(store.Current).IsValid);
+    }
+
+    [Fact]
+    public async Task Human_input_terminal_resume_reenters_the_canonical_ordered_runner_and_completes_the_exit()
+    {
+        var context = await HumanInputSuccessFallbackContextAsync();
+        var store = new FakeRunStore(context.Run);
+        var executor = new QueueExecutor();
+        var publisher = new RecordingPublisher();
+        var runtime = Runtime(context, store, executor, publisher, HumanInputPolicyResolver(context));
+
+        var parked = await runtime.RunAsync(Request(context));
+        Assert.Equal(CustomLoopOrderedRunStatus.Waiting, parked.Status);
+        store.ReplaceCurrent(AnswerHumanInputCheckpointForOrderedReentry(store.Current, _now.AddMilliseconds(500)));
+        var terminal = CompleteHumanInputCheckpointForOrderedReentry(store.Current, context, _now.AddSeconds(1));
+        var terminalValidation = CustomLoopRunValidator.ValidateUpdate(store.Current, terminal.Run);
+        Assert.True(terminalValidation.IsValid, string.Join(Environment.NewLine, terminalValidation.Errors));
+        store.ReplaceCurrent(terminal.Run);
+
+        var resumed = await runtime.ResumeHumanInputAsync(new GovernedLoopSequentialOrderedHumanInputResumeRequest(
+            GovernedLoopSequentialOrderedHumanInputResumeRequest.CurrentSchemaVersion,
+            context.Anchor,
+            context.Plan,
+            context.Artifact,
+            terminal.Checkpoint.Binding.CheckpointId,
+            terminal.ReceiptHash,
+            terminal.Run.AdmissionActor));
+
+        Assert.True(resumed.Status == CustomLoopOrderedRunStatus.Completed, $"{resumed.Status}: {resumed.Detail}; {store.Current.FailureCode}: {store.Current.FailureDetail}");
+        Assert.Equal(CustomLoopRunStatus.Completed, store.Current.Status);
+        Assert.Equal(GovernedLoopFrontierStatus.Completed, store.Current.Frontier?.Payload.Status);
+        Assert.Empty(executor.Requests);
+        Assert.True(CustomLoopRunValidator.Validate(store.Current).IsValid);
+    }
+
+    [Fact]
+    public async Task Human_input_terminal_resume_rejects_a_receipt_mismatch_without_ordered_dispatch()
+    {
+        var context = await HumanInputSuccessFallbackContextAsync();
+        var store = new FakeRunStore(context.Run);
+        var executor = new QueueExecutor();
+        var publisher = new RecordingPublisher();
+        var runtime = Runtime(context, store, executor, publisher, HumanInputPolicyResolver(context));
+
+        var parked = await runtime.RunAsync(Request(context));
+        Assert.Equal(CustomLoopOrderedRunStatus.Waiting, parked.Status);
+        store.ReplaceCurrent(AnswerHumanInputCheckpointForOrderedReentry(store.Current, _now.AddMilliseconds(500)));
+        var terminal = CompleteHumanInputCheckpointForOrderedReentry(store.Current, context, _now.AddSeconds(1));
+        store.ReplaceCurrent(terminal.Run);
+        var writes = store.Writes.Count;
+
+        var resumed = await runtime.ResumeHumanInputAsync(new GovernedLoopSequentialOrderedHumanInputResumeRequest(
+            GovernedLoopSequentialOrderedHumanInputResumeRequest.CurrentSchemaVersion,
+            context.Anchor,
+            context.Plan,
+            context.Artifact,
+            terminal.Checkpoint.Binding.CheckpointId,
+            new string('c', 64),
+            terminal.Run.AdmissionActor));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.InvalidState, resumed.Status);
+        Assert.Equal(writes, store.Writes.Count);
+        Assert.Empty(executor.Requests);
+        Assert.Equal(CustomLoopRunStatus.Running, store.Current.Status);
+        Assert.True(CustomLoopRunValidator.Validate(store.Current).IsValid);
+    }
+
+    [Fact]
+    public async Task Human_input_failure_resume_reenters_the_canonical_ordered_runner_on_the_routed_failure_edge()
+    {
+        var context = await HumanInputFailureContextAsync();
+        var store = new FakeRunStore(context.Run);
+        var executor = new QueueExecutor();
+        var publisher = new RecordingPublisher();
+        var runtime = Runtime(context, store, executor, publisher, HumanInputPolicyResolver(context));
+
+        var parked = await runtime.RunAsync(Request(context));
+        Assert.Equal(CustomLoopOrderedRunStatus.Waiting, parked.Status);
+        var retirement = RejectHumanInputCheckpointForOrderedReentry(store.Current, context, _now.AddSeconds(1));
+        Assert.True(CustomLoopRunValidator.ValidateUpdate(store.Current, retirement.Run).IsValid);
+        store.ReplaceCurrent(retirement.Run);
+
+        var resumed = await runtime.ResumeHumanInputFailureAsync(new GovernedLoopSequentialOrderedHumanInputFailureResumeRequest(
+            GovernedLoopSequentialOrderedHumanInputFailureResumeRequest.CurrentSchemaVersion,
+            context.Anchor,
+            context.Plan,
+            context.Artifact,
+            retirement.Checkpoint.Binding.CheckpointId,
+            retirement.RetirementEvidenceHash,
+            retirement.EventId,
+            retirement.FailureEvidenceHash,
+            retirement.Run.AdmissionActor));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Failed, resumed.Status);
+        Assert.Equal(CustomLoopRunStatus.Failed, store.Current.Status);
+        Assert.Equal(GovernedLoopFrontierStatus.Failed, store.Current.Frontier?.Payload.Status);
+        Assert.Empty(executor.Requests);
+        Assert.True(CustomLoopRunValidator.Validate(store.Current).IsValid);
+    }
+
+    [Fact]
+    public async Task Human_input_failure_resume_rejects_a_failure_evidence_mismatch_without_ordered_dispatch()
+    {
+        var context = await HumanInputFailureContextAsync();
+        var store = new FakeRunStore(context.Run);
+        var executor = new QueueExecutor();
+        var publisher = new RecordingPublisher();
+        var runtime = Runtime(context, store, executor, publisher, HumanInputPolicyResolver(context));
+
+        var parked = await runtime.RunAsync(Request(context));
+        Assert.Equal(CustomLoopOrderedRunStatus.Waiting, parked.Status);
+        var retirement = RejectHumanInputCheckpointForOrderedReentry(store.Current, context, _now.AddSeconds(1));
+        store.ReplaceCurrent(retirement.Run);
+        var writes = store.Writes.Count;
+
+        var resumed = await runtime.ResumeHumanInputFailureAsync(new GovernedLoopSequentialOrderedHumanInputFailureResumeRequest(
+            GovernedLoopSequentialOrderedHumanInputFailureResumeRequest.CurrentSchemaVersion,
+            context.Anchor,
+            context.Plan,
+            context.Artifact,
+            retirement.Checkpoint.Binding.CheckpointId,
+            retirement.RetirementEvidenceHash,
+            retirement.EventId,
+            new string('c', 64),
+            retirement.Run.AdmissionActor));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.InvalidState, resumed.Status);
+        Assert.Equal(writes, store.Writes.Count);
+        Assert.Empty(executor.Requests);
+        Assert.Equal(CustomLoopRunStatus.Running, store.Current.Status);
+        Assert.True(CustomLoopRunValidator.Validate(store.Current).IsValid);
+    }
+
+    [Fact]
     public async Task Restart_recovery_preserves_an_exact_pending_human_input_checkpoint_without_delivery_or_continuation()
     {
         var context = await HumanInputContextAsync();
@@ -659,7 +1084,7 @@ public sealed partial class CustomLoopOrderedRunnerTests
     }
 
     [Fact]
-    public async Task Resume_rejects_a_paused_human_input_checkpoint_that_is_no_longer_pending_without_ordered_dispatch()
+    public async Task Resume_rejects_a_paused_human_input_checkpoint_with_a_malformed_unconverged_expired_posture_without_ordered_dispatch()
     {
         var context = await HumanInputContextAsync();
         var store = new FakeRunStore(context.Run);
@@ -685,8 +1110,8 @@ public sealed partial class CustomLoopOrderedRunnerTests
             AuditSchema.Actors.Web));
         Assert.Equal(CustomLoopControlStatus.Paused, pause.Status);
         var expired = ExpireHumanInputWaitingCheckpoint(store.Current);
-        Assert.True(CustomLoopRunValidator.Validate(expired).IsValid);
-        store.ReplaceCurrent(expired);
+        Assert.False(CustomLoopRunValidator.Validate(expired).IsValid);
+        store.ReplaceCurrent(expired, validate: false);
         var writesBeforeResume = store.Writes.Count;
 
         var result = await service.ResumeAsync(new CustomLoopResumeRequest(
@@ -825,6 +1250,327 @@ public sealed partial class CustomLoopOrderedRunnerTests
         return run with { HumanInputWaitingCheckpoints = [futureCheckpoint] };
     }
 
+    private static (CustomLoopRunRecord Run, GovernedLoopHumanInputWaitingCheckpoint Checkpoint, string ReceiptHash) CompleteHumanInputCheckpointForOrderedReentry(
+        CustomLoopRunRecord run,
+        SequentialTestContext context,
+        DateTimeOffset completedAtUtc)
+    {
+        var checkpoint = Assert.Single(run.HumanInputWaitingCheckpoints);
+        var activation = Assert.IsType<GovernedLoopNodeExecutionEvidence>(run.Frontier?.Payload.Nodes.ElementAtOrDefault(checkpoint.Binding.ActivationOrdinal));
+        var node = Assert.IsType<GovernedLoopSequentialPlanNode>(context.Plan.Nodes.ElementAtOrDefault(activation.PlanOrdinal));
+        Assert.Equal(GovernedLoopHumanInputWaitingCheckpointPosture.AnsweredNotResumed, checkpoint.Posture);
+        var receiptHash = new string('b', 64);
+        var terminalEvidence = GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(new GovernedLoopHumanInputWaitingCheckpointEvidence(
+            GovernedLoopHumanInputWaitingCheckpoint.CurrentSchemaVersion,
+            checkpoint.Evidence.Length + 1,
+            GovernedLoopHumanInputWaitingCheckpointEvidenceKind.Terminalized,
+            completedAtUtc,
+            null,
+            null,
+            null,
+            "human-input-ordered-reentry-receipt",
+            receiptHash,
+            checkpoint.Evidence[^1].EvidenceHash,
+            string.Empty));
+        var terminalCheckpoint = GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(new GovernedLoopHumanInputWaitingCheckpoint(
+            checkpoint.SchemaVersion,
+            checkpoint.Binding,
+            checkpoint.NodeConfiguration,
+            checkpoint.ResolvedPolicy,
+            checkpoint.Request,
+            GovernedLoopHumanInputWaitingCheckpointPosture.Terminal,
+            [.. checkpoint.Evidence, terminalEvidence],
+            string.Empty));
+        var baseEvent = new CustomLoopRunEvent(
+            run.Events[^1].Sequence + 2,
+            "human-input-ordered-reentry-terminal",
+            completedAtUtc,
+            CustomLoopRunEventKind.NodeAttemptCompleted,
+            activation.CycleIteration ?? run.Checkpoint.Iteration,
+            activation.NodeId,
+            activation.Attempt,
+            "The exact accepted Human Input response terminalized before ordered re-entry.",
+            [],
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null);
+        var completed = GovernedLoopSequentialFrontierMachine.CompleteWaitingHumanInput(
+            run.Frontier,
+            context.Anchor.AdapterBinding,
+            context.Plan,
+            node,
+            activation,
+            activation.Attempt!.Value,
+            activation.AttemptOperationId,
+            baseEvent.EventId,
+            CustomLoopSequentialOutcomeArtifactHash.Compute(baseEvent),
+            completedAtUtc);
+        Assert.Equal(GovernedLoopSequentialFrontierTransitionStatus.Applied, completed.Status);
+        var terminalActivation = Assert.IsType<GovernedLoopNodeExecutionEvidence>(completed.Frontier?.Payload.Nodes.ElementAtOrDefault(activation.ActivationOrdinal));
+        var evidence = CustomLoopSequentialNodeEvidenceHash.Apply(new CustomLoopSequentialNodeEvidence(
+            CustomLoopSequentialNodeEvidence.CurrentSchemaVersion,
+            CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
+            context.Anchor.AdapterBinding.WorkspaceId,
+            context.Anchor.AdapterBinding.ExecutionBinding.RunId,
+            context.Anchor.AdapterBinding.ExecutionBinding.Revision,
+            context.Anchor.AdapterBinding.ExecutionBinding.ExecutionGeneration,
+            terminalActivation.ActivationOrdinal,
+            terminalActivation.VisitOrdinal,
+            terminalActivation.NodeId,
+            terminalActivation.Attempt,
+            terminalActivation.CycleId,
+            terminalActivation.CycleIteration,
+            GovernedLoopControlCondition.Success,
+            terminalActivation.SelectedControlEdgeIds,
+            terminalActivation.SkippedControlEdgeIds,
+            null,
+            null,
+            CustomLoopSequentialNodeDisposition.Completed,
+            CustomLoopSequentialOutcomeArtifactHash.Compute(baseEvent),
+            string.Empty));
+        var lifecycle = new CustomLoopRunEvent(
+            run.Events[^1].Sequence + 1,
+            "human-input-ordered-reentry-frontier",
+            completedAtUtc,
+            CustomLoopRunEventKind.LifecycleChanged,
+            null,
+            null,
+            null,
+            "The exact accepted Human Input response advanced the canonical frontier before ordered re-entry.",
+            [],
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null);
+        var terminal = run with
+        {
+            LifecycleVersion = checked(run.LifecycleVersion + 1),
+            Status = CustomLoopRunStatus.Running,
+            UpdatedAtUtc = completedAtUtc,
+            ExecutionClock = run.ExecutionClock with { ActiveSinceUtc = completedAtUtc },
+            Frontier = completed.Frontier,
+            Events = [.. run.Events, lifecycle, baseEvent with { SequentialNodeEvidence = evidence }],
+            HumanInputWaitingCheckpoints = [terminalCheckpoint],
+        };
+        Assert.True(CustomLoopRunValidator.Validate(terminal).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(terminal).Errors));
+        return (terminal, terminalCheckpoint, receiptHash);
+    }
+
+    private static CustomLoopRunRecord AnswerHumanInputCheckpointForOrderedReentry(CustomLoopRunRecord run, DateTimeOffset selectedAtUtc)
+    {
+        var checkpoint = Assert.Single(run.HumanInputWaitingCheckpoints);
+        var request = new HumanInputRequestReference(
+            HumanInputRequestReference.CurrentSchemaVersion,
+            checkpoint.Request.RequestId,
+            checkpoint.Request.RequestVersionId,
+            checkpoint.Request.RequestHash);
+        var response = new HumanInputResponseReference(
+            HumanInputResponseReference.CurrentSchemaVersion,
+            "human-input-ordered-reentry-response",
+            request,
+            new string('a', 64),
+            new string('b', 64));
+        var selection = HumanInputResponseSelectionReference.Create(HumanInputResponseSelectionHash.Apply(new HumanInputResponseSelection(
+            HumanInputResponseSelection.CurrentSchemaVersion,
+            "human-input-ordered-reentry-selection",
+            request,
+            HumanInputResponsePolicyKind.FirstValid,
+            ImmutableArray.Create(response),
+            null,
+            null,
+            selectedAtUtc,
+            string.Empty)));
+        var answeredEvidence = GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(new GovernedLoopHumanInputWaitingCheckpointEvidence(
+            GovernedLoopHumanInputWaitingCheckpoint.CurrentSchemaVersion,
+            checkpoint.Evidence.Length + 1,
+            GovernedLoopHumanInputWaitingCheckpointEvidenceKind.Answered,
+            selectedAtUtc,
+            selection,
+            null,
+            null,
+            null,
+            null,
+            checkpoint.Evidence[^1].EvidenceHash,
+            string.Empty));
+        var answered = GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(new GovernedLoopHumanInputWaitingCheckpoint(
+            checkpoint.SchemaVersion,
+            checkpoint.Binding,
+            checkpoint.NodeConfiguration,
+            checkpoint.ResolvedPolicy,
+            checkpoint.Request,
+            GovernedLoopHumanInputWaitingCheckpointPosture.AnsweredNotResumed,
+            [.. checkpoint.Evidence, answeredEvidence],
+            string.Empty));
+        var candidate = run with
+        {
+            LifecycleVersion = checked(run.LifecycleVersion + 1),
+            UpdatedAtUtc = selectedAtUtc,
+            HumanInputWaitingCheckpoints = [answered],
+        };
+        Assert.True(CustomLoopRunValidator.ValidateUpdate(run, candidate).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.ValidateUpdate(run, candidate).Errors));
+        return candidate;
+    }
+
+    private static (CustomLoopRunRecord Run, GovernedLoopHumanInputWaitingCheckpoint Checkpoint, string RetirementEvidenceHash, string EventId, string FailureEvidenceHash) RejectHumanInputCheckpointForOrderedReentry(
+        CustomLoopRunRecord run,
+        SequentialTestContext context,
+        DateTimeOffset rejectedAtUtc)
+    {
+        var checkpoint = Assert.Single(run.HumanInputWaitingCheckpoints);
+        var activation = Assert.IsType<GovernedLoopNodeExecutionEvidence>(run.Frontier?.Payload.Nodes.ElementAtOrDefault(checkpoint.Binding.ActivationOrdinal));
+        var node = Assert.IsType<GovernedLoopSequentialPlanNode>(context.Plan.Nodes.ElementAtOrDefault(activation.PlanOrdinal));
+        const string LifecycleOperationId = "human-input-rejected-operation";
+        var operationHash = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(LifecycleOperationId)));
+        var eventId = "human-input-human-input-rejected-" + operationHash[..24];
+        var baseEvent = new CustomLoopRunEvent(
+            run.Events[^1].Sequence + 2,
+            eventId,
+            rejectedAtUtc,
+            CustomLoopRunEventKind.NodeAttemptFailed,
+            activation.CycleIteration ?? run.Checkpoint.Iteration,
+            activation.NodeId,
+            activation.Attempt,
+            "The exact Human Input lifecycle operation rejected the request without an accepted selection.",
+            [],
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null);
+        var causal = new GovernedLoopFailureEvidenceReference(LifecycleOperationId, checkpoint.Request.RequestHash);
+        var classified = new GovernedLoopFailureClassifier().Classify(
+            new GovernedLoopFailureClassificationContext(
+                "failure-human-input-rejected",
+                context.Anchor.AdapterBinding.WorkspaceId,
+                context.Anchor.AdapterBinding.ExecutionBinding.RunId,
+                context.Anchor.AdapterBinding.ExecutionBinding.Revision,
+                context.Anchor.AdapterBinding.ExecutionBinding.ExecutionGeneration,
+                activation.ActivationOrdinal,
+                activation.VisitOrdinal,
+                activation.NodeId,
+                activation.Attempt!.Value,
+                causal),
+            [new GovernedLoopFailureObservation(
+                GovernedLoopFailureObservationKind.TerminalFailure,
+                GovernedLoopFailureSource.User,
+                "human-input-rejected",
+                causal)],
+            rejectedAtUtc);
+        Assert.Equal(GovernedLoopFailureClassificationStatus.Classified, classified.Status);
+        var failure = Assert.IsType<GovernedLoopFailureEvidence>(classified.Evidence);
+        var classifiedEvent = baseEvent with { FailureEvidence = failure };
+        var failed = GovernedLoopSequentialFrontierMachine.FailWaiting(
+            run.Frontier,
+            context.Anchor.AdapterBinding,
+            context.Plan,
+            node,
+            activation,
+            activation.Attempt.Value,
+            activation.AttemptOperationId,
+            classifiedEvent.EventId,
+            CustomLoopSequentialOutcomeArtifactHash.Compute(classifiedEvent),
+            GovernedLoopControlCondition.Failure,
+            rejectedAtUtc);
+        Assert.True(failed.Status == GovernedLoopSequentialFrontierTransitionStatus.Applied, failed.Detail);
+        var failedActivation = Assert.IsType<GovernedLoopNodeExecutionEvidence>(failed.Frontier?.Payload.Nodes.ElementAtOrDefault(activation.ActivationOrdinal));
+        var sequentialEvidence = CustomLoopSequentialNodeEvidenceHash.Apply(new CustomLoopSequentialNodeEvidence(
+            CustomLoopSequentialNodeEvidence.CurrentSchemaVersion,
+            CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection,
+            context.Anchor.AdapterBinding.WorkspaceId,
+            context.Anchor.AdapterBinding.ExecutionBinding.RunId,
+            context.Anchor.AdapterBinding.ExecutionBinding.Revision,
+            context.Anchor.AdapterBinding.ExecutionBinding.ExecutionGeneration,
+            failedActivation.ActivationOrdinal,
+            failedActivation.VisitOrdinal,
+            failedActivation.NodeId,
+            failedActivation.Attempt,
+            failedActivation.CycleId,
+            failedActivation.CycleIteration,
+            GovernedLoopControlCondition.Failure,
+            failedActivation.SelectedControlEdgeIds,
+            failedActivation.SkippedControlEdgeIds,
+            null,
+            null,
+            CustomLoopSequentialNodeDisposition.Rejected,
+            CustomLoopSequentialOutcomeArtifactHash.Compute(classifiedEvent),
+            string.Empty)
+        {
+            FailureEvidenceId = failure.EvidenceId,
+            FailureEvidenceHash = failure.ContentHash,
+        });
+        var retirementEvidence = GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(new GovernedLoopHumanInputWaitingCheckpointEvidence(
+            GovernedLoopHumanInputWaitingCheckpoint.CurrentSchemaVersion,
+            checkpoint.Evidence.Length + 1,
+            GovernedLoopHumanInputWaitingCheckpointEvidenceKind.Rejected,
+            rejectedAtUtc,
+            null,
+            null,
+            null,
+            null,
+            null,
+            checkpoint.Evidence[^1].EvidenceHash,
+            string.Empty));
+        var retiredCheckpoint = GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(new GovernedLoopHumanInputWaitingCheckpoint(
+            checkpoint.SchemaVersion,
+            checkpoint.Binding,
+            checkpoint.NodeConfiguration,
+            checkpoint.ResolvedPolicy,
+            checkpoint.Request,
+            GovernedLoopHumanInputWaitingCheckpointPosture.Rejected,
+            [.. checkpoint.Evidence, retirementEvidence],
+            string.Empty));
+        var lifecycle = new CustomLoopRunEvent(
+            run.Events[^1].Sequence + 1,
+            "human-input-rejected-frontier",
+            rejectedAtUtc,
+            CustomLoopRunEventKind.LifecycleChanged,
+            null,
+            null,
+            null,
+            "The exact Human Input no-response disposition advanced the canonical frontier without an accepted response.",
+            [],
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null);
+        var retired = run with
+        {
+            LifecycleVersion = checked(run.LifecycleVersion + 1),
+            Status = CustomLoopRunStatus.Running,
+            UpdatedAtUtc = rejectedAtUtc,
+            ExecutionClock = run.ExecutionClock with { ActiveSinceUtc = rejectedAtUtc },
+            Frontier = failed.Frontier,
+            Events = [.. run.Events, lifecycle, classifiedEvent with { SequentialNodeEvidence = sequentialEvidence }],
+            HumanInputWaitingCheckpoints = [retiredCheckpoint],
+        };
+        Assert.True(CustomLoopRunValidator.Validate(retired).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(retired).Errors));
+        return (retired, retiredCheckpoint, retirementEvidence.EvidenceHash, eventId, failure.ContentHash);
+    }
+
     private static CustomLoopRunRecord ExpireHumanInputWaitingCheckpoint(CustomLoopRunRecord run)
     {
         var checkpoint = Assert.Single(run.HumanInputWaitingCheckpoints);
@@ -904,6 +1650,39 @@ public sealed partial class CustomLoopOrderedRunnerTests
                 return artifact;
             });
 
+    private static async Task<SequentialTestContext> HumanInputFailureContextAsync()
+        => await SequentialContextAsync(
+            Run(SequentialDefinition()),
+            artifactFactory: role =>
+            {
+                var artifact = HumanInputFailureArtifact(role);
+                var plan = GovernedLoopSequentialPlanBuilder.Build(artifact);
+                Assert.True(plan.Plan is not null, $"{plan.Status}: {plan.FailurePath}");
+                return artifact;
+            });
+
+    private static async Task<SequentialTestContext> HumanInputSuccessFallbackContextAsync()
+        => await SequentialContextAsync(
+            Run(SequentialDefinition()),
+            artifactFactory: role =>
+            {
+                var artifact = HumanInputSuccessFallbackArtifact(role);
+                var plan = GovernedLoopSequentialPlanBuilder.Build(artifact);
+                Assert.True(plan.Plan is not null, $"{plan.Status}: {plan.FailurePath}");
+                return artifact;
+            });
+
+    private static async Task<SequentialTestContext> HumanInputConditionContextAsync()
+        => await SequentialContextAsync(
+            Run(SequentialDefinition()),
+            artifactFactory: role =>
+            {
+                var artifact = HumanInputConditionArtifact(role);
+                var plan = GovernedLoopSequentialPlanBuilder.Build(artifact);
+                Assert.True(plan.Plan is not null, $"{plan.Status}: {plan.FailurePath}");
+                return artifact;
+            });
+
     private static async Task<SequentialTestContext> ParallelHumanInputContextAsync()
         => await SequentialContextAsync(
             Run(SequentialDefinition()),
@@ -921,11 +1700,20 @@ public sealed partial class CustomLoopOrderedRunnerTests
         QueueExecutor executor,
         RecordingPublisher publisher,
         HumanInputPolicyResolutionService? resolver,
-        TimeProvider? runnerTimeProvider = null)
+        TimeProvider? runnerTimeProvider = null,
+        RecordingAuditLog? audit = null,
+        IGovernedLoopSequentialHumanInputBindingSource? humanInputBindingSource = null)
     {
         var evidence = new SequentialEvidenceHarness(store, context.Evidence);
         return new GovernedLoopSequentialOrderedRuntimeAdapter(
-            Runner(store, executor, publisher, timeProvider: runnerTimeProvider ?? new FixedTimeProvider(_now), humanInputPolicyResolutionService: resolver),
+            Runner(
+                store,
+                executor,
+                publisher,
+                audit,
+                timeProvider: runnerTimeProvider ?? new FixedTimeProvider(_now),
+                humanInputPolicyResolutionService: resolver,
+                humanInputBindingSource: humanInputBindingSource),
             evidence,
             evidence);
     }
@@ -958,6 +1746,153 @@ public sealed partial class CustomLoopOrderedRunnerTests
             ["exit"],
             role,
             bindings: [new GovernedLoopBindingDefinition("response-to-exit", GovernedLoopBindingKind.Data, "human-input", GovernedLoopHumanInputVocabulary.ResponsePortId, "exit", "result")],
+            authorityCeiling: GovernedLoopAuthorityCeiling.Create([GovernedLoopSequentialApplicationTestFixture.ConversationTurnCapabilityId]));
+    }
+
+    private static GovernedLoopGraphRevisionArtifact HumanInputFailureArtifact(ContextualRoleRevisionPin role)
+    {
+        var configuration = HumanInputConfiguration();
+        return GovernedLoopSequentialApplicationTestFixture.Artifact(
+            [
+                GovernedLoopSequentialApplicationTestFixture.Trigger("trigger"),
+                new GovernedLoopNodeDefinition(
+                    "human-input",
+                    new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.HumanInput, GovernedLoopHumanInputVocabulary.TypeId, GovernedLoopHumanInputVocabulary.DescriptorVersion),
+                    [new GovernedLoopPortDefinition(GovernedLoopHumanInputVocabulary.ResponsePortId, GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "text", true)],
+                    GovernedLoopAuthorityCeiling.Create([]),
+                    new Dictionary<string, string>(),
+                    null,
+                    null,
+                    null,
+                    configuration),
+                new GovernedLoopNodeDefinition(
+                    "success-fallback",
+                    GovernedLoopSequentialNodeDescriptors.IdentityTransform,
+                    [
+                        new GovernedLoopPortDefinition(GovernedLoopPureNodeVocabulary.InputPort, GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data, "text", true),
+                        new GovernedLoopPortDefinition(GovernedLoopPureNodeVocabulary.OutputPort, GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "text", true),
+                    ],
+                    GovernedLoopAuthorityCeiling.Create([]),
+                    new Dictionary<string, string>()),
+                GovernedLoopSequentialApplicationTestFixture.Exit("exit"),
+                GovernedLoopSequentialApplicationTestFixture.Node("fail", GovernedLoopSequentialNodeDescriptors.FailTerminal),
+            ],
+            [
+                new GovernedLoopControlEdgeDefinition("trigger-to-human-input", "trigger", "human-input", GovernedLoopControlCondition.Always),
+                new GovernedLoopControlEdgeDefinition("human-input-to-fallback-success", "human-input", "success-fallback", GovernedLoopControlCondition.Success),
+                new GovernedLoopControlEdgeDefinition("human-input-to-fail-failure", "human-input", "fail", GovernedLoopControlCondition.Failure),
+                new GovernedLoopControlEdgeDefinition("fallback-to-exit", "success-fallback", "exit", GovernedLoopControlCondition.Success),
+            ],
+            ["exit", "fail"],
+            role,
+            bindings:
+            [
+                new GovernedLoopBindingDefinition("request-to-success-fallback", GovernedLoopBindingKind.Data, "trigger", "request", "success-fallback", GovernedLoopPureNodeVocabulary.InputPort),
+                new GovernedLoopBindingDefinition("success-fallback-to-exit", GovernedLoopBindingKind.Data, "success-fallback", GovernedLoopPureNodeVocabulary.OutputPort, "exit", "result"),
+            ],
+            authorityCeiling: GovernedLoopAuthorityCeiling.Create([GovernedLoopSequentialApplicationTestFixture.ConversationTurnCapabilityId]));
+    }
+
+    private static GovernedLoopGraphRevisionArtifact HumanInputSuccessFallbackArtifact(ContextualRoleRevisionPin role)
+    {
+        var configuration = HumanInputConfiguration();
+        return GovernedLoopSequentialApplicationTestFixture.Artifact(
+            [
+                GovernedLoopSequentialApplicationTestFixture.Trigger("trigger"),
+                new GovernedLoopNodeDefinition(
+                    "human-input",
+                    new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.HumanInput, GovernedLoopHumanInputVocabulary.TypeId, GovernedLoopHumanInputVocabulary.DescriptorVersion),
+                    [new GovernedLoopPortDefinition(GovernedLoopHumanInputVocabulary.ResponsePortId, GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "text", true)],
+                    GovernedLoopAuthorityCeiling.Create([]),
+                    new Dictionary<string, string>(),
+                    null,
+                    null,
+                    null,
+                    configuration),
+                new GovernedLoopNodeDefinition(
+                    "success-fallback",
+                    GovernedLoopSequentialNodeDescriptors.IdentityTransform,
+                    [
+                        new GovernedLoopPortDefinition(GovernedLoopPureNodeVocabulary.InputPort, GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data, "text", true),
+                        new GovernedLoopPortDefinition(GovernedLoopPureNodeVocabulary.OutputPort, GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "text", true),
+                    ],
+                    GovernedLoopAuthorityCeiling.Create([]),
+                    new Dictionary<string, string>()),
+                GovernedLoopSequentialApplicationTestFixture.Exit("exit"),
+            ],
+            [
+                new GovernedLoopControlEdgeDefinition("trigger-to-human-input", "trigger", "human-input", GovernedLoopControlCondition.Always),
+                new GovernedLoopControlEdgeDefinition("human-input-to-fallback-success", "human-input", "success-fallback", GovernedLoopControlCondition.Success),
+                new GovernedLoopControlEdgeDefinition("fallback-to-exit", "success-fallback", "exit", GovernedLoopControlCondition.Success),
+            ],
+            ["exit"],
+            role,
+            bindings:
+            [
+                new GovernedLoopBindingDefinition("request-to-fallback", GovernedLoopBindingKind.Data, "trigger", "request", "success-fallback", GovernedLoopPureNodeVocabulary.InputPort),
+                new GovernedLoopBindingDefinition("fallback-to-exit", GovernedLoopBindingKind.Data, "success-fallback", GovernedLoopPureNodeVocabulary.OutputPort, "exit", "result"),
+            ],
+            authorityCeiling: GovernedLoopAuthorityCeiling.Create([GovernedLoopSequentialApplicationTestFixture.ConversationTurnCapabilityId]));
+    }
+
+    private static GovernedLoopGraphRevisionArtifact HumanInputConditionArtifact(ContextualRoleRevisionPin role)
+    {
+        var configuration = HumanInputConfiguration();
+        return GovernedLoopSequentialApplicationTestFixture.Artifact(
+            [
+                GovernedLoopSequentialApplicationTestFixture.Trigger("trigger"),
+                new GovernedLoopNodeDefinition(
+                    "human-input",
+                    new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.HumanInput, GovernedLoopHumanInputVocabulary.TypeId, GovernedLoopHumanInputVocabulary.DescriptorVersion),
+                    [new GovernedLoopPortDefinition(GovernedLoopHumanInputVocabulary.ResponsePortId, GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "text", true)],
+                    GovernedLoopAuthorityCeiling.Create([]),
+                    new Dictionary<string, string>(),
+                    null,
+                    null,
+                    null,
+                    configuration),
+                new GovernedLoopNodeDefinition(
+                    "response-condition",
+                    GovernedLoopSequentialNodeDescriptors.ExactTextCondition,
+                    [new GovernedLoopPortDefinition(GovernedLoopTopologyNodeVocabulary.ValuePort, GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data, "text", true)],
+                    GovernedLoopAuthorityCeiling.Create([]),
+                    new Dictionary<string, string> { [GovernedLoopTopologyNodeVocabulary.ExpectedParameter] = "allow" }),
+                new GovernedLoopNodeDefinition(
+                    "approved",
+                    GovernedLoopSequentialNodeDescriptors.FailTerminal,
+                    [],
+                    GovernedLoopAuthorityCeiling.Create([]),
+                    new Dictionary<string, string>
+                    {
+                        [GovernedLoopFailNodeVocabulary.CodeParameter] = "response-approved",
+                        [GovernedLoopFailNodeVocabulary.ExplanationParameter] = "The approved route terminates without retaining the response value.",
+                    }),
+                new GovernedLoopNodeDefinition(
+                    "denied-fallback",
+                    GovernedLoopSequentialNodeDescriptors.IdentityTransform,
+                    [
+                        new GovernedLoopPortDefinition(GovernedLoopPureNodeVocabulary.InputPort, GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data, "text", true),
+                        new GovernedLoopPortDefinition(GovernedLoopPureNodeVocabulary.OutputPort, GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "text", true),
+                    ],
+                    GovernedLoopAuthorityCeiling.Create([]),
+                    new Dictionary<string, string>()),
+                GovernedLoopSequentialApplicationTestFixture.Exit("exit"),
+            ],
+            [
+                new GovernedLoopControlEdgeDefinition("trigger-to-human-input", "trigger", "human-input", GovernedLoopControlCondition.Always),
+                new GovernedLoopControlEdgeDefinition("human-input-to-condition", "human-input", "response-condition", GovernedLoopControlCondition.Success),
+                new GovernedLoopControlEdgeDefinition("condition-approved", "response-condition", "approved", GovernedLoopControlCondition.True),
+                new GovernedLoopControlEdgeDefinition("condition-denied", "response-condition", "denied-fallback", GovernedLoopControlCondition.False),
+                new GovernedLoopControlEdgeDefinition("denied-fallback-to-exit", "denied-fallback", "exit", GovernedLoopControlCondition.Success),
+            ],
+            ["exit", "approved"],
+            role,
+            bindings:
+            [
+                new GovernedLoopBindingDefinition("response-to-condition", GovernedLoopBindingKind.Data, "human-input", GovernedLoopHumanInputVocabulary.ResponsePortId, "response-condition", GovernedLoopTopologyNodeVocabulary.ValuePort),
+                new GovernedLoopBindingDefinition("request-to-denied-fallback", GovernedLoopBindingKind.Data, "trigger", "request", "denied-fallback", GovernedLoopPureNodeVocabulary.InputPort),
+                new GovernedLoopBindingDefinition("denied-fallback-to-exit", GovernedLoopBindingKind.Data, "denied-fallback", GovernedLoopPureNodeVocabulary.OutputPort, "exit", "result"),
+            ],
             authorityCeiling: GovernedLoopAuthorityCeiling.Create([GovernedLoopSequentialApplicationTestFixture.ConversationTurnCapabilityId]));
     }
 

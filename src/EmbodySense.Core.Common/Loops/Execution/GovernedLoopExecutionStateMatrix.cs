@@ -1,4 +1,5 @@
 using EmbodySense.Core.Common.Loops.Execution.Models;
+using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 
 namespace EmbodySense.Core.Common.Loops.Execution;
 
@@ -198,7 +199,7 @@ public static class GovernedLoopExecutionStateMatrix
         {
             GovernedLoopRunStatus.Admitted => next is GovernedLoopRunStatus.Running or GovernedLoopRunStatus.Waiting or GovernedLoopRunStatus.PauseRequested or GovernedLoopRunStatus.Paused or GovernedLoopRunStatus.CancelRequested or GovernedLoopRunStatus.Cancelled or GovernedLoopRunStatus.Failed or GovernedLoopRunStatus.NeedsReview,
             GovernedLoopRunStatus.Running => next is GovernedLoopRunStatus.Waiting or GovernedLoopRunStatus.PauseRequested or GovernedLoopRunStatus.Paused or GovernedLoopRunStatus.CancelRequested or GovernedLoopRunStatus.Completed or GovernedLoopRunStatus.Failed or GovernedLoopRunStatus.NeedsReview,
-            GovernedLoopRunStatus.Waiting => next is GovernedLoopRunStatus.Running or GovernedLoopRunStatus.PauseRequested or GovernedLoopRunStatus.Paused or GovernedLoopRunStatus.CancelRequested or GovernedLoopRunStatus.Failed or GovernedLoopRunStatus.NeedsReview,
+            GovernedLoopRunStatus.Waiting => next is GovernedLoopRunStatus.Running or GovernedLoopRunStatus.PauseRequested or GovernedLoopRunStatus.Paused or GovernedLoopRunStatus.CancelRequested or GovernedLoopRunStatus.Cancelled or GovernedLoopRunStatus.Failed or GovernedLoopRunStatus.NeedsReview,
             GovernedLoopRunStatus.PauseRequested => next is GovernedLoopRunStatus.Paused or GovernedLoopRunStatus.CancelRequested or GovernedLoopRunStatus.Completed or GovernedLoopRunStatus.Failed or GovernedLoopRunStatus.NeedsReview,
             GovernedLoopRunStatus.Paused => next is GovernedLoopRunStatus.Running or GovernedLoopRunStatus.Waiting or GovernedLoopRunStatus.CancelRequested or GovernedLoopRunStatus.Cancelled or GovernedLoopRunStatus.Failed or GovernedLoopRunStatus.NeedsReview,
             GovernedLoopRunStatus.CancelRequested => next is GovernedLoopRunStatus.Cancelled or GovernedLoopRunStatus.Failed or GovernedLoopRunStatus.NeedsReview,
@@ -236,7 +237,7 @@ public static class GovernedLoopExecutionStateMatrix
     /// <param name="current">The current node evidence.</param>
     /// <param name="next">The proposed successor evidence for the same node.</param>
     /// <returns><see langword="true"/> when identity and incoming controls are immutable and the status edge preserves either one attempt or an explicit next-attempt reservation.</returns>
-    /// <remarks>A retry reservation is the sole edge that increments an attempt: Running to Waiting, exactly plus one, with a distinct operation identity and no fabricated outcome or route.</remarks>
+    /// <remarks>A retry reservation is the sole edge that increments an attempt: Running to Waiting, exactly plus one, with a distinct operation identity and no fabricated outcome or route. A Waiting Human Input activation may complete only when its immutable descriptor kind is <see cref="GovernedLoopNodeKind.HumanInput"/>.</remarks>
     public static bool IsNodeEvidenceTransitionAllowed(GovernedLoopNodeExecutionEvidence? current, GovernedLoopNodeExecutionEvidence? next)
     {
         if (current is null || next is null
@@ -251,7 +252,10 @@ public static class GovernedLoopExecutionStateMatrix
             || !string.Equals(current.CycleId, next.CycleId, StringComparison.Ordinal)
             || current.CycleIteration != next.CycleIteration
             || !SameJoinArrivals(current.JoinArrivals, next.JoinArrivals)
-            || !IsNodeTransitionAllowed(current.Status, next.Status))
+            || (!IsNodeTransitionAllowed(current.Status, next.Status)
+                && !(current.Status == GovernedLoopNodeExecutionStatus.Waiting
+                    && next.Status == GovernedLoopNodeExecutionStatus.Completed
+                    && current.Descriptor.Kind == GovernedLoopNodeKind.HumanInput)))
         {
             return false;
         }

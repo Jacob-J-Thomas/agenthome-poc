@@ -22,5 +22,11 @@ public enum GovernedLoopHumanInputWaitingCheckpointPosture
     Superseded = 5,
 
     /// <summary>A later runner recorded terminal consumption of the already answered checkpoint.</summary>
-    Terminal = 6
+    Terminal = 6,
+
+    /// <summary>An authenticated lifecycle actor rejected the request without treating rejection as response data.</summary>
+    Rejected = 7,
+
+    /// <summary>The request lifecycle was superseded but no distinct replacement checkpoint could be authenticated, so the run requires review.</summary>
+    NeedsReview = 8
 }

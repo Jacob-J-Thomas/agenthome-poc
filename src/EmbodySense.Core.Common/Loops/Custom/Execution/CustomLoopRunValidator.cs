@@ -898,7 +898,18 @@ public static class CustomLoopRunValidator
                 || activation.VisitOrdinal != checkpointBinding.NodeVisitOrdinal
                 || !string.Equals(activation.CycleId, checkpointBinding.CycleId, StringComparison.Ordinal)
                 || activation.CycleIteration != checkpointBinding.CycleIteration
-                || activation.Status != GovernedLoopNodeExecutionStatus.Waiting
+                || (checkpoint.Posture is GovernedLoopHumanInputWaitingCheckpointPosture.Pending or GovernedLoopHumanInputWaitingCheckpointPosture.AnsweredNotResumed)
+                    && activation.Status != GovernedLoopNodeExecutionStatus.Waiting
+                || checkpoint.Posture == GovernedLoopHumanInputWaitingCheckpointPosture.Expired
+                    && activation.Status != GovernedLoopNodeExecutionStatus.Failed
+                || checkpoint.Posture == GovernedLoopHumanInputWaitingCheckpointPosture.Rejected
+                    && activation.Status != GovernedLoopNodeExecutionStatus.Failed
+                || checkpoint.Posture == GovernedLoopHumanInputWaitingCheckpointPosture.Cancelled
+                    && activation.Status != GovernedLoopNodeExecutionStatus.Waiting
+                || checkpoint.Posture == GovernedLoopHumanInputWaitingCheckpointPosture.NeedsReview
+                    && activation.Status != GovernedLoopNodeExecutionStatus.ReviewBlocked
+                || checkpoint.Posture == GovernedLoopHumanInputWaitingCheckpointPosture.Terminal
+                    && activation.Status != GovernedLoopNodeExecutionStatus.Completed
                 || run.Frontier.Payload.FrontierVersion < checkpointBinding.FrontierVersion
                 || run.Frontier.Payload.FrontierVersion == checkpointBinding.FrontierVersion
                     && !string.Equals(run.Frontier.Payload.ContentHash, checkpointBinding.FrontierHash, StringComparison.Ordinal)
@@ -912,7 +923,8 @@ public static class CustomLoopRunValidator
         var waitingHumanInputActivations = run.Frontier?.Payload.Nodes
             .Where(node => node.Descriptor.Kind == GovernedLoopNodeKind.HumanInput && node.Status == GovernedLoopNodeExecutionStatus.Waiting)
             .ToArray() ?? [];
-        if (waitingHumanInputActivations.Any(activation => run.HumanInputWaitingCheckpoints.Count(checkpoint => checkpoint is not null && checkpoint.Binding.ActivationOrdinal == activation.ActivationOrdinal) != 1))
+        if (waitingHumanInputActivations.Any(activation => run.HumanInputWaitingCheckpoints.Count(checkpoint => checkpoint is not null
+            && checkpoint.Binding.ActivationOrdinal == activation.ActivationOrdinal) != 1))
         {
             Add(errors, "human_input_waiting_checkpoint_required", "humanInputWaitingCheckpoints", "Every durable Waiting Human Input activation requires exactly one retained checkpoint.");
         }
@@ -1874,10 +1886,150 @@ public static class CustomLoopRunValidator
                 latestVisits[evidence.NodeId] = evidence.VisitOrdinal;
             }
         }
-        else if (!starts.Contains(key) && !HasExactRetryExhaustionWithoutDispatch(run.Events, eventIndex, item, evidence))
+        else if (!starts.Contains(key)
+            && !HasExactRetryExhaustionWithoutDispatch(run.Events, eventIndex, item, evidence)
+            && !HasExactHumanInputTerminalWithoutDispatch(run, item, evidence))
         {
             Add(errors, "sequential_dispatch_marker_required", $"{field}.sequentialNodeEvidence", "Terminal provider-node evidence requires an earlier exact dispatch-start marker for the same canonical attempt.");
         }
+    }
+
+    private static bool HasExactHumanInputTerminalWithoutDispatch(
+        CustomLoopRunRecord run,
+        CustomLoopRunEvent item,
+        CustomLoopSequentialNodeEvidence evidence)
+        => HasExactAcceptedHumanInputTerminalWithoutDispatch(run, item, evidence)
+            || HasExactNoResponseHumanInputTerminalWithoutDispatch(run, item, evidence);
+
+    private static bool HasExactAcceptedHumanInputTerminalWithoutDispatch(
+        CustomLoopRunRecord run,
+        CustomLoopRunEvent item,
+        CustomLoopSequentialNodeEvidence evidence)
+    {
+        if (item.Kind != CustomLoopRunEventKind.NodeAttemptCompleted
+            || evidence.Kind != CustomLoopSequentialNodeEvidenceKind.CompletedOutcome
+            || evidence.Disposition != CustomLoopSequentialNodeDisposition.Completed
+            || !IsHumanInputNodeEvent(run, item)
+            || run.Frontier?.Payload.Nodes.ElementAtOrDefault(evidence.ActivationOrdinal) is not
+            {
+                Descriptor.Kind: GovernedLoopNodeKind.HumanInput,
+                Status: GovernedLoopNodeExecutionStatus.Completed,
+                OutcomeEvidenceId: not null,
+                OutcomeEvidenceHash: not null,
+            } activation
+            || !string.Equals(activation.OutcomeEvidenceId, item.EventId, StringComparison.Ordinal)
+            || !string.Equals(activation.OutcomeEvidenceHash, evidence.OutcomeArtifactHash, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return run.HumanInputWaitingCheckpoints.Count(checkpoint => checkpoint is not null
+            && checkpoint.Posture == GovernedLoopHumanInputWaitingCheckpointPosture.Terminal
+            && checkpoint.Binding.ActivationOrdinal == evidence.ActivationOrdinal
+            && checkpoint.Binding.NodeVisitOrdinal == evidence.VisitOrdinal
+            && string.Equals(checkpoint.Binding.NodeId, evidence.NodeId, StringComparison.Ordinal)
+            && string.Equals(checkpoint.Binding.CycleId, evidence.CycleId, StringComparison.Ordinal)
+            && checkpoint.Binding.CycleIteration == evidence.CycleIteration
+            && checkpoint.Evidence is [
+            { Kind: GovernedLoopHumanInputWaitingCheckpointEvidenceKind.Published },
+            { Kind: GovernedLoopHumanInputWaitingCheckpointEvidenceKind.Answered },
+            { Kind: GovernedLoopHumanInputWaitingCheckpointEvidenceKind.Terminalized },
+            ]) == 1;
+    }
+
+    private static bool HasExactNoResponseHumanInputTerminalWithoutDispatch(
+        CustomLoopRunRecord run,
+        CustomLoopRunEvent item,
+        CustomLoopSequentialNodeEvidence evidence)
+    {
+        if (item.Kind != CustomLoopRunEventKind.NodeAttemptFailed
+            || !IsHumanInputNodeEvent(run, item)
+            || item.FailureEvidence is not
+            {
+                CausalEvidence: [{ EvidenceId: var lifecycleOperationId, EvidenceHash: var requestHash }],
+            } failure
+            || evidence.FailureEvidenceId is null
+            || evidence.FailureEvidenceHash is null
+            || !string.Equals(evidence.FailureEvidenceId, failure.EvidenceId, StringComparison.Ordinal)
+            || !string.Equals(evidence.FailureEvidenceHash, failure.ContentHash, StringComparison.Ordinal)
+            || run.Frontier?.Payload.Nodes.ElementAtOrDefault(evidence.ActivationOrdinal) is not
+            {
+                Descriptor.Kind: GovernedLoopNodeKind.HumanInput,
+                OutcomeEvidenceId: not null,
+                OutcomeEvidenceHash: not null,
+            } activation
+            || !string.Equals(activation.OutcomeEvidenceId, item.EventId, StringComparison.Ordinal)
+            || !string.Equals(activation.OutcomeEvidenceHash, evidence.OutcomeArtifactHash, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var checkpoints = run.HumanInputWaitingCheckpoints.Where(checkpoint => checkpoint is not null
+            && checkpoint.Binding.ActivationOrdinal == evidence.ActivationOrdinal
+            && checkpoint.Binding.NodeVisitOrdinal == evidence.VisitOrdinal
+            && string.Equals(checkpoint.Binding.NodeId, evidence.NodeId, StringComparison.Ordinal)
+            && string.Equals(checkpoint.Binding.CycleId, evidence.CycleId, StringComparison.Ordinal)
+            && checkpoint.Binding.CycleIteration == evidence.CycleIteration).Take(2).ToArray();
+        if (checkpoints.Length != 1 || !string.Equals(checkpoints[0].Request.RequestHash, requestHash, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var checkpoint = checkpoints[0];
+        GovernedLoopHumanInputWaitingCheckpointEvidenceKind expectedCheckpointEvidenceKind;
+        GovernedLoopNodeExecutionStatus expectedActivationStatus;
+        CustomLoopSequentialNodeEvidenceKind expectedEvidenceKind;
+        CustomLoopSequentialNodeDisposition expectedDisposition;
+        string expectedFailureCode;
+        switch (checkpoint.Posture)
+        {
+            case GovernedLoopHumanInputWaitingCheckpointPosture.Expired:
+                expectedCheckpointEvidenceKind = GovernedLoopHumanInputWaitingCheckpointEvidenceKind.Expired;
+                expectedActivationStatus = GovernedLoopNodeExecutionStatus.Failed;
+                expectedEvidenceKind = CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection;
+                expectedDisposition = CustomLoopSequentialNodeDisposition.Rejected;
+                expectedFailureCode = "human-input-expired";
+                break;
+            case GovernedLoopHumanInputWaitingCheckpointPosture.Rejected:
+                expectedCheckpointEvidenceKind = GovernedLoopHumanInputWaitingCheckpointEvidenceKind.Rejected;
+                expectedActivationStatus = GovernedLoopNodeExecutionStatus.Failed;
+                expectedEvidenceKind = CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection;
+                expectedDisposition = CustomLoopSequentialNodeDisposition.Rejected;
+                expectedFailureCode = "human-input-rejected";
+                break;
+            case GovernedLoopHumanInputWaitingCheckpointPosture.NeedsReview:
+                expectedCheckpointEvidenceKind = GovernedLoopHumanInputWaitingCheckpointEvidenceKind.NeedsReview;
+                expectedActivationStatus = GovernedLoopNodeExecutionStatus.ReviewBlocked;
+                expectedEvidenceKind = CustomLoopSequentialNodeEvidenceKind.AmbiguityAttention;
+                expectedDisposition = CustomLoopSequentialNodeDisposition.NeedsReview;
+                expectedFailureCode = "human-input-supersession-unresolved";
+                break;
+            default:
+                return false;
+        }
+
+        if (activation.Status != expectedActivationStatus
+            || evidence.Kind != expectedEvidenceKind
+            || evidence.Disposition != expectedDisposition
+            || !string.Equals(failure.ServerCode, expectedFailureCode, StringComparison.Ordinal)
+            || !string.Equals(item.EventId, HumanInputNoResponseEventId(expectedFailureCode, lifecycleOperationId), StringComparison.Ordinal)
+            || checkpoint.Evidence is not [
+            { Kind: GovernedLoopHumanInputWaitingCheckpointEvidenceKind.Published },
+            { Kind: var evidenceKind },
+            ]
+            || evidenceKind != expectedCheckpointEvidenceKind)
+        {
+            return false;
+        }
+
+        return checkpoint.Evidence[1].OccurredAtUtc == item.TimestampUtc
+            && failure.ObservedAtUtc == item.TimestampUtc;
+    }
+
+    private static string HumanInputNoResponseEventId(string failureCode, string lifecycleOperationId)
+    {
+        var operationHash = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(lifecycleOperationId)));
+        return "human-input-" + failureCode + "-" + operationHash[..24];
     }
 
     private static bool HasExactRetryExhaustionWithoutDispatch(
@@ -2265,6 +2417,7 @@ public static class CustomLoopRunValidator
             var isPureNode = IsPureNodeEvent(run, item);
             var isTopologyNode = IsTopologyNodeEvent(run, item);
             var isWaitNode = IsWaitNodeEvent(run, item);
+            var isHumanInputNode = IsHumanInputNodeEvent(run, item);
             var isRecoverableAction = IsRecoverableActionEvent(run, item);
             var isFailNode = IsFailNodeEvent(run, item);
             var hasValidPureEventShape = item.Kind switch
@@ -2320,6 +2473,27 @@ public static class CustomLoopRunValidator
                     || !hasValidWaitShape)
                 {
                     Add(errors, "sequential_wait_node_step_mismatch", $"{field}.sequentialNodeEvidence.nodeId", "Sequential Wait evidence must identify its exact activation and use the canonical start, completion, or failure envelope.");
+                }
+
+                return;
+            }
+
+            if (isHumanInputNode)
+            {
+                var hasValidHumanInputShape = item.Kind switch
+                {
+                    CustomLoopRunEventKind.NodeAttemptStarted => item.TraceReservationUtf8Bytes == CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes,
+                    CustomLoopRunEventKind.NodeAttemptCompleted => item.PureNodeOutcomeJson is null
+                        && item.WaitContinuationEvidenceHash is null
+                        && item.CanonicalOutput is null,
+                    CustomLoopRunEventKind.NodeAttemptFailed => item.FailureEvidence is not null,
+                    _ => false,
+                };
+                if (!string.Equals(evidence.NodeId, item.StepId, StringComparison.Ordinal)
+                    || item.Iteration != (evidence.CycleIteration ?? 1)
+                    || !hasValidHumanInputShape)
+                {
+                    Add(errors, "sequential_human_input_node_step_mismatch", $"{field}.sequentialNodeEvidence.nodeId", "Sequential Human Input evidence must identify the exact activation and retain the value-free accepted-response or classified no-response outcome envelope.");
                 }
 
                 return;
@@ -2494,6 +2668,16 @@ public static class CustomLoopRunValidator
         }
 
         return run.Frontier?.Payload.Nodes.ElementAtOrDefault(activationOrdinal)?.Descriptor.Kind == GovernedLoopNodeKind.Wait;
+    }
+
+    private static bool IsHumanInputNodeEvent(CustomLoopRunRecord run, CustomLoopRunEvent item)
+    {
+        if (item.SequentialNodeEvidence is not { ActivationOrdinal: var activationOrdinal })
+        {
+            return false;
+        }
+
+        return run.Frontier?.Payload.Nodes.ElementAtOrDefault(activationOrdinal)?.Descriptor.Kind == GovernedLoopNodeKind.HumanInput;
     }
 
     private static bool IsRecoverableActionEvent(CustomLoopRunRecord run, CustomLoopRunEvent item)
@@ -3181,16 +3365,35 @@ public static class CustomLoopRunValidator
             return;
         }
 
+        var advanced = 0;
         for (var index = 0; index < current.HumanInputWaitingCheckpoints.Count; index++)
         {
             var currentCheckpoint = current.HumanInputWaitingCheckpoints[index];
             var candidateCheckpoint = candidate.HumanInputWaitingCheckpoints[index];
             if (currentCheckpoint is null
-                || candidateCheckpoint is null
-                || !string.Equals(currentCheckpoint.CheckpointHash, candidateCheckpoint.CheckpointHash, StringComparison.Ordinal))
+                || candidateCheckpoint is null)
             {
-                Add(errors, "human_input_waiting_checkpoint_history_changed", $"humanInputWaitingCheckpoints[{index}]", "Retained Human Input checkpoint contents are immutable until a later dedicated response-continuation contract defines an allowed successor.");
+                Add(errors, "human_input_waiting_checkpoint_history_changed", $"humanInputWaitingCheckpoints[{index}]", "Retained Human Input checkpoints must remain complete and cannot be removed.");
+                continue;
             }
+
+            if (string.Equals(currentCheckpoint.CheckpointHash, candidateCheckpoint.CheckpointHash, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (!GovernedLoopHumanInputWaitingCheckpointStateTransitionValidator.ValidateTransition(currentCheckpoint, candidateCheckpoint).IsValid)
+            {
+                Add(errors, "human_input_waiting_checkpoint_transition_invalid", $"humanInputWaitingCheckpoints[{index}]", "A retained Human Input checkpoint may advance only through its exact append-only response-continuation transition.");
+                continue;
+            }
+
+            advanced++;
+        }
+
+        if (advanced > 1)
+        {
+            Add(errors, "multiple_human_input_waiting_checkpoint_advances", "humanInputWaitingCheckpoints", "One optimistic run successor may advance at most one Human Input checkpoint.");
         }
 
         var appended = candidate.HumanInputWaitingCheckpoints.Skip(current.HumanInputWaitingCheckpoints.Count).ToArray();

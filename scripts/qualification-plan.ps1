@@ -260,6 +260,7 @@ $script:QualificationLinkedTestMappings = @(
         Path = "tests/EmbodySense.Core.Application.Tests/Governance/Authority/Grants/AuthorityGrantApplicationTestFixture.cs"
         TestProjects = @(
             "tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj",
+            "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj",
             "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj"
         )
     },
@@ -267,6 +268,7 @@ $script:QualificationLinkedTestMappings = @(
         Path = "tests/EmbodySense.Core.Application.Tests/CommandActions/CommandActionApplicationTestData.cs"
         TestProjects = @(
             "tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj",
+            "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj",
             "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj"
         )
     },
@@ -274,6 +276,7 @@ $script:QualificationLinkedTestMappings = @(
         Path = "tests/EmbodySense.Core.Application.Tests/GovernedModelProfileApplicationTestFixture.cs"
         TestProjects = @(
             "tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj",
+            "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj",
             "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj"
         )
     },
@@ -288,6 +291,7 @@ $script:QualificationLinkedTestMappings = @(
         Path = "tests/EmbodySense.Core.Application.Tests/Loops/Sequential/GovernedLoopSequentialApplicationTestFixture.cs"
         TestProjects = @(
             "tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj",
+            "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj",
             "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj"
         )
     },
@@ -1141,6 +1145,16 @@ function Get-QualificationPlan {
             [void]$unfilteredTestProjects.Add($e2eTestProject)
             [void]$filteredTestNamespaces.Remove($e2eTestProject)
             [void]$filteredTestClasses.Remove($e2eTestProject)
+            $classified = $true
+        }
+
+        if ($path.StartsWith("tests/EmbodySense.HumanInputContinuationHost/", [StringComparison]::Ordinal)) {
+            $requiresBuild = $true
+            $persistenceTestProject = "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj"
+            [void]$testProjects.Add($persistenceTestProject)
+            [void]$unfilteredTestProjects.Add($persistenceTestProject)
+            [void]$filteredTestNamespaces.Remove($persistenceTestProject)
+            [void]$filteredTestClasses.Remove($persistenceTestProject)
             $classified = $true
         }
 

@@ -519,6 +519,47 @@ public static class GovernedLoopSequentialFrontierMachine
         DateTimeOffset? cycleStartedAtUtc = null)
         => ResolveClaimed(frontier, binding, plan, node, activation, attempt, attemptOperationId, GovernedLoopNodeExecutionStatus.Running, GovernedLoopNodeExecutionStatus.Completed, outcomeEvidenceId, outcomeEvidenceHash, controlOutcome, skipEvidence, updatedAtUtc, cycleStartedAtUtc);
 
+    /// <summary>Completes one exact Waiting Human Input activation from a durably accepted response.</summary>
+    /// <remarks>The transition is pure and advances no dependent activation outside its admitted successor frontier.
+    /// The response-continuation transaction must retain its terminal receipt and outcome event in the same whole-run
+    /// compare-exchange before invoking any ordered re-entry.</remarks>
+    public static GovernedLoopSequentialFrontierTransitionResult CompleteWaitingHumanInput(
+        GovernedLoopFrontierPosture? frontier,
+        GovernedLoopSequentialAdapterBinding? binding,
+        GovernedLoopSequentialPlan? plan,
+        GovernedLoopSequentialPlanNode? node,
+        GovernedLoopNodeExecutionEvidence? activation,
+        int attempt,
+        string? attemptOperationId,
+        string? outcomeEvidenceId,
+        string? outcomeEvidenceHash,
+        DateTimeOffset updatedAtUtc,
+        IReadOnlyList<GovernedLoopSequentialSkipEvidenceReference>? skipEvidence = null,
+        DateTimeOffset? cycleStartedAtUtc = null)
+    {
+        if (!GovernedLoopSequentialNodeDescriptors.IsHumanInput(node?.Descriptor))
+        {
+            return Invalid("Only an exact Waiting Human Input activation can complete from a response continuation.");
+        }
+
+        return ResolveClaimed(
+            frontier,
+            binding,
+            plan,
+            node,
+            activation,
+            attempt,
+            attemptOperationId,
+            GovernedLoopNodeExecutionStatus.Waiting,
+            GovernedLoopNodeExecutionStatus.Completed,
+            outcomeEvidenceId,
+            outcomeEvidenceHash,
+            GovernedLoopControlCondition.Success,
+            skipEvidence,
+            updatedAtUtc,
+            cycleStartedAtUtc);
+    }
+
     /// <summary>Commits one exact definitive failed outcome and advances only an admitted Failure route, when present.</summary>
     public static GovernedLoopSequentialFrontierTransitionResult FailRunning(
         GovernedLoopFrontierPosture? frontier,

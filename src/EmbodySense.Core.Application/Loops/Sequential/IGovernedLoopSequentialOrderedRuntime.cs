@@ -28,6 +28,30 @@ public interface IGovernedLoopSequentialOrderedRuntime
             "This ordered runtime does not support canonical Wait re-entry."));
     }
 
+    /// <summary>Re-enters ordered execution from one already-terminalized Human Input response continuation.</summary>
+    Task<CustomLoopOrderedRunResult> ResumeHumanInputAsync(
+        GovernedLoopSequentialOrderedHumanInputResumeRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(new CustomLoopOrderedRunResult(
+            CustomLoopOrderedRunStatus.InvalidState,
+            null,
+            "This ordered runtime does not support canonical Human Input re-entry."));
+    }
+
+    /// <summary>Re-enters ordered execution after an exact no-response Human Input failure has already selected its failure edge.</summary>
+    Task<CustomLoopOrderedRunResult> ResumeHumanInputFailureAsync(
+        GovernedLoopSequentialOrderedHumanInputFailureResumeRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(new CustomLoopOrderedRunResult(
+            CustomLoopOrderedRunStatus.InvalidState,
+            null,
+            "This ordered runtime does not support canonical Human Input failure re-entry."));
+    }
+
     /// <summary>Re-enters ordered execution from an exact durable retry dispatch or routed exhaustion.</summary>
     Task<CustomLoopOrderedRunResult> ResumeRetryAsync(
         GovernedLoopSequentialOrderedRetryResumeRequest request,

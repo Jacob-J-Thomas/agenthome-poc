@@ -319,6 +319,8 @@ public static class GovernedLoopHumanInputWaitingCheckpointContractValidator
             GovernedLoopHumanInputWaitingCheckpointPosture.Cancelled => [GovernedLoopHumanInputWaitingCheckpointEvidenceKind.Published, GovernedLoopHumanInputWaitingCheckpointEvidenceKind.Cancelled],
             GovernedLoopHumanInputWaitingCheckpointPosture.Superseded => [GovernedLoopHumanInputWaitingCheckpointEvidenceKind.Published, GovernedLoopHumanInputWaitingCheckpointEvidenceKind.Superseded],
             GovernedLoopHumanInputWaitingCheckpointPosture.Terminal => [GovernedLoopHumanInputWaitingCheckpointEvidenceKind.Published, GovernedLoopHumanInputWaitingCheckpointEvidenceKind.Answered, GovernedLoopHumanInputWaitingCheckpointEvidenceKind.Terminalized],
+            GovernedLoopHumanInputWaitingCheckpointPosture.Rejected => [GovernedLoopHumanInputWaitingCheckpointEvidenceKind.Published, GovernedLoopHumanInputWaitingCheckpointEvidenceKind.Rejected],
+            GovernedLoopHumanInputWaitingCheckpointPosture.NeedsReview => [GovernedLoopHumanInputWaitingCheckpointEvidenceKind.Published, GovernedLoopHumanInputWaitingCheckpointEvidenceKind.NeedsReview],
             _ => [],
         };
         if (evidence.Length != expectedKinds.Length || !evidence.Select((item, index) => item is not null && item.Kind == expectedKinds[index]).All(value => value))
@@ -339,9 +341,9 @@ public static class GovernedLoopHumanInputWaitingCheckpointContractValidator
         {
             Add(errors, "expired_at_or_before_deadline", "$.evidence[1].occurredAtUtc", "Expired posture may be recorded only strictly after the inclusive response endpoint.");
         }
-        if ((posture is GovernedLoopHumanInputWaitingCheckpointPosture.Cancelled or GovernedLoopHumanInputWaitingCheckpointPosture.Superseded) && evidence[1] is { } terminal && terminal.OccurredAtUtc > request.Timing.ExpiresAtUtc)
+        if ((posture is GovernedLoopHumanInputWaitingCheckpointPosture.Cancelled or GovernedLoopHumanInputWaitingCheckpointPosture.Superseded or GovernedLoopHumanInputWaitingCheckpointPosture.Rejected or GovernedLoopHumanInputWaitingCheckpointPosture.NeedsReview) && evidence[1] is { } terminal && terminal.OccurredAtUtc > request.Timing.ExpiresAtUtc)
         {
-            Add(errors, "terminal_after_deadline", "$.evidence[1].occurredAtUtc", "Cancellation and supersession must occur before the pending request expires.");
+            Add(errors, "terminal_after_deadline", "$.evidence[1].occurredAtUtc", "Cancellation, supersession, rejection, and supersession-derived review must occur before the pending request expires.");
         }
         if (posture == GovernedLoopHumanInputWaitingCheckpointPosture.Superseded
             && evidence[1] is { } supersession

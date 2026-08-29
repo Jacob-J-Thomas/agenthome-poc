@@ -45,7 +45,7 @@ public static class GovernedLoopHumanInputWaitingCheckpointStateTransitionValida
         }
         if (IsTerminal(previous.Posture))
         {
-            Add(errors, "terminal_exact_replay_required", "$", "Expired, cancelled, superseded, and terminal checkpoint states permit exact canonical replay only.");
+            Add(errors, "terminal_exact_replay_required", "$", "Expired, cancelled, superseded, rejected, needs-review, and terminal checkpoint states permit exact canonical replay only.");
             return new GovernedLoopHumanInputWaitingCheckpointValidationResult(errors);
         }
         if (candidate.Evidence.Length != previous.Evidence.Length + 1 || !HasExactEvidencePrefix(previous, candidate))
@@ -56,13 +56,13 @@ public static class GovernedLoopHumanInputWaitingCheckpointStateTransitionValida
 
         var legal = previous.Posture switch
         {
-            GovernedLoopHumanInputWaitingCheckpointPosture.Pending => candidate.Posture is GovernedLoopHumanInputWaitingCheckpointPosture.AnsweredNotResumed or GovernedLoopHumanInputWaitingCheckpointPosture.Expired or GovernedLoopHumanInputWaitingCheckpointPosture.Cancelled or GovernedLoopHumanInputWaitingCheckpointPosture.Superseded,
+            GovernedLoopHumanInputWaitingCheckpointPosture.Pending => candidate.Posture is GovernedLoopHumanInputWaitingCheckpointPosture.AnsweredNotResumed or GovernedLoopHumanInputWaitingCheckpointPosture.Expired or GovernedLoopHumanInputWaitingCheckpointPosture.Cancelled or GovernedLoopHumanInputWaitingCheckpointPosture.Superseded or GovernedLoopHumanInputWaitingCheckpointPosture.Rejected or GovernedLoopHumanInputWaitingCheckpointPosture.NeedsReview,
             GovernedLoopHumanInputWaitingCheckpointPosture.AnsweredNotResumed => candidate.Posture == GovernedLoopHumanInputWaitingCheckpointPosture.Terminal,
             _ => false,
         };
         if (!legal)
         {
-            Add(errors, "illegal_posture_transition", "$.posture", "Only pending-to-answered/expired/cancelled/superseded or answered-not-resumed-to-terminal transitions are legal.");
+            Add(errors, "illegal_posture_transition", "$.posture", "Only pending-to-answered/expired/cancelled/superseded/rejected/needs-review or answered-not-resumed-to-terminal transitions are legal.");
         }
 
         return new GovernedLoopHumanInputWaitingCheckpointValidationResult(errors);
@@ -82,7 +82,7 @@ public static class GovernedLoopHumanInputWaitingCheckpointStateTransitionValida
         => previous.Evidence.Select((item, index) => GovernedLoopHumanInputWaitingCheckpointReplayClassifier.Classify(item, candidate.Evidence[index]) == GovernedLoopHumanInputWaitingCheckpointReplayDisposition.ExactReplay).All(value => value);
 
     private static bool IsTerminal(GovernedLoopHumanInputWaitingCheckpointPosture posture)
-        => posture is GovernedLoopHumanInputWaitingCheckpointPosture.Expired or GovernedLoopHumanInputWaitingCheckpointPosture.Cancelled or GovernedLoopHumanInputWaitingCheckpointPosture.Superseded or GovernedLoopHumanInputWaitingCheckpointPosture.Terminal;
+        => posture is GovernedLoopHumanInputWaitingCheckpointPosture.Expired or GovernedLoopHumanInputWaitingCheckpointPosture.Cancelled or GovernedLoopHumanInputWaitingCheckpointPosture.Superseded or GovernedLoopHumanInputWaitingCheckpointPosture.Terminal or GovernedLoopHumanInputWaitingCheckpointPosture.Rejected or GovernedLoopHumanInputWaitingCheckpointPosture.NeedsReview;
 
     private static void Add(List<GovernedLoopHumanInputWaitingCheckpointValidationError> errors, string code, string path, string message)
         => errors.Add(new GovernedLoopHumanInputWaitingCheckpointValidationError(code, path, message));
