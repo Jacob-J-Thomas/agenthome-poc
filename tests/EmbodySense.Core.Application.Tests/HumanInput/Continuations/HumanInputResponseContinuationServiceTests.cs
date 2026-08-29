@@ -44,7 +44,7 @@ public sealed class HumanInputResponseContinuationServiceTests
     }
 
     [Fact]
-    public async Task Accepted_selection_commits_once_when_ordered_reentry_advances_the_canonical_run()
+    public async Task Submitted_and_replayed_are_returned_only_after_terminal_checkpoint_frontier_and_ordered_advancement_are_durable()
     {
         var scenario = await HumanInputResponseContinuationScenario.CreateAsync(advanceOrderedReentry: true);
 
@@ -53,9 +53,13 @@ public sealed class HumanInputResponseContinuationServiceTests
 
         Assert.Equal(HumanInputResponseContinuationWakeStatus.Submitted, result.Status);
         Assert.Equal(HumanInputResponseContinuationWakeStatus.Replayed, replay.Status);
+        Assert.Equal(GovernedLoopWakeResultStatus.Committed, result.Wake?.Status);
+        Assert.Equal(GovernedLoopWakeResultStatus.Committed, replay.Wake?.Status);
         Assert.Equal(CustomLoopRunStatus.Running, scenario.Runs.Current.Status);
         Assert.Equal(GovernedLoopNodeExecutionStatus.Running, scenario.Runs.Current.Frontier?.Payload.Nodes.Single(node => node.NodeId == "exit").Status);
-        Assert.Equal(GovernedLoopHumanInputWaitingCheckpointPosture.Terminal, Assert.Single(scenario.Runs.Current.HumanInputWaitingCheckpoints).Posture);
+        var checkpoint = Assert.Single(scenario.Runs.Current.HumanInputWaitingCheckpoints);
+        Assert.Equal(GovernedLoopHumanInputWaitingCheckpointPosture.Terminal, checkpoint.Posture);
+        Assert.Equal(GovernedLoopHumanInputWaitingCheckpointEvidenceKind.Terminalized, checkpoint.Evidence[^1].Kind);
         Assert.Equal(1, scenario.Ordered.ResumeHumanInputCount);
         Assert.Equal(1, scenario.SleepStore.WakeCount);
         Assert.True(CustomLoopRunValidator.Validate(scenario.Runs.Current).IsValid);

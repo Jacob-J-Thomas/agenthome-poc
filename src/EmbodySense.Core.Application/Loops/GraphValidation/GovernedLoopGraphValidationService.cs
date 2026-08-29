@@ -11,6 +11,7 @@ using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Execution.Effects;
 using EmbodySense.Core.Common.Loops.Execution.Wait;
+using EmbodySense.Core.Common.Loops.HumanInput;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.PureNodes;
 
@@ -229,7 +230,7 @@ public sealed class GovernedLoopGraphValidationService
         }
 
         if (GovernedLoopHumanInputNodeCatalogContract.TryResolve(descriptor.Descriptor, out _)
-            && !GovernedLoopHumanInputNodeCatalogContract.HasExactCatalogSemantics(descriptor))
+            && !GovernedLoopHumanInputNodeCatalogContract.HasExactCatalogStructure(descriptor))
         {
             Add(
                 errors,
@@ -237,7 +238,7 @@ public sealed class GovernedLoopGraphValidationService
                 GovernedLoopGraphElementKind.Catalog,
                 id,
                 path,
-                "The reserved Human Input descriptor key must retain its complete data-only canonical executable contract.");
+                "The reserved Human Input descriptor key must retain its complete data-only canonical contract.");
         }
     }
 
@@ -389,9 +390,45 @@ public sealed class GovernedLoopGraphValidationService
         }
 
         ValidateControlOutcomes(graph, semantics, errors);
+        ValidateHumanInputResponseBindings(graph, semantics, errors);
         ValidateJoins(graph, semantics, errors);
         ValidateCycles(graph, semantics, errors);
         ValidateResources(graph, semantics, authority, errors);
+    }
+
+    private static void ValidateHumanInputResponseBindings(
+        GovernedLoopGraphDefinition graph,
+        IReadOnlyDictionary<string, GovernedLoopNodeCatalogDescriptor> semantics,
+        List<GovernedLoopGraphValidationError> errors)
+    {
+        var nodes = graph.Nodes.ToDictionary(node => node.Id, StringComparer.Ordinal);
+        var schemas = graph.ValueSchemas.ToDictionary(schema => schema.Id, StringComparer.Ordinal);
+        foreach (var binding in graph.Bindings.Where(binding => binding.Kind == GovernedLoopBindingKind.Data).OrderBy(binding => binding.Id, StringComparer.Ordinal))
+        {
+            if (!nodes.TryGetValue(binding.FromNodeId, out var source)
+                || !GovernedLoopHumanInputNodeCatalogContract.TryResolve(source.Descriptor, out _)
+                || !string.Equals(binding.FromPortId, GovernedLoopHumanInputVocabulary.ResponsePortId, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var isExactCondition = nodes.TryGetValue(binding.ToNodeId, out var target)
+                && semantics.TryGetValue(binding.ToNodeId, out var targetDescriptor)
+                && target.Descriptor.Kind == GovernedLoopNodeKind.Condition
+                && GovernedLoopTopologyNodeCatalogContract.TryResolve(target.Descriptor, out _)
+                && GovernedLoopTopologyNodeCatalogContract.HasExactCatalogSemantics(targetDescriptor)
+                && GovernedLoopTopologyNodeCatalogContract.HasExactSchemaSemantics(target, schemas);
+            if (!isExactCondition)
+            {
+                Add(
+                    errors,
+                    "binding.human-input-response.target-unsupported",
+                    GovernedLoopGraphElementKind.Binding,
+                    binding.Id,
+                    $"graph.bindings[{binding.Id}].toNodeId",
+                    "Until generic downstream dataflow and privacy propagation are implemented, a Human Input response may bind only to one exact deterministic Condition.");
+            }
+        }
     }
 
     private static void ValidatePureNodeSchemaSemantics(
@@ -479,7 +516,7 @@ public sealed class GovernedLoopGraphValidationService
         List<GovernedLoopGraphValidationError> errors)
     {
         if (!GovernedLoopHumanInputNodeCatalogContract.TryResolve(node.Descriptor, out _)
-            || !GovernedLoopHumanInputNodeCatalogContract.HasExactCatalogSemantics(admittedDescriptor))
+            || !GovernedLoopHumanInputNodeCatalogContract.HasExactCatalogStructure(admittedDescriptor))
         {
             return;
         }

@@ -86,6 +86,8 @@ internal sealed class WebGovernedLoopBackgroundHostedService : BackgroundService
     {
         if (_startRetryBlocked)
         {
+            var blockedStatus = await _host.ReadGovernedLoopLocalBackgroundForProcessAsync().ConfigureAwait(false);
+            _host.SetGovernedLoopBackgroundPosture(ToPosture(blockedStatus.Readiness));
             return;
         }
 

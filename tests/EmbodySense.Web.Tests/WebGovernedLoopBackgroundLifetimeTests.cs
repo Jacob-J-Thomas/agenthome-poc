@@ -78,7 +78,7 @@ public sealed class WebGovernedLoopBackgroundLifetimeTests
     }
 
     [Fact]
-    public async Task Hosted_lifetime_latches_a_terminal_start_failure_until_process_restart()
+    public async Task Hosted_lifetime_does_not_restart_after_terminal_start_failure_when_coordinator_evidence_is_removed()
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
@@ -115,7 +115,7 @@ public sealed class WebGovernedLoopBackgroundLifetimeTests
             Directory.Delete(workspace.File(".agent", "loops", "execution", "coordinator"), recursive: true);
             await Task.Delay(1000);
 
-            Assert.Equal(WebGovernedLoopBackgroundPosture.Degraded, (await ReadStatusAsync(client)).BackgroundPosture);
+            Assert.Equal(WebGovernedLoopBackgroundPosture.Stopped, (await ReadStatusAsync(client)).BackgroundPosture);
         }
         finally
         {
@@ -408,14 +408,15 @@ public sealed class WebGovernedLoopBackgroundLifetimeTests
             Directory.CreateDirectory(paths.CustomLoopRunsPath);
             var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
             await File.WriteAllTextAsync(indexPath, "{\"schemaVersion\":2,\"revision\":1,\"entries\":[]}");
+            await AssertFailedCoordinatorBoundaryAsync(runtimeHost);
 
             await Assert.ThrowsAsync<LoopRunEvidenceUnsupportedSchemaException>(() => runtimeHost.InvokeLoopAsync(input, "connection-1"));
             File.Delete(indexPath);
 
             Assert.Empty((await runtimeHost.GetLoopRunsAsync()).Items);
             Assert.Equal(
-                WebGovernedLoopBackgroundPosture.Ready,
-                (await WaitForPostureAsync(runtimeHost, WebGovernedLoopBackgroundPosture.Ready, TimeSpan.FromSeconds(10))).BackgroundPosture);
+                WebGovernedLoopBackgroundPosture.Unavailable,
+                (await WaitForPostureAsync(runtimeHost, WebGovernedLoopBackgroundPosture.Unavailable, TimeSpan.FromSeconds(10))).BackgroundPosture);
         }
         finally
         {
@@ -442,6 +443,7 @@ public sealed class WebGovernedLoopBackgroundLifetimeTests
             Directory.CreateDirectory(paths.CustomLoopRunsPath);
             var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
             await File.WriteAllTextAsync(indexPath, "{\"schemaVersion\":2,\"revision\":1,\"entries\":[]}");
+            await AssertFailedCoordinatorBoundaryAsync(runtimeHost);
 
             await Assert.ThrowsAsync<LoopRunEvidenceUnsupportedSchemaException>(() => runtimeHost.InvokeLoopAsync(input, "connection-1"));
 
@@ -454,16 +456,13 @@ public sealed class WebGovernedLoopBackgroundLifetimeTests
                 var incomplete = await Assert.ThrowsAsync<InvalidOperationException>(() => runtimeHost.GetLoopRunsAsync());
 
                 Assert.Contains("custom_loop_recovery_pending", incomplete.Message, StringComparison.Ordinal);
-                Assert.Equal(
-                    WebGovernedLoopBackgroundPosture.Unavailable,
-                    (await WaitForPostureAsync(runtimeHost, WebGovernedLoopBackgroundPosture.Unavailable, TimeSpan.FromSeconds(10))).BackgroundPosture);
                 File.Delete(indexPath);
             }
 
             Assert.Empty((await runtimeHost.GetLoopRunsAsync()).Items);
             Assert.Equal(
-                WebGovernedLoopBackgroundPosture.Ready,
-                (await WaitForPostureAsync(runtimeHost, WebGovernedLoopBackgroundPosture.Ready, TimeSpan.FromSeconds(10))).BackgroundPosture);
+                WebGovernedLoopBackgroundPosture.Unavailable,
+                (await WaitForPostureAsync(runtimeHost, WebGovernedLoopBackgroundPosture.Unavailable, TimeSpan.FromSeconds(10))).BackgroundPosture);
         }
         finally
         {
@@ -561,7 +560,15 @@ public sealed class WebGovernedLoopBackgroundLifetimeTests
         }
         while (DateTimeOffset.UtcNow < deadline);
 
-        throw new TimeoutException($"The Web background posture did not reach `{posture}`.");
+        var last = runtimeHost.GetStatus();
+        throw new TimeoutException($"The Web background posture did not reach `{posture}`; the last observed posture was `{last.BackgroundPosture}`.");
+    }
+
+    private static async Task AssertFailedCoordinatorBoundaryAsync(WebAgentRuntimeHost runtimeHost)
+    {
+        Assert.Equal(
+            WebGovernedLoopBackgroundPosture.Degraded,
+            (await WaitForPostureAsync(runtimeHost, WebGovernedLoopBackgroundPosture.Degraded, TimeSpan.FromSeconds(10))).BackgroundPosture);
     }
 
     private static async Task WaitForLinesAsync(string path, int count)

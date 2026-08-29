@@ -23,7 +23,8 @@ public sealed class GovernedLoopLocalCoordinator : IAsyncDisposable
     [
         GovernedLoopLocalWorkFamily.Schedule,
         GovernedLoopLocalWorkFamily.Trigger,
-        GovernedLoopLocalWorkFamily.Wake
+        GovernedLoopLocalWorkFamily.Wake,
+        GovernedLoopLocalWorkFamily.HumanInput
     ];
 
     private readonly SemaphoreSlim _evidenceGate = new(1, 1);
@@ -347,6 +348,7 @@ public sealed class GovernedLoopLocalCoordinator : IAsyncDisposable
                         GovernedLoopLocalWorkResult? result;
                         try
                         {
+                            ObserveWorkFamilyAttempted(family);
                             result = await _work.RunOnceAsync(family, session.AdmissionStop.Token).ConfigureAwait(false);
                         }
                         catch (OperationCanceledException) when (session.AdmissionStop.IsCancellationRequested)
@@ -1143,6 +1145,18 @@ public sealed class GovernedLoopLocalCoordinator : IAsyncDisposable
         }
     }
 
+    private void ObserveWorkFamilyAttempted(GovernedLoopLocalWorkFamily family)
+    {
+        try
+        {
+            _boundaryObserver?.OnWorkFamilyAttempted(family);
+        }
+        catch (Exception)
+        {
+            // Observation cannot grant authority or change durable coordinator behavior.
+        }
+    }
+
     private void ObserveOwnershipLost()
     {
         try
@@ -1277,6 +1291,7 @@ public sealed class GovernedLoopLocalCoordinator : IAsyncDisposable
             GovernedLoopLocalWorkFamily.Schedule => "schedule",
             GovernedLoopLocalWorkFamily.Trigger => "trigger",
             GovernedLoopLocalWorkFamily.Wake => "wake",
+            GovernedLoopLocalWorkFamily.HumanInput => "human-input",
             _ => "work"
         };
 

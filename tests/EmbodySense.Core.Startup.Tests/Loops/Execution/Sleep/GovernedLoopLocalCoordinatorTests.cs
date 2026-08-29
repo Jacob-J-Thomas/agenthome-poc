@@ -69,12 +69,12 @@ public sealed class GovernedLoopLocalCoordinatorTests
                 GovernedLoopLocalWorkFamily.Trigger,
                 GovernedLoopLocalWorkFamily.Wake,
                 GovernedLoopLocalWorkFamily.Wake,
+                GovernedLoopLocalWorkFamily.HumanInput,
+                GovernedLoopLocalWorkFamily.HumanInput,
                 GovernedLoopLocalWorkFamily.Trigger,
                 GovernedLoopLocalWorkFamily.Trigger,
                 GovernedLoopLocalWorkFamily.Wake,
-                GovernedLoopLocalWorkFamily.Wake,
-                GovernedLoopLocalWorkFamily.Schedule,
-                GovernedLoopLocalWorkFamily.Schedule
+                GovernedLoopLocalWorkFamily.Wake
             ],
             work.Calls.Take(12));
     }
@@ -602,7 +602,7 @@ public sealed class GovernedLoopLocalCoordinatorTests
         await WaitUntilAsync(() => work.CallCount >= 9);
         await coordinator.StopAsync();
 
-        Assert.Equal(3, evidence.Failures.Count);
+        Assert.Equal(4, evidence.Failures.Count);
         Assert.All(evidence.Failures, item => Assert.Equal(GovernedLoopCoordinatorFailureKind.Backpressured, item.Kind));
     }
 

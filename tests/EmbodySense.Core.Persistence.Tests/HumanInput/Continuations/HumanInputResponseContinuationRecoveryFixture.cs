@@ -4,7 +4,6 @@ using EmbodySense.Core.Application.Loops.Sequential;
 using EmbodySense.Core.Application.Loops.Sequential.Models;
 using EmbodySense.Core.Application.Tests.Governance.Authority.Grants;
 using EmbodySense.Core.Application.Tests.Loops.Sequential;
-using EmbodySense.Core.Application.Tests.Loops.Sleep;
 using EmbodySense.HumanInputContinuationHost;
 using EmbodySense.Core.Common.Authority;
 using EmbodySense.Core.Common.Authority.Grants;

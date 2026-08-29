@@ -10,5 +10,8 @@ public enum GovernedLoopLocalWorkFamily
     Trigger = 2,
 
     /// <summary>One durable wake delivery or prepared-wake reconciliation.</summary>
-    Wake = 3
+    Wake = 3,
+
+    /// <summary>One durable Human Input response continuation recovery attempt.</summary>
+    HumanInput = 4
 }

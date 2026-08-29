@@ -638,8 +638,8 @@ Assert-True -Condition (@($browserHostPlan.TestSelections | Where-Object { @($_.
 
 $humanInputContinuationHostPlan = Get-QualificationPlan -ChangedPaths @("tests/EmbodySense.HumanInputContinuationHost/Program.cs", "tests/EmbodySense.HumanInputContinuationHost/HumanInputResponseContinuationGraphFixture.cs")
 Assert-True -Condition $humanInputContinuationHostPlan.RequiresBuild -Message "The Human Input continuation host must compile during qualification."
-Assert-Equal -Actual ($humanInputContinuationHostPlan.TestProjects -join "|") -Expected "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj" -Message "The Human Input continuation host must execute its complete Persistence consumer suite without becoming a standalone test owner."
-Assert-True -Condition (@($humanInputContinuationHostPlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 -or @($_.Classes).Count -ne 0 }).Count -eq 0) -Message "Human Input continuation-host edits must run the complete Persistence consumer suite."
+Assert-Equal -Actual ($humanInputContinuationHostPlan.TestProjects -join "|") -Expected "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj|tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj" -Message "The Human Input continuation host must execute every complete Persistence and Startup consumer suite without becoming a standalone test owner."
+Assert-True -Condition (@($humanInputContinuationHostPlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 -or @($_.Classes).Count -ne 0 }).Count -eq 0) -Message "Human Input continuation-host edits must run complete Persistence and Startup consumer suites."
 Assert-True -Condition ($null -eq (Get-QualificationTestProject -Path "tests/EmbodySense.HumanInputContinuationHost/HumanInputResponseContinuationGraphFixture.cs")) -Message "The linked Human Input host graph fixture must remain a helper host rather than an invented test-project owner."
 
 $frontendConfigurationPlan = Get-QualificationPlan -ChangedPaths @("eslint.config.js", ".prettierignore")
@@ -823,6 +823,84 @@ foreach ($consumerProject in $script:QualificationTestProjects) {
         Assert-True -Condition ($linkedMapping.TestProjects -ccontains $ownerProject) -Message "Cross-project linked test input '$linkedPath' must retain its source project '$ownerProject'."
         Assert-True -Condition ($linkedMapping.TestProjects -ccontains $consumerProject) -Message "Cross-project linked test input '$linkedPath' must select consumer '$consumerProject'."
     }
+}
+
+$humanInputContinuationLinkedSourceExpectations = @(
+    [pscustomobject]@{
+        Path = "tests/EmbodySense.Core.Persistence.Tests/HumanInput/Continuations/HumanInputContinuationAuthorityTransaction.cs"
+        TestProjects = @(
+            "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj",
+            "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj"
+        )
+    },
+    [pscustomobject]@{
+        Path = "tests/EmbodySense.Core.Persistence.Tests/HumanInput/Continuations/HumanInputContinuationRecoveryContext.cs"
+        TestProjects = @(
+            "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj",
+            "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj"
+        )
+    },
+    [pscustomobject]@{
+        Path = "tests/EmbodySense.Core.Persistence.Tests/HumanInput/Continuations/HumanInputContinuationResponseActorAuthenticator.cs"
+        TestProjects = @(
+            "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj",
+            "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj"
+        )
+    },
+    [pscustomobject]@{
+        Path = "tests/EmbodySense.Core.Persistence.Tests/HumanInput/Continuations/HumanInputResponseContinuationRecoveryFixture.cs"
+        TestProjects = @(
+            "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj",
+            "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj"
+        )
+    },
+    [pscustomobject]@{
+        Path = "tests/EmbodySense.Core.Persistence.Tests/HumanInput/Requests/HumanInputRequestStoreTestData.cs"
+        TestProjects = @(
+            "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj",
+            "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj"
+        )
+    },
+    [pscustomobject]@{
+        Path = "tests/EmbodySense.HumanInputContinuationHost/HumanInputResponseContinuationGraphFixture.cs"
+        TestProjects = @(
+            "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj",
+            "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj"
+        )
+    },
+    [pscustomobject]@{
+        Path = "tests/EmbodySense.HumanInputContinuationHost/HumanInputResponseContinuationHostAuthorityProvider.cs"
+        TestProjects = @("tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj")
+    },
+    [pscustomobject]@{
+        Path = "tests/EmbodySense.HumanInputContinuationHost/HumanInputResponseContinuationHostCapabilityAdmissionService.cs"
+        TestProjects = @("tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj")
+    },
+    [pscustomobject]@{
+        Path = "tests/EmbodySense.HumanInputContinuationHost/HumanInputResponseContinuationHostCompletionTransaction.cs"
+        TestProjects = @("tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj")
+    },
+    [pscustomobject]@{
+        Path = "tests/EmbodySense.HumanInputContinuationHost/HumanInputResponseContinuationHostContextPort.cs"
+        TestProjects = @("tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj")
+    },
+    [pscustomobject]@{
+        Path = "tests/EmbodySense.HumanInputContinuationHost/HumanInputResponseContinuationHostConversationPublisher.cs"
+        TestProjects = @("tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj")
+    },
+    [pscustomobject]@{
+        Path = "tests/EmbodySense.HumanInputContinuationHost/HumanInputResponseContinuationHostCurrentPosturePort.cs"
+        TestProjects = @("tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj")
+    },
+    [pscustomobject]@{
+        Path = "tests/EmbodySense.HumanInputContinuationHost/HumanInputResponseContinuationHostInferenceExecutor.cs"
+        TestProjects = @("tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj")
+    }
+)
+foreach ($expectation in $humanInputContinuationLinkedSourceExpectations) {
+    $mapping = Get-QualificationLinkedTestMapping -Path $expectation.Path
+    Assert-True -Condition ($null -ne $mapping) -Message "Human Input continuation linked input '$($expectation.Path)' must retain explicit qualification ownership."
+    Assert-Equal -Actual ($mapping.TestProjects -join "|") -Expected ($expectation.TestProjects -join "|") -Message "Human Input continuation linked input '$($expectation.Path)' must select its exact owners and consumers."
 }
 
 function Get-DirectTestProjectConsumers {

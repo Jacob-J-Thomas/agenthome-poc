@@ -538,8 +538,65 @@ public sealed partial class CustomLoopOrderedRunnerTests
         Assert.Empty(executor.Requests);
         Assert.DoesNotContain(PrivateResponse, Assert.Single(store.Current.HumanInputWaitingCheckpoints).ToString(), StringComparison.Ordinal);
         Assert.DoesNotContain(PrivateResponse, source.LastBinding!.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain(PrivateResponse, store.Current.FinalOutput ?? string.Empty, StringComparison.Ordinal);
+        Assert.DoesNotContain(PrivateResponse, store.Current.Checkpoint.ToString(), StringComparison.Ordinal);
         Assert.DoesNotContain(PrivateResponse, store.Current.Events.Select(item => item.Detail ?? string.Empty));
         Assert.DoesNotContain(PrivateResponse, audit.Events.Select(item => item.Detail));
+        Assert.DoesNotContain(PrivateResponse, publisher.Requests.Select(item => item.ToString()));
+        Assert.DoesNotContain(PrivateResponse, store.Current.ContextSnapshot.ToString(), StringComparison.Ordinal);
+        Assert.True(CustomLoopRunValidator.Validate(store.Current).IsValid);
+    }
+
+    [Fact]
+    public async Task Human_input_terminal_resume_rejects_an_old_exit_binding_before_response_rehydration_or_publication()
+    {
+        const string PrivateResponse = "response-private-old-exit-token";
+        var context = await HumanInputContextAsync();
+        var store = new FakeRunStore(context.Run);
+        var executor = new QueueExecutor();
+        var publisher = new RecordingPublisher();
+        var audit = new RecordingAuditLog();
+        Assert.True(GovernedLoopTypedValue.TryCreate(
+            GovernedLoopTypedValue.CurrentSchemaVersion,
+            GovernedLoopValueKind.Text,
+            "\"response-private-old-exit-token\"",
+            out var value,
+            out _));
+        var source = new ExactHumanInputBindingSource(Assert.IsType<GovernedLoopTypedValue>(value));
+        var runtime = Runtime(
+            context,
+            store,
+            executor,
+            publisher,
+            HumanInputPolicyResolver(context),
+            audit: audit,
+            humanInputBindingSource: source);
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Waiting, (await runtime.RunAsync(Request(context))).Status);
+        store.ReplaceCurrent(AnswerHumanInputCheckpointForOrderedReentry(store.Current, _now.AddMilliseconds(500)));
+        var terminal = CompleteHumanInputCheckpointForOrderedReentry(store.Current, context, _now.AddSeconds(1));
+        store.ReplaceCurrent(terminal.Run);
+
+        var result = await runtime.ResumeHumanInputAsync(new GovernedLoopSequentialOrderedHumanInputResumeRequest(
+            GovernedLoopSequentialOrderedHumanInputResumeRequest.CurrentSchemaVersion,
+            context.Anchor,
+            context.Plan,
+            context.Artifact,
+            terminal.Checkpoint.Binding.CheckpointId,
+            terminal.ReceiptHash,
+            terminal.Run.AdmissionActor));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.NeedsReview, result.Status);
+        Assert.Equal(CustomLoopRunStatus.NeedsReview, store.Current.Status);
+        Assert.Equal(0, source.ReadCount);
+        Assert.Empty(executor.Requests);
+        Assert.Empty(publisher.Requests);
+        Assert.DoesNotContain(PrivateResponse, store.Current.FinalOutput ?? string.Empty, StringComparison.Ordinal);
+        Assert.DoesNotContain(PrivateResponse, store.Current.Checkpoint.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain(PrivateResponse, store.Current.Events.Select(item => item.Detail ?? string.Empty));
+        Assert.DoesNotContain(PrivateResponse, audit.Events.Select(item => item.Detail));
+        Assert.DoesNotContain(PrivateResponse, publisher.Requests.Select(item => item.ToString()));
+        Assert.DoesNotContain(PrivateResponse, store.Current.ContextSnapshot.ToString(), StringComparison.Ordinal);
         Assert.True(CustomLoopRunValidator.Validate(store.Current).IsValid);
     }
 

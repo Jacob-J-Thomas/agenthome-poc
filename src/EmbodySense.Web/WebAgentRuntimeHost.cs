@@ -1767,14 +1767,14 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
             }
 
             var stop = await StopGovernedLoopLocalBackgroundForProcessAsync().ConfigureAwait(false);
-            if (stop.Readiness != AgentRuntimeGovernedLoopBackgroundReadiness.Stopped)
+            if (!IsSafeBackgroundRecoveryStopBoundary(stop))
             {
                 throw new InvalidOperationException("custom_loop_recovery_pending: the pinned governed-loop background runtime has not reached a terminal stop boundary; retry the evidence request afterward.");
             }
 
-            // Retain the exact stopped coordinator while its run-store recovery completes. Its confirmed terminal
-            // ownership permits the Web lifetime to restart immediately afterward without mistaking its own unexpired
-            // 30-second heartbeat for a live peer; the recovery latch blocks every other runtime use meanwhile.
+            // Retain the exact terminal coordinator while its run-store recovery completes. Confirmed terminal
+            // non-ownership keeps the recovery work isolated from a live peer; the recovery latch blocks every other
+            // runtime use meanwhile.
             await ReleaseGovernedLoopLocalBackgroundForProcessAsync(retainRuntime: true).ConfigureAwait(false);
             await _runtimeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
@@ -1804,6 +1804,15 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
             }
         }
     }
+
+    private static bool IsSafeBackgroundRecoveryStopBoundary(AgentRuntimeGovernedLoopBackgroundStopResult stop)
+        // TODO(#648): This accepts durable Failed/Degraded/None solely to release the pinned runtime while run-store
+        // recovery completes. It cannot restore Ready until a governed coordinator-evidence repair authority exists.
+        => (stop.Readiness == AgentRuntimeGovernedLoopBackgroundReadiness.Stopped
+                && stop.Ownership == AgentRuntimeGovernedLoopBackgroundOwnership.None)
+            || (stop.Status == AgentRuntimeGovernedLoopBackgroundStopStatus.Failed
+                && stop.Readiness == AgentRuntimeGovernedLoopBackgroundReadiness.Degraded
+                && stop.Ownership == AgentRuntimeGovernedLoopBackgroundOwnership.None);
 
     private async Task WaitForLoopRecoveryAttemptAsync()
     {

@@ -7,6 +7,7 @@ using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Application.CommandActions;
 using EmbodySense.Core.Application.Governance.Tools;
 using EmbodySense.Core.Application.Governance.Authority.Grants;
+using EmbodySense.Core.Application.HumanInput.Continuations;
 using EmbodySense.Core.Application.HumanInput.Policies;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Admission;
@@ -42,6 +43,8 @@ using EmbodySense.Core.Persistence.Audit;
 using EmbodySense.Core.Persistence.Authority;
 using EmbodySense.Core.Persistence.Capabilities;
 using EmbodySense.Core.Persistence.ContextualRoles;
+using EmbodySense.Core.Persistence.HumanInput.Continuations;
+using EmbodySense.Core.Persistence.HumanInput.Requests;
 using EmbodySense.Core.Persistence.HumanInput.Policies;
 using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Core.Persistence.Loops.Admission;
@@ -622,19 +625,16 @@ public sealed class AgentRuntimeFactory
             var governedWaitNodeRelay = new GovernedLoopWaitNodeExecutionRelay();
             var governedRetryNodeRelay = new GovernedLoopRetryNodeExecutionRelay();
             var governedWaitContinuationRelay = new GovernedLoopWaitContinuationRelay();
-            var humanInputPolicyResolutionService = new HumanInputPolicyResolutionService(new HumanInputPolicyFileStore(paths));
+            var humanInputPolicyStore = new HumanInputPolicyFileStore(paths);
+            var humanInputPolicyResolutionService = new HumanInputPolicyResolutionService(humanInputPolicyStore);
+            var humanInputResponses = new HumanInputRequestStore(paths, _capabilityTrustProvider, authorityTransaction: capabilityAuthority);
+            var humanInputBindingSource = new HumanInputResponseContinuationBindingSource(humanInputResponses);
+            var humanInputRecovery = new HumanInputResponseContinuationRecoveryStore(customRunStore);
+            var humanInputReadiness = new HumanInputContinuationReadinessSignal();
             var governedWaitPosture = new GovernedLoopCanonicalWaitCurrentPostureAdapter(
                 customRunStore,
                 governedGrantResolver);
             var governedSleepStore = new GovernedLoopSleepStore(paths);
-            IGovernedLoopAuthenticatedWakeVerificationPort authenticatedWakeVerification = _authenticatedWakeVerifier is null
-                ? new GovernedLoopUnavailableAuthenticatedWakeVerificationPort()
-                : new AgentRuntimeAuthenticatedWakeVerificationAdapter(_authenticatedWakeVerifier);
-            governedSleep = new GovernedLoopSleepService(
-                governedSleepStore,
-                governedWaitPosture,
-                governedWaitContinuationRelay,
-                authenticatedWakeVerification);
             var governedRunner = new CustomLoopOrderedRunner(
                 customRunStore,
                 new CustomLoopContextResolver(),
@@ -651,7 +651,8 @@ public sealed class AgentRuntimeFactory
                 workspaceActionExecutor: governedWorkspaceActionExecutor,
                 commandActionExecutor: governedCommandActionExecutor,
                 failureClassifier: failureClassifier,
-                humanInputPolicyResolutionService: humanInputPolicyResolutionService);
+                humanInputPolicyResolutionService: humanInputPolicyResolutionService,
+                humanInputBindingSource: humanInputBindingSource);
             var governedAdmissionStore = new GovernedLoopAdmissionStore(paths, _capabilityTrustProvider, authorityTransaction: capabilityAuthority);
             var governedAdmission = new GovernedLoopAdmissionService(
                 workspaceId,
@@ -674,6 +675,27 @@ public sealed class AgentRuntimeFactory
                 governedAdmissionStore,
                 governedGraphStore,
                 governedOrderedRuntime);
+            var humanInputContinuation = new HumanInputResponseContinuationService(
+                customRunStore,
+                humanInputResponses,
+                governedSleepStore,
+                governedWaitPosture,
+                governedWaitResume,
+                governedOrderedRuntime,
+                operationalClock);
+            IGovernedLoopAuthenticatedWakeVerificationPort externalAuthenticatedWakeVerification = _authenticatedWakeVerifier is null
+                ? new GovernedLoopUnavailableAuthenticatedWakeVerificationPort()
+                : new AgentRuntimeAuthenticatedWakeVerificationAdapter(_authenticatedWakeVerifier);
+            var authenticatedWakeVerification = new GovernedLoopHumanInputAwareAuthenticatedWakeVerificationPort(
+                externalAuthenticatedWakeVerification,
+                humanInputContinuation);
+            governedSleep = new GovernedLoopSleepService(
+                governedSleepStore,
+                governedWaitPosture,
+                governedWaitContinuationRelay,
+                authenticatedWakeVerification,
+                operationalClock);
+            humanInputContinuation.BindSleep(governedSleep);
             var governedWait = new GovernedLoopWaitExecutionService(
                 customRunStore,
                 governedSleep,
@@ -697,6 +719,7 @@ public sealed class AgentRuntimeFactory
             governedRetryNodeRelay.Bind(governedRetry);
             governedWaitContinuationRelay.Bind(governedWait);
             governedWaitContinuationRelay.BindRetry(governedRetry);
+            governedWaitContinuationRelay.BindHumanInput(humanInputContinuation);
             governedBackgroundRuntimeHost = new GovernedLoopBackgroundRuntimeHost(
                 coordinatorEvidenceStore,
                 governedWait,
@@ -775,7 +798,8 @@ public sealed class AgentRuntimeFactory
                 governedCommandActionRegistrations?.Registrations ?? [],
                 registration => executableCommandActions.Contains(registration.Template.ContentHash),
                 graphCapabilityCatalog,
-                governedCommandActionNativeHost);
+                governedCommandActionNativeHost,
+                isHumanInputExecutable: () => humanInputReadiness.IsExecutable);
             var graphAuthority = new GovernedLoopAuthoritySnapshotProvider(governedRoleSource);
             var graphAuthoringFacade = new GovernedLoopGraphAuthoringFacade(
                 workspaceId,
@@ -874,7 +898,14 @@ public sealed class AgentRuntimeFactory
                     1,
                     GovernedLoopLocalWorkRunnerOptions.MaximumCandidateReadLimit),
                 operationalClock);
-            governedBackgroundRuntimeHost.BindBackgroundWork(localBackgroundWork);
+            governedBackgroundRuntimeHost.BindBackgroundWork(new HumanInputResponseContinuationWorkRunner(
+                localBackgroundWork,
+                humanInputRecovery,
+                humanInputPolicyStore,
+                humanInputContinuation,
+                CustomLoopLimits.MaxRecentRunsPageSize,
+                operationalClock,
+                humanInputReadiness));
             var runtime = new AgentRuntime(
                 paths,
                 runtimeSurface,
