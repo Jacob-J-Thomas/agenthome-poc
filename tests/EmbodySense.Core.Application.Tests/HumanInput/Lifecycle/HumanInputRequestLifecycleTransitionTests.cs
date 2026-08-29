@@ -95,7 +95,7 @@ public sealed class HumanInputRequestLifecycleTransitionTests
             HumanInputRequestLifecycleMutationStatus.Conflict,
             HumanInputRequestLifecycleOperationFailureCode.TimingBoundaryConflict);
         Assert.Empty(endpointHarness.Resolver.Calls);
-        Assert.Equal(1, endpointHarness.Time.Calls);
+        Assert.Equal(2, endpointHarness.Time.Calls);
 
         var afterHarness = new HumanInputRequestLifecycleHarness();
         var afterRequest = HumanInputRequestLifecycleTestData.Request();

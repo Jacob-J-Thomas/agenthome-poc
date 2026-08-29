@@ -8,7 +8,7 @@ namespace EmbodySense.Core.Startup.Tests.HumanInput;
 
 internal sealed class HumanInputRuntimeFacadeTestAuthorityProvider : IAgentRuntimeHumanInputAuthorityProvider
 {
-    private readonly AuthorityActorId _actor;
+    private AuthorityActorId _actor;
 
     internal HumanInputRuntimeFacadeTestAuthorityProvider(string actor = "user-one")
     {
@@ -29,6 +29,12 @@ internal sealed class HumanInputRuntimeFacadeTestAuthorityProvider : IAgentRunti
     internal int LifecycleAuthorizations { get; private set; }
 
     internal int ResponseAuthentications { get; private set; }
+
+    internal void UseActor(string actor)
+    {
+        Assert.True(AuthorityActorId.TryParse(actor, out var parsed, out _));
+        _actor = parsed!;
+    }
 
     public async Task<AgentRuntimeHumanInputLifecycleTerms> ResolveLifecycleTermsAsync(
         AgentRuntimeHumanInputLifecycleTermsRequest request,

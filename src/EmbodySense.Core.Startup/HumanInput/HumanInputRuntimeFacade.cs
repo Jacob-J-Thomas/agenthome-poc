@@ -156,10 +156,31 @@ public sealed class HumanInputRuntimeFacade
                 : Unavailable(input.OperationId);
         }
 
-        var expectedBinding = await ResolveExpectedBindingAsync(input.RequestId, input.ExpectedRequest, input.Kind, cancellationToken).ConfigureAwait(false);
-        if (input.Kind != HumanInputRequestLifecycleOperationKind.Create && expectedBinding is null)
+        HumanInputRequestBinding? expectedBinding = null;
+        if (input.Kind != HumanInputRequestLifecycleOperationKind.Create)
         {
-            return new HumanInputOperationResult(HumanInputOperationStatus.Conflict, input.OperationId, null, null, []);
+            var expected = await ReadExpectedRequestAsync(input.RequestId, input.ExpectedRequest, cancellationToken).ConfigureAwait(false);
+            var readFailure = MapExpectedRequestReadFailure(input.OperationId, expected);
+            if (readFailure is not null)
+            {
+                return readFailure;
+            }
+
+            var matchingRequests = expected.Entry!.Lifecycle.RequestVersions
+                .Where(request => Matches(request, input.ExpectedRequest!))
+                .Take(2)
+                .ToArray();
+            if (matchingRequests.Length == 0)
+            {
+                return new HumanInputOperationResult(HumanInputOperationStatus.Conflict, input.OperationId, null, null, []);
+            }
+
+            if (matchingRequests.Length != 1)
+            {
+                return new HumanInputOperationResult(HumanInputOperationStatus.Ambiguous, input.OperationId, null, null, []);
+            }
+
+            expectedBinding = matchingRequests[0].Binding;
         }
 
         HumanInputRequestLifecycleCommand command;
@@ -192,7 +213,7 @@ public sealed class HumanInputRuntimeFacade
             _workspaceId,
             _timeProvider);
         var result = await service.MutateAsync(command, cancellationToken).ConfigureAwait(false);
-        return await MapLifecycleResultAsync(result, input.RequestId, cancellationToken).ConfigureAwait(false);
+        return await MapLifecycleResultAsync(result, input.RequestId, CancellationToken.None).ConfigureAwait(false);
     }
 
     /// <summary>Submits one exact response operation through canonical persistence and server-owned authentication.</summary>
@@ -276,27 +297,31 @@ public sealed class HumanInputRuntimeFacade
             _workspaceId,
             _timeProvider);
         var result = await service.MutateAsync(command, cancellationToken).ConfigureAwait(false);
-        return await MapResponseResultAsync(result, input.RequestId, cancellationToken).ConfigureAwait(false);
+        return await MapResponseResultAsync(result, input.RequestId, CancellationToken.None).ConfigureAwait(false);
     }
 
-    private async Task<HumanInputRequestBinding?> ResolveExpectedBindingAsync(
+    private async Task<HumanInputRequestCatalogReadResult> ReadExpectedRequestAsync(
         string requestId,
         HumanInputRequestReference? expectedRequest,
-        HumanInputRequestLifecycleOperationKind kind,
         CancellationToken cancellationToken)
     {
-        if (kind == HumanInputRequestLifecycleOperationKind.Create)
-        {
-            return null;
-        }
-
         if (expectedRequest is null || !string.Equals(requestId, expectedRequest.RequestId, StringComparison.Ordinal))
         {
-            return null;
+            return new HumanInputRequestCatalogReadResult(HumanInputRequestCatalogReadStatus.Invalid, 0, null);
         }
 
-        var observed = await _catalog.ReadAsync(requestId, cancellationToken).ConfigureAwait(false);
-        return observed.Entry?.Lifecycle.RequestVersions.SingleOrDefault(request => Matches(request, expectedRequest))?.Binding;
+        try
+        {
+            return await _catalog.ReadAsync(requestId, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            return new HumanInputRequestCatalogReadResult(HumanInputRequestCatalogReadStatus.Unavailable, 0, null);
+        }
     }
 
     private async Task<HumanInputOperationResult> MapLifecycleResultAsync(
@@ -355,10 +380,17 @@ public sealed class HumanInputRuntimeFacade
 
     private async Task<HumanInputRequestPosture?> TryReadPostureAsync(string requestId, CancellationToken cancellationToken)
     {
-        var current = await _catalog.ReadAsync(requestId, cancellationToken).ConfigureAwait(false);
-        return current.Status == HumanInputRequestCatalogReadStatus.Ready && current.Entry is not null
-            ? MapPosture(current.Entry)
-            : null;
+        try
+        {
+            var current = await _catalog.ReadAsync(requestId, cancellationToken).ConfigureAwait(false);
+            return current.Status == HumanInputRequestCatalogReadStatus.Ready && current.Entry is not null
+                ? MapPosture(current.Entry)
+                : null;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
     }
 
     private static HumanInputRequestPosture MapPosture(HumanInputRequestCatalogEntry entry)
@@ -492,6 +524,19 @@ public sealed class HumanInputRuntimeFacade
             HumanInputResponseLifecycleMutationStatus.LimitExceeded => HumanInputOperationStatus.LimitExceeded,
             HumanInputResponseLifecycleMutationStatus.Unavailable => HumanInputOperationStatus.Unavailable,
             _ => HumanInputOperationStatus.Ambiguous,
+        };
+
+    private static HumanInputOperationResult? MapExpectedRequestReadFailure(
+        string operationId,
+        HumanInputRequestCatalogReadResult result)
+        => result.Status switch
+        {
+            HumanInputRequestCatalogReadStatus.Ready when result.Entry is not null => null,
+            HumanInputRequestCatalogReadStatus.Invalid => Invalid(operationId),
+            HumanInputRequestCatalogReadStatus.NotFound => new HumanInputOperationResult(HumanInputOperationStatus.NotFound, operationId, null, null, []),
+            HumanInputRequestCatalogReadStatus.Unavailable => Unavailable(operationId),
+            HumanInputRequestCatalogReadStatus.Ambiguous => new HumanInputOperationResult(HumanInputOperationStatus.Ambiguous, operationId, null, null, []),
+            _ => new HumanInputOperationResult(HumanInputOperationStatus.Ambiguous, operationId, null, null, []),
         };
 
     private static HumanInputOperationResult MapResponseReadFailure(

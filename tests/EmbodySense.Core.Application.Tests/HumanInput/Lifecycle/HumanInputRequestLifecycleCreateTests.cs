@@ -49,7 +49,7 @@ public sealed class HumanInputRequestLifecycleCreateTests
     }
 
     [Fact]
-    public async Task Exact_replay_returns_durable_proof_before_clock_actor_or_grant_dependencies()
+    public async Task Exact_replay_returns_durable_proof_after_current_actor_authorization_without_grant_resolution()
     {
         var harness = new HumanInputRequestLifecycleHarness();
         var request = HumanInputRequestLifecycleTestData.Request();
@@ -58,8 +58,6 @@ public sealed class HumanInputRequestLifecycleCreateTests
         harness.Resolver.Calls.Clear();
         harness.Authorizer.Requests.Clear();
         harness.Resolver.Handler = (_, _) => throw new InvalidOperationException("Grant must not be resolved.");
-        harness.Authorizer.Handler = (_, _) => throw new InvalidOperationException("Actor must not be resolved.");
-        harness.Time.ThrowOnRead = true;
 
         var replay = await harness.Service.MutateAsync(command);
 
@@ -67,8 +65,8 @@ public sealed class HumanInputRequestLifecycleCreateTests
         Assert.NotNull(replay.Proof);
         Assert.NotNull(replay.DeliveryOpportunity);
         Assert.Empty(harness.Resolver.Calls);
-        Assert.Empty(harness.Authorizer.Requests);
-        Assert.Equal(0, harness.Time.Calls);
+        Assert.Single(harness.Authorizer.Requests);
+        Assert.Equal(1, harness.Time.Calls);
         Assert.Single(harness.Store.Commits);
     }
 

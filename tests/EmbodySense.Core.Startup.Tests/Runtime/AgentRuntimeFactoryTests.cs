@@ -97,6 +97,7 @@ using EmbodySense.Core.Common.Triggers.Schedules;
 using EmbodySense.Core.Persistence.Triggers;
 using EmbodySense.Core.Persistence.Triggers.Schedules;
 using EmbodySense.Core.Persistence.HumanInput.Requests;
+using EmbodySense.Core.Persistence.HumanInput.Requests.Models;
 using EmbodySense.Core.Startup.Triggers;
 using EmbodySense.Core.Startup.Triggers.Models;
 using EmbodySense.Core.Startup.Tests.Triggers;
@@ -2023,12 +2024,18 @@ public sealed class AgentRuntimeFactoryTests
         var cancelReplay = await runtime.HumanInput.SubmitLifecycleAsync(cancel);
         var changedCancel = await runtime.HumanInput.SubmitLifecycleAsync(cancel with { Reason = "different cancel reason" });
         var staleCancel = await runtime.HumanInput.SubmitLifecycleAsync(cancel with { OperationId = "cancel-stale-request" });
+        provider.LifecycleAuthorizationStatus = AgentRuntimeHumanInputAuthorityStatus.Denied;
+        var deniedReplay = await runtime.HumanInput.SubmitLifecycleAsync(cancel);
+        provider.LifecycleAuthorizationStatus = AgentRuntimeHumanInputAuthorityStatus.Ready;
+        provider.UseActor("user-two");
+        var differentActorReplay = await runtime.HumanInput.SubmitLifecycleAsync(cancel);
+        provider.UseActor("user-one");
         var cancelConflictRead = await runtime.HumanInput.ReadAsync(cancelPosture.RequestId);
         var cancelConflictPage = await runtime.HumanInput.ListAsync(new HumanInputRequestPosturePageRequest(64));
 
         Assert.Equal(HumanInputOperationStatus.Committed, cancelled.Status);
-        Assert.Equal(HumanInputOperationStatus.Conflict, missingLifecycleBinding.Status);
-        Assert.Equal(HumanInputOperationStatus.Conflict, mismatchedLifecycleRequest.Status);
+        Assert.Equal(HumanInputOperationStatus.NotFound, missingLifecycleBinding.Status);
+        Assert.Equal(HumanInputOperationStatus.Invalid, mismatchedLifecycleRequest.Status);
         Assert.Equal(HumanInputOperationStatus.Invalid, invalidLifecycleOperation.Status);
         Assert.Equal(HumanInputOperationStatus.Denied, deniedTerms.Status);
         Assert.Equal(HumanInputOperationStatus.Unavailable, unavailableTerms.Status);
@@ -2037,6 +2044,8 @@ public sealed class AgentRuntimeFactoryTests
         Assert.Equal(HumanInputOperationStatus.Unavailable, unavailableLifecycle.Status);
         Assert.Equal(HumanInputRequestLifecycleStatus.Cancelled, cancelled.Request!.Status);
         Assert.Equal(HumanInputOperationStatus.Replayed, cancelReplay.Status);
+        Assert.Equal(HumanInputOperationStatus.Denied, deniedReplay.Status);
+        Assert.Equal(HumanInputOperationStatus.Denied, differentActorReplay.Status);
         Assert.Equal(HumanInputOperationStatus.Conflict, changedCancel.Status);
         Assert.Equal(HumanInputOperationStatus.Conflict, staleCancel.Status);
         Assert.Equal(HumanInputRequestLifecycleStatus.Cancelled, staleCancel.Request!.Status);
@@ -2069,6 +2078,72 @@ public sealed class AgentRuntimeFactoryTests
         var unchanged = await runtime.HumanInput.ReadAsync("request-cancel");
 
         Assert.Equal(HumanInputRequestLifecycleStatus.Cancelled, unchanged.Request!.Status);
+    }
+
+    [Fact]
+    public async Task Human_input_facade_preserves_closed_catalog_dispositions_before_lifecycle_binding_resolution()
+    {
+        using (var unavailableWorkspace = new TestWorkspace())
+        {
+            await WorkspaceInitializer.ForFileCapabilityTrustRoot(unavailableWorkspace.ServerStatePath).InitializeAsync(unavailableWorkspace.RootPath);
+            var paths = new WorkspacePaths(unavailableWorkspace.RootPath);
+            var store = new HumanInputRequestStore(paths, new FileCapabilityCatalogTrustProvider(unavailableWorkspace.ServerStatePath));
+            var mutation = CreateFreshHumanInputMutation(unavailableWorkspace.RootPath, "unavailable-catalog-request", "unavailable-catalog-version", "unavailable-catalog-create", HumanInputRequestStoreTestData.HashA);
+            Assert.Equal(HumanInputRequestLifecycleStoreCommitStatus.Committed, (await store.CommitAsync(mutation)).Status);
+            await File.WriteAllTextAsync(Path.Combine(paths.AgentPath, "human-input", "requests", "lifecycle.json"), "not an authenticated document");
+            await File.WriteAllTextAsync(Path.Combine(paths.AgentPath, "human-input", "requests", "lifecycle.proved.json"), "not an authenticated document");
+            var request = Assert.IsType<HumanInputRequest>(mutation.RequestToAppend);
+            var head = Assert.IsType<HumanInputRequestLifecycleHead>(mutation.PrimaryHeadToWrite);
+            await using var runtime = await CreateRuntimeAsync(
+                unavailableWorkspace,
+                AgentRuntimeSurface.Web,
+                humanInputAuthorityProvider: new HumanInputRuntimeFacadeTestAuthorityProvider());
+
+            var result = await runtime.HumanInput.SubmitLifecycleAsync(new HumanInputLifecycleOperationInput(
+                "unavailable-catalog-operation",
+                HumanInputRequestLifecycleOperationKind.Cancel,
+                request.RequestId,
+                head.LifecycleVersion,
+                head.Status,
+                HumanInputRequestStoreTestData.Reference(request),
+                null,
+                "cancel request"));
+
+            Assert.Equal(HumanInputOperationStatus.Unavailable, result.Status);
+        }
+
+        using var ambiguousWorkspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(ambiguousWorkspace.ServerStatePath).InitializeAsync(ambiguousWorkspace.RootPath);
+        var ambiguousPaths = new WorkspacePaths(ambiguousWorkspace.RootPath);
+        var interruptedStore = new HumanInputRequestStore(
+            ambiguousPaths,
+            new FileCapabilityCatalogTrustProvider(ambiguousWorkspace.ServerStatePath),
+            new HumanInputRequestStoreOptions
+            {
+                DurableBoundaryObserver = (boundary, _) => boundary == HumanInputRequestPersistenceBoundary.PrimaryPublished
+                    ? ValueTask.FromException(new IOException("Simulated interruption after primary publication."))
+                    : ValueTask.CompletedTask,
+            });
+        var interrupted = CreateFreshHumanInputMutation(ambiguousWorkspace.RootPath, "ambiguous-catalog-request", "ambiguous-catalog-version", "ambiguous-catalog-create", HumanInputRequestStoreTestData.HashB);
+        Assert.Equal(HumanInputRequestLifecycleStoreCommitStatus.Ambiguous, (await interruptedStore.CommitAsync(interrupted)).Status);
+        var interruptedRequest = Assert.IsType<HumanInputRequest>(interrupted.RequestToAppend);
+        var interruptedHead = Assert.IsType<HumanInputRequestLifecycleHead>(interrupted.PrimaryHeadToWrite);
+        await using var ambiguousRuntime = await CreateRuntimeAsync(
+            ambiguousWorkspace,
+            AgentRuntimeSurface.Web,
+            humanInputAuthorityProvider: new HumanInputRuntimeFacadeTestAuthorityProvider());
+
+        var ambiguous = await ambiguousRuntime.HumanInput.SubmitLifecycleAsync(new HumanInputLifecycleOperationInput(
+            "ambiguous-catalog-operation",
+            HumanInputRequestLifecycleOperationKind.Cancel,
+            interruptedRequest.RequestId,
+            interruptedHead.LifecycleVersion,
+            interruptedHead.Status,
+            HumanInputRequestStoreTestData.Reference(interruptedRequest),
+            null,
+            "cancel request"));
+
+        Assert.Equal(HumanInputOperationStatus.Ambiguous, ambiguous.Status);
     }
 
     [Fact]

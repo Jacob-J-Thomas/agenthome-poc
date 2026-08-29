@@ -121,10 +121,11 @@ public sealed class HumanInputRequestLifecycleService : IHumanInputRequestLifecy
         }
 
         var initialRead = await ObserveAsync(exact, cancellationToken).ConfigureAwait(false);
+        HumanInputRequestLifecycleActorAuthorization? establishedAuthorization = null;
         for (var attempt = 0; attempt < MaximumCommitAttempts; attempt++)
         {
             var read = attempt == 0 ? initialRead : await ObserveAsync(exact, cancellationToken).ConfigureAwait(false);
-            var existing = ResolveExisting(read, exact);
+            var existing = await ResolveExistingAsync(read, exact, establishedAuthorization, cancellationToken).ConfigureAwait(false);
             if (existing is not null)
             {
                 return existing;
@@ -150,15 +151,18 @@ public sealed class HumanInputRequestLifecycleService : IHumanInputRequestLifecy
                     exact.RequestHash);
             }
 
-            var authorization = await AuthorizeAsync(exact, dependency.RecordedAtUtc, cancellationToken).ConfigureAwait(false);
-            if (authorization.Status != HumanInputRequestLifecycleActorAuthorizationStatus.Authorized)
+            if (establishedAuthorization is null)
             {
-                return Result(
-                    authorization.Status == HumanInputRequestLifecycleActorAuthorizationStatus.Denied
-                        ? HumanInputRequestLifecycleMutationStatus.Denied
-                        : HumanInputRequestLifecycleMutationStatus.Unavailable,
-                    exact.OperationId,
-                    exact.RequestHash);
+                establishedAuthorization = await AuthorizeAsync(exact, dependency.RecordedAtUtc, cancellationToken).ConfigureAwait(false);
+                if (establishedAuthorization.Status != HumanInputRequestLifecycleActorAuthorizationStatus.Authorized)
+                {
+                    return Result(
+                        establishedAuthorization.Status == HumanInputRequestLifecycleActorAuthorizationStatus.Denied
+                            ? HumanInputRequestLifecycleMutationStatus.Denied
+                            : HumanInputRequestLifecycleMutationStatus.Unavailable,
+                        exact.OperationId,
+                        exact.RequestHash);
+                }
             }
 
             if (!ObservedBindingsMatchExpectedScope(exact, read.PrimarySnapshot, read.RelatedSnapshot))
@@ -188,8 +192,8 @@ public sealed class HumanInputRequestLifecycleService : IHumanInputRequestLifecy
                 exact,
                 read.StoreGeneration,
                 plan,
-                authorization.ActorId!,
-                authorization.AuthorityEvidenceHash,
+                establishedAuthorization.ActorId!,
+                establishedAuthorization.AuthorityEvidenceHash,
                 dependency.DependencyEvidenceHash,
                 dependency.RecordedAtUtc);
             if (mutation is null)
@@ -205,12 +209,13 @@ public sealed class HumanInputRequestLifecycleService : IHumanInputRequestLifecy
             }
             catch (Exception)
             {
-                return await RecoverAfterIntentAsync(exact).ConfigureAwait(false);
+                return await RecoverAfterIntentAsync(exact, establishedAuthorization).ConfigureAwait(false);
             }
 
-            var mapped = await MapCommitAsync(commit, mutation, plan, exact).ConfigureAwait(false);
+            var mapped = await MapCommitAsync(commit, mutation, plan, exact, establishedAuthorization).ConfigureAwait(false);
             if (mapped.Retry)
             {
+                establishedAuthorization = null;
                 continue;
             }
 
@@ -495,6 +500,50 @@ public sealed class HumanInputRequestLifecycleService : IHumanInputRequestLifecy
         {
             return false;
         }
+    }
+
+    private async Task<HumanInputRequestLifecycleMutationResult?> ResolveExistingAsync(
+        HumanInputRequestLifecycleStoreReadResult read,
+        HumanInputRequestLifecycleCommand command,
+        HumanInputRequestLifecycleActorAuthorization? establishedAuthorization,
+        CancellationToken cancellationToken)
+    {
+        var replay = ResolveExisting(read, command);
+        if (replay?.Status != HumanInputRequestLifecycleMutationStatus.Replayed)
+        {
+            return replay;
+        }
+
+        var stored = read.ExistingOperation;
+        if (stored is null)
+        {
+            return Result(HumanInputRequestLifecycleMutationStatus.Ambiguous, command.OperationId, command.RequestHash);
+        }
+
+        var authorization = establishedAuthorization ?? await AuthorizeReplayAsync(command, cancellationToken).ConfigureAwait(false);
+        if (authorization.Status != HumanInputRequestLifecycleActorAuthorizationStatus.Authorized)
+        {
+            return Result(
+                authorization.Status == HumanInputRequestLifecycleActorAuthorizationStatus.Denied
+                    ? HumanInputRequestLifecycleMutationStatus.Denied
+                    : HumanInputRequestLifecycleMutationStatus.Unavailable,
+                command.OperationId,
+                command.RequestHash);
+        }
+
+        return authorization.ActorId!.Equals(stored.Evidence.ActorId)
+            ? replay
+            : Result(HumanInputRequestLifecycleMutationStatus.Denied, command.OperationId, command.RequestHash);
+    }
+
+    private async Task<HumanInputRequestLifecycleActorAuthorization> AuthorizeReplayAsync(
+        HumanInputRequestLifecycleCommand command,
+        CancellationToken cancellationToken)
+    {
+        var evaluatedAtUtc = UtcNow();
+        return evaluatedAtUtc == default
+            ? UnavailableAuthorization(command, evaluatedAtUtc)
+            : await AuthorizeAsync(command, evaluatedAtUtc, cancellationToken).ConfigureAwait(false);
     }
 
     private static HumanInputRequestLifecycleMutationResult? ResolveExisting(
@@ -1015,20 +1064,23 @@ public sealed class HumanInputRequestLifecycleService : IHumanInputRequestLifecy
         HumanInputRequestLifecycleStoreCommitResult? commit,
         HumanInputRequestLifecycleStoreMutation mutation,
         HumanInputRequestLifecycleMutationPlan plan,
-        HumanInputRequestLifecycleCommand command)
+        HumanInputRequestLifecycleCommand command,
+        HumanInputRequestLifecycleActorAuthorization establishedAuthorization)
     {
         if (commit is null
             || commit.StoreGeneration is < 0 or > HumanInputRequestLifecycleContractLimits.MaxOperationsPerStore
             || !Enum.IsDefined(commit.Status)
             || commit.Status == HumanInputRequestLifecycleStoreCommitStatus.Unknown)
         {
-            return (false, await RecoverAfterIntentAsync(command).ConfigureAwait(false));
+            return (false, await RecoverAfterIntentAsync(command, establishedAuthorization).ConfigureAwait(false));
         }
 
         if (commit.Status is HumanInputRequestLifecycleStoreCommitStatus.Committed or HumanInputRequestLifecycleStoreCommitStatus.Replayed)
         {
             var proof = await ValidateCommitProofAsync(commit, mutation).ConfigureAwait(false);
             if (!proof.IsValid
+                || commit.StoredOperation is null
+                || !establishedAuthorization.ActorId!.Equals(commit.StoredOperation.Evidence.ActorId)
                 || !TryBuildProvedResult(
                     commit.Status == HumanInputRequestLifecycleStoreCommitStatus.Replayed
                         ? HumanInputRequestLifecycleMutationStatus.Replayed
@@ -1039,7 +1091,7 @@ public sealed class HumanInputRequestLifecycleService : IHumanInputRequestLifecy
                     proof.Related,
                     out var result))
             {
-                return (false, await RecoverAfterIntentAsync(command).ConfigureAwait(false));
+                return (false, await RecoverAfterIntentAsync(command, establishedAuthorization).ConfigureAwait(false));
             }
 
             return (false, result);
@@ -1054,6 +1106,16 @@ public sealed class HumanInputRequestLifecycleService : IHumanInputRequestLifecy
 
         if (commit.Status == HumanInputRequestLifecycleStoreCommitStatus.OperationConflict)
         {
+            if (commit.StoredOperation is { } stored
+                && string.Equals(stored.RequestId, command.RequestId, StringComparison.Ordinal)
+                && string.Equals(stored.Evidence.RequestHash, command.RequestHash, StringComparison.Ordinal)
+                && OperationMatchesCommand(stored.Evidence, command))
+            {
+                return establishedAuthorization.ActorId!.Equals(stored.Evidence.ActorId)
+                    ? (false, await RecoverAfterIntentAsync(command, establishedAuthorization).ConfigureAwait(false))
+                    : (false, Result(HumanInputRequestLifecycleMutationStatus.Denied, command.OperationId, command.RequestHash));
+            }
+
             return (false, Result(HumanInputRequestLifecycleMutationStatus.Conflict, command.OperationId, command.RequestHash));
         }
 
@@ -1067,11 +1129,12 @@ public sealed class HumanInputRequestLifecycleService : IHumanInputRequestLifecy
             return (false, Result(HumanInputRequestLifecycleMutationStatus.Unavailable, command.OperationId, command.RequestHash));
         }
 
-        return (false, await RecoverAfterIntentAsync(command).ConfigureAwait(false));
+        return (false, await RecoverAfterIntentAsync(command, establishedAuthorization).ConfigureAwait(false));
     }
 
     private async Task<HumanInputRequestLifecycleMutationResult> RecoverAfterIntentAsync(
-        HumanInputRequestLifecycleCommand command)
+        HumanInputRequestLifecycleCommand command,
+        HumanInputRequestLifecycleActorAuthorization establishedAuthorization)
     {
         HumanInputRequestLifecycleStoreReadResult recovered;
         try
@@ -1083,7 +1146,7 @@ public sealed class HumanInputRequestLifecycleService : IHumanInputRequestLifecy
             return Result(HumanInputRequestLifecycleMutationStatus.Ambiguous, command.OperationId, command.RequestHash);
         }
 
-        return ResolveExisting(recovered, command)
+        return await ResolveExistingAsync(recovered, command, establishedAuthorization, CancellationToken.None).ConfigureAwait(false)
             ?? MapReadFailure(recovered, command)
             ?? Result(
                 HumanInputRequestLifecycleMutationStatus.Ambiguous,

@@ -202,7 +202,7 @@ public sealed class HumanInputRequestLifecycleExpectedBindingTests
             HumanInputRequestLifecycleOperationFailureCode.LifecycleNotFound);
         Assert.Equal(command.RequestHash, Assert.Single(harness.Store.Commits).Mutation.Operation.RequestHash);
         Assert.Single(harness.Resolver.Calls);
-        Assert.Single(harness.Authorizer.Requests);
+        Assert.Equal(2, harness.Authorizer.Requests.Count);
     }
 
     [Fact]
