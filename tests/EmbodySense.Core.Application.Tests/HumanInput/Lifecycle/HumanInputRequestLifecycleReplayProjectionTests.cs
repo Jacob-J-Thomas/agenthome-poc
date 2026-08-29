@@ -50,7 +50,7 @@ public sealed class HumanInputRequestLifecycleReplayProjectionTests
         Assert.Null(replay.Related);
         Assert.Null(replay.DeliveryOpportunity);
         Assert.Empty(harness.Resolver.Calls);
-        Assert.Empty(harness.Authorizer.Requests);
+        Assert.Single(harness.Authorizer.Requests);
         Assert.Empty(harness.Store.Commits);
     }
 
@@ -101,7 +101,7 @@ public sealed class HumanInputRequestLifecycleReplayProjectionTests
         Assert.Null(replay.Related);
         Assert.Null(replay.DeliveryOpportunity);
         Assert.Empty(harness.Resolver.Calls);
-        Assert.Empty(harness.Authorizer.Requests);
+        Assert.Single(harness.Authorizer.Requests);
         Assert.Empty(harness.Store.Commits);
     }
 

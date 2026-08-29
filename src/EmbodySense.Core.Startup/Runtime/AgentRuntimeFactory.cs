@@ -8,7 +8,10 @@ using EmbodySense.Core.Application.CommandActions;
 using EmbodySense.Core.Application.Governance.Tools;
 using EmbodySense.Core.Application.Governance.Authority.Grants;
 using EmbodySense.Core.Application.HumanInput.Continuations;
+using EmbodySense.Core.Application.HumanInput.Catalog;
+using EmbodySense.Core.Application.HumanInput.Lifecycle;
 using EmbodySense.Core.Application.HumanInput.Policies;
+using EmbodySense.Core.Application.HumanInput.Responses;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Admission;
 using EmbodySense.Core.Application.Loops.EffectAuthorityUsage;
@@ -63,6 +66,7 @@ using EmbodySense.Core.Startup.Governance;
 using EmbodySense.Core.Startup.Capabilities;
 using EmbodySense.Core.Startup.Inference;
 using EmbodySense.Core.Startup.Inference.Profiles;
+using EmbodySense.Core.Startup.HumanInput;
 using EmbodySense.Core.Startup.Loops;
 using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Core.Startup.Loops.Execution.Effects;
@@ -95,6 +99,7 @@ public sealed class AgentRuntimeFactory
     private readonly CodexRuntimeStatus? _codexRuntimeStatus;
     private readonly ICapabilityCatalogTrustProvider _capabilityTrustProvider;
     private readonly IAgentRuntimeAuthenticatedWakeVerifier? _authenticatedWakeVerifier;
+    private readonly IAgentRuntimeHumanInputAuthorityProvider? _humanInputAuthorityProvider;
     private readonly IGovernedModelPrimaryExecutionBoundaryObserver? _governedModelExecutionObserver;
     private readonly IGovernedLoopLocalCoordinatorBoundaryObserver? _governedLoopLocalCoordinatorBoundaryObserver;
     private readonly IReadOnlyList<ModelProfileRuntimeProvider> _additionalModelProfileProviders;
@@ -179,6 +184,28 @@ public sealed class AgentRuntimeFactory
             _governedModelExecutionObserver,
             _additionalModelProfileProviders,
             verifier,
+            _humanInputAuthorityProvider,
+            _commandActionRuntimeProvider,
+            _customLoopRunStoreProvider,
+            _governedLoopLocalCoordinatorBoundaryObserver);
+    }
+
+    /// <summary>Returns an equivalent factory that composes one explicit server-owned Human Input authority provider.</summary>
+    /// <remarks>Without this provider, runtime Human Input reads remain available while every mutation returns unavailable.</remarks>
+    /// <param name="provider">The authenticated surface boundary supplying canonical lifecycle terms, authorization, and response authentication.</param>
+    /// <returns>A factory preserving existing runtime composition with the supplied Human Input boundary.</returns>
+    public AgentRuntimeFactory WithHumanInputAuthorityProvider(IAgentRuntimeHumanInputAuthorityProvider provider)
+    {
+        ArgumentNullException.ThrowIfNull(provider);
+        return new AgentRuntimeFactory(
+            _approvalPrompt,
+            _conversationPublicationObserver,
+            _codexRuntimeStatus,
+            _capabilityTrustProvider,
+            _governedModelExecutionObserver,
+            _additionalModelProfileProviders,
+            _authenticatedWakeVerifier,
+            provider,
             _commandActionRuntimeProvider,
             _customLoopRunStoreProvider,
             _governedLoopLocalCoordinatorBoundaryObserver);
@@ -198,6 +225,7 @@ public sealed class AgentRuntimeFactory
             _governedModelExecutionObserver,
             _additionalModelProfileProviders,
             _authenticatedWakeVerifier,
+            _humanInputAuthorityProvider,
             provider,
             _customLoopRunStoreProvider,
             _governedLoopLocalCoordinatorBoundaryObserver);
@@ -219,6 +247,7 @@ public sealed class AgentRuntimeFactory
             _governedModelExecutionObserver,
             _additionalModelProfileProviders,
             _authenticatedWakeVerifier,
+            _humanInputAuthorityProvider,
             _commandActionRuntimeProvider,
             provider,
             _governedLoopLocalCoordinatorBoundaryObserver);
@@ -240,6 +269,7 @@ public sealed class AgentRuntimeFactory
             _governedModelExecutionObserver,
             _additionalModelProfileProviders,
             _authenticatedWakeVerifier,
+            _humanInputAuthorityProvider,
             _commandActionRuntimeProvider,
             _customLoopRunStoreProvider,
             observer);
@@ -253,6 +283,7 @@ public sealed class AgentRuntimeFactory
         IGovernedModelPrimaryExecutionBoundaryObserver? governedModelExecutionObserver = null,
         IReadOnlyList<ModelProfileRuntimeProvider>? additionalModelProfileProviders = null,
         IAgentRuntimeAuthenticatedWakeVerifier? authenticatedWakeVerifier = null,
+        IAgentRuntimeHumanInputAuthorityProvider? humanInputAuthorityProvider = null,
         CommandActionRuntimeProvider? commandActionRuntimeProvider = null,
         CustomLoopRunStoreProvider? customLoopRunStoreProvider = null,
         IGovernedLoopLocalCoordinatorBoundaryObserver? governedLoopLocalCoordinatorBoundaryObserver = null)
@@ -273,6 +304,7 @@ public sealed class AgentRuntimeFactory
         _codexRuntimeStatus = codexRuntimeStatus;
         _capabilityTrustProvider = capabilityTrustProvider ?? FileCapabilityCatalogTrustProvider.CreateDefault();
         _authenticatedWakeVerifier = authenticatedWakeVerifier;
+        _humanInputAuthorityProvider = humanInputAuthorityProvider;
         _governedModelExecutionObserver = governedModelExecutionObserver;
         _governedLoopLocalCoordinatorBoundaryObserver = governedLoopLocalCoordinatorBoundaryObserver;
         var additionalProviders = (additionalModelProfileProviders ?? [])
@@ -628,6 +660,15 @@ public sealed class AgentRuntimeFactory
             var humanInputPolicyStore = new HumanInputPolicyFileStore(paths);
             var humanInputPolicyResolutionService = new HumanInputPolicyResolutionService(humanInputPolicyStore);
             var humanInputResponses = new HumanInputRequestStore(paths, _capabilityTrustProvider, authorityTransaction: capabilityAuthority);
+            var humanInputFacade = new HumanInputRuntimeFacade(
+                workspaceId,
+                (IHumanInputRequestCatalog)humanInputResponses,
+                (IHumanInputRequestLifecycleStore)humanInputResponses,
+                (IHumanInputResponseLifecycleStore)humanInputResponses,
+                governedGrantResolver,
+                capabilityAuthority,
+                operationalClock,
+                _humanInputAuthorityProvider);
             var humanInputBindingSource = new HumanInputResponseContinuationBindingSource(humanInputResponses);
             var humanInputRecovery = new HumanInputResponseContinuationRecoveryStore(customRunStore);
             var humanInputReadiness = new HumanInputContinuationReadinessSignal();
@@ -924,6 +965,7 @@ public sealed class AgentRuntimeFactory
                 graphAuthoringFacade,
                 governedLoopInvocationPreparation,
                 modelProfileCatalogFacade,
+                humanInputFacade,
                 defaultConversationReviews,
                 codexRuntimeStatus,
                 triggerAuthorizer,

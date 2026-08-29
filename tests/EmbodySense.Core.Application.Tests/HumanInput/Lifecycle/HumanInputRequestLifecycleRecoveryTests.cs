@@ -126,11 +126,10 @@ public sealed class HumanInputRequestLifecycleRecoveryTests
         Assert.Equal(HumanInputRequestLifecycleMutationStatus.Conflict, result.Status);
         Assert.Equal(HumanInputRequestLifecycleOperationFailureCode.OptimisticStateConflict, result.Proof?.FailureCode);
         Assert.Equal(2, harness.Resolver.Calls.Count);
-        Assert.Equal(2, harness.Authorizer.Requests.Count);
         Assert.Collection(
             harness.Authorizer.Requests,
-            request => Assert.Equal(firstEvaluation, request.EvaluatedAtUtc),
-            request => Assert.Equal(secondEvaluation, request.EvaluatedAtUtc));
+            authorization => Assert.Equal(firstEvaluation, authorization.EvaluatedAtUtc),
+            authorization => Assert.Equal(secondEvaluation, authorization.EvaluatedAtUtc));
         Assert.Equal(2, harness.Store.Commits.Count);
         Assert.Equal(secondEvaluation, harness.Store.Commits[1].Mutation.Operation.RecordedAtUtc);
 
@@ -139,7 +138,7 @@ public sealed class HumanInputRequestLifecycleRecoveryTests
         Assert.Equal(HumanInputRequestLifecycleMutationStatus.Replayed, replay.Status);
         Assert.Equal(HumanInputRequestLifecycleOperationFailureCode.OptimisticStateConflict, replay.Proof?.FailureCode);
         Assert.Equal(2, harness.Resolver.Calls.Count);
-        Assert.Equal(2, harness.Authorizer.Requests.Count);
+        Assert.Equal(3, harness.Authorizer.Requests.Count);
         Assert.Equal(2, harness.Store.Commits.Count);
     }
 
@@ -184,6 +183,7 @@ public sealed class HumanInputRequestLifecycleRecoveryTests
         Assert.Equal(2, harness.Store.MutationReads.Count);
         Assert.Equal(cancellation.Token, harness.Store.MutationReads[0].CancellationToken);
         Assert.Equal(CancellationToken.None, harness.Store.MutationReads[1].CancellationToken);
+        Assert.Single(harness.Authorizer.Requests);
     }
 
     [Theory]
@@ -285,6 +285,33 @@ public sealed class HumanInputRequestLifecycleRecoveryTests
         Assert.Single(harness.Authorizer.Requests);
         Assert.Empty(harness.Store.Commits);
         Assert.Single(harness.Store.MutationReads);
+    }
+
+    [Fact]
+    public async Task Caller_cancellation_after_durable_intent_cannot_erase_the_committed_result()
+    {
+        var (harness, request) = await SeededHarnessAsync();
+        HumanInputRequestLifecycleTransitionTestSupport.ResetCalls(harness);
+        using var cancellation = new CancellationTokenSource();
+        harness.Store.CommitOverride = (mutation, _) =>
+        {
+            var durable = harness.Store.CommitDurably(mutation);
+            cancellation.Cancel();
+            return Task.FromResult(durable);
+        };
+        var command = HumanInputRequestLifecycleTransitionTestSupport.Command(
+            harness,
+            HumanInputRequestLifecycleOperationKind.Remind,
+            "cancel-after-durable-intent",
+            request.RequestId);
+
+        var result = await harness.Service.MutateAsync(command, cancellation.Token);
+
+        Assert.True(cancellation.IsCancellationRequested);
+        Assert.Equal(HumanInputRequestLifecycleMutationStatus.Committed, result.Status);
+        Assert.NotNull(result.Proof);
+        Assert.NotNull(result.DeliveryOpportunity);
+        Assert.Equal(CancellationToken.None, Assert.Single(harness.Store.Commits).CancellationToken);
     }
 
     [Fact]

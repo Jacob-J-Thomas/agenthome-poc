@@ -30,7 +30,7 @@ public sealed class HumanInputRequestLifecycleStaleDeliveryTests
             HumanInputRequestLifecycleMutationStatus.Committed,
             (await harness.Service.MutateAsync(cancel)).Status);
         HumanInputRequestLifecycleTransitionTestSupport.ResetCalls(harness);
-        RejectMutableDependencies(harness);
+        RejectMutableGrantDependency(harness);
 
         var replay = await harness.Service.MutateAsync(create);
 
@@ -40,7 +40,7 @@ public sealed class HumanInputRequestLifecycleStaleDeliveryTests
         Assert.Equal(2, replay.Primary?.LifecycleVersion);
         Assert.Null(replay.DeliveryOpportunity);
         Assert.Empty(harness.Resolver.Calls);
-        Assert.Empty(harness.Authorizer.Requests);
+        Assert.Single(harness.Authorizer.Requests);
         Assert.Empty(harness.Store.Commits);
     }
 
@@ -76,7 +76,7 @@ public sealed class HumanInputRequestLifecycleStaleDeliveryTests
             HumanInputRequestLifecycleMutationStatus.Committed,
             (await harness.Service.MutateAsync(newer)).Status);
         HumanInputRequestLifecycleTransitionTestSupport.ResetCalls(harness);
-        RejectMutableDependencies(harness);
+        RejectMutableGrantDependency(harness);
 
         var staleReplay = await harness.Service.MutateAsync(oldCommand);
 
@@ -86,7 +86,7 @@ public sealed class HumanInputRequestLifecycleStaleDeliveryTests
         Assert.Equal(3, staleReplay.Primary?.LifecycleVersion);
         Assert.Null(staleReplay.DeliveryOpportunity);
         Assert.Empty(harness.Resolver.Calls);
-        Assert.Empty(harness.Authorizer.Requests);
+        Assert.Single(harness.Authorizer.Requests);
         Assert.Empty(harness.Store.Commits);
     }
 
@@ -122,7 +122,7 @@ public sealed class HumanInputRequestLifecycleStaleDeliveryTests
             HumanInputRequestLifecycleMutationStatus.Committed,
             (await harness.Service.MutateAsync(followUp)).Status);
         HumanInputRequestLifecycleTransitionTestSupport.ResetCalls(harness);
-        RejectMutableDependencies(harness);
+        RejectMutableGrantDependency(harness);
 
         var staleReplay = await harness.Service.MutateAsync(supersede);
 
@@ -132,7 +132,7 @@ public sealed class HumanInputRequestLifecycleStaleDeliveryTests
         Assert.Equal(2, staleReplay.Related?.LifecycleVersion);
         Assert.Null(staleReplay.DeliveryOpportunity);
         Assert.Empty(harness.Resolver.Calls);
-        Assert.Empty(harness.Authorizer.Requests);
+        Assert.Single(harness.Authorizer.Requests);
         Assert.Empty(harness.Store.Commits);
     }
 
@@ -148,9 +148,8 @@ public sealed class HumanInputRequestLifecycleStaleDeliveryTests
             _ => null,
         };
 
-    private static void RejectMutableDependencies(HumanInputRequestLifecycleHarness harness)
+    private static void RejectMutableGrantDependency(HumanInputRequestLifecycleHarness harness)
     {
         harness.Resolver.Handler = (_, _) => throw new InvalidOperationException("Replay must not resolve mutable grant state.");
-        harness.Authorizer.Handler = (_, _) => throw new InvalidOperationException("Replay must not resolve mutable actor state.");
     }
 }
