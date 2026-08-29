@@ -8,6 +8,7 @@ using EmbodySense.HumanInputContinuationHost;
 using EmbodySense.Core.Common.Authority;
 using EmbodySense.Core.Common.Authority.Grants;
 using EmbodySense.Core.Common.Authority.Grants.Models;
+using EmbodySense.Core.Common.Authority.Models;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.HumanInput;
 using EmbodySense.Core.Common.HumanInput.Models;
@@ -26,6 +27,7 @@ using EmbodySense.Core.Common.Loops.HumanInput.Policies;
 using EmbodySense.Core.Common.Loops.HumanInput.Policies.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
+using EmbodySense.Core.Common.Loops.PureNodes;
 using EmbodySense.Core.Common.Loops.Revisions;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
 using EmbodySense.Core.Common.Loops.Sequential;
@@ -38,6 +40,12 @@ internal static class HumanInputResponseContinuationRecoveryFixture
     internal static readonly DateTimeOffset Now = GovernedLoopSequentialApplicationTestFixture.Now;
 
     internal static HumanInputContinuationRecoveryContext CreateWaitingContext(string runId = "human-input-continuation-run")
+        => CreateContext(runId, activeParallel: false);
+
+    internal static HumanInputContinuationRecoveryContext CreateActivePendingContext(string runId = "human-input-active-continuation-run")
+        => CreateContext(runId, activeParallel: true);
+
+    private static HumanInputContinuationRecoveryContext CreateContext(string runId, bool activeParallel)
     {
         const string WorkspaceId = "workspace-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         var configuration = new GovernedLoopHumanInputNodeConfiguration(
@@ -51,7 +59,9 @@ internal static class HumanInputResponseContinuationRecoveryFixture
             new HumanInputResponsePolicy(HumanInputResponsePolicyKind.FirstValid, null, null),
             "timeout-policy-one@revision-one",
             "failure-policy-one@revision-one");
-        var artifact = HumanInputResponseContinuationGraphFixture.CreateArtifact(configuration);
+        var artifact = activeParallel
+            ? CreateActivePendingArtifact(configuration)
+            : HumanInputResponseContinuationGraphFixture.CreateArtifact(configuration);
         var builtPlan = GovernedLoopSequentialPlanBuilder.Build(artifact);
         Assert.True(builtPlan.Plan is not null, $"{builtPlan.Status}: {builtPlan.FailurePath}");
         var plan = builtPlan.Plan!;
@@ -65,16 +75,29 @@ internal static class HumanInputResponseContinuationRecoveryFixture
             Now,
             context.SourceManifest,
             string.Empty));
+        var publication = GovernedLoopRevisionPublicationPinFactory.Create(1, artifact.RevisionArtifact.Revision, "publish-sequential", Hash('7'));
+        var grantProfile = AuthorityGrantApplicationTestFixture.Profile(ceiling: AuthorityCeilingIntersection.EmptyCeiling());
+        var grant = AuthorityGrantApplicationTestFixture.Grant(
+            binding: new AuthorityGrantBinding(
+                new AuthorityGrantProfilePin(
+                    new AuthorityProfileReference(grantProfile.ProfileId, grantProfile.Revision),
+                    AuthorityGrantApplicationTestFixture.ProfileHash(grantProfile)),
+                artifact.Graph.OwningRole,
+                publication),
+            ceiling: AuthorityCeilingIntersection.EmptyCeiling(),
+            boundary: new AuthorityGrantBoundary(Now.AddHours(-1), Now.AddHours(1), AuthorityGrantCompletionConstraintKind.None),
+            recordedAtUtc: Now.AddHours(-2));
+        var grantReference = new AuthorityGrantReference(grant.GrantId, grant.Revision, grant.ContentHash);
         var admission = GovernedLoopAdmissionRequestHash.Apply(new GovernedLoopAdmissionRequest(
             1,
             "human-input-continuation-admit",
             invocation.ContentHash,
             string.Empty,
-            GovernedLoopRevisionPublicationPinFactory.Create(1, artifact.RevisionArtifact.Revision, "publish-sequential", Hash('7')),
-            GrantReference(),
+            publication,
+            grantReference,
             Actor(),
             "test"));
-        var receipt = GovernedLoopSequentialApplicationTestFixture.AdmissionReceipt(artifact, execution, WorkspaceId, admission.OperationId, admission.RequestHash, artifact.ArtifactHash, artifact.LayoutHash);
+        var receipt = GovernedLoopSequentialApplicationTestFixture.AdmissionReceipt(artifact, execution, WorkspaceId, admission.OperationId, admission.RequestHash, artifact.ArtifactHash, artifact.LayoutHash, grant);
         var binding = GovernedLoopSequentialContractHash.Apply(new GovernedLoopSequentialAdapterBinding(
             1,
             WorkspaceId,
@@ -91,7 +114,7 @@ internal static class HumanInputResponseContinuationRecoveryFixture
         var projected = GovernedLoopSequentialLegacyDefinitionProjector.Project(binding, invocation, plan, artifact);
         Assert.Equal(GovernedLoopSequentialLegacyDefinitionProjectionStatus.Ready, projected.Status);
         var definition = Assert.IsType<CustomLoopDefinition>(projected.Definition);
-        var admittedEvent = AdmittedEvent(binding);
+        var admittedEvent = AdmittedEvent(binding, activeParallel);
         var initialized = Assert.IsType<GovernedLoopFrontierPosture>(GovernedLoopSequentialFrontierMachine.Initialize(
             binding,
             plan,
@@ -163,18 +186,77 @@ internal static class HumanInputResponseContinuationRecoveryFixture
             "human-input-continuation-claim",
             Now.AddMinutes(1)).Frontier);
         var checkpoint = CreateCheckpoint(binding, running, node, waitingFrontier.Payload.Nodes[activation.ActivationOrdinal], waitingFrontier, configuration, Now.AddMinutes(1));
+        var aggregateWaiting = waitingFrontier.Payload.Status == GovernedLoopFrontierStatus.Waiting;
         var waiting = running with
         {
             LifecycleVersion = 3,
-            Status = CustomLoopRunStatus.Waiting,
+            Status = aggregateWaiting ? CustomLoopRunStatus.Waiting : CustomLoopRunStatus.Running,
             UpdatedAtUtc = Now.AddMinutes(1),
-            ExecutionClock = new CustomLoopExecutionClock(60_000, null),
+            ExecutionClock = aggregateWaiting
+                ? new CustomLoopExecutionClock(60_000, null)
+                : new CustomLoopExecutionClock(0, Now.AddMinutes(1)),
             Frontier = waitingFrontier,
             HumanInputWaitingCheckpoints = [checkpoint],
             Events = [.. running.Events, new CustomLoopRunEvent(3, "human-input-continuation-waiting", Now.AddMinutes(1), CustomLoopRunEventKind.LifecycleChanged, null, null, null, "Human Input waiting.", [], null, null, null, null, null, null, null, null, null, null)],
         };
         Assert.True(CustomLoopRunValidator.Validate(waiting).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(waiting).Errors));
-        return new HumanInputContinuationRecoveryContext(seed, running, waiting, checkpoint, binding, plan, artifact);
+        return new HumanInputContinuationRecoveryContext(seed, running, waiting, checkpoint, binding, plan, artifact, grant);
+    }
+
+    private static GovernedLoopGraphRevisionArtifact CreateActivePendingArtifact(GovernedLoopHumanInputNodeConfiguration configuration)
+    {
+        var humanInput = new GovernedLoopNodeDefinition(
+            "human-input",
+            new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.HumanInput, GovernedLoopHumanInputVocabulary.TypeId, GovernedLoopHumanInputVocabulary.DescriptorVersion),
+            [new GovernedLoopPortDefinition(GovernedLoopHumanInputVocabulary.ResponsePortId, GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "confirmation", true)],
+            GovernedLoopAuthorityCeiling.Create([]),
+            new Dictionary<string, string>(),
+            null,
+            null,
+            null,
+            configuration);
+        var readyBranch = new GovernedLoopNodeDefinition(
+            "ready-branch",
+            GovernedLoopSequentialNodeDescriptors.IdentityTransform,
+            [
+                new GovernedLoopPortDefinition(GovernedLoopPureNodeVocabulary.InputPort, GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data, "text", true),
+                new GovernedLoopPortDefinition(GovernedLoopPureNodeVocabulary.OutputPort, GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "text", true),
+            ],
+            GovernedLoopAuthorityCeiling.Create([]),
+            new Dictionary<string, string>());
+        var join = new GovernedLoopNodeDefinition(
+            "join",
+            GovernedLoopSequentialNodeDescriptors.AllJoin,
+            [],
+            GovernedLoopAuthorityCeiling.Create([]),
+            new Dictionary<string, string>());
+        return GovernedLoopSequentialApplicationTestFixture.Artifact(
+            [
+                GovernedLoopSequentialApplicationTestFixture.Trigger("trigger"),
+                humanInput,
+                readyBranch,
+                join,
+                GovernedLoopSequentialApplicationTestFixture.Exit("exit"),
+            ],
+            [
+                new GovernedLoopControlEdgeDefinition("trigger-to-human-input", "trigger", humanInput.Id, GovernedLoopControlCondition.Always),
+                new GovernedLoopControlEdgeDefinition("trigger-to-ready", "trigger", readyBranch.Id, GovernedLoopControlCondition.Always),
+                new GovernedLoopControlEdgeDefinition("human-input-to-join", humanInput.Id, join.Id, GovernedLoopControlCondition.Success),
+                new GovernedLoopControlEdgeDefinition("ready-to-join", readyBranch.Id, join.Id, GovernedLoopControlCondition.Success),
+                new GovernedLoopControlEdgeDefinition("join-to-exit", join.Id, "exit", GovernedLoopControlCondition.Success),
+            ],
+            ["exit"],
+            bindings:
+            [
+                new GovernedLoopBindingDefinition("request-to-ready", GovernedLoopBindingKind.Data, "trigger", "request", readyBranch.Id, GovernedLoopPureNodeVocabulary.InputPort),
+                new GovernedLoopBindingDefinition("request-to-exit", GovernedLoopBindingKind.Data, "trigger", "request", "exit", "result"),
+            ],
+            valueSchemas:
+            [
+                new GovernedLoopValueSchemaDefinition("confirmation", GovernedLoopValueKind.Boolean, false),
+                new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false),
+            ],
+            authorityCeiling: GovernedLoopAuthorityCeiling.Create([GovernedLoopSequentialApplicationTestFixture.ConversationTurnCapabilityId]));
     }
 
     internal static CustomLoopRunRecord AnsweredNotResumed(HumanInputContinuationRecoveryContext context)
@@ -261,7 +343,7 @@ internal static class HumanInputResponseContinuationRecoveryFixture
             string.Empty));
     }
 
-    private static CustomLoopRunEvent AdmittedEvent(GovernedLoopSequentialAdapterBinding binding)
+    private static CustomLoopRunEvent AdmittedEvent(GovernedLoopSequentialAdapterBinding binding, bool activeParallel)
     {
         var runEvent = new CustomLoopRunEvent(1, "human-input-continuation-admitted", Now, CustomLoopRunEventKind.Admitted, null, null, null, "Run admitted.", [], null, null, null, null, null, null, null, null, null, null);
         var evidence = CustomLoopSequentialNodeEvidenceHash.Apply(new CustomLoopSequentialNodeEvidence(
@@ -278,7 +360,7 @@ internal static class HumanInputResponseContinuationRecoveryFixture
             null,
             null,
             GovernedLoopControlCondition.Always,
-            ["trigger-to-human-input"],
+            activeParallel ? ["trigger-to-human-input", "trigger-to-ready"] : ["trigger-to-human-input"],
             [],
             null,
             null,
@@ -292,13 +374,6 @@ internal static class HumanInputResponseContinuationRecoveryFixture
     {
         Assert.True(AuthorityActorId.TryParse("user-owner", out var actor, out _));
         return actor!;
-    }
-
-    private static AuthorityGrantReference GrantReference()
-    {
-        Assert.True(AuthorityGrantId.TryParse("grant-sequential", out var grantId, out _));
-        Assert.True(AuthorityGrantRevision.TryParse("1", out var revision, out _));
-        return new AuthorityGrantReference(grantId!, revision!, "sha256:" + Hash('a'));
     }
 
     private static string Hash(char value) => new(value, 64);

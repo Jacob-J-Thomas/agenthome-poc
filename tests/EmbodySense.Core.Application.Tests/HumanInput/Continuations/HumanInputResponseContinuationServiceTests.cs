@@ -245,11 +245,29 @@ public sealed class HumanInputResponseContinuationServiceTests
         cancellation.Cancel();
 
         Assert.Equal(HumanInputResponseContinuationWakeStatus.Invalid, (await scenario.Service.WakeAsync(null)).Status);
-        Assert.Equal(HumanInputResponseContinuationWakeStatus.Invalid, (await scenario.Service.WakeAsync(new HumanInputResponseContinuationCandidate("invalid id", scenario.Candidate.CheckpointId))).Status);
-        Assert.Equal(HumanInputResponseContinuationWakeStatus.Stale, (await scenario.Service.WakeAsync(new HumanInputResponseContinuationCandidate("missing-run", scenario.Candidate.CheckpointId))).Status);
+        Assert.Equal(HumanInputResponseContinuationWakeStatus.Invalid, (await scenario.Service.WakeAsync(new HumanInputResponseContinuationCandidate("invalid id", scenario.Candidate.CheckpointId, scenario.Candidate.CheckpointHash))).Status);
+        Assert.Equal(HumanInputResponseContinuationWakeStatus.Stale, (await scenario.Service.WakeAsync(new HumanInputResponseContinuationCandidate("missing-run", scenario.Candidate.CheckpointId, scenario.Candidate.CheckpointHash))).Status);
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => scenario.Service.WakeAsync(scenario.Candidate, cancellation.Token));
         Assert.Equal(0, scenario.SleepStore.WakeCount);
         Assert.Equal(0, scenario.Ordered.ResumeHumanInputCount);
+    }
+
+    [Fact]
+    public async Task Different_valid_scanned_checkpoint_hash_is_stale_before_response_or_run_mutation()
+    {
+        var scenario = await HumanInputResponseContinuationScenario.CreateAsync();
+        var mismatched = new HumanInputResponseContinuationCandidate(
+            scenario.Candidate.RunId,
+            scenario.Candidate.CheckpointId,
+            new string('b', 64));
+
+        var result = await scenario.Service.WakeAsync(mismatched);
+
+        Assert.Equal(HumanInputResponseContinuationWakeStatus.Stale, result.Status);
+        Assert.Equal(0, scenario.Runs.UpdateAttemptCount);
+        Assert.Equal(0, scenario.SleepStore.WakeCount);
+        Assert.Equal(0, scenario.Ordered.ResumeHumanInputCount);
+        Assert.Equal(GovernedLoopHumanInputWaitingCheckpointPosture.Pending, Assert.Single(scenario.Runs.Current.HumanInputWaitingCheckpoints).Posture);
     }
 
     [Theory]
@@ -755,7 +773,7 @@ public sealed class HumanInputResponseContinuationServiceTests
     public async Task Wake_returns_stale_without_touching_response_or_sleep_state_when_the_exact_checkpoint_is_absent()
     {
         var scenario = await HumanInputResponseContinuationScenario.CreateAsync();
-        var absent = new HumanInputResponseContinuationCandidate(scenario.Candidate.RunId, "human-input-continuation-absent");
+        var absent = new HumanInputResponseContinuationCandidate(scenario.Candidate.RunId, "human-input-continuation-absent", scenario.Candidate.CheckpointHash);
 
         var result = await scenario.Service.WakeAsync(absent);
 

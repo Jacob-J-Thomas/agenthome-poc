@@ -66,6 +66,7 @@ internal sealed class HumanInputResponseContinuationProcessScenario : IAsyncDisp
             _workspace.RootPath,
             _context.Run.Id,
             _context.Checkpoint.Binding.CheckpointId,
+            _context.Checkpoint.CheckpointHash,
             _now.UtcTicks.ToString(System.Globalization.CultureInfo.InvariantCulture),
             crashPlane,
             crashBoundary,

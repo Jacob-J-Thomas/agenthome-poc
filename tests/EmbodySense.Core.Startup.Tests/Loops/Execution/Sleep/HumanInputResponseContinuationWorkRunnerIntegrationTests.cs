@@ -1,7 +1,11 @@
 using EmbodySense.Core.Application.HumanInput.Continuations;
+using EmbodySense.Core.Application.HumanInput.Catalog;
+using EmbodySense.Core.Application.HumanInput.Catalog.Models;
 using EmbodySense.Core.Application.HumanInput.Lifecycle.Models;
+using EmbodySense.Core.Application.HumanInput.Publication;
 using EmbodySense.Core.Application.HumanInput.Responses;
 using EmbodySense.Core.Application.HumanInput.Responses.Models;
+using EmbodySense.Core.Application.Governance.Authority.Grants.Models;
 using EmbodySense.Core.Application.Loops.EffectAuthorityUsage;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
 using EmbodySense.Core.Application.Loops.Models;
@@ -9,6 +13,7 @@ using EmbodySense.Core.Application.Loops.Posture.Models;
 using EmbodySense.Core.Application.Loops.Sequential;
 using EmbodySense.Core.Application.Loops.Sleep;
 using EmbodySense.Core.Common.Authority;
+using EmbodySense.Core.Common.Authority.Grants.Models;
 using EmbodySense.Core.Common.HumanInput;
 using EmbodySense.Core.Common.HumanInput.Lifecycle.Models;
 using EmbodySense.Core.Common.HumanInput.Models;
@@ -36,6 +41,91 @@ namespace EmbodySense.Core.Startup.Tests.Loops.Execution.Sleep;
 
 public sealed class HumanInputResponseContinuationWorkRunnerIntegrationTests
 {
+    [Fact]
+    public async Task Production_publication_survives_restart_and_exposes_one_checkpoint_request_before_response_continues_once()
+    {
+        using var workspace = new TestWorkspace();
+        var now = HumanInputResponseContinuationRecoveryFixture.Now.AddMinutes(1).AddSeconds(30);
+        var pathsA = new WorkspacePaths(workspace.RootPath);
+        var context = await SeedWaitingRunAsync(pathsA, now);
+        var grantReference = new AuthorityGrantReference(context.Grant.GrantId, context.Grant.Revision, context.Grant.ContentHash);
+        var activeGrant = new AuthorityGrantResolution(
+            AuthorityGrantResolutionStatus.Active,
+            grantReference,
+            context.Grant,
+            context.Grant.RequestedCeiling,
+            new string('d', 64),
+            now);
+        using var runsA = new CustomLoopRunStore(pathsA, new HumanInputResponseContinuationFixedTimeProvider(now));
+        var requestsA = new HumanInputRequestStore(pathsA);
+        var publicationA = new HumanInputRequestPublicationService(
+            runsA,
+            requestsA,
+            new RecordingAuthorityGrantResolver(activeGrant),
+            new HumanInputContinuationAuthorityTransaction(),
+            context.Binding.WorkspaceId,
+            new HumanInputResponseContinuationFixedTimeProvider(now));
+        var workerA = CreateWorker(pathsA, runsA, now, publicationA);
+
+        var awaitingResponse = await workerA.RunOnceAsync(GovernedLoopLocalWorkFamily.HumanInput);
+        var catalogA = (IHumanInputRequestCatalog)requestsA;
+        var listed = await catalogA.ListAsync(new HumanInputRequestCatalogPageRequest(4));
+        var inspected = await catalogA.ReadAsync(context.Checkpoint.Request.RequestId);
+
+        Assert.Equal(GovernedLoopLocalWorkResultStatus.Empty, awaitingResponse?.Status);
+        Assert.Equal(HumanInputRequestCatalogPageStatus.Ready, listed.Status);
+        var visible = Assert.Single(listed.Entries);
+        Assert.Equal(context.Checkpoint.Request.RequestId, visible.Lifecycle.Head.RequestId);
+        Assert.Equal(HumanInputRequestCatalogReadStatus.Ready, inspected.Status);
+        Assert.Equal(context.Checkpoint.Request.RequestHash, inspected.Entry?.Lifecycle.Head.CurrentRequest.RequestHash);
+
+        var pathsB = new WorkspacePaths(workspace.RootPath);
+        using var runsB = new CustomLoopRunStore(pathsB, new HumanInputResponseContinuationFixedTimeProvider(now));
+        var requestsB = new HumanInputRequestStore(pathsB);
+        var unavailableGrant = activeGrant with
+        {
+            Status = AuthorityGrantResolutionStatus.Unavailable,
+            Grant = null,
+            EffectiveCeiling = AuthorityCeilingIntersection.EmptyCeiling(),
+            DependencyEvidenceHash = string.Empty,
+            EvaluatedAtUtc = default,
+        };
+        var publicationB = new HumanInputRequestPublicationService(
+            runsB,
+            requestsB,
+            new RecordingAuthorityGrantResolver(unavailableGrant),
+            new HumanInputContinuationAuthorityTransaction(),
+            context.Binding.WorkspaceId,
+            new HumanInputResponseContinuationFixedTimeProvider(now));
+        var workerB = CreateWorker(pathsB, runsB, now, publicationB);
+        var replayedBeforeResponse = await workerB.RunOnceAsync(GovernedLoopLocalWorkFamily.HumanInput);
+        await SubmitResponseAsync(requestsB, context, now);
+
+        var pathsC = new WorkspacePaths(workspace.RootPath);
+        using var runsC = new CustomLoopRunStore(pathsC, new HumanInputResponseContinuationFixedTimeProvider(now));
+        var requestsC = new HumanInputRequestStore(pathsC);
+        var publicationC = new HumanInputRequestPublicationService(
+            runsC,
+            requestsC,
+            new RecordingAuthorityGrantResolver(unavailableGrant),
+            new HumanInputContinuationAuthorityTransaction(),
+            context.Binding.WorkspaceId,
+            new HumanInputResponseContinuationFixedTimeProvider(now));
+        var workerC = CreateWorker(pathsC, runsC, now, publicationC);
+        var completedResult = await workerC.RunOnceAsync(GovernedLoopLocalWorkFamily.HumanInput);
+        var completed = await runsC.GetAsync(context.Run.Id);
+        var cleanTail = await workerC.RunOnceAsync(GovernedLoopLocalWorkFamily.HumanInput);
+        var lifecycle = await requestsC.ReadAsync(context.Checkpoint.Request.RequestId);
+
+        Assert.Equal(GovernedLoopLocalWorkResultStatus.Empty, replayedBeforeResponse?.Status);
+        Assert.Equal(GovernedLoopLocalWorkResultStatus.Completed, completedResult?.Status);
+        AssertCompletedWithoutPrivateResponse(Assert.IsType<CustomLoopRunRecord>(completed), await ReadAuditEvidenceAsync(pathsB));
+        Assert.Equal(GovernedLoopLocalWorkResultStatus.Empty, cleanTail?.Status);
+        var lifecycleSnapshot = Assert.IsType<HumanInputRequestLifecycleStoreSnapshot>(lifecycle.PrimarySnapshot);
+        Assert.Single(lifecycleSnapshot.RequestVersions);
+        Assert.Single(lifecycleSnapshot.Operations);
+    }
+
     [Fact]
     public async Task Fresh_worker_finishes_the_submitted_waiting_run_and_a_restart_reaches_the_clean_tail_without_duplicate_evidence()
     {
@@ -94,7 +184,8 @@ public sealed class HumanInputResponseContinuationWorkRunnerIntegrationTests
     private static HumanInputResponseContinuationWorkRunner CreateWorker(
         WorkspacePaths paths,
         CustomLoopRunStore runs,
-        DateTimeOffset now)
+        DateTimeOffset now,
+        IHumanInputRequestPublicationService? publication = null)
     {
         var clock = new HumanInputResponseContinuationFixedTimeProvider(now);
         var responses = new HumanInputRequestStore(paths);
@@ -131,12 +222,22 @@ public sealed class HumanInputResponseContinuationWorkRunnerIntegrationTests
             new HumanInputResponseContinuationNoOpWorkRunner(),
             new HumanInputResponseContinuationRecoveryStore(runs),
             new HumanInputPolicyFileStore(paths),
+            publication ?? new HumanInputResponseContinuationRecordingPublicationService(),
             continuation,
             4,
             clock);
     }
 
     private static async Task<HumanInputContinuationRecoveryContext> SeedSubmittedWaitingRunAsync(
+        WorkspacePaths paths,
+        DateTimeOffset now)
+    {
+        var context = await SeedWaitingRunAsync(paths, now);
+        await SeedSubmittedResponseAsync(paths, context, now);
+        return context;
+    }
+
+    private static async Task<HumanInputContinuationRecoveryContext> SeedWaitingRunAsync(
         WorkspacePaths paths,
         DateTimeOffset now)
     {
@@ -158,7 +259,6 @@ public sealed class HumanInputResponseContinuationWorkRunnerIntegrationTests
         Assert.Equal(CustomLoopRunStoreStatus.Created, (await runs.CreateAsync(context.AdmittedRun)).Status);
         Assert.Equal(CustomLoopRunStoreStatus.Updated, (await runs.UpdateAsync(context.RunningRun, context.AdmittedRun.LifecycleVersion)).Status);
         Assert.Equal(CustomLoopRunStoreStatus.Updated, (await runs.UpdateAsync(context.Run, context.RunningRun.LifecycleVersion)).Status);
-        await SeedSubmittedResponseAsync(paths, context, now);
         return context;
     }
 
@@ -172,6 +272,17 @@ public sealed class HumanInputResponseContinuationWorkRunnerIntegrationTests
         var head = HumanInputRequestStoreTestData.Head(request, 1, HumanInputRequestLifecycleStatus.Pending, 0, null, null, "human-input-continuation-create", request.Timing.RequestedAtUtc);
         var evidence = HumanInputRequestStoreTestData.Evidence(HumanInputRequestLifecycleOperationKind.Create, request.RequestId, "human-input-continuation-create", HumanInputRequestStoreTestData.HashA, request.Timing.RequestedAtUtc, null, head, request);
         Assert.Equal(HumanInputRequestLifecycleStoreCommitStatus.Committed, (await store.CommitAsync(new HumanInputRequestLifecycleStoreMutation(0, evidence, request, head, null))).Status);
+        await SubmitResponseAsync(store, context, now);
+    }
+
+    private static async Task SubmitResponseAsync(
+        HumanInputRequestStore store,
+        HumanInputContinuationRecoveryContext context,
+        DateTimeOffset now)
+    {
+        var request = context.Checkpoint.Request;
+        var lifecycle = await store.ReadAsync(request.RequestId);
+        var head = Assert.IsType<HumanInputRequestLifecycleStoreSnapshot>(lifecycle.PrimarySnapshot).Head;
         Assert.True(AuthorityActorId.TryParse("user-one", out var actor, out _));
         var command = HumanInputResponseLifecycleCommandHash.Apply(new HumanInputResponseLifecycleCommand(
             HumanInputResponseLifecycleCommand.CurrentSchemaVersion,

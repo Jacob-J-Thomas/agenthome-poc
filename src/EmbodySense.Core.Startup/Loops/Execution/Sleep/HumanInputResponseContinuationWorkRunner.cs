@@ -2,6 +2,8 @@ using EmbodySense.Core.Application.HumanInput.Continuations;
 using EmbodySense.Core.Application.HumanInput.Continuations.Models;
 using EmbodySense.Core.Application.HumanInput.Policies;
 using EmbodySense.Core.Application.HumanInput.Policies.Models;
+using EmbodySense.Core.Application.HumanInput.Publication;
+using EmbodySense.Core.Application.HumanInput.Publication.Models;
 using EmbodySense.Core.Common.HumanInput;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.HumanInput.Policies;
@@ -25,6 +27,7 @@ public sealed class HumanInputResponseContinuationWorkRunner : IGovernedLoopLoca
     private readonly IGovernedLoopLocalWorkRunner _inner;
     private readonly int _maximumScanCount;
     private readonly IHumanInputPolicySource _policySource;
+    private readonly IHumanInputRequestPublicationService _publication;
     private readonly HumanInputContinuationReadinessSignal _readiness;
     private readonly IHumanInputResponseContinuationCandidateSource _source;
     private readonly TimeProvider _timeProvider;
@@ -35,6 +38,7 @@ public sealed class HumanInputResponseContinuationWorkRunner : IGovernedLoopLoca
     /// <param name="inner">The existing canonical local work runner for Schedule, Trigger, and Wake families.</param>
     /// <param name="source">The canonical opaque-cursor Human Input continuation discovery source.</param>
     /// <param name="policySource">The canonical exact-revision Human Input policy source health-probed before every Human Input one-shot.</param>
+    /// <param name="publication">The canonical checkpoint-to-request-ledger publication reconciler that runs before every continuation wake.</param>
     /// <param name="continuation">The canonical Human Input response continuation and generic wake bridge.</param>
     /// <param name="maximumScanCount">The bounded number of checkpoint ordinals examined by one source read.</param>
     /// <param name="timeProvider">The trusted UTC clock used for source observations.</param>
@@ -43,6 +47,7 @@ public sealed class HumanInputResponseContinuationWorkRunner : IGovernedLoopLoca
         IGovernedLoopLocalWorkRunner inner,
         IHumanInputResponseContinuationCandidateSource source,
         IHumanInputPolicySource policySource,
+        IHumanInputRequestPublicationService publication,
         IHumanInputResponseContinuationWakePort continuation,
         int maximumScanCount,
         TimeProvider? timeProvider = null,
@@ -51,6 +56,7 @@ public sealed class HumanInputResponseContinuationWorkRunner : IGovernedLoopLoca
         _inner = inner ?? throw new ArgumentNullException(nameof(inner));
         _source = source ?? throw new ArgumentNullException(nameof(source));
         _policySource = policySource ?? throw new ArgumentNullException(nameof(policySource));
+        _publication = publication ?? throw new ArgumentNullException(nameof(publication));
         _continuation = continuation ?? throw new ArgumentNullException(nameof(continuation));
         _maximumScanCount = maximumScanCount is < 1 or > CustomLoopLimits.MaxRecentRunsPageSize
             ? throw new ArgumentOutOfRangeException(nameof(maximumScanCount))
@@ -82,6 +88,13 @@ public sealed class HumanInputResponseContinuationWorkRunner : IGovernedLoopLoca
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            var publicationHealth = await ProbePublicationAsync(cancellationToken).ConfigureAwait(false);
+            if (publicationHealth is not null)
+            {
+                _readiness.Observe(publicationHealth);
+                return publicationHealth;
+            }
+
             var policyHealth = await ProbePolicySourceAsync(cancellationToken).ConfigureAwait(false);
             if (policyHealth is not null)
             {
@@ -105,6 +118,35 @@ public sealed class HumanInputResponseContinuationWorkRunner : IGovernedLoopLoca
         }
     }
 
+    private async Task<GovernedLoopLocalWorkResult?> ProbePublicationAsync(CancellationToken cancellationToken)
+    {
+        HumanInputRequestPublicationHealthResult? result;
+        try
+        {
+            result = await _publication.ProbeAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return Result(GovernedLoopLocalWorkResultStatus.Unavailable, "human-input-request-publication-health-unavailable");
+        }
+
+        if (result is null || !Enum.IsDefined(result.Status) || result.Status == HumanInputRequestPublicationHealthStatus.Unknown)
+        {
+            return Result(GovernedLoopLocalWorkResultStatus.Corrupt, "human-input-request-publication-health-corrupt");
+        }
+
+        return result.Status switch
+        {
+            HumanInputRequestPublicationHealthStatus.Ready => null,
+            HumanInputRequestPublicationHealthStatus.Unavailable => Result(GovernedLoopLocalWorkResultStatus.Unavailable, "human-input-request-publication-health-unavailable"),
+            _ => Result(GovernedLoopLocalWorkResultStatus.Corrupt, "human-input-request-publication-health-corrupt"),
+        };
+    }
+
     private async Task<GovernedLoopLocalWorkResult?> RunHumanInputUnderGateAsync(
         DateTimeOffset observedAtUtc,
         CancellationToken cancellationToken)
@@ -124,6 +166,41 @@ public sealed class HumanInputResponseContinuationWorkRunner : IGovernedLoopLoca
         }
 
         var candidate = _page.Peek();
+        HumanInputRequestPublicationResult? publication;
+        try
+        {
+            publication = await _publication.PublishAsync(
+                new HumanInputRequestPublicationRequest(candidate.RunId, candidate.CheckpointId, candidate.CheckpointHash),
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return Result(GovernedLoopLocalWorkResultStatus.Unavailable, "human-input-request-publication-unavailable");
+        }
+
+        if (publication is null || !Enum.IsDefined(publication.Status))
+        {
+            return Result(GovernedLoopLocalWorkResultStatus.Corrupt, "human-input-request-publication-corrupt");
+        }
+
+        switch (publication.Status)
+        {
+            case HumanInputRequestPublicationStatus.Published:
+            case HumanInputRequestPublicationStatus.Replayed:
+                break;
+            case HumanInputRequestPublicationStatus.Stale:
+                return EmptyPublication();
+            case HumanInputRequestPublicationStatus.Unavailable:
+                _page.Enqueue(_page.Dequeue());
+                return Result(GovernedLoopLocalWorkResultStatus.Unavailable, "human-input-request-publication-unavailable");
+            default:
+                return Result(GovernedLoopLocalWorkResultStatus.Corrupt, "human-input-request-publication-corrupt");
+        }
+
         HumanInputResponseContinuationWakeResult? wake;
         try
         {
@@ -287,7 +364,8 @@ public sealed class HumanInputResponseContinuationWorkRunner : IGovernedLoopLoca
     private static bool IsValidCandidate(HumanInputResponseContinuationCandidate? candidate)
         => candidate is not null
             && CustomLoopArtifactIdentifier.IsValid(candidate.RunId)
-            && HumanInputIdentifier.IsValid(candidate.CheckpointId);
+            && HumanInputIdentifier.IsValid(candidate.CheckpointId)
+            && IsSha256(candidate.CheckpointHash);
 
     private static GovernedLoopLocalWorkResult Result(GovernedLoopLocalWorkResultStatus status, string reason)
         => new(status, reason);
@@ -303,6 +381,16 @@ public sealed class HumanInputResponseContinuationWorkRunner : IGovernedLoopLoca
         _ = _page.Dequeue();
         return Result(GovernedLoopLocalWorkResultStatus.Empty, WakeReason(status));
     }
+
+    private GovernedLoopLocalWorkResult EmptyPublication()
+    {
+        _ = _page.Dequeue();
+        return Result(GovernedLoopLocalWorkResultStatus.Empty, "human-input-request-publication-stale");
+    }
+
+    private static bool IsSha256(string? value)
+        => value is { Length: 64 }
+            && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
 
     private static string WakeReason(HumanInputResponseContinuationWakeStatus status)
         => status switch

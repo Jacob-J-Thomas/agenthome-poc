@@ -118,7 +118,7 @@ public sealed class HumanInputResponseContinuationProcessTests
         Assert.Equal(GovernedLoopFrontierStatus.Active, routed.Frontier?.Payload.Status);
         var checkpoint = Assert.Single(routed.HumanInputWaitingCheckpoints);
         Assert.Equal(expectedPosture, checkpoint.Posture);
-        Assert.Equal([new HumanInputResponseContinuationCandidate(routed.Id, checkpoint.Binding.CheckpointId)], page.Candidates);
+        Assert.Equal([new HumanInputResponseContinuationCandidate(routed.Id, checkpoint.Binding.CheckpointId, checkpoint.CheckpointHash)], page.Candidates);
         await AssertNoGenericWakePublicationAsync(scenario);
 
         var recovered = await scenario.RunAsync("routed-no-response-recovery");

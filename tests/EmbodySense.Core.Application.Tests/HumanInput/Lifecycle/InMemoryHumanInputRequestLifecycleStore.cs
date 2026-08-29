@@ -17,6 +17,8 @@ internal sealed class InMemoryHumanInputRequestLifecycleStore : IHumanInputReque
 
     internal List<(HumanInputRequestLifecycleStoreMutation Mutation, CancellationToken CancellationToken)> Commits { get; } = [];
 
+    internal Func<string, CancellationToken, Task<HumanInputRequestLifecycleStoreReadResult>>? ReadOverride { get; set; }
+
     internal Func<string, string, string, string?, CancellationToken, Task<HumanInputRequestLifecycleStoreReadResult>>? ReadForMutationOverride { get; set; }
 
     internal Func<HumanInputRequestLifecycleStoreMutation, CancellationToken, Task<HumanInputRequestLifecycleStoreCommitResult>>? CommitOverride { get; set; }
@@ -26,6 +28,11 @@ internal sealed class InMemoryHumanInputRequestLifecycleStore : IHumanInputReque
         CancellationToken cancellationToken = default)
     {
         Reads.Add((requestId, cancellationToken));
+        if (ReadOverride is not null)
+        {
+            return ReadOverride(requestId, cancellationToken);
+        }
+
         _snapshots.TryGetValue(requestId, out var snapshot);
         return Task.FromResult(new HumanInputRequestLifecycleStoreReadResult(
             snapshot is null ? HumanInputRequestLifecycleStoreReadStatus.NotFound : HumanInputRequestLifecycleStoreReadStatus.Ready,

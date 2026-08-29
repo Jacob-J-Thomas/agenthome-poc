@@ -440,7 +440,8 @@ internal static class GovernedLoopSequentialApplicationTestFixture
         string operationId,
         string requestHash,
         string graphArtifactHash,
-        string graphLayoutHash)
+        string graphLayoutHash,
+        AuthorityGrant? grant = null)
     {
         Assert.True(AuthorityGrantId.TryParse("grant-sequential", out var grantId, out _));
         Assert.True(AuthorityGrantRevision.TryParse("1", out var grantRevision, out _));
@@ -449,22 +450,25 @@ internal static class GovernedLoopSequentialApplicationTestFixture
         Assert.True(AuthorityProfileHash.TryParse("sha256:" + Hash('b'), out var profileHash, out _));
         Assert.True(AuthorityActorId.TryParse("user-owner", out var actorId, out _));
         var publication = GovernedLoopRevisionPublicationPinFactory.Create(1, execution.Revision, "publish-sequential", Hash('7'));
+        var grantReference = grant is null
+            ? new AuthorityGrantReference(grantId!, grantRevision!, "sha256:" + Hash('a'))
+            : new AuthorityGrantReference(grant.GrantId, grant.Revision, grant.ContentHash);
         var intent = new GovernedLoopAdmissionIntent(
             GovernedLoopAdmissionIntent.CurrentSchemaVersion,
             workspaceId,
             operationId,
             requestHash,
             publication,
-            new AuthorityGrantReference(grantId!, grantRevision!, "sha256:" + Hash('a')),
+            grantReference,
             artifact.Graph.OwningRole,
             actorId!,
             "test",
             graphArtifactHash,
             graphLayoutHash);
         var capabilityAdmission = CapabilityAdmission(artifact, workspaceId);
-        var effectiveAuthority = AuthorityCeilingIntersection.EmptyCeiling();
-        var grantProfile = new AuthorityGrantProfilePin(new AuthorityProfileReference(profileId!, profileRevision!), profileHash!);
-        var grantBoundary = new AuthorityGrantBoundary(Now.AddHours(-1), Now.AddHours(1), AuthorityGrantCompletionConstraintKind.None);
+        var effectiveAuthority = grant?.RequestedCeiling ?? AuthorityCeilingIntersection.EmptyCeiling();
+        var grantProfile = grant?.Binding.Profile ?? new AuthorityGrantProfilePin(new AuthorityProfileReference(profileId!, profileRevision!), profileHash!);
+        var grantBoundary = grant?.Boundary ?? new AuthorityGrantBoundary(Now.AddHours(-1), Now.AddHours(1), AuthorityGrantCompletionConstraintKind.None);
         var inferenceNodes = artifact.Graph.Nodes.Where(node => node.Descriptor.Kind == GovernedLoopNodeKind.Inference).Select(node => node.Id).ToArray();
         var evidence = inferenceNodes.Length == 0
             ? GovernedModelProfileApplicationTestFixture.EmptyRoutingEvidence(intent, execution, grantProfile, grantBoundary, Hash('9'), effectiveAuthority, capabilityAdmission, Now)

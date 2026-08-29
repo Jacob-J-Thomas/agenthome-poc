@@ -4,6 +4,8 @@ using EmbodySense.Core.Application.HumanInput.Continuations.Models;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Execution;
+using EmbodySense.Core.Common.Loops.Execution.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Persistence.HumanInput.Continuations;
 
@@ -69,6 +71,25 @@ public sealed class HumanInputResponseContinuationRecoveryStoreTests
         Assert.Equal(HumanInputResponseContinuationRecoveryPageStatus.Current, page.Status);
         Assert.Equal([(answered.Id, answered.HumanInputWaitingCheckpoints[0].Binding.CheckpointId)], page.Candidates.Select(candidate => (candidate.RunId, candidate.CheckpointId)));
         Assert.True(page.HasMoreScanWork);
+    }
+
+    [Fact]
+    public async Task Active_parallel_frontier_recovers_its_pending_human_input_publication_candidate()
+    {
+        var context = HumanInputResponseContinuationRecoveryFixture.CreateActivePendingContext();
+        var source = new ScriptedRunStore(context.Run);
+
+        var page = await new HumanInputResponseContinuationRecoveryStore(source).ListCandidatesAsync(
+            1,
+            null,
+            HumanInputResponseContinuationRecoveryFixture.Now.AddMinutes(1));
+
+        Assert.Equal(CustomLoopRunStatus.Running, context.Run.Status);
+        Assert.Equal(GovernedLoopFrontierStatus.Active, context.Run.Frontier?.Payload.Status);
+        var candidate = Assert.Single(page.Candidates);
+        Assert.Equal(context.Run.Id, candidate.RunId);
+        Assert.Equal(context.Checkpoint.Binding.CheckpointId, candidate.CheckpointId);
+        Assert.Equal(context.Checkpoint.CheckpointHash, candidate.CheckpointHash);
     }
 
     [Fact]

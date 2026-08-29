@@ -24,7 +24,7 @@ internal static class HumanInputResponseContinuationHost
 
     internal static async Task<int> RunAsync(string[] arguments)
     {
-        if (arguments is not [var workspaceRoot, var runId, var checkpointId, var utcTicksText, var crashPlane, var crashBoundaryText, var crashOrdinalText, var readyPath, var releasePath, var resultPath]
+        if (arguments is not [var workspaceRoot, var runId, var checkpointId, var checkpointHash, var utcTicksText, var crashPlane, var crashBoundaryText, var crashOrdinalText, var readyPath, var releasePath, var resultPath]
             || !long.TryParse(utcTicksText, out var utcTicks)
             || !int.TryParse(crashOrdinalText, out var crashOrdinal)
             || crashOrdinal < 1)
@@ -71,7 +71,7 @@ internal static class HumanInputResponseContinuationHost
         continuation.BindSleep(sleep);
 
         SignalReadyAndWaitForRelease(readyPath, releasePath);
-        var result = await continuation.WakeAsync(new HumanInputResponseContinuationCandidate(runId, checkpointId)).ConfigureAwait(false);
+        var result = await continuation.WakeAsync(new HumanInputResponseContinuationCandidate(runId, checkpointId, checkpointHash)).ConfigureAwait(false);
         await File.WriteAllTextAsync(resultPath, result.Status.ToString()).ConfigureAwait(false);
         await File.WriteAllTextAsync(
             resultPath + ".diagnostic",
