@@ -3088,7 +3088,9 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         }
         catch
         {
-            return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.Waiting, durable, "The durable Human Input checkpoint awaits request-publication reconciliation."));
+            return durable.Status == CustomLoopRunStatus.Running && durable.Frontier?.Payload.Status == GovernedLoopFrontierStatus.Active
+                ? new RunAdvance(durable, null)
+                : new RunAdvance(null, Result(CustomLoopOrderedRunStatus.Waiting, durable, "The durable Human Input checkpoint awaits request-publication reconciliation."));
         }
 
         if (publication is null || !Enum.IsDefined(publication.Status))
@@ -3096,9 +3098,16 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.InvalidState, durable, "The durable Human Input checkpoint publication result was invalid and requires reconciliation."));
         }
 
-        if (publication.Status is HumanInputRequestPublicationStatus.Unavailable or HumanInputRequestPublicationStatus.Stale)
+        if (publication.Status == HumanInputRequestPublicationStatus.Unavailable)
         {
-            return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.Waiting, durable, "The durable Human Input checkpoint awaits request-publication reconciliation."));
+            return durable.Status == CustomLoopRunStatus.Running && durable.Frontier?.Payload.Status == GovernedLoopFrontierStatus.Active
+                ? new RunAdvance(durable, null)
+                : new RunAdvance(null, Result(CustomLoopOrderedRunStatus.Waiting, durable, "The durable Human Input checkpoint awaits request-publication reconciliation."));
+        }
+
+        if (publication.Status == HumanInputRequestPublicationStatus.Stale)
+        {
+            return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.InvalidState, durable, "The durable Human Input checkpoint publication evidence was stale and requires reconciliation."));
         }
 
         if (publication.Status is not (HumanInputRequestPublicationStatus.Published or HumanInputRequestPublicationStatus.Replayed))

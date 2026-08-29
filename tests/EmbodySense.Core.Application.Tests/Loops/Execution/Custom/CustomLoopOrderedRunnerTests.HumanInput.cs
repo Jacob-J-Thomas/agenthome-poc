@@ -257,6 +257,29 @@ public sealed partial class CustomLoopOrderedRunnerTests
     }
 
     [Fact]
+    public async Task Parallel_active_human_input_checkpoint_keeps_the_independent_ready_branch_running_when_publication_is_unavailable()
+    {
+        var context = await ParallelHumanInputPublicationContextAsync();
+        var runs = new FakeRunStore(context.Run);
+        var publication = new RecordingHumanInputRequestPublicationService(HumanInputRequestPublicationStatus.Unavailable);
+
+        var result = await Runtime(
+            context,
+            runs,
+            new QueueExecutor(Result("parallel Human Input source")),
+            new RecordingPublisher(),
+            HumanInputPolicyResolver(context),
+            humanInputRequestPublicationService: publication).RunAsync(Request(context));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Waiting, result.Status);
+        Assert.Equal(CustomLoopRunStatus.Waiting, runs.Current.Status);
+        var checkpoints = runs.Current.HumanInputWaitingCheckpoints.OrderBy(checkpoint => checkpoint.Binding.FrontierVersion).ToArray();
+        Assert.Equal(2, checkpoints.Length);
+        Assert.Equal(checkpoints.Select(checkpoint => checkpoint.Binding.CheckpointId), publication.Requests.Select(request => request.CheckpointId));
+        Assert.Equal(2, publication.Requests.Count);
+    }
+
+    [Fact]
     public async Task Ambiguous_post_commit_request_publication_recovers_exactly_once_before_the_runner_returns_waiting()
     {
         var context = await HumanInputPublicationContextAsync();

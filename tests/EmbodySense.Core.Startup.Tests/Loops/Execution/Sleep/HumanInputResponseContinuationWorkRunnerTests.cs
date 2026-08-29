@@ -250,6 +250,32 @@ public sealed class HumanInputResponseContinuationWorkRunnerTests
     }
 
     [Fact]
+    public async Task Unavailable_request_publication_rotates_the_candidate_so_a_later_candidate_can_progress()
+    {
+        var first = Candidate("publication-unavailable");
+        var second = Candidate("publication-ready");
+        var source = new HumanInputResponseContinuationRecordingCandidateSource(Page([first, second], "cursor-one"));
+        var publication = new HumanInputResponseContinuationRecordingPublicationService(
+            HumanInputRequestPublicationStatus.Unavailable,
+            HumanInputRequestPublicationStatus.Published,
+            HumanInputRequestPublicationStatus.Published);
+        var continuation = new HumanInputResponseContinuationRecordingWakePort(
+            HumanInputResponseContinuationWakeStatus.Submitted,
+            HumanInputResponseContinuationWakeStatus.Submitted);
+        var runner = Runner(source, continuation, publication: publication);
+
+        var unavailable = await runner.RunOnceAsync(GovernedLoopLocalWorkFamily.HumanInput);
+        var secondCompleted = await runner.RunOnceAsync(GovernedLoopLocalWorkFamily.HumanInput);
+        var firstRetried = await runner.RunOnceAsync(GovernedLoopLocalWorkFamily.HumanInput);
+
+        Assert.Equal(GovernedLoopLocalWorkResultStatus.Unavailable, unavailable?.Status);
+        Assert.Equal(GovernedLoopLocalWorkResultStatus.Completed, secondCompleted?.Status);
+        Assert.Equal(GovernedLoopLocalWorkResultStatus.Completed, firstRetried?.Status);
+        Assert.Equal([first, second, first], publication.Requests.Select(request => new HumanInputResponseContinuationCandidate(request.RunId, request.CheckpointId, request.CheckpointHash)));
+        Assert.Equal([second, first], continuation.Candidates);
+    }
+
+    [Fact]
     public async Task Stale_request_publication_dequeues_the_candidate_without_waking()
     {
         var candidate = Candidate("publication-stale");

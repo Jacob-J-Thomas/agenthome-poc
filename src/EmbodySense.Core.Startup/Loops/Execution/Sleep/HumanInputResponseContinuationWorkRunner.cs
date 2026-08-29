@@ -195,6 +195,7 @@ public sealed class HumanInputResponseContinuationWorkRunner : IGovernedLoopLoca
             case HumanInputRequestPublicationStatus.Stale:
                 return EmptyPublication();
             case HumanInputRequestPublicationStatus.Unavailable:
+                _page.Enqueue(_page.Dequeue());
                 return Result(GovernedLoopLocalWorkResultStatus.Unavailable, "human-input-request-publication-unavailable");
             default:
                 return Result(GovernedLoopLocalWorkResultStatus.Corrupt, "human-input-request-publication-corrupt");
