@@ -4,6 +4,8 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using EmbodySense.Core.Application.Capabilities;
+using EmbodySense.Core.Application.HumanInput.Catalog;
+using EmbodySense.Core.Application.HumanInput.Catalog.Models;
 using EmbodySense.Core.Application.HumanInput.Lifecycle;
 using EmbodySense.Core.Application.HumanInput.Lifecycle.Models;
 using EmbodySense.Core.Application.HumanInput.Responses;
@@ -30,7 +32,7 @@ namespace EmbodySense.Core.Persistence.HumanInput.Requests;
 /// to the physical workspace. A pending direct successor can be finalized only by an exact operation retry. Recovered
 /// last-proved state is read-only and never becomes a mutation base.
 /// </remarks>
-public sealed class HumanInputRequestStore : IHumanInputRequestLifecycleStore, IHumanInputResponseLifecycleStore
+public sealed class HumanInputRequestStore : IHumanInputRequestCatalog, IHumanInputRequestLifecycleStore, IHumanInputResponseLifecycleStore
 {
     private static readonly JsonSerializerOptions _jsonOptions = CreateJsonOptions(writeIndented: true);
     private static readonly JsonSerializerOptions _hashOptions = CreateJsonOptions(writeIndented: false);
@@ -113,6 +115,71 @@ public sealed class HumanInputRequestStore : IHumanInputRequestLifecycleStore, I
         catch (Exception exception) when (IsAvailabilityFailure(exception) || exception is OperationCanceledException)
         {
             return completed ?? ReadResult(HumanInputRequestLifecycleStoreReadStatus.Unavailable);
+        }
+    }
+
+    async Task<HumanInputRequestCatalogPage> IHumanInputRequestCatalog.ListAsync(
+        HumanInputRequestCatalogPageRequest? request,
+        CancellationToken cancellationToken)
+    {
+        if (request is null
+            || request.MaximumCount is < 1 or > HumanInputRequestCatalogLimits.MaxPageSize)
+        {
+            return CatalogPage(HumanInputRequestCatalogPageStatus.Invalid);
+        }
+
+        var callbackEntered = false;
+        HumanInputRequestCatalogPage? completed = null;
+        try
+        {
+            return await _authorityTransaction.ExecuteAsync(
+                async token =>
+                {
+                    callbackEntered = true;
+                    completed = await ListCatalogCoreAsync(request, token).ConfigureAwait(false);
+                    return completed;
+                },
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (completed is null && cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception) when (IsAvailabilityFailure(exception) || exception is OperationCanceledException)
+        {
+            return completed ?? CatalogPage(callbackEntered
+                ? HumanInputRequestCatalogPageStatus.Ambiguous
+                : HumanInputRequestCatalogPageStatus.Unavailable);
+        }
+    }
+
+    async Task<HumanInputRequestCatalogReadResult> IHumanInputRequestCatalog.ReadAsync(
+        string requestId,
+        CancellationToken cancellationToken)
+    {
+        if (!HumanInputIdentifier.IsValid(requestId))
+        {
+            return CatalogRead(HumanInputRequestCatalogReadStatus.Invalid);
+        }
+
+        HumanInputRequestCatalogReadResult? completed = null;
+        try
+        {
+            return await _authorityTransaction.ExecuteAsync(
+                async token =>
+                {
+                    completed = await ReadCatalogCoreAsync(requestId, token).ConfigureAwait(false);
+                    return completed;
+                },
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (completed is null && cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception) when (IsAvailabilityFailure(exception) || exception is OperationCanceledException)
+        {
+            return completed ?? CatalogRead(HumanInputRequestCatalogReadStatus.Unavailable);
         }
     }
 
@@ -563,6 +630,106 @@ public sealed class HumanInputRequestStore : IHumanInputRequestLifecycleStore, I
             snapshot,
             null,
             null);
+    }
+
+    private async Task<HumanInputRequestCatalogPage> ListCatalogCoreAsync(
+        HumanInputRequestCatalogPageRequest request,
+        CancellationToken cancellationToken)
+    {
+        await using var session = await AcquireAsync(cancellationToken).ConfigureAwait(false);
+        var workspaceIdentity = WorkspaceIdentity(session);
+        var trust = await _trustProvider.ReadAsync(workspaceIdentity, cancellationToken).ConfigureAwait(false);
+        var loaded = await LoadAsync(session, workspaceIdentity, trust, cancellationToken).ConfigureAwait(false);
+        if (loaded.Disposition is HumanInputRequestLoadDisposition.Pending or HumanInputRequestLoadDisposition.Recovered)
+        {
+            return CatalogPage(HumanInputRequestCatalogPageStatus.Ambiguous);
+        }
+
+        if (loaded.Document is null)
+        {
+            return CatalogPage(HumanInputRequestCatalogPageStatus.Unavailable);
+        }
+
+        var document = loaded.Document;
+        string? startAfterRequestId = null;
+        if (request.Cursor is not null)
+        {
+            if (!HumanInputRequestCatalogCursor.TryParse(request.Cursor, out var cursor))
+            {
+                return CatalogPage(HumanInputRequestCatalogPageStatus.Invalid);
+            }
+
+            if (cursor.Generation != document.Generation
+                || !string.Equals(cursor.ContentDigest, document.ContentDigest, StringComparison.Ordinal))
+            {
+                return CatalogPage(HumanInputRequestCatalogPageStatus.Stale, document.Generation);
+            }
+
+            if (!document.Heads.Any(head => string.Equals(head.RequestId, cursor.LastRequestId, StringComparison.Ordinal)))
+            {
+                return CatalogPage(HumanInputRequestCatalogPageStatus.Ambiguous, document.Generation);
+            }
+
+            startAfterRequestId = cursor.LastRequestId;
+        }
+
+        var heads = document.Heads
+            .OrderBy(head => head.RequestId, StringComparer.Ordinal)
+            .ToArray();
+        var candidates = startAfterRequestId is null
+            ? heads
+            : heads.Where(head => string.CompareOrdinal(head.RequestId, startAfterRequestId) > 0).ToArray();
+        var pageHeads = candidates.Take(request.MaximumCount).ToArray();
+        var entries = new List<HumanInputRequestCatalogEntry>(pageHeads.Length);
+        foreach (var head in pageHeads)
+        {
+            var entry = CatalogEntry(document, head);
+            if (entry is null)
+            {
+                return CatalogPage(HumanInputRequestCatalogPageStatus.Ambiguous, document.Generation);
+            }
+
+            entries.Add(entry);
+        }
+
+        var hasMore = candidates.Length > pageHeads.Length;
+        var nextCursor = hasMore
+            ? HumanInputRequestCatalogCursor.Create(document.Generation, document.ContentDigest, pageHeads[^1].RequestId)
+            : null;
+        return new HumanInputRequestCatalogPage(
+            HumanInputRequestCatalogPageStatus.Ready,
+            document.Generation,
+            Array.AsReadOnly(entries.ToArray()),
+            nextCursor);
+    }
+
+    private async Task<HumanInputRequestCatalogReadResult> ReadCatalogCoreAsync(string requestId, CancellationToken cancellationToken)
+    {
+        await using var session = await AcquireAsync(cancellationToken).ConfigureAwait(false);
+        var workspaceIdentity = WorkspaceIdentity(session);
+        var trust = await _trustProvider.ReadAsync(workspaceIdentity, cancellationToken).ConfigureAwait(false);
+        var loaded = await LoadAsync(session, workspaceIdentity, trust, cancellationToken).ConfigureAwait(false);
+        if (loaded.Disposition is HumanInputRequestLoadDisposition.Pending or HumanInputRequestLoadDisposition.Recovered)
+        {
+            return CatalogRead(HumanInputRequestCatalogReadStatus.Ambiguous);
+        }
+
+        if (loaded.Document is null)
+        {
+            return CatalogRead(HumanInputRequestCatalogReadStatus.Unavailable);
+        }
+
+        var head = loaded.Document.Heads.SingleOrDefault(value => string.Equals(value.RequestId, requestId, StringComparison.Ordinal));
+        if (head is null)
+        {
+            return new HumanInputRequestCatalogReadResult(HumanInputRequestCatalogReadStatus.NotFound, loaded.Document.Generation, null);
+        }
+
+        var entry = CatalogEntry(loaded.Document, head);
+        return new HumanInputRequestCatalogReadResult(
+            entry is null ? HumanInputRequestCatalogReadStatus.Ambiguous : HumanInputRequestCatalogReadStatus.Ready,
+            loaded.Document.Generation,
+            entry);
     }
 
     private async Task<HumanInputRequestLifecycleStoreReadResult> ReadForMutationCoreAsync(
@@ -1493,6 +1660,15 @@ public sealed class HumanInputRequestStore : IHumanInputRequestLifecycleStore, I
             answerOperation);
     }
 
+    private static HumanInputRequestCatalogEntry? CatalogEntry(
+        HumanInputRequestStoreDocument document,
+        HumanInputRequestLifecycleHead head)
+    {
+        var lifecycle = Snapshot(document, head.RequestId);
+        var responses = ResponseSnapshot(document, head.CurrentRequest);
+        return lifecycle is null || responses is null ? null : new HumanInputRequestCatalogEntry(lifecycle, responses);
+    }
+
     private static HumanInputRequestLifecycleStoreSnapshot? RelatedSnapshot(
         HumanInputRequestStoreDocument document,
         HumanInputRequestLifecycleOperationEvidence operation)
@@ -1830,6 +2006,16 @@ public sealed class HumanInputRequestStore : IHumanInputRequestLifecycleStore, I
 
     private static HumanInputRequestLifecycleStoreReadResult ReadResult(HumanInputRequestLifecycleStoreReadStatus status)
         => new(status, 0, null, null, null);
+
+    private static HumanInputRequestCatalogPage CatalogPage(
+        HumanInputRequestCatalogPageStatus status,
+        long storeGeneration = 0)
+        => new(status, storeGeneration, [], null);
+
+    private static HumanInputRequestCatalogReadResult CatalogRead(
+        HumanInputRequestCatalogReadStatus status,
+        long storeGeneration = 0)
+        => new(status, storeGeneration, null);
 
     private static HumanInputRequestLifecycleStoreCommitResult CommitResult(HumanInputRequestLifecycleStoreCommitStatus status)
         => new(status, 0, null, null, null);

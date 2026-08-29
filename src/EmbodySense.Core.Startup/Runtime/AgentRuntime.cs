@@ -28,6 +28,7 @@ using EmbodySense.Core.Startup.Triggers;
 using EmbodySense.Core.Startup.Loops.Posture;
 using EmbodySense.Core.Startup.Loops.GraphAuthoring;
 using EmbodySense.Core.Startup.Inference.Profiles;
+using EmbodySense.Core.Startup.HumanInput;
 using EmbodySense.Core.Startup.Loops.InvocationPreparation;
 using EmbodySense.Core.Startup.Loops.InvocationPreparation.Models;
 
@@ -61,6 +62,7 @@ public sealed class AgentRuntime : IAsyncDisposable
     private readonly GovernedLoopGraphAuthoringFacade _governedLoopGraphAuthoring;
     private readonly GovernedLoopInvocationPreparationFacade _governedLoopInvocationPreparation;
     private readonly IModelProfileCatalogFacade _modelProfiles;
+    private readonly HumanInputRuntimeFacade _humanInput;
     private readonly DefaultConversationTurnReviewService _defaultConversationReviews;
     private readonly ITriggerWorkerCurrentEvidenceAuthorizer _triggerWorkerCurrentEvidenceAuthorizer;
     private readonly GovernedLoopBackgroundRuntimeHost _governedBackgroundRuntimeHost;
@@ -86,6 +88,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         GovernedLoopGraphAuthoringFacade governedLoopGraphAuthoring,
         GovernedLoopInvocationPreparationFacade governedLoopInvocationPreparation,
         IModelProfileCatalogFacade modelProfiles,
+        HumanInputRuntimeFacade humanInput,
         DefaultConversationTurnReviewService defaultConversationReviews,
         CodexRuntimeStatus codexRuntimeStatus,
         ITriggerWorkerCurrentEvidenceAuthorizer triggerWorkerCurrentEvidenceAuthorizer,
@@ -107,6 +110,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(governedLoopGraphAuthoring);
         ArgumentNullException.ThrowIfNull(governedLoopInvocationPreparation);
         ArgumentNullException.ThrowIfNull(modelProfiles);
+        ArgumentNullException.ThrowIfNull(humanInput);
         ArgumentNullException.ThrowIfNull(defaultConversationReviews);
         ArgumentNullException.ThrowIfNull(triggerWorkerCurrentEvidenceAuthorizer);
         ArgumentNullException.ThrowIfNull(governedBackgroundRuntimeHost);
@@ -129,6 +133,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         _governedLoopGraphAuthoring = governedLoopGraphAuthoring;
         _governedLoopInvocationPreparation = governedLoopInvocationPreparation;
         _modelProfiles = modelProfiles;
+        _humanInput = humanInput;
         _defaultConversationReviews = defaultConversationReviews;
         _triggerWorkerCurrentEvidenceAuthorizer = triggerWorkerCurrentEvidenceAuthorizer;
         _governedBackgroundRuntimeHost = governedBackgroundRuntimeHost;
@@ -172,6 +177,9 @@ public sealed class AgentRuntime : IAsyncDisposable
 
     /// <summary>Gets the shared safe model-profile catalog and exact configured default.</summary>
     public IModelProfileCatalogFacade ModelProfiles => _modelProfiles;
+
+    /// <summary>Gets the bounded surface-neutral Human Input posture and operation facade over this runtime's canonical ledger.</summary>
+    public HumanInputRuntimeFacade HumanInput => _humanInput;
 
     internal IConversationMemoryStore ConversationMemory { get; }
 

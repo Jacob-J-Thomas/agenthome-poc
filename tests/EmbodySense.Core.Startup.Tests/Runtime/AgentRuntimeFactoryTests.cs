@@ -24,6 +24,7 @@ using EmbodySense.Core.Common.Loops.Execution.Retry.Models;
 using EmbodySense.Core.Startup.Loops.Execution.Models;
 using EmbodySense.Core.Startup.Governance;
 using EmbodySense.Core.Startup.Inference.Profiles;
+using EmbodySense.Core.Startup.HumanInput.Models;
 using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Application.Capabilities.Models;
@@ -41,6 +42,9 @@ using EmbodySense.Core.Common.CommandActions.Models;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Application.Loops.Protocol;
+using EmbodySense.Core.Application.HumanInput.Lifecycle.Models;
+using EmbodySense.Core.Application.HumanInput.Responses;
+using EmbodySense.Core.Application.HumanInput.Responses.Models;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Sleep.Models;
 using EmbodySense.Core.Application.Loops.EffectAuthorityUsage;
@@ -57,6 +61,9 @@ using EmbodySense.Core.Common.Loops.Posture.Models;
 using EmbodySense.Core.Common.Triggers;
 using EmbodySense.Core.Common.Triggers.Models;
 using EmbodySense.Core.Common.Workspace;
+using EmbodySense.Core.Common.HumanInput.Lifecycle.Models;
+using EmbodySense.Core.Common.HumanInput.Models;
+using EmbodySense.Core.Common.HumanInput.Responses.Models;
 using EmbodySense.Core.Common.Runtime;
 using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Core.Persistence.Loops.Execution.Sleep;
@@ -89,11 +96,14 @@ using EmbodySense.Core.Common.Tests.Triggers.Schedules;
 using EmbodySense.Core.Common.Triggers.Schedules;
 using EmbodySense.Core.Persistence.Triggers;
 using EmbodySense.Core.Persistence.Triggers.Schedules;
+using EmbodySense.Core.Persistence.HumanInput.Requests;
 using EmbodySense.Core.Startup.Triggers;
 using EmbodySense.Core.Startup.Triggers.Models;
 using EmbodySense.Core.Startup.Tests.Triggers;
 using EmbodySense.Core.Startup.Tests.Loops.Execution.Effects;
 using EmbodySense.Core.Startup.Tests.Loops.Execution.Sleep;
+using EmbodySense.Core.Startup.Tests.HumanInput;
+using EmbodySense.Core.Persistence.Tests.HumanInput.Requests;
 using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Startup.Tests.Runtime;
@@ -1774,6 +1784,294 @@ public sealed class AgentRuntimeFactoryTests
     }
 
     [Fact]
+    public async Task Human_input_facade_projects_canonical_redacted_posture_with_stable_paging_and_default_mutation_unavailability()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new HumanInputRequestStore(paths, new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath));
+        var pending = CreateFreshHumanInputMutation(workspace.RootPath, "request-pending", "version-pending", "create-pending", HumanInputRequestStoreTestData.HashA, 0, "Display-safe prompt.");
+        var cancelled = CreateFreshHumanInputMutation(workspace.RootPath, "request-cancelled", "version-cancelled", "create-cancelled", HumanInputRequestStoreTestData.HashB, 1);
+        Assert.Equal(HumanInputRequestLifecycleStoreCommitStatus.Committed, (await store.CommitAsync(pending)).Status);
+        Assert.Equal(HumanInputRequestLifecycleStoreCommitStatus.Committed, (await store.CommitAsync(cancelled)).Status);
+        var cancelledHead = Assert.IsType<HumanInputRequestLifecycleHead>(cancelled.PrimaryHeadToWrite);
+        var cancelledRequest = Assert.IsType<HumanInputRequest>(cancelled.RequestToAppend);
+        Assert.Equal(HumanInputRequestLifecycleStoreCommitStatus.Committed, (await store.CommitAsync(
+            CreateFreshTerminalHumanInputMutation(
+                HumanInputRequestLifecycleOperationKind.Cancel,
+                cancelledRequest,
+                cancelledHead,
+                2,
+                "cancel-canonical",
+                HumanInputRequestStoreTestData.HashC))).Status);
+        var expired = CreateFreshHumanInputMutation(workspace.RootPath, "request-expired", "version-expired", "create-expired", HumanInputRequestStoreTestData.HashA, 3);
+        Assert.Equal(HumanInputRequestLifecycleStoreCommitStatus.Committed, (await store.CommitAsync(expired)).Status);
+        var expiredHead = Assert.IsType<HumanInputRequestLifecycleHead>(expired.PrimaryHeadToWrite);
+        var expiredRequest = Assert.IsType<HumanInputRequest>(expired.RequestToAppend);
+        Assert.Equal(HumanInputRequestLifecycleStoreCommitStatus.Committed, (await store.CommitAsync(
+            CreateFreshTerminalHumanInputMutation(
+                HumanInputRequestLifecycleOperationKind.Expire,
+                expiredRequest,
+                expiredHead,
+                4,
+                "expire-canonical",
+                HumanInputRequestStoreTestData.HashB))).Status);
+        var superseded = CreateFreshHumanInputMutation(workspace.RootPath, "request-superseded", "version-superseded", "create-superseded", HumanInputRequestStoreTestData.HashC, 5);
+        Assert.Equal(HumanInputRequestLifecycleStoreCommitStatus.Committed, (await store.CommitAsync(superseded)).Status);
+        var supersededHead = Assert.IsType<HumanInputRequestLifecycleHead>(superseded.PrimaryHeadToWrite);
+        var supersededRequest = Assert.IsType<HumanInputRequest>(superseded.RequestToAppend);
+        Assert.Equal(HumanInputRequestLifecycleStoreCommitStatus.Committed, (await store.CommitAsync(
+            HumanInputRequestStoreTestData.SupersedeMutation(supersededRequest, supersededHead, 6, "supersede-canonical", HumanInputRequestStoreTestData.HashA))).Status);
+
+        await using (var noAuthorityRuntime = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Web))
+        {
+            var inspection = await noAuthorityRuntime.HumanInput.ListAsync(new HumanInputRequestPosturePageRequest(1));
+            var observed = Assert.Single(inspection.Requests);
+            var unavailable = await noAuthorityRuntime.HumanInput.SubmitLifecycleAsync(new HumanInputLifecycleOperationInput(
+                "cancel-without-provider",
+                HumanInputRequestLifecycleOperationKind.Cancel,
+                observed.RequestId,
+                observed.LifecycleVersion,
+                observed.Status,
+                observed.CurrentRequest,
+                null,
+                "cancel requested"));
+            var unavailableResponse = await noAuthorityRuntime.HumanInput.SubmitResponseAsync(new HumanInputResponseOperationInput(
+                "response-without-provider",
+                HumanInputResponseOperationKind.Submit,
+                observed.RequestId,
+                observed.LifecycleVersion,
+                observed.Status,
+                observed.CurrentRequest,
+                "response-without-provider",
+                new HumanInputResponseValue(HumanInputResponseKind.Text, "untrusted-value", null, null, null, null),
+                null));
+
+            Assert.Equal(HumanInputRequestPosturePageStatus.Ready, inspection.Status);
+            Assert.Equal(HumanInputOperationStatus.Unavailable, unavailable.Status);
+            Assert.Equal(HumanInputOperationStatus.Unavailable, unavailableResponse.Status);
+        }
+
+        var provider = new HumanInputRuntimeFacadeTestAuthorityProvider();
+        await using var runtime = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Web, humanInputAuthorityProvider: provider);
+        var defaultPage = await runtime.HumanInput.ListAsync();
+        var first = await runtime.HumanInput.ListAsync(new HumanInputRequestPosturePageRequest(1));
+        var second = await runtime.HumanInput.ListAsync(new HumanInputRequestPosturePageRequest(1, first.NextCursor));
+        var nullRequest = await runtime.HumanInput.ListAsync(null);
+        var malformed = await runtime.HumanInput.ListAsync(new HumanInputRequestPosturePageRequest(1, "not-a-canonical-cursor"));
+        var malformedRead = await runtime.HumanInput.ReadAsync(null!);
+        var missingRead = await runtime.HumanInput.ReadAsync("request-does-not-exist");
+        var pendingRead = await runtime.HumanInput.ReadAsync("request-pending");
+        var serialized = System.Text.Json.JsonSerializer.Serialize(pendingRead);
+
+        Assert.Equal(HumanInputRequestPosturePageStatus.Ready, first.Status);
+        Assert.Equal(HumanInputRequestPosturePageStatus.Ready, defaultPage.Status);
+        Assert.NotNull(first.NextCursor);
+        Assert.Equal(HumanInputRequestPosturePageStatus.Ready, second.Status);
+        Assert.NotEqual(first.Requests[0].RequestId, second.Requests[0].RequestId);
+        Assert.Equal(HumanInputRequestPosturePageStatus.Invalid, nullRequest.Status);
+        Assert.Equal(HumanInputRequestPosturePageStatus.Invalid, malformed.Status);
+        Assert.Equal(HumanInputRequestPostureReadStatus.Invalid, malformedRead.Status);
+        Assert.Equal(HumanInputRequestPostureReadStatus.NotFound, missingRead.Status);
+        Assert.Contains("Display-safe prompt.", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain("route-one", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain("role-one", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain("workspace-sha256", serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain("user-one", serialized, StringComparison.Ordinal);
+
+        var allPosture = await runtime.HumanInput.ListAsync(new HumanInputRequestPosturePageRequest(64));
+        Assert.Contains(allPosture.Requests, request => request.Status == HumanInputRequestLifecycleStatus.Pending);
+        Assert.Contains(allPosture.Requests, request => request.Status == HumanInputRequestLifecycleStatus.Cancelled);
+        Assert.Contains(allPosture.Requests, request => request.Status == HumanInputRequestLifecycleStatus.Expired);
+        Assert.Contains(allPosture.Requests, request => request.Status == HumanInputRequestLifecycleStatus.Superseded);
+
+        var added = CreateFreshHumanInputMutation(workspace.RootPath, "request-stales-page", "version-stales-page", "create-stales-page", HumanInputRequestStoreTestData.HashB, 7);
+        Assert.Equal(HumanInputRequestLifecycleStoreCommitStatus.Committed, (await store.CommitAsync(added)).Status);
+        var stale = await runtime.HumanInput.ListAsync(new HumanInputRequestPosturePageRequest(1, first.NextCursor));
+
+        Assert.Equal(HumanInputRequestPosturePageStatus.Stale, stale.Status);
+    }
+
+    [Fact]
+    public async Task Human_input_facade_uses_server_authority_for_exact_response_and_lifecycle_operations_with_replay_conflict_and_cancellation_boundaries()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new HumanInputRequestStore(paths, new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath));
+        var pending = CreateFreshHumanInputMutation(workspace.RootPath, "request-answer", "version-answer", "create-answer", HumanInputRequestStoreTestData.HashA);
+        var cancellable = CreateFreshHumanInputMutation(workspace.RootPath, "request-cancel", "version-cancel", "create-cancel", HumanInputRequestStoreTestData.HashB, 1);
+        Assert.Equal(HumanInputRequestLifecycleStoreCommitStatus.Committed, (await store.CommitAsync(pending)).Status);
+        Assert.Equal(HumanInputRequestLifecycleStoreCommitStatus.Committed, (await store.CommitAsync(cancellable)).Status);
+        var provider = new HumanInputRuntimeFacadeTestAuthorityProvider();
+        await using var runtime = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Web, humanInputAuthorityProvider: provider);
+        var answerPosture = Assert.IsType<HumanInputRequestPosture>((await runtime.HumanInput.ReadAsync("request-answer")).Request);
+        var invalidLifecycle = await runtime.HumanInput.SubmitLifecycleAsync(null);
+        var invalidResponse = await runtime.HumanInput.SubmitResponseAsync(null);
+        var missingTarget = await runtime.HumanInput.SubmitResponseAsync(new HumanInputResponseOperationInput(
+            "withdraw-missing-response",
+            HumanInputResponseOperationKind.Withdraw,
+            answerPosture.RequestId,
+            answerPosture.LifecycleVersion,
+            answerPosture.Status,
+            answerPosture.CurrentRequest,
+            "response-missing",
+            null,
+            null));
+        var missingRequestReference = answerPosture.CurrentRequest with { RequestId = "request-does-not-exist" };
+        var missingRequest = await runtime.HumanInput.SubmitResponseAsync(new HumanInputResponseOperationInput(
+            "submit-missing-request",
+            HumanInputResponseOperationKind.Submit,
+            missingRequestReference.RequestId,
+            answerPosture.LifecycleVersion,
+            answerPosture.Status,
+            missingRequestReference,
+            "response-missing-request",
+            new HumanInputResponseValue(HumanInputResponseKind.Text, "private-missing-request-value", null, null, null, null),
+            null));
+        var submit = new HumanInputResponseOperationInput(
+            "submit-canonical-response",
+            HumanInputResponseOperationKind.Submit,
+            answerPosture.RequestId,
+            answerPosture.LifecycleVersion,
+            answerPosture.Status,
+            answerPosture.CurrentRequest,
+            "response-canonical",
+            new HumanInputResponseValue(HumanInputResponseKind.Text, "private-response-value", null, null, null, null),
+            "private-response-explanation");
+
+        var committed = await runtime.HumanInput.SubmitResponseAsync(submit);
+        var mismatchedRequestId = await runtime.HumanInput.SubmitResponseAsync(submit with
+        {
+            OperationId = "submit-mismatched-request-id",
+            RequestId = "different-request-id"
+        });
+        var replayed = await runtime.HumanInput.SubmitResponseAsync(submit);
+        var changed = await runtime.HumanInput.SubmitResponseAsync(submit with
+        {
+            Value = new HumanInputResponseValue(HumanInputResponseKind.Text, "changed-private-response-value", null, null, null, null)
+        });
+        var persistedResponses = await ((IHumanInputResponseLifecycleStore)store).ReadAsync(answerPosture.CurrentRequest);
+        var responseCommandHash = Assert.Single(
+            Assert.IsType<HumanInputResponseLifecycleStoreSnapshot>(persistedResponses.Snapshot).Operations,
+            operation => operation.OperationId == submit.OperationId).CommandHash;
+        var stale = await runtime.HumanInput.SubmitResponseAsync(submit with { OperationId = "submit-stale-response" });
+        var publicResultJson = System.Text.Json.JsonSerializer.Serialize(new[] { committed, replayed, changed, stale });
+
+        Assert.Equal(HumanInputOperationStatus.Committed, committed.Status);
+        Assert.Equal(HumanInputOperationStatus.Invalid, invalidLifecycle.Status);
+        Assert.Equal(HumanInputOperationStatus.Invalid, invalidResponse.Status);
+        Assert.Equal(HumanInputOperationStatus.NotFound, missingTarget.Status);
+        Assert.Equal(HumanInputOperationStatus.NotFound, missingRequest.Status);
+        Assert.Equal(HumanInputOperationStatus.Conflict, mismatchedRequestId.Status);
+        Assert.NotNull(committed.Evidence);
+        Assert.True(committed.Request!.IsAnswered);
+        Assert.Equal(HumanInputOperationStatus.Replayed, replayed.Status);
+        Assert.Equal(committed.OperationId, replayed.OperationId);
+        Assert.Equal(committed.Evidence.OperationId, replayed.Evidence!.OperationId);
+        Assert.Equal(HumanInputOperationStatus.Conflict, changed.Status);
+        Assert.Equal(HumanInputRequestLifecycleStatus.Answered, changed.Request!.Status);
+        Assert.Null(changed.Request.LatestConflict);
+        Assert.Equal(HumanInputOperationStatus.Conflict, stale.Status);
+        Assert.NotNull(stale.Evidence);
+        Assert.Equal(HumanInputRequestLifecycleStatus.Answered, stale.Request!.Status);
+        Assert.Null(stale.Request.LatestConflict);
+        Assert.DoesNotContain("private-response-value", publicResultJson, StringComparison.Ordinal);
+        Assert.DoesNotContain("changed-private-response-value", publicResultJson, StringComparison.Ordinal);
+        Assert.DoesNotContain("private-response-explanation", publicResultJson, StringComparison.Ordinal);
+        Assert.DoesNotContain(responseCommandHash, publicResultJson, StringComparison.Ordinal);
+        Assert.DoesNotContain("user-one", publicResultJson, StringComparison.Ordinal);
+        Assert.DoesNotContain("role-one", publicResultJson, StringComparison.Ordinal);
+        Assert.DoesNotContain("route-one", publicResultJson, StringComparison.Ordinal);
+
+        var cancelPosture = Assert.IsType<HumanInputRequestPosture>((await runtime.HumanInput.ReadAsync("request-cancel")).Request);
+        var cancel = new HumanInputLifecycleOperationInput(
+            "cancel-canonical-request",
+            HumanInputRequestLifecycleOperationKind.Cancel,
+            cancelPosture.RequestId,
+            cancelPosture.LifecycleVersion,
+            cancelPosture.Status,
+            cancelPosture.CurrentRequest,
+            null,
+            "cancel requested");
+        var missingLifecycleBinding = await runtime.HumanInput.SubmitLifecycleAsync(cancel with
+        {
+            OperationId = "cancel-missing-request",
+            RequestId = "request-does-not-exist",
+            ExpectedRequest = cancelPosture.CurrentRequest with { RequestId = "request-does-not-exist" }
+        });
+        var mismatchedLifecycleRequest = await runtime.HumanInput.SubmitLifecycleAsync(cancel with
+        {
+            OperationId = "cancel-mismatched-request",
+            RequestId = "different-request-id"
+        });
+        var invalidLifecycleOperation = await runtime.HumanInput.SubmitLifecycleAsync(cancel with { OperationId = string.Empty });
+        provider.LifecycleTermsStatus = AgentRuntimeHumanInputAuthorityStatus.Denied;
+        var deniedTerms = await runtime.HumanInput.SubmitLifecycleAsync(cancel with { OperationId = "cancel-terms-denied" });
+        provider.LifecycleTermsStatus = AgentRuntimeHumanInputAuthorityStatus.Unavailable;
+        var unavailableTerms = await runtime.HumanInput.SubmitLifecycleAsync(cancel with { OperationId = "cancel-terms-unavailable" });
+        provider.LifecycleTermsStatus = AgentRuntimeHumanInputAuthorityStatus.Ready;
+        provider.ThrowDuringLifecycleTerms = true;
+        var thrownTerms = await runtime.HumanInput.SubmitLifecycleAsync(cancel with { OperationId = "cancel-terms-throws" });
+        provider.ThrowDuringLifecycleTerms = false;
+        provider.LifecycleAuthorizationStatus = AgentRuntimeHumanInputAuthorityStatus.Denied;
+        var deniedLifecycle = await runtime.HumanInput.SubmitLifecycleAsync(cancel with { OperationId = "cancel-authorization-denied" });
+        provider.LifecycleAuthorizationStatus = AgentRuntimeHumanInputAuthorityStatus.Unavailable;
+        var unavailableLifecycle = await runtime.HumanInput.SubmitLifecycleAsync(cancel with { OperationId = "cancel-authorization-unavailable" });
+        provider.LifecycleAuthorizationStatus = AgentRuntimeHumanInputAuthorityStatus.Ready;
+        var cancelled = await runtime.HumanInput.SubmitLifecycleAsync(cancel);
+        var cancelReplay = await runtime.HumanInput.SubmitLifecycleAsync(cancel);
+        var changedCancel = await runtime.HumanInput.SubmitLifecycleAsync(cancel with { Reason = "different cancel reason" });
+        var staleCancel = await runtime.HumanInput.SubmitLifecycleAsync(cancel with { OperationId = "cancel-stale-request" });
+        var cancelConflictRead = await runtime.HumanInput.ReadAsync(cancelPosture.RequestId);
+        var cancelConflictPage = await runtime.HumanInput.ListAsync(new HumanInputRequestPosturePageRequest(64));
+
+        Assert.Equal(HumanInputOperationStatus.Committed, cancelled.Status);
+        Assert.Equal(HumanInputOperationStatus.Conflict, missingLifecycleBinding.Status);
+        Assert.Equal(HumanInputOperationStatus.Conflict, mismatchedLifecycleRequest.Status);
+        Assert.Equal(HumanInputOperationStatus.Invalid, invalidLifecycleOperation.Status);
+        Assert.Equal(HumanInputOperationStatus.Denied, deniedTerms.Status);
+        Assert.Equal(HumanInputOperationStatus.Unavailable, unavailableTerms.Status);
+        Assert.Equal(HumanInputOperationStatus.Unavailable, thrownTerms.Status);
+        Assert.Equal(HumanInputOperationStatus.Denied, deniedLifecycle.Status);
+        Assert.Equal(HumanInputOperationStatus.Unavailable, unavailableLifecycle.Status);
+        Assert.Equal(HumanInputRequestLifecycleStatus.Cancelled, cancelled.Request!.Status);
+        Assert.Equal(HumanInputOperationStatus.Replayed, cancelReplay.Status);
+        Assert.Equal(HumanInputOperationStatus.Conflict, changedCancel.Status);
+        Assert.Equal(HumanInputOperationStatus.Conflict, staleCancel.Status);
+        Assert.Equal(HumanInputRequestLifecycleStatus.Cancelled, staleCancel.Request!.Status);
+        Assert.Equal(staleCancel.OperationId, staleCancel.Request.LatestConflict!.OperationId);
+        Assert.Equal("Lifecycle", staleCancel.Request.LatestConflict.OperationFamily);
+        Assert.Equal(HumanInputRequestLifecycleStatus.Cancelled, cancelConflictRead.Request!.Status);
+        Assert.Equal(staleCancel.OperationId, cancelConflictRead.Request.LatestConflict!.OperationId);
+        var conflictFromPage = Assert.Single(cancelConflictPage.Requests, request => request.RequestId == cancelPosture.RequestId);
+        Assert.Equal(HumanInputRequestLifecycleStatus.Cancelled, conflictFromPage.Status);
+        Assert.Equal(staleCancel.OperationId, conflictFromPage.LatestConflict!.OperationId);
+        Assert.True(provider.ResponseAuthentications >= 2);
+        Assert.True(provider.LifecycleAuthorizations >= 1);
+
+        provider.ResponseAuthenticationStatus = AgentRuntimeHumanInputAuthorityStatus.Denied;
+        var denied = await runtime.HumanInput.SubmitResponseAsync(submit with { OperationId = "submit-denied-response" });
+        provider.ResponseAuthenticationStatus = AgentRuntimeHumanInputAuthorityStatus.Unavailable;
+        var unavailable = await runtime.HumanInput.SubmitResponseAsync(submit with { OperationId = "submit-unavailable-response" });
+        var invalid = await runtime.HumanInput.SubmitResponseAsync(submit with { OperationId = string.Empty });
+
+        Assert.Equal(HumanInputOperationStatus.Denied, denied.Status);
+        Assert.Equal(HumanInputOperationStatus.Unavailable, unavailable.Status);
+        Assert.Equal(HumanInputOperationStatus.Invalid, invalid.Status);
+
+        provider.DelayLifecycleTermsUntilCancellation = true;
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => runtime.HumanInput.SubmitLifecycleAsync(
+            cancel with { OperationId = "cancel-before-intent" },
+            cancellation.Token));
+        var unchanged = await runtime.HumanInput.ReadAsync("request-cancel");
+
+        Assert.Equal(HumanInputRequestLifecycleStatus.Cancelled, unchanged.Request!.Status);
+    }
+
+    [Fact]
     public async Task CreateAsync_starts_with_fresh_transcript_without_exposing_runtime_internals()
     {
         using var workspace = new TestWorkspace();
@@ -3209,11 +3507,107 @@ public sealed class AgentRuntimeFactoryTests
     private static GovernedLoopGraphCatalogNodeSnapshot HumanInputDescriptor(GovernedLoopGraphCatalogResponse catalog)
         => Assert.Single(catalog.NodeDescriptors, item => item.Descriptor.Kind == GovernedLoopNodeKind.HumanInput);
 
+    private static HumanInputRequestLifecycleStoreMutation CreateFreshHumanInputMutation(
+        string workspacePath,
+        string requestId,
+        string requestVersionId,
+        string operationId,
+        string requestHash,
+        long generation = 0,
+        string prompt = "Private prompt one.")
+    {
+        var requestedAtUtc = DateTimeOffset.UtcNow.AddMinutes(-1).ToUniversalTime();
+        var binding = new HumanInputRequestBinding(
+            CapabilityWorkspaceScopeId.Create(workspacePath),
+            "governed-loop",
+            "loop-revision-one",
+            "node-one",
+            "run-one",
+            "checkpoint-one");
+        var request = HumanInputRequestStoreTestData.Request(requestId, requestVersionId, requestedAtUtc, binding, prompt: prompt);
+        var head = HumanInputRequestStoreTestData.Head(
+            request,
+            1,
+            HumanInputRequestLifecycleStatus.Pending,
+            0,
+            null,
+            null,
+            operationId,
+            requestedAtUtc);
+        var evidence = HumanInputRequestStoreTestData.Evidence(
+            HumanInputRequestLifecycleOperationKind.Create,
+            requestId,
+            operationId,
+            requestHash,
+            requestedAtUtc,
+            null,
+            head,
+            request);
+        return new HumanInputRequestLifecycleStoreMutation(generation, evidence, request, head, null);
+    }
+
+    private static HumanInputRequestLifecycleStoreMutation CreateFreshTerminalHumanInputMutation(
+        HumanInputRequestLifecycleOperationKind kind,
+        HumanInputRequest request,
+        HumanInputRequestLifecycleHead previousHead,
+        long generation,
+        string operationId,
+        string requestHash)
+    {
+        var status = kind switch
+        {
+            HumanInputRequestLifecycleOperationKind.Cancel => HumanInputRequestLifecycleStatus.Cancelled,
+            HumanInputRequestLifecycleOperationKind.Expire => HumanInputRequestLifecycleStatus.Expired,
+            HumanInputRequestLifecycleOperationKind.Reject => HumanInputRequestLifecycleStatus.Rejected,
+            _ => throw new ArgumentOutOfRangeException(nameof(kind)),
+        };
+        var recordedAtUtc = kind == HumanInputRequestLifecycleOperationKind.Expire
+            ? request.Timing.ExpiresAtUtc.AddTicks(1)
+            : previousHead.UpdatedAtUtc.AddSeconds(1);
+        var resultHead = HumanInputRequestStoreTestData.Head(
+            request,
+            previousHead.LifecycleVersion + 1,
+            status,
+            previousHead.ReminderCount,
+            previousHead.SupersedesRequestId,
+            previousHead.SupersededByRequestId,
+            operationId,
+            recordedAtUtc);
+        Assert.True(AuthorityActorId.TryParse("user-owner", out var actor, out _));
+        Assert.True(AuthorityPurpose.TryParse("manage human input", out var reason, out _));
+        var evidence = new HumanInputRequestLifecycleOperationEvidence(
+            1,
+            operationId,
+            requestHash,
+            kind,
+            HumanInputRequestLifecycleOperationOutcome.Committed,
+            HumanInputRequestLifecycleOperationFailureCode.None,
+            request.RequestId,
+            previousHead.LifecycleVersion,
+            previousHead.Status,
+            previousHead.CurrentRequest,
+            request.Binding,
+            previousHead,
+            resultHead,
+            null,
+            null,
+            null,
+            null,
+            actor!,
+            reason!,
+            null,
+            HumanInputRequestStoreTestData.HashB,
+            null,
+            recordedAtUtc);
+        return new HumanInputRequestLifecycleStoreMutation(generation, evidence, null, resultHead, null);
+    }
+
     private static async Task<AgentRuntime> CreateRuntimeAsync(
         TestWorkspace workspace,
         AgentRuntimeSurface? runtimeSurface = null,
         string? codexPath = null,
         IAgentRuntimeAuthenticatedWakeVerifier? verifier = null,
+        IAgentRuntimeHumanInputAuthorityProvider? humanInputAuthorityProvider = null,
         CommandActionRuntimeProvider? commandActionRuntimeProvider = null,
         IReadOnlyList<ModelProfileRuntimeProvider>? additionalModelProfileProviders = null)
     {
@@ -3228,6 +3622,11 @@ public sealed class AgentRuntimeFactoryTests
         if (verifier is not null)
         {
             factory = factory.WithAuthenticatedWakeVerifier(verifier);
+        }
+
+        if (humanInputAuthorityProvider is not null)
+        {
+            factory = factory.WithHumanInputAuthorityProvider(humanInputAuthorityProvider);
         }
 
         return await factory.CreateAsync(
