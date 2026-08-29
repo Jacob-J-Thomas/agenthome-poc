@@ -1,5 +1,8 @@
 using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Execution.Models;
+using EmbodySense.Core.Common.Loops.Execution.Wait;
+using EmbodySense.Core.Common.Loops.HumanInput;
+using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 
 namespace EmbodySense.Core.Common.Tests.Loops.Execution;
 
@@ -163,7 +166,7 @@ public sealed class GovernedLoopExecutionStateMatrixTests
         AssertAllowedTargets(GovernedLoopNodeExecutionStatus.Running, [GovernedLoopNodeExecutionStatus.Running, GovernedLoopNodeExecutionStatus.Completed, GovernedLoopNodeExecutionStatus.Waiting, GovernedLoopNodeExecutionStatus.Failed, GovernedLoopNodeExecutionStatus.ReviewBlocked], GovernedLoopExecutionStateMatrix.IsNodeTransitionAllowed);
         AssertAllowedTargets(GovernedLoopNodeExecutionStatus.Completed, [GovernedLoopNodeExecutionStatus.Completed], GovernedLoopExecutionStateMatrix.IsNodeTransitionAllowed);
         AssertAllowedTargets(GovernedLoopNodeExecutionStatus.Skipped, [GovernedLoopNodeExecutionStatus.Skipped], GovernedLoopExecutionStateMatrix.IsNodeTransitionAllowed);
-        AssertAllowedTargets(GovernedLoopNodeExecutionStatus.Waiting, [GovernedLoopNodeExecutionStatus.Running, GovernedLoopNodeExecutionStatus.Waiting, GovernedLoopNodeExecutionStatus.Completed, GovernedLoopNodeExecutionStatus.Failed, GovernedLoopNodeExecutionStatus.ReviewBlocked], GovernedLoopExecutionStateMatrix.IsNodeTransitionAllowed);
+        AssertAllowedTargets(GovernedLoopNodeExecutionStatus.Waiting, [GovernedLoopNodeExecutionStatus.Running, GovernedLoopNodeExecutionStatus.Waiting, GovernedLoopNodeExecutionStatus.Failed, GovernedLoopNodeExecutionStatus.ReviewBlocked], GovernedLoopExecutionStateMatrix.IsNodeTransitionAllowed);
         AssertAllowedTargets(GovernedLoopNodeExecutionStatus.Failed, [GovernedLoopNodeExecutionStatus.Failed], GovernedLoopExecutionStateMatrix.IsNodeTransitionAllowed);
         AssertAllowedTargets(GovernedLoopNodeExecutionStatus.ReviewBlocked, [GovernedLoopNodeExecutionStatus.Running, GovernedLoopNodeExecutionStatus.Failed, GovernedLoopNodeExecutionStatus.ReviewBlocked], GovernedLoopExecutionStateMatrix.IsNodeTransitionAllowed);
 
@@ -222,6 +225,25 @@ public sealed class GovernedLoopExecutionStateMatrixTests
         Assert.True(GovernedLoopExecutionStateMatrix.IsNodeEvidenceTransitionAllowed(running, retryReservation));
         Assert.False(GovernedLoopExecutionStateMatrix.IsNodeEvidenceTransitionAllowed(running, skippedRetryAttempt));
         Assert.False(GovernedLoopExecutionStateMatrix.IsNodeEvidenceTransitionAllowed(running, reusedAttemptOperation));
+    }
+
+    [Fact]
+    public void Node_evidence_waiting_to_completed_requires_a_human_input_descriptor()
+    {
+        var waitDescriptor = new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Wait, GovernedLoopWaitVocabulary.Timestamp, 1);
+        var inferenceDescriptor = new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Inference, "provider-inference", 1);
+        var humanInputDescriptor = new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.HumanInput, GovernedLoopHumanInputVocabulary.TypeId, GovernedLoopHumanInputVocabulary.DescriptorVersion);
+        var waitingWait = GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Waiting, descriptor: waitDescriptor);
+        var completedWait = GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Completed, descriptor: waitDescriptor);
+        var waitingInference = GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Waiting, descriptor: inferenceDescriptor);
+        var completedInference = GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Completed, descriptor: inferenceDescriptor);
+        var waitingHumanInput = GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Waiting, descriptor: humanInputDescriptor);
+        var completedHumanInput = GovernedLoopExecutionTestFixture.Node(GovernedLoopNodeExecutionStatus.Completed, descriptor: humanInputDescriptor);
+
+        Assert.False(GovernedLoopExecutionStateMatrix.IsNodeTransitionAllowed(GovernedLoopNodeExecutionStatus.Waiting, GovernedLoopNodeExecutionStatus.Completed));
+        Assert.False(GovernedLoopExecutionStateMatrix.IsNodeEvidenceTransitionAllowed(waitingWait, completedWait));
+        Assert.False(GovernedLoopExecutionStateMatrix.IsNodeEvidenceTransitionAllowed(waitingInference, completedInference));
+        Assert.True(GovernedLoopExecutionStateMatrix.IsNodeEvidenceTransitionAllowed(waitingHumanInput, completedHumanInput));
     }
 
     [Fact]
