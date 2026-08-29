@@ -45,6 +45,8 @@ using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Application.Loops.Protocol;
 using EmbodySense.Core.Application.HumanInput.Lifecycle.Models;
 using EmbodySense.Core.Application.HumanInput.Lifecycle;
+using EmbodySense.Core.Application.HumanInput.Publication;
+using EmbodySense.Core.Application.HumanInput.Publication.Models;
 using EmbodySense.Core.Application.HumanInput.Responses;
 using EmbodySense.Core.Application.HumanInput.Responses.Models;
 using EmbodySense.Core.Application.Loops;
@@ -101,6 +103,8 @@ using EmbodySense.Core.Persistence.Triggers;
 using EmbodySense.Core.Persistence.Triggers.Schedules;
 using EmbodySense.Core.Persistence.HumanInput.Requests;
 using EmbodySense.Core.Persistence.HumanInput.Requests.Models;
+using EmbodySense.Core.Persistence.Tests.HumanInput.Continuations;
+using EmbodySense.HumanInputContinuationHost;
 using EmbodySense.Core.Startup.Triggers;
 using EmbodySense.Core.Startup.Triggers.Models;
 using EmbodySense.Core.Startup.Tests.Triggers;
@@ -1785,6 +1789,86 @@ public sealed class AgentRuntimeFactoryTests
         Assert.Same(published, disableTarget);
         Assert.Same(published, archiveTarget);
         Assert.Same(draft, replaceTarget);
+    }
+
+    [Fact]
+    public async Task Agent_runtime_cancellation_converges_a_real_published_human_input_request_through_the_public_facades()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var workspaceId = CapabilityWorkspaceScopeId.Create(workspace.RootPath);
+        var fixture = HumanInputResponseContinuationRecoveryFixture.CreateWaitingContext(
+            "runtime-human-input-cancellation",
+            workspaceId,
+            DateTimeOffset.UtcNow.AddMinutes(-1).AddSeconds(-30));
+        var running = fixture.RunningRun with
+        {
+            Events =
+            [
+                .. fixture.RunningRun.Events,
+                new CustomLoopRunEvent(3, "runtime-human-input-running", fixture.RunningRun.UpdatedAtUtc, CustomLoopRunEventKind.LifecycleChanged, null, null, null, "Run entered Running.", [], null, null, null, null, null, null, null, null, null, null),
+            ],
+        };
+        var waiting = fixture.Run with
+        {
+            Events = [.. running.Events, fixture.Run.Events[^1] with { Sequence = 4 }],
+        };
+        var context = fixture with { RunningRun = running, Run = waiting };
+        using (var runs = new CustomLoopRunStore(paths))
+        {
+            Assert.Equal(CustomLoopRunStoreStatus.Created, (await runs.CreateAsync(context.AdmittedRun)).Status);
+            Assert.Equal(CustomLoopRunStoreStatus.Updated, (await runs.UpdateAsync(context.RunningRun, context.AdmittedRun.LifecycleVersion)).Status);
+            Assert.Equal(CustomLoopRunStoreStatus.Updated, (await runs.UpdateAsync(context.Run, context.RunningRun.LifecycleVersion)).Status);
+        }
+
+        var requests = new HumanInputRequestStore(paths, new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath));
+        var publication = new HumanInputRequestPublicationService(
+            new CustomLoopRunStore(paths),
+            requests,
+            new HumanInputRequestPublicationHostGrantResolver(context.Grant, DateTimeOffset.UtcNow),
+            new CapabilityAuthorityTransaction(paths),
+            workspaceId);
+        var published = await publication.PublishAsync(new HumanInputRequestPublicationRequest(
+            context.Run.Id,
+            context.Checkpoint.Binding.CheckpointId,
+            context.Checkpoint.CheckpointHash));
+
+        Assert.Equal(HumanInputRequestPublicationStatus.Published, published.Status);
+        var authority = new HumanInputRuntimeFacadeTestAuthorityProvider();
+        await using var runtime = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Web, humanInputAuthorityProvider: authority);
+        var input = new LoopRunControlInput(context.Run.Id, context.Run.LifecycleVersion, "runtime-human-input-cancel");
+        var pending = Assert.IsType<HumanInputRequestPosture>((await runtime.HumanInput.ReadAsync(context.Checkpoint.Request.RequestId)).Request);
+
+        var cancelled = await runtime.CancelCustomLoopAsync(input);
+        var page = await runtime.HumanInput.ListAsync(new HumanInputRequestPosturePageRequest(32));
+        var read = await runtime.HumanInput.ReadAsync(context.Checkpoint.Request.RequestId);
+        var replayed = await runtime.CancelCustomLoopAsync(input);
+        var terminal = Assert.IsType<HumanInputRequestPosture>(read.Request);
+        var staleResponse = await runtime.HumanInput.SubmitResponseAsync(new HumanInputResponseOperationInput(
+            "runtime-human-input-stale-response",
+            HumanInputResponseOperationKind.Submit,
+            pending.RequestId,
+            pending.LifecycleVersion,
+            pending.Status,
+            pending.CurrentRequest,
+            "runtime-human-input-stale-response",
+            new HumanInputResponseValue(HumanInputResponseKind.Confirmation, null, null, true, null, null),
+            null));
+        var persisted = await requests.ReadAsync(context.Checkpoint.Request.RequestId);
+
+        Assert.Equal("Cancelled", cancelled.Status);
+        Assert.Equal("Cancelled", cancelled.Run!.Status);
+        Assert.Equal(HumanInputRequestPosturePageStatus.Ready, page.Status);
+        Assert.DoesNotContain(page.Requests, item => item.Status == HumanInputRequestLifecycleStatus.Pending);
+        Assert.Equal(HumanInputRequestPostureReadStatus.Ready, read.Status);
+        Assert.Equal(HumanInputRequestLifecycleStatus.Cancelled, terminal.Status);
+        Assert.Equal("Cancelled", replayed.Status);
+        Assert.Equal(HumanInputOperationStatus.Conflict, staleResponse.Status);
+        var snapshot = Assert.IsType<HumanInputRequestLifecycleStoreSnapshot>(persisted.PrimarySnapshot);
+        Assert.Equal(2, snapshot.Operations.Count);
+        Assert.Equal(1, snapshot.Operations.Count(item => item.Kind == HumanInputRequestLifecycleOperationKind.Create));
+        Assert.Equal(1, snapshot.Operations.Count(item => item.Kind == HumanInputRequestLifecycleOperationKind.Cancel));
     }
 
     [Fact]

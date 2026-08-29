@@ -8,8 +8,16 @@ using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
+using EmbodySense.Core.Application.Loops.Revisions;
 using EmbodySense.Core.Application.Loops.TraceRetention;
 using EmbodySense.Core.Application.Capabilities;
+using EmbodySense.Core.Application.Governance.Authority.Grants;
+using EmbodySense.Core.Persistence.Authority;
+using EmbodySense.Core.Persistence.Capabilities;
+using EmbodySense.Core.Persistence.ContextualRoles;
+using EmbodySense.Core.Persistence.HumanInput.Requests;
+using EmbodySense.Core.Persistence.Loops.GraphAuthoring;
+using EmbodySense.Core.Persistence.Loops.Revisions;
 using EmbodySense.Core.Persistence.Audit;
 using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Core.Persistence.Memory;
@@ -39,6 +47,7 @@ public sealed class LoopRunInspectionFacade : IAsyncDisposable
     private readonly CustomLoopTraceRetentionService? _retention;
     private readonly string? _actor;
     private readonly string? _surface;
+    private readonly ContextualRoleRevisionStore? _recoveryRoleStore;
     private CustomLoopWorkspaceExecutionGate? _executionGate;
     private int _disposed;
 
@@ -66,7 +75,42 @@ public sealed class LoopRunInspectionFacade : IAsyncDisposable
         _actor = authenticatedActor;
         _surface = authenticatedSurface;
         var audit = authenticatedActor is null ? null : new AuditLog(_paths);
-        _recovery = audit is null ? null : new CustomLoopRecoveryService(_runStore, audit);
+        if (audit is null)
+        {
+            _recovery = null;
+        }
+        else
+        {
+            var authority = new CapabilityAuthorityTransaction(_paths);
+            var revisionStore = new GovernedLoopRevisionLifecycleStore(_paths, authorityTransaction: authority);
+            var graphStore = new GovernedLoopGraphRevisionStore(_paths, revisionStore, authorityTransaction: authority);
+            var publicationSource = new GovernedLoopPublishedRevisionSource(revisionStore, authority);
+            var bindingSource = new GovernedLoopGrantBindingSource(publicationSource, graphStore, authority);
+            _recoveryRoleStore = new ContextualRoleRevisionStore(_paths, _workspaceId, authorityTransaction: authority);
+            var roleSource = new AuthorityGrantRoleSource(
+                _workspaceId,
+                _recoveryRoleStore,
+                _recoveryRoleStore,
+                new WorkspaceContextualRoleInstructionSourceProbe(_paths),
+                authority);
+            var authorityStore = new AuthorityProfileStore(_paths, authorityTransaction: authority);
+            var grantResolver = new AuthorityGrantResolver(
+                authorityStore,
+                new AuthorityGrantProfileSource(authorityStore),
+                roleSource,
+                publicationSource,
+                bindingSource,
+                authority);
+            var requests = new HumanInputRequestStore(_paths, authorityTransaction: authority);
+            var convergence = new CustomLoopHumanInputCancellationConvergenceService(
+                _runStore,
+                _controlOperationStore,
+                requests,
+                grantResolver,
+                authority,
+                _workspaceId);
+            _recovery = new CustomLoopRecoveryService(_runStore, audit, humanInputCancellationConvergence: convergence);
+        }
         _retention = audit is null ? null : new CustomLoopTraceRetentionService(_runStore, audit);
     }
 
@@ -138,6 +182,7 @@ public sealed class LoopRunInspectionFacade : IAsyncDisposable
         }
 
         _runStore.Dispose();
+        _recoveryRoleStore?.Dispose();
         if (_executionGate is not null) await _executionGate.DisposeAsync();
     }
 

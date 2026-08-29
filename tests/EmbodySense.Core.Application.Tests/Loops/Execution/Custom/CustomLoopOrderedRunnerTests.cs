@@ -8527,6 +8527,8 @@ public sealed partial class CustomLoopOrderedRunnerTests
     {
         private readonly Dictionary<string, CustomLoopControlOperation> _operations = new(StringComparer.Ordinal);
 
+        public Exception? GetException { get; set; }
+
         public Task<CustomLoopControlOperationStoreResult> BeginAsync(CustomLoopControlOperation operation, CancellationToken cancellationToken = default)
         {
             if (_operations.TryGetValue(operation.OperationId, out var existing))
@@ -8541,6 +8543,11 @@ public sealed partial class CustomLoopOrderedRunnerTests
 
         public Task<CustomLoopControlOperation?> GetAsync(string operationId, CancellationToken cancellationToken = default)
         {
+            if (GetException is not null)
+            {
+                throw GetException;
+            }
+
             _operations.TryGetValue(operationId, out var operation);
             return Task.FromResult(operation);
         }

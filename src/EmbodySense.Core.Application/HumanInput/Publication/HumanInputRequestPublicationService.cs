@@ -154,6 +154,11 @@ public sealed class HumanInputRequestPublicationService : IHumanInputRequestPubl
             return Result(HumanInputRequestPublicationStatus.Corrupt);
         }
 
+        if (run.Status is CustomLoopRunStatus.CancelRequested or CustomLoopRunStatus.Cancelled)
+        {
+            return Result(HumanInputRequestPublicationStatus.Corrupt);
+        }
+
         var matches = run.HumanInputWaitingCheckpoints
             .Where(item => string.Equals(item.Binding.CheckpointId, request.CheckpointId, StringComparison.Ordinal))
             .Take(2)
@@ -167,7 +172,6 @@ public sealed class HumanInputRequestPublicationService : IHumanInputRequestPubl
             return Result(HumanInputRequestPublicationStatus.Corrupt);
         }
 
-        // TODO(#660): serialize loop cancellation with this cross-store Create and retire any request when cancellation wins after publication.
         var command = CreateCommand(run, matches[0]);
         if (command is null)
         {

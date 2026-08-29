@@ -1,10 +1,15 @@
 using System.Collections.Immutable;
+using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Application.Governance.Authority.Grants.Models;
 using EmbodySense.Core.Application.HumanInput.Policies;
 using EmbodySense.Core.Application.HumanInput.Policies.Models;
+using EmbodySense.Core.Application.HumanInput.Continuations;
+using EmbodySense.Core.Application.HumanInput.Continuations.Models;
 using EmbodySense.Core.Application.HumanInput.Lifecycle.Models;
 using EmbodySense.Core.Application.HumanInput.Publication;
 using EmbodySense.Core.Application.HumanInput.Publication.Models;
+using EmbodySense.Core.Application.HumanInput.Responses;
+using EmbodySense.Core.Application.HumanInput.Responses.Models;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
 using EmbodySense.Core.Application.Loops.Execution.Custom.Models;
@@ -15,10 +20,17 @@ using EmbodySense.Core.Application.Loops.GraphValidation;
 using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Loops.Sequential;
 using EmbodySense.Core.Application.Loops.Sequential.Models;
+using EmbodySense.Core.Application.Loops.Sleep;
+using EmbodySense.Core.Application.Loops.Sleep.Models;
+using EmbodySense.Core.Application.Loops.Wait.Models;
 using EmbodySense.Core.Application.Tests.HumanInput.Policies;
+using EmbodySense.Core.Application.Tests.HumanInput.Continuations;
 using EmbodySense.Core.Application.Tests.HumanInput.Lifecycle;
 using EmbodySense.Core.Application.Tests.Governance.Authority.Grants;
+using EmbodySense.Core.Application.Tests.Capabilities;
+using EmbodySense.Core.Application.Tests.HumanInput.Responses;
 using EmbodySense.Core.Application.Tests.Loops.Sequential;
+using EmbodySense.Core.Application.Tests.Loops.Sleep;
 using EmbodySense.Core.Common.Authority;
 using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.ContextualRoles;
@@ -415,6 +427,807 @@ public sealed partial class CustomLoopOrderedRunnerTests
         Assert.Equal(CustomLoopRunStatus.Cancelled, runs.Current.Status);
         Assert.Equal(HumanInputRequestPublicationStatus.Corrupt, result.Status);
         Assert.Empty(lifecycle.Commits);
+    }
+
+    [Fact]
+    public async Task Cancellation_before_human_input_publication_retires_the_checkpoint_without_creating_or_continuing()
+    {
+        var context = await HumanInputPublicationContextAsync();
+        var runs = new FakeRunStore(context.Run);
+        var lifecycle = new InMemoryHumanInputRequestLifecycleStore();
+        var parked = await Runtime(context, runs, new QueueExecutor(), new RecordingPublisher(), HumanInputPolicyResolver(context)).RunAsync(Request(context));
+        var checkpoint = Assert.Single(runs.Current.HumanInputWaitingCheckpoints);
+        var controls = new FakeControlOperationStore();
+        var cancellation = HumanInputCancellationLifecycle(context, runs, lifecycle, controls);
+
+        var cancelled = await cancellation.CancelAsync(new CustomLoopCancelRequest(
+            runs.Current.Id,
+            runs.Current.LifecycleVersion,
+            "cancel-before-human-input-publication",
+            AuditSchema.Actors.Web));
+        var publication = await Publication(context, runs, lifecycle).PublishAsync(new HumanInputRequestPublicationRequest(
+            runs.Current.Id,
+            checkpoint.Binding.CheckpointId,
+            checkpoint.CheckpointHash));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Waiting, parked.Status);
+        Assert.Equal(CustomLoopControlStatus.Cancelled, cancelled.Status);
+        Assert.Equal(CustomLoopRunStatus.Cancelled, runs.Current.Status);
+        Assert.Equal(GovernedLoopHumanInputWaitingCheckpointPosture.Cancelled, Assert.Single(runs.Current.HumanInputWaitingCheckpoints).Posture);
+        Assert.Equal(HumanInputRequestPublicationStatus.Corrupt, publication.Status);
+        Assert.Empty(lifecycle.Commits);
+    }
+
+    [Fact]
+    public async Task Cancellation_after_human_input_publication_commits_one_deterministic_cancel_and_replays_without_duplication()
+    {
+        var context = await HumanInputPublicationContextAsync();
+        var runs = new FakeRunStore(context.Run);
+        var lifecycle = new InMemoryHumanInputRequestLifecycleStore();
+        var parked = await Runtime(
+            context,
+            runs,
+            new QueueExecutor(),
+            new RecordingPublisher(),
+            HumanInputPolicyResolver(context),
+            humanInputRequestPublicationService: Publication(context, runs, lifecycle)).RunAsync(Request(context));
+        var checkpoint = Assert.Single(runs.Current.HumanInputWaitingCheckpoints);
+        var controls = new FakeControlOperationStore();
+        var cancellation = HumanInputCancellationLifecycle(context, runs, lifecycle, controls);
+        var request = new CustomLoopCancelRequest(runs.Current.Id, runs.Current.LifecycleVersion, "cancel-after-human-input-publication", AuditSchema.Actors.Web);
+
+        var cancelled = await cancellation.CancelAsync(request);
+        var replayed = await cancellation.CancelAsync(request);
+        var snapshot = Assert.IsType<HumanInputRequestLifecycleStoreSnapshot>(lifecycle.Snapshot(checkpoint.Request.RequestId));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Waiting, parked.Status);
+        Assert.Equal(CustomLoopControlStatus.Cancelled, cancelled.Status);
+        Assert.Equal(CustomLoopControlStatus.Cancelled, replayed.Status);
+        Assert.Equal(CustomLoopRunStatus.Cancelled, runs.Current.Status);
+        Assert.Equal(GovernedLoopHumanInputWaitingCheckpointPosture.Cancelled, Assert.Single(runs.Current.HumanInputWaitingCheckpoints).Posture);
+        Assert.Equal(HumanInputRequestLifecycleStatus.Cancelled, snapshot.Head.Status);
+        Assert.Equal(
+            [HumanInputRequestLifecycleOperationKind.Create, HumanInputRequestLifecycleOperationKind.Cancel],
+            lifecycle.Commits.Select(commit => commit.Mutation.Operation.Kind));
+        Assert.Single(lifecycle.Commits, commit => commit.Mutation.Operation.Kind == HumanInputRequestLifecycleOperationKind.Cancel);
+    }
+
+    [Theory]
+    [InlineData("throw")]
+    [InlineData("malformed")]
+    [InlineData("ambiguous")]
+    [InlineData("divergent")]
+    public async Task Cancellation_fails_closed_when_pending_request_read_evidence_is_not_one_exact_canonical_snapshot(string readFailure)
+    {
+        var scenario = await PublishedHumanInputCancellationAsync();
+        var published = Assert.IsType<HumanInputRequestLifecycleStoreSnapshot>(scenario.Lifecycle.Snapshot(scenario.Checkpoint.Request.RequestId));
+        scenario.Lifecycle.ReadOverride = (_, _) => readFailure switch
+        {
+            "throw" => Task.FromException<HumanInputRequestLifecycleStoreReadResult>(new IOException("simulated Human Input lifecycle read outage")),
+            "malformed" => Task.FromResult(new HumanInputRequestLifecycleStoreReadResult(
+                HumanInputRequestLifecycleStoreReadStatus.Ready,
+                -1,
+                null,
+                null,
+                null)),
+            "ambiguous" => Task.FromResult(new HumanInputRequestLifecycleStoreReadResult(
+                HumanInputRequestLifecycleStoreReadStatus.Ambiguous,
+                1,
+                null,
+                null,
+                null)),
+            "divergent" => Task.FromResult(new HumanInputRequestLifecycleStoreReadResult(
+                HumanInputRequestLifecycleStoreReadStatus.Ready,
+                1,
+                new HumanInputRequestLifecycleStoreSnapshot(published.Head, [], published.Operations),
+                null,
+                null)),
+            _ => throw new InvalidOperationException("The test read-failure case is unsupported."),
+        };
+        var cancellation = HumanInputCancellationLifecycle(scenario.Context, scenario.Runs, scenario.Lifecycle, new FakeControlOperationStore());
+
+        var result = await cancellation.CancelAsync(new CustomLoopCancelRequest(
+            scenario.Runs.Current.Id,
+            scenario.Runs.Current.LifecycleVersion,
+            "cancel-fails-closed-request-read-" + readFailure,
+            AuditSchema.Actors.Web));
+
+        Assert.NotEqual(CustomLoopControlStatus.Cancelled, result.Status);
+        Assert.Equal(CustomLoopRunStatus.CancelRequested, scenario.Runs.Current.Status);
+        Assert.Equal(GovernedLoopHumanInputWaitingCheckpointPosture.Pending, Assert.Single(scenario.Runs.Current.HumanInputWaitingCheckpoints).Posture);
+        var retained = Assert.IsType<HumanInputRequestLifecycleStoreSnapshot>(scenario.Lifecycle.Snapshot(scenario.Checkpoint.Request.RequestId));
+        Assert.Equal(HumanInputRequestLifecycleStatus.Pending, retained.Head.Status);
+        Assert.Equal([HumanInputRequestLifecycleOperationKind.Create], retained.Operations.Select(operation => operation.Kind));
+        Assert.DoesNotContain(scenario.Lifecycle.Commits, commit => commit.Mutation.Operation.Kind == HumanInputRequestLifecycleOperationKind.Cancel);
+    }
+
+    [Theory]
+    [InlineData(HumanInputRequestLifecycleStoreCommitStatus.OperationConflict)]
+    [InlineData(HumanInputRequestLifecycleStoreCommitStatus.Unavailable)]
+    [InlineData(HumanInputRequestLifecycleStoreCommitStatus.Ambiguous)]
+    public async Task Cancellation_fails_closed_when_the_deterministic_child_cancel_cannot_prove_a_terminal_request(
+        HumanInputRequestLifecycleStoreCommitStatus commitStatus)
+    {
+        var scenario = await PublishedHumanInputCancellationAsync();
+        scenario.Lifecycle.CommitOverride = (mutation, _) => Task.FromResult(new HumanInputRequestLifecycleStoreCommitResult(
+            commitStatus,
+            mutation.ExpectedStoreGeneration,
+            null,
+            null,
+            null));
+        var cancellation = HumanInputCancellationLifecycle(scenario.Context, scenario.Runs, scenario.Lifecycle, new FakeControlOperationStore());
+
+        var result = await cancellation.CancelAsync(new CustomLoopCancelRequest(
+            scenario.Runs.Current.Id,
+            scenario.Runs.Current.LifecycleVersion,
+            "cancel-fails-closed-child-" + commitStatus.ToString().ToLowerInvariant(),
+            AuditSchema.Actors.Web));
+
+        Assert.NotEqual(CustomLoopControlStatus.Cancelled, result.Status);
+        Assert.Equal(CustomLoopRunStatus.CancelRequested, scenario.Runs.Current.Status);
+        Assert.Equal(GovernedLoopHumanInputWaitingCheckpointPosture.Pending, Assert.Single(scenario.Runs.Current.HumanInputWaitingCheckpoints).Posture);
+        var retained = Assert.IsType<HumanInputRequestLifecycleStoreSnapshot>(scenario.Lifecycle.Snapshot(scenario.Checkpoint.Request.RequestId));
+        Assert.Equal(HumanInputRequestLifecycleStatus.Pending, retained.Head.Status);
+        Assert.Equal([HumanInputRequestLifecycleOperationKind.Create], retained.Operations.Select(operation => operation.Kind));
+        Assert.Single(scenario.Lifecycle.Commits, commit => commit.Mutation.Operation.Kind == HumanInputRequestLifecycleOperationKind.Cancel);
+    }
+
+    [Fact]
+    public async Task Cancellation_preserves_the_committed_child_cancel_when_its_post_commit_readback_is_unavailable()
+    {
+        var scenario = await PublishedHumanInputCancellationAsync();
+        var originalRead = await scenario.Lifecycle.ReadAsync(scenario.Checkpoint.Request.RequestId);
+        var readCount = 0;
+        scenario.Lifecycle.ReadOverride = (_, _) => Interlocked.Increment(ref readCount) == 1
+            ? Task.FromResult(originalRead)
+            : Task.FromException<HumanInputRequestLifecycleStoreReadResult>(new IOException("simulated child Cancel proof readback outage"));
+        var cancellation = HumanInputCancellationLifecycle(scenario.Context, scenario.Runs, scenario.Lifecycle, new FakeControlOperationStore());
+
+        var result = await cancellation.CancelAsync(new CustomLoopCancelRequest(
+            scenario.Runs.Current.Id,
+            scenario.Runs.Current.LifecycleVersion,
+            "cancel-fails-closed-post-commit-readback",
+            AuditSchema.Actors.Web));
+
+        Assert.NotEqual(CustomLoopControlStatus.Cancelled, result.Status);
+        Assert.Equal(2, readCount);
+        Assert.Equal(CustomLoopRunStatus.CancelRequested, scenario.Runs.Current.Status);
+        Assert.Equal(GovernedLoopHumanInputWaitingCheckpointPosture.Pending, Assert.Single(scenario.Runs.Current.HumanInputWaitingCheckpoints).Posture);
+        var retained = Assert.IsType<HumanInputRequestLifecycleStoreSnapshot>(scenario.Lifecycle.Snapshot(scenario.Checkpoint.Request.RequestId));
+        Assert.Equal(HumanInputRequestLifecycleStatus.Cancelled, retained.Head.Status);
+        Assert.Equal(
+            [HumanInputRequestLifecycleOperationKind.Create, HumanInputRequestLifecycleOperationKind.Cancel],
+            retained.Operations.Select(operation => operation.Kind));
+    }
+
+    [Theory]
+    [InlineData(CustomLoopRunStoreStatus.Conflict)]
+    [InlineData(CustomLoopRunStoreStatus.TerminalImmutable)]
+    [InlineData(CustomLoopRunStoreStatus.NotFound)]
+    public async Task Cancellation_preserves_the_child_cancel_when_checkpoint_retirement_cannot_commit(
+        CustomLoopRunStoreStatus retirementStatus)
+    {
+        var scenario = await PublishedHumanInputCancellationAsync();
+        scenario.Runs.AfterUpdate = run =>
+        {
+            if (run.Status == CustomLoopRunStatus.CancelRequested
+                && Assert.Single(run.HumanInputWaitingCheckpoints).Posture == GovernedLoopHumanInputWaitingCheckpointPosture.Pending)
+            {
+                scenario.Runs.UpdateResultOverride = CheckpointRetirementResult(retirementStatus, scenario.Runs.Current);
+            }
+
+            return Task.CompletedTask;
+        };
+        var cancellation = HumanInputCancellationLifecycle(scenario.Context, scenario.Runs, scenario.Lifecycle, new FakeControlOperationStore());
+        var request = new CustomLoopCancelRequest(
+            scenario.Runs.Current.Id,
+            scenario.Runs.Current.LifecycleVersion,
+            "cancel-fails-closed-retirement-" + retirementStatus.ToString().ToLowerInvariant(),
+            AuditSchema.Actors.Web);
+
+        var result = await cancellation.CancelAsync(request);
+
+        Assert.NotEqual(CustomLoopControlStatus.Cancelled, result.Status);
+        Assert.Equal(CustomLoopRunStatus.CancelRequested, scenario.Runs.Current.Status);
+        Assert.Equal(GovernedLoopHumanInputWaitingCheckpointPosture.Pending, Assert.Single(scenario.Runs.Current.HumanInputWaitingCheckpoints).Posture);
+        var retained = Assert.IsType<HumanInputRequestLifecycleStoreSnapshot>(scenario.Lifecycle.Snapshot(scenario.Checkpoint.Request.RequestId));
+        Assert.Equal(HumanInputRequestLifecycleStatus.Cancelled, retained.Head.Status);
+        Assert.Equal(
+            [HumanInputRequestLifecycleOperationKind.Create, HumanInputRequestLifecycleOperationKind.Cancel],
+            retained.Operations.Select(operation => operation.Kind));
+
+        scenario.Runs.UpdateResultOverride = null;
+        var replayed = await cancellation.CancelAsync(request);
+
+        Assert.Equal(CustomLoopControlStatus.Cancelled, replayed.Status);
+        Assert.Equal(CustomLoopRunStatus.Cancelled, scenario.Runs.Current.Status);
+        Assert.Equal(GovernedLoopHumanInputWaitingCheckpointPosture.Cancelled, Assert.Single(scenario.Runs.Current.HumanInputWaitingCheckpoints).Posture);
+        Assert.Single(scenario.Lifecycle.Commits, commit => commit.Mutation.Operation.Kind == HumanInputRequestLifecycleOperationKind.Cancel);
+    }
+
+    [Fact]
+    public async Task Human_input_cancellation_convergence_returns_unavailable_when_the_shared_authority_boundary_fails()
+    {
+        var scenario = await PublishedHumanInputCancellationAsync();
+        var authority = new StubCapabilityAuthorityTransaction { Exception = new IOException("simulated authority boundary failure") };
+        var convergence = HumanInputCancellationConvergence(scenario.Context, scenario.Runs, scenario.Lifecycle, new FakeControlOperationStore(), authority);
+
+        var result = await convergence.ConvergeAsync(scenario.Runs.Current, "cancel-convergence-authority-failure");
+
+        Assert.Equal(CustomLoopHumanInputCancellationConvergenceStatus.Unavailable, result.Status);
+        Assert.Equal(scenario.Runs.Current, result.Run);
+        Assert.Equal(1, authority.Executions);
+        Assert.DoesNotContain(scenario.Lifecycle.Commits, commit => commit.Mutation.Operation.Kind == HumanInputRequestLifecycleOperationKind.Cancel);
+    }
+
+    [Fact]
+    public async Task Human_input_cancellation_convergence_propagates_caller_cancellation_from_the_shared_authority_boundary()
+    {
+        var scenario = await PublishedHumanInputCancellationAsync();
+        using var callerCancellation = new CancellationTokenSource();
+        callerCancellation.Cancel();
+        var authority = new StubCapabilityAuthorityTransaction { Exception = new OperationCanceledException(callerCancellation.Token) };
+        var convergence = HumanInputCancellationConvergence(scenario.Context, scenario.Runs, scenario.Lifecycle, new FakeControlOperationStore(), authority);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => convergence.ConvergeAsync(
+            scenario.Runs.Current,
+            "cancel-convergence-authority-cancelled",
+            callerCancellation.Token));
+
+        Assert.Equal(1, authority.Executions);
+        Assert.Equal(CustomLoopRunStatus.Waiting, scenario.Runs.Current.Status);
+        Assert.DoesNotContain(scenario.Lifecycle.Commits, commit => commit.Mutation.Operation.Kind == HumanInputRequestLifecycleOperationKind.Cancel);
+    }
+
+    [Fact]
+    public async Task Human_input_cancellation_convergence_propagates_caller_cancellation_from_the_canonical_control_and_run_reads()
+    {
+        var scenario = await PublishedHumanInputCancellationAsync();
+        var controls = new FakeControlOperationStore();
+        var authority = new StubCapabilityAuthorityTransaction();
+        var convergence = HumanInputCancellationConvergence(scenario.Context, scenario.Runs, scenario.Lifecycle, controls, authority);
+        using var controlCancellation = new CancellationTokenSource();
+        controlCancellation.Cancel();
+        controls.GetException = new OperationCanceledException(controlCancellation.Token);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => convergence.ConvergeAsync(
+            scenario.Runs.Current,
+            "cancel-convergence-control-read-cancelled",
+            controlCancellation.Token));
+
+        controls.GetException = null;
+        var operation = PendingCancellationControl(scenario.Runs.Current, "cancel-convergence-run-read-cancelled");
+        await controls.BeginAsync(operation);
+        using var runCancellation = new CancellationTokenSource();
+        runCancellation.Cancel();
+        scenario.Runs.GetException = new OperationCanceledException(runCancellation.Token);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => convergence.ConvergeAsync(
+            scenario.Runs.Current,
+            operation.OperationId,
+            runCancellation.Token));
+
+        scenario.Runs.GetException = null;
+        var corrupt = await convergence.ConvergeAsync(scenario.Runs.Current, operation.OperationId);
+
+        Assert.Equal(CustomLoopHumanInputCancellationConvergenceStatus.Corrupt, corrupt.Status);
+        Assert.Equal(scenario.Runs.Current, corrupt.Run);
+        Assert.Equal(3, authority.Executions);
+        Assert.Equal(CustomLoopRunStatus.Waiting, scenario.Runs.Current.Status);
+        Assert.DoesNotContain(scenario.Lifecycle.Commits, commit => commit.Mutation.Operation.Kind == HumanInputRequestLifecycleOperationKind.Cancel);
+    }
+
+    [Fact]
+    public async Task Human_input_cancellation_convergence_propagates_caller_cancellation_from_the_canonical_request_read()
+    {
+        var scenario = await PublishedHumanInputCancellationAsync();
+        var controls = new FakeControlOperationStore();
+        scenario.Lifecycle.ReadOverride = (_, _) => Task.FromException<HumanInputRequestLifecycleStoreReadResult>(new IOException("retain CancelRequested before request-read cancellation"));
+        var cancellation = HumanInputCancellationLifecycle(scenario.Context, scenario.Runs, scenario.Lifecycle, controls);
+        var parent = new CustomLoopCancelRequest(
+            scenario.Runs.Current.Id,
+            scenario.Runs.Current.LifecycleVersion,
+            "cancel-convergence-request-read-cancelled",
+            AuditSchema.Actors.Web);
+
+        var retained = await cancellation.CancelAsync(parent);
+
+        Assert.NotEqual(CustomLoopControlStatus.Cancelled, retained.Status);
+        Assert.Equal(CustomLoopRunStatus.CancelRequested, scenario.Runs.Current.Status);
+        Assert.Equal(GovernedLoopHumanInputWaitingCheckpointPosture.Pending, Assert.Single(scenario.Runs.Current.HumanInputWaitingCheckpoints).Posture);
+        var writesBeforeDirectConvergence = scenario.Runs.Writes.Count;
+        using var requestCancellation = new CancellationTokenSource();
+        requestCancellation.Cancel();
+        scenario.Lifecycle.ReadOverride = (_, _) => Task.FromException<HumanInputRequestLifecycleStoreReadResult>(new OperationCanceledException(requestCancellation.Token));
+        var authority = new StubCapabilityAuthorityTransaction();
+        var convergence = HumanInputCancellationConvergence(scenario.Context, scenario.Runs, scenario.Lifecycle, controls, authority);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => convergence.ConvergeAsync(
+            scenario.Runs.Current,
+            parent.OperationId,
+            requestCancellation.Token));
+
+        Assert.Equal(1, authority.Executions);
+        Assert.Equal(writesBeforeDirectConvergence, scenario.Runs.Writes.Count);
+        Assert.Equal(CustomLoopRunStatus.CancelRequested, scenario.Runs.Current.Status);
+        Assert.Equal(GovernedLoopHumanInputWaitingCheckpointPosture.Pending, Assert.Single(scenario.Runs.Current.HumanInputWaitingCheckpoints).Posture);
+        Assert.DoesNotContain(scenario.Lifecycle.Commits, commit => commit.Mutation.Operation.Kind == HumanInputRequestLifecycleOperationKind.Cancel);
+    }
+
+    [Fact]
+    public async Task Human_input_cancellation_convergence_fails_closed_for_invalid_control_and_run_read_evidence()
+    {
+        var scenario = await PublishedHumanInputCancellationAsync();
+        var controls = new FakeControlOperationStore();
+        var authority = new StubCapabilityAuthorityTransaction();
+        var convergence = HumanInputCancellationConvergence(scenario.Context, scenario.Runs, scenario.Lifecycle, controls, authority);
+
+        var invalidInput = await convergence.ConvergeAsync(scenario.Runs.Current, string.Empty);
+        var missingControl = await convergence.ConvergeAsync(scenario.Runs.Current, "cancel-convergence-missing-control");
+        controls.GetException = new IOException("simulated control receipt read failure");
+        var unavailableControl = await convergence.ConvergeAsync(scenario.Runs.Current, "cancel-convergence-missing-control");
+        controls.GetException = null;
+
+        var operation = PendingCancellationControl(scenario.Runs.Current, "cancel-convergence-run-read");
+        await controls.BeginAsync(operation);
+        scenario.Runs.GetException = new IOException("simulated canonical run read failure");
+        var unavailableRun = await convergence.ConvergeAsync(scenario.Runs.Current, operation.OperationId);
+        scenario.Runs.GetException = null;
+        scenario.Runs.ReturnMissing = true;
+        var missingRun = await convergence.ConvergeAsync(scenario.Runs.Current, operation.OperationId);
+
+        Assert.Equal(CustomLoopHumanInputCancellationConvergenceStatus.Corrupt, invalidInput.Status);
+        Assert.Equal(scenario.Runs.Current, invalidInput.Run);
+        Assert.Equal(CustomLoopHumanInputCancellationConvergenceStatus.Corrupt, missingControl.Status);
+        Assert.Null(missingControl.Run);
+        Assert.Equal(CustomLoopHumanInputCancellationConvergenceStatus.Corrupt, unavailableControl.Status);
+        Assert.Null(unavailableControl.Run);
+        Assert.Equal(CustomLoopHumanInputCancellationConvergenceStatus.Unavailable, unavailableRun.Status);
+        Assert.Null(unavailableRun.Run);
+        Assert.Equal(CustomLoopHumanInputCancellationConvergenceStatus.Unavailable, missingRun.Status);
+        Assert.Null(missingRun.Run);
+        Assert.Equal(4, authority.Executions);
+        Assert.DoesNotContain(scenario.Lifecycle.Commits, commit => commit.Mutation.Operation.Kind == HumanInputRequestLifecycleOperationKind.Cancel);
+    }
+
+    [Fact]
+    public async Task Cancellation_preserves_the_child_cancel_when_the_retirement_timestamp_exceeds_the_request_window()
+    {
+        var scenario = await PublishedHumanInputCancellationAsync();
+        scenario.Runs.AfterUpdate = run =>
+        {
+            if (run.Status == CustomLoopRunStatus.CancelRequested
+                && Assert.Single(run.HumanInputWaitingCheckpoints).Posture == GovernedLoopHumanInputWaitingCheckpointPosture.Pending)
+            {
+                scenario.Runs.ReplaceCurrent(run with { UpdatedAtUtc = scenario.Checkpoint.Request.Timing.ExpiresAtUtc.AddTicks(1) });
+            }
+
+            return Task.CompletedTask;
+        };
+        var cancellation = HumanInputCancellationLifecycle(scenario.Context, scenario.Runs, scenario.Lifecycle, new FakeControlOperationStore());
+
+        var result = await cancellation.CancelAsync(new CustomLoopCancelRequest(
+            scenario.Runs.Current.Id,
+            scenario.Runs.Current.LifecycleVersion,
+            "cancel-fails-closed-retirement-window",
+            AuditSchema.Actors.Web));
+
+        Assert.NotEqual(CustomLoopControlStatus.Cancelled, result.Status);
+        Assert.Equal(CustomLoopRunStatus.CancelRequested, scenario.Runs.Current.Status);
+        Assert.Equal(GovernedLoopHumanInputWaitingCheckpointPosture.Pending, Assert.Single(scenario.Runs.Current.HumanInputWaitingCheckpoints).Posture);
+        var retained = Assert.IsType<HumanInputRequestLifecycleStoreSnapshot>(scenario.Lifecycle.Snapshot(scenario.Checkpoint.Request.RequestId));
+        Assert.Equal(HumanInputRequestLifecycleStatus.Cancelled, retained.Head.Status);
+        Assert.Equal(
+            [HumanInputRequestLifecycleOperationKind.Create, HumanInputRequestLifecycleOperationKind.Cancel],
+            retained.Operations.Select(operation => operation.Kind));
+    }
+
+    [Fact]
+    public async Task Cancellation_replays_exactly_after_request_cancel_commits_but_its_acknowledgement_is_lost()
+    {
+        var context = await HumanInputPublicationContextAsync();
+        var runs = new FakeRunStore(context.Run);
+        var lifecycle = new InMemoryHumanInputRequestLifecycleStore();
+        var parked = await Runtime(
+            context,
+            runs,
+            new QueueExecutor(),
+            new RecordingPublisher(),
+            HumanInputPolicyResolver(context),
+            humanInputRequestPublicationService: Publication(context, runs, lifecycle)).RunAsync(Request(context));
+        var checkpoint = Assert.Single(runs.Current.HumanInputWaitingCheckpoints);
+        var lostAcknowledgement = false;
+        lifecycle.CommitOverride = (mutation, _) =>
+        {
+            if (lostAcknowledgement || mutation.Operation.Kind != HumanInputRequestLifecycleOperationKind.Cancel)
+            {
+                return Task.FromResult(lifecycle.CommitDurably(mutation));
+            }
+
+            lostAcknowledgement = true;
+            lifecycle.CommitDurably(mutation);
+            throw new IOException("The request Cancel committed before the caller received its acknowledgement.");
+        };
+        var controls = new FakeControlOperationStore();
+        var cancellation = HumanInputCancellationLifecycle(context, runs, lifecycle, controls);
+        var request = new CustomLoopCancelRequest(runs.Current.Id, runs.Current.LifecycleVersion, "cancel-lost-request-acknowledgement", AuditSchema.Actors.Web);
+
+        var interrupted = await cancellation.CancelAsync(request);
+        var replayed = await cancellation.CancelAsync(request);
+        var snapshot = Assert.IsType<HumanInputRequestLifecycleStoreSnapshot>(lifecycle.Snapshot(checkpoint.Request.RequestId));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Waiting, parked.Status);
+        Assert.True(lostAcknowledgement);
+        Assert.Equal(CustomLoopControlStatus.Cancelled, interrupted.Status);
+        Assert.Equal(CustomLoopControlStatus.Cancelled, replayed.Status);
+        Assert.Equal(CustomLoopRunStatus.Cancelled, runs.Current.Status);
+        Assert.Equal(HumanInputRequestLifecycleStatus.Cancelled, snapshot.Head.Status);
+        Assert.Equal(
+            [HumanInputRequestLifecycleOperationKind.Create, HumanInputRequestLifecycleOperationKind.Cancel],
+            lifecycle.Commits.Select(commit => commit.Mutation.Operation.Kind));
+        Assert.Equal(GovernedLoopHumanInputWaitingCheckpointPosture.Cancelled, Assert.Single(runs.Current.HumanInputWaitingCheckpoints).Posture);
+    }
+
+    [Fact]
+    public async Task Cancellation_replays_without_duplicate_request_cancel_after_checkpoint_retirement_commits_but_run_acknowledgement_is_lost()
+    {
+        var context = await HumanInputPublicationContextAsync();
+        var runs = new FakeRunStore(context.Run);
+        var lifecycle = new InMemoryHumanInputRequestLifecycleStore();
+        var parked = await Runtime(
+            context,
+            runs,
+            new QueueExecutor(),
+            new RecordingPublisher(),
+            HumanInputPolicyResolver(context),
+            humanInputRequestPublicationService: Publication(context, runs, lifecycle)).RunAsync(Request(context));
+        var checkpoint = Assert.Single(runs.Current.HumanInputWaitingCheckpoints);
+        var acknowledgementLost = false;
+        runs.AfterUpdate = run =>
+        {
+            if (!acknowledgementLost
+                && run.Status == CustomLoopRunStatus.CancelRequested
+                && run.HumanInputWaitingCheckpoints.Single().Posture == GovernedLoopHumanInputWaitingCheckpointPosture.Cancelled)
+            {
+                acknowledgementLost = true;
+                throw new IOException("The checkpoint retirement committed before its run-store acknowledgement was returned.");
+            }
+
+            return Task.CompletedTask;
+        };
+        var cancellation = HumanInputCancellationLifecycle(context, runs, lifecycle, new FakeControlOperationStore());
+        var request = new CustomLoopCancelRequest(runs.Current.Id, runs.Current.LifecycleVersion, "cancel-lost-checkpoint-retirement-acknowledgement", AuditSchema.Actors.Web);
+
+        var interrupted = await cancellation.CancelAsync(request);
+        var replayed = await cancellation.CancelAsync(request);
+        var snapshot = Assert.IsType<HumanInputRequestLifecycleStoreSnapshot>(lifecycle.Snapshot(checkpoint.Request.RequestId));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Waiting, parked.Status);
+        Assert.True(acknowledgementLost);
+        Assert.Equal(CustomLoopControlStatus.Failed, interrupted.Status);
+        Assert.Equal(CustomLoopControlStatus.Cancelled, replayed.Status);
+        Assert.Equal(CustomLoopRunStatus.Cancelled, runs.Current.Status);
+        Assert.Equal(HumanInputRequestLifecycleStatus.Cancelled, snapshot.Head.Status);
+        Assert.Equal(
+            [HumanInputRequestLifecycleOperationKind.Create, HumanInputRequestLifecycleOperationKind.Cancel],
+            lifecycle.Commits.Select(commit => commit.Mutation.Operation.Kind));
+        Assert.Equal(GovernedLoopHumanInputWaitingCheckpointPosture.Cancelled, Assert.Single(runs.Current.HumanInputWaitingCheckpoints).Posture);
+    }
+
+    [Fact]
+    public async Task Cancellation_retires_parallel_pending_human_input_checkpoints_in_canonical_order_once_each()
+    {
+        var context = await ParallelHumanInputPublicationContextAsync();
+        var runs = new FakeRunStore(context.Run);
+        var lifecycle = new InMemoryHumanInputRequestLifecycleStore();
+        var parked = await Runtime(
+            context,
+            runs,
+            new QueueExecutor(Result("parallel cancellation source")),
+            new RecordingPublisher(),
+            HumanInputPolicyResolver(context),
+            humanInputRequestPublicationService: Publication(context, runs, lifecycle)).RunAsync(Request(context));
+        var checkpoints = runs.Current.HumanInputWaitingCheckpoints
+            .OrderBy(checkpoint => checkpoint.Binding.ActivationOrdinal)
+            .ThenBy(checkpoint => checkpoint.Binding.NodeVisitOrdinal)
+            .ThenBy(checkpoint => checkpoint.Binding.CheckpointId, StringComparer.Ordinal)
+            .ToArray();
+        var controls = new FakeControlOperationStore();
+        var cancellation = HumanInputCancellationLifecycle(context, runs, lifecycle, controls);
+        var request = new CustomLoopCancelRequest(
+            runs.Current.Id,
+            runs.Current.LifecycleVersion,
+            "cancel-parallel-human-input",
+            AuditSchema.Actors.Web);
+
+        var cancelled = await cancellation.CancelAsync(request);
+        var replayed = await cancellation.CancelAsync(request);
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Waiting, parked.Status);
+        Assert.Equal(CustomLoopControlStatus.Cancelled, cancelled.Status);
+        Assert.Equal(CustomLoopControlStatus.Cancelled, replayed.Status);
+        Assert.Equal(CustomLoopRunStatus.Cancelled, runs.Current.Status);
+        Assert.All(runs.Current.HumanInputWaitingCheckpoints, checkpoint => Assert.Equal(GovernedLoopHumanInputWaitingCheckpointPosture.Cancelled, checkpoint.Posture));
+        var cancellations = lifecycle.Commits.Where(commit => commit.Mutation.Operation.Kind == HumanInputRequestLifecycleOperationKind.Cancel).ToArray();
+        Assert.Equal(checkpoints.Select(checkpoint => checkpoint.Request.RequestId), cancellations.Select(commit => commit.Mutation.Operation.TargetRequestId));
+        Assert.Equal(2, cancellations.Length);
+        Assert.Equal(4, lifecycle.Commits.Count);
+        Assert.All(checkpoints, checkpoint => Assert.Equal(HumanInputRequestLifecycleStatus.Cancelled, lifecycle.Snapshot(checkpoint.Request.RequestId)!.Head.Status));
+    }
+
+    [Fact]
+    public async Task Cancellation_fails_closed_when_answered_not_resumed_checkpoint_wins_before_request_cancel()
+    {
+        var context = await HumanInputPublicationContextAsync();
+        var runs = new FakeRunStore(context.Run);
+        var lifecycle = new InMemoryHumanInputRequestLifecycleStore();
+        var parked = await Runtime(
+            context,
+            runs,
+            new QueueExecutor(),
+            new RecordingPublisher(),
+            HumanInputPolicyResolver(context),
+            humanInputRequestPublicationService: Publication(context, runs, lifecycle)).RunAsync(Request(context));
+        var answered = AnswerHumanInputCheckpointForOrderedReentry(runs.Current, _now.AddSeconds(2));
+        runs.ReplaceCurrent(answered);
+        var checkpoint = Assert.Single(runs.Current.HumanInputWaitingCheckpoints);
+        var cancellation = HumanInputCancellationLifecycle(context, runs, lifecycle, new FakeControlOperationStore());
+
+        var result = await cancellation.CancelAsync(new CustomLoopCancelRequest(
+            runs.Current.Id,
+            runs.Current.LifecycleVersion,
+            "cancel-after-human-input-answer",
+            AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Waiting, parked.Status);
+        Assert.Equal(CustomLoopControlStatus.Failed, result.Status);
+        Assert.Equal(CustomLoopRunStatus.CancelRequested, runs.Current.Status);
+        Assert.Equal(GovernedLoopHumanInputWaitingCheckpointPosture.AnsweredNotResumed, Assert.Single(runs.Current.HumanInputWaitingCheckpoints).Posture);
+        Assert.Equal(HumanInputRequestLifecycleStatus.Pending, lifecycle.Snapshot(checkpoint.Request.RequestId)!.Head.Status);
+        Assert.Single(lifecycle.Commits);
+        Assert.Equal(HumanInputRequestLifecycleOperationKind.Create, lifecycle.Commits[0].Mutation.Operation.Kind);
+    }
+
+    [Fact]
+    public async Task Authenticated_response_winner_under_the_shared_authority_fence_remains_answered_without_loop_cancel()
+    {
+        var context = await HumanInputPublicationContextAsync();
+        var runs = new FakeRunStore(context.Run);
+        var lifecycle = new InMemoryHumanInputRequestLifecycleStore();
+        var parked = await Runtime(
+            context,
+            runs,
+            new QueueExecutor(),
+            new RecordingPublisher(),
+            HumanInputPolicyResolver(context),
+            humanInputRequestPublicationService: Publication(context, runs, lifecycle)).RunAsync(Request(context));
+        var checkpoint = Assert.Single(runs.Current.HumanInputWaitingCheckpoints);
+        var published = Assert.IsType<HumanInputRequestLifecycleStoreSnapshot>(lifecycle.Snapshot(checkpoint.Request.RequestId));
+        var responseStore = new InMemoryHumanInputResponseLifecycleStore(published);
+        var responses = new HumanInputResponseLifecycleService(
+            responseStore,
+            new RecordingHumanInputResponseActorAuthenticator(),
+            context.Store,
+            context.Anchor.AdapterBinding.WorkspaceId,
+            new FixedTimeProvider(_now.AddSeconds(2)));
+        var response = await responses.MutateAsync(HumanInputResponseLifecycleTestData.Submit(
+            checkpoint.Request,
+            published.Head,
+            "response-wins-before-loop-cancel",
+            "response-wins-before-loop-cancel-value",
+            HumanInputResponseLifecycleTestData.Text("accepted")));
+        lifecycle.ReplaceSnapshot(checkpoint.Request.RequestId, responseStore.CurrentSnapshot!.Request);
+        var cancellation = HumanInputCancellationLifecycle(context, runs, lifecycle, new FakeControlOperationStore());
+
+        var result = await cancellation.CancelAsync(new CustomLoopCancelRequest(
+            runs.Current.Id,
+            runs.Current.LifecycleVersion,
+            "cancel-after-response-winner",
+            AuditSchema.Actors.Web));
+        var answered = Assert.IsType<HumanInputRequestLifecycleStoreSnapshot>(lifecycle.Snapshot(checkpoint.Request.RequestId));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Waiting, parked.Status);
+        Assert.Equal(HumanInputResponseLifecycleMutationStatus.Committed, response.Status);
+        Assert.Equal(CustomLoopControlStatus.Failed, result.Status);
+        Assert.Equal(CustomLoopRunStatus.CancelRequested, runs.Current.Status);
+        Assert.Equal(HumanInputRequestLifecycleStatus.Answered, answered.Head.Status);
+        Assert.Equal("response-wins-before-loop-cancel", answered.Head.LastOperationId);
+        Assert.DoesNotContain(lifecycle.Commits, commit => commit.Mutation.Operation.Kind == HumanInputRequestLifecycleOperationKind.Cancel);
+        Assert.Single(responseStore.Commits);
+    }
+
+    [Fact]
+    public async Task Queued_human_input_response_continuation_loses_its_waiting_cas_to_parent_cancellation_without_dispatch_or_pending_requests()
+    {
+        var context = await ParallelHumanInputPublicationContextAsync();
+        var runs = new FakeRunStore(context.Run);
+        var lifecycle = new InMemoryHumanInputRequestLifecycleStore();
+        var parked = await Runtime(
+            context,
+            runs,
+            new QueueExecutor(Result("queued continuation cancellation source")),
+            new RecordingPublisher(),
+            HumanInputPolicyResolver(context),
+            humanInputRequestPublicationService: Publication(context, runs, lifecycle)).RunAsync(Request(context));
+        var checkpoints = runs.Current.HumanInputWaitingCheckpoints
+            .OrderBy(checkpoint => checkpoint.Binding.ActivationOrdinal)
+            .ThenBy(checkpoint => checkpoint.Binding.NodeVisitOrdinal)
+            .ThenBy(checkpoint => checkpoint.Binding.CheckpointId, StringComparer.Ordinal)
+            .ToArray();
+        var selectedCheckpoint = checkpoints[0];
+        var published = Assert.IsType<HumanInputRequestLifecycleStoreSnapshot>(lifecycle.Snapshot(selectedCheckpoint.Request.RequestId));
+        var responseStore = new InMemoryHumanInputResponseLifecycleStore(published);
+        var currentPosture = new StubGovernedLoopSleepCurrentPosturePort
+        {
+            Result = new GovernedLoopSleepCurrentPostureReadResult(
+                GovernedLoopSleepCurrentPostureReadStatus.Found,
+                HumanInputContinuationPosture(context, runs.Current)),
+        };
+        var sleepStore = new InMemoryGovernedLoopSleepStore();
+        var ordered = new CancellationBarrierRecordingOrderedRuntime();
+        var continuation = new HumanInputResponseContinuationService(
+            runs,
+            responseStore,
+            sleepStore,
+            currentPosture,
+            new HumanInputResponseContinuationBoundContextPort(new GovernedLoopWaitOrderedContext(context.Anchor, context.Plan, context.Artifact)),
+            ordered,
+            new FixedTimeProvider(_now.AddSeconds(3)));
+        var sleep = new GovernedLoopSleepService(
+            sleepStore,
+            currentPosture,
+            continuation,
+            continuation,
+            new FixedTimeProvider(_now.AddSeconds(3)));
+        continuation.BindSleep(sleep);
+        var waitingRereadReached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseAfterParentCancellation = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        responseStore.ReadOverride = async (request, cancellationToken) =>
+        {
+            waitingRereadReached.TrySetResult();
+            await releaseAfterParentCancellation.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+            return responseStore.ReadCurrent(request);
+        };
+
+        var writesBeforeWorker = runs.Writes.Count;
+        var worker = continuation.WakeAsync(new HumanInputResponseContinuationCandidate(
+            runs.Current.Id,
+            selectedCheckpoint.Binding.CheckpointId,
+            selectedCheckpoint.CheckpointHash));
+        await waitingRereadReached.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var cancellation = HumanInputCancellationLifecycle(context, runs, lifecycle, new FakeControlOperationStore());
+        var cancelled = await cancellation.CancelAsync(new CustomLoopCancelRequest(
+            runs.Current.Id,
+            runs.Current.LifecycleVersion,
+            "cancel-wins-over-queued-response-continuation",
+            AuditSchema.Actors.Web));
+        var writesAfterParentCancellation = runs.Writes.Count;
+        responseStore.ReplaceLifecycle(Assert.IsType<HumanInputRequestLifecycleStoreSnapshot>(lifecycle.Snapshot(selectedCheckpoint.Request.RequestId)));
+        releaseAfterParentCancellation.TrySetResult();
+        var workerResult = await worker.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Waiting, parked.Status);
+        Assert.Equal(CustomLoopControlStatus.Cancelled, cancelled.Status);
+        Assert.Equal(HumanInputResponseContinuationWakeStatus.Retired, workerResult.Status);
+        Assert.Equal(CustomLoopRunStatus.Cancelled, runs.Current.Status);
+        Assert.Equal(writesAfterParentCancellation, runs.Writes.Count);
+        Assert.Equal(0, ordered.ResumeHumanInputCount);
+        Assert.Equal(0, ordered.ResumeHumanInputFailureCount);
+        Assert.Equal(0, sleepStore.CheckpointCount);
+        Assert.Equal(0, sleepStore.WakeCount);
+        Assert.DoesNotContain(
+            runs.Writes.Skip(writesBeforeWorker),
+            run => run.HumanInputWaitingCheckpoints.Any(
+                checkpoint => checkpoint.Posture == GovernedLoopHumanInputWaitingCheckpointPosture.AnsweredNotResumed));
+        Assert.All(
+            runs.Current.HumanInputWaitingCheckpoints,
+            checkpoint => Assert.Equal(GovernedLoopHumanInputWaitingCheckpointPosture.Cancelled, checkpoint.Posture));
+        Assert.All(
+            checkpoints,
+            checkpoint => Assert.Equal(HumanInputRequestLifecycleStatus.Cancelled, lifecycle.Snapshot(checkpoint.Request.RequestId)!.Head.Status));
+        Assert.DoesNotContain(
+            runs.Current.HumanInputWaitingCheckpoints,
+            checkpoint => checkpoint.Posture == GovernedLoopHumanInputWaitingCheckpointPosture.Pending);
+        Assert.DoesNotContain(
+            checkpoints,
+            checkpoint => lifecycle.Snapshot(checkpoint.Request.RequestId)!.Head.Status == HumanInputRequestLifecycleStatus.Pending);
+    }
+
+    [Fact]
+    public async Task Cancel_requested_run_refuses_a_queued_human_input_continuation_before_parent_checkpoint_retirement()
+    {
+        var context = await ParallelHumanInputPublicationContextAsync();
+        var runs = new FakeRunStore(context.Run);
+        var lifecycle = new InMemoryHumanInputRequestLifecycleStore();
+        var parked = await Runtime(
+            context,
+            runs,
+            new QueueExecutor(Result("cancel requested continuation refusal source")),
+            new RecordingPublisher(),
+            HumanInputPolicyResolver(context),
+            humanInputRequestPublicationService: Publication(context, runs, lifecycle)).RunAsync(Request(context));
+        var checkpoints = runs.Current.HumanInputWaitingCheckpoints
+            .OrderBy(checkpoint => checkpoint.Binding.ActivationOrdinal)
+            .ThenBy(checkpoint => checkpoint.Binding.NodeVisitOrdinal)
+            .ThenBy(checkpoint => checkpoint.Binding.CheckpointId, StringComparer.Ordinal)
+            .ToArray();
+        var selectedCheckpoint = checkpoints[0];
+        var responseStore = new InMemoryHumanInputResponseLifecycleStore(
+            Assert.IsType<HumanInputRequestLifecycleStoreSnapshot>(lifecycle.Snapshot(selectedCheckpoint.Request.RequestId)));
+        var currentPosture = new StubGovernedLoopSleepCurrentPosturePort
+        {
+            Result = new GovernedLoopSleepCurrentPostureReadResult(
+                GovernedLoopSleepCurrentPostureReadStatus.Found,
+                HumanInputContinuationPosture(context, runs.Current)),
+        };
+        var sleepStore = new InMemoryGovernedLoopSleepStore();
+        var ordered = new CancellationBarrierRecordingOrderedRuntime();
+        var continuation = new HumanInputResponseContinuationService(
+            runs,
+            responseStore,
+            sleepStore,
+            currentPosture,
+            new HumanInputResponseContinuationBoundContextPort(new GovernedLoopWaitOrderedContext(context.Anchor, context.Plan, context.Artifact)),
+            ordered,
+            new FixedTimeProvider(_now.AddSeconds(3)));
+        var sleep = new GovernedLoopSleepService(
+            sleepStore,
+            currentPosture,
+            continuation,
+            continuation,
+            new FixedTimeProvider(_now.AddSeconds(3)));
+        continuation.BindSleep(sleep);
+        var checkpointRetirementReached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseCheckpointRetirement = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        runs.BeforeUpdateAsync = async (candidate, _) =>
+        {
+            if (candidate.Status == CustomLoopRunStatus.CancelRequested
+                && candidate.HumanInputWaitingCheckpoints.Any(
+                    checkpoint => checkpoint.Posture == GovernedLoopHumanInputWaitingCheckpointPosture.Cancelled))
+            {
+                checkpointRetirementReached.TrySetResult();
+                await releaseCheckpointRetirement.Task.ConfigureAwait(false);
+            }
+        };
+
+        var cancellation = HumanInputCancellationLifecycle(context, runs, lifecycle, new FakeControlOperationStore());
+        var parent = cancellation.CancelAsync(new CustomLoopCancelRequest(
+            runs.Current.Id,
+            runs.Current.LifecycleVersion,
+            "cancel-requested-refuses-queued-continuation",
+            AuditSchema.Actors.Web));
+        await checkpointRetirementReached.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var writesBeforeWake = runs.Writes.Count;
+
+        var wake = await continuation.WakeAsync(new HumanInputResponseContinuationCandidate(
+            runs.Current.Id,
+            selectedCheckpoint.Binding.CheckpointId,
+            selectedCheckpoint.CheckpointHash));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Waiting, parked.Status);
+        Assert.Equal(CustomLoopRunStatus.CancelRequested, runs.Current.Status);
+        Assert.All(
+            runs.Current.HumanInputWaitingCheckpoints,
+            checkpoint => Assert.Equal(GovernedLoopHumanInputWaitingCheckpointPosture.Pending, checkpoint.Posture));
+        Assert.Equal(HumanInputResponseContinuationWakeStatus.Stale, wake.Status);
+        Assert.Equal(writesBeforeWake, runs.Writes.Count);
+        Assert.Equal(0, sleepStore.CheckpointCount);
+        Assert.Equal(0, sleepStore.WakeCount);
+        Assert.Equal(0, ordered.ResumeHumanInputCount);
+        Assert.Equal(0, ordered.ResumeHumanInputFailureCount);
+
+        releaseCheckpointRetirement.TrySetResult();
+        var cancelled = await parent.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(CustomLoopControlStatus.Cancelled, cancelled.Status);
+        Assert.Equal(CustomLoopRunStatus.Cancelled, runs.Current.Status);
+        Assert.All(
+            runs.Current.HumanInputWaitingCheckpoints,
+            checkpoint => Assert.Equal(GovernedLoopHumanInputWaitingCheckpointPosture.Cancelled, checkpoint.Posture));
+        Assert.All(
+            checkpoints,
+            checkpoint => Assert.Equal(HumanInputRequestLifecycleStatus.Cancelled, lifecycle.Snapshot(checkpoint.Request.RequestId)!.Head.Status));
     }
 
     [Fact]
@@ -2374,6 +3187,110 @@ public sealed partial class CustomLoopOrderedRunnerTests
             context.Store,
             context.Anchor.AdapterBinding.WorkspaceId,
             new FixedTimeProvider(AuthorityGrantApplicationTestFixture.Now));
+
+    private static CustomLoopLifecycleService HumanInputCancellationLifecycle(
+        SequentialTestContext context,
+        FakeRunStore runs,
+        InMemoryHumanInputRequestLifecycleStore lifecycle,
+        FakeControlOperationStore controls,
+        TimeProvider? timeProvider = null)
+    {
+        var clock = timeProvider ?? new FixedTimeProvider(_now.AddSeconds(3));
+        var convergence = HumanInputCancellationConvergence(context, runs, lifecycle, controls, context.Store, clock);
+        return new CustomLoopLifecycleService(
+            runs,
+            controls,
+            new NoopWaitLifecycleResumeExecutor(runs.Current),
+            new AvailableModel(),
+            new NoActiveAttemptCancellationSignal(),
+            new RecordingAuditLog(),
+            new TestExecutionGate(),
+            clock,
+            cancellationAuthorityTransaction: context.Store,
+            humanInputCancellationConvergence: convergence);
+    }
+
+    private static CustomLoopHumanInputCancellationConvergenceService HumanInputCancellationConvergence(
+        SequentialTestContext context,
+        FakeRunStore runs,
+        InMemoryHumanInputRequestLifecycleStore lifecycle,
+        FakeControlOperationStore controls,
+        ICapabilityAuthorityTransaction authorityTransaction,
+        TimeProvider? timeProvider = null)
+        => new(
+            runs,
+            controls,
+            lifecycle,
+            context.Store,
+            authorityTransaction,
+            context.Anchor.AdapterBinding.WorkspaceId,
+            timeProvider ?? new FixedTimeProvider(_now.AddSeconds(3)));
+
+    private static CustomLoopControlOperation PendingCancellationControl(CustomLoopRunRecord run, string operationId)
+        => new(
+            CustomLoopControlOperation.CurrentSchemaVersion,
+            operationId,
+            CustomLoopControlRequestHash.Compute(CustomLoopControlKind.Cancel, run.Id, run.LifecycleVersion, operationId, AuditSchema.Actors.Web),
+            CustomLoopControlKind.Cancel,
+            run.Id,
+            run.LifecycleVersion,
+            AuditSchema.Actors.Web,
+            _now,
+            _now,
+            CustomLoopControlOperationState.Pending,
+            CustomLoopControlStatus.Unknown,
+            null,
+            null,
+            false,
+            "Cancellation operation pending.");
+
+    private static async Task<(SequentialTestContext Context, FakeRunStore Runs, InMemoryHumanInputRequestLifecycleStore Lifecycle, GovernedLoopHumanInputWaitingCheckpoint Checkpoint)> PublishedHumanInputCancellationAsync()
+    {
+        var context = await HumanInputPublicationContextAsync();
+        var runs = new FakeRunStore(context.Run);
+        var lifecycle = new InMemoryHumanInputRequestLifecycleStore();
+        var parked = await Runtime(
+            context,
+            runs,
+            new QueueExecutor(),
+            new RecordingPublisher(),
+            HumanInputPolicyResolver(context),
+            humanInputRequestPublicationService: Publication(context, runs, lifecycle)).RunAsync(Request(context));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Waiting, parked.Status);
+        return (context, runs, lifecycle, Assert.Single(runs.Current.HumanInputWaitingCheckpoints));
+    }
+
+    private static CustomLoopRunStoreResult CheckpointRetirementResult(CustomLoopRunStoreStatus status, CustomLoopRunRecord run)
+        => status switch
+        {
+            CustomLoopRunStoreStatus.Conflict => CustomLoopRunStoreResult.VersionConflict(run, run.LifecycleVersion),
+            CustomLoopRunStoreStatus.TerminalImmutable => CustomLoopRunStoreResult.TerminalImmutable(run, run.LifecycleVersion),
+            CustomLoopRunStoreStatus.NotFound => CustomLoopRunStoreResult.NotFound(),
+            _ => throw new InvalidOperationException("The test checkpoint-retirement result is unsupported."),
+        };
+
+    private static GovernedLoopSleepCurrentPosture HumanInputContinuationPosture(SequentialTestContext context, CustomLoopRunRecord run)
+    {
+        var lifecycle = GovernedLoopRunLifecycle.Create(
+            context.Anchor.AdapterBinding.ExecutionBinding,
+            GovernedLoopRunLifecyclePayload.Create(
+                1,
+                run.LifecycleVersion,
+                GovernedLoopRunStatus.Waiting,
+                run.CreatedAtUtc,
+                run.UpdatedAtUtc,
+                null));
+        var execution = GovernedLoopExecutionEvidenceSet.Create(1, lifecycle, run.Frontier!, [], []);
+        return new GovernedLoopSleepCurrentPosture(
+            execution,
+            context.Anchor.AdapterBinding.AdmissionReceipt.Intent.Publication,
+            true,
+            GovernedLoopSleepApplicationTestFixture.Hash('f'),
+            null,
+            _now.AddSeconds(3),
+            GovernedLoopSleepApplicationTestFixture.Hash('9'));
+    }
 
     private static HumanInputPolicyArtifact TimeoutPolicy(GovernedLoopSequentialAdapterBinding binding, string actorId)
         => HumanInputPolicyArtifactHash.Apply(new HumanInputPolicyArtifact(

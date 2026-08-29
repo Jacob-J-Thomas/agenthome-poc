@@ -95,6 +95,14 @@ internal sealed class InMemoryHumanInputRequestLifecycleStore : IHumanInputReque
     internal HumanInputRequestLifecycleStoreSnapshot? Snapshot(string requestId)
         => _snapshots.GetValueOrDefault(requestId);
 
+    internal void ReplaceSnapshot(string requestId, HumanInputRequestLifecycleStoreSnapshot snapshot)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(requestId);
+        ArgumentNullException.ThrowIfNull(snapshot);
+        _snapshots[requestId] = snapshot;
+        _generation++;
+    }
+
     internal HumanInputRequestLifecycleStoreCommitResult CommitDurably(HumanInputRequestLifecycleStoreMutation mutation)
     {
         if (_operations.TryGetValue(mutation.Operation.OperationId, out var existing))

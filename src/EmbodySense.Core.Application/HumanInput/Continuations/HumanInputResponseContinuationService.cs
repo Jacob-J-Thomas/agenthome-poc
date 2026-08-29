@@ -40,7 +40,9 @@ namespace EmbodySense.Core.Application.HumanInput.Continuations;
 /// This service owns no worker lifetime, timer, queue, lease, or wake ledger. The canonical run retains the selected
 /// response and terminal receipt; the generic sleep store retains wake identity, prepared/ambiguous/committed evidence,
 /// and coordinator ownership. A selection is durably attached to its exact checkpoint before wake submission, and the
-/// terminal checkpoint plus completed activation frontier are durably committed before ordered re-entry.
+/// terminal checkpoint plus completed activation frontier are durably committed before ordered re-entry. A canonical
+/// <see cref="CustomLoopRunStatus.CancelRequested"/> run is a hard refusal boundary: response replay, selection
+/// attachment, no-response retirement, wake verification, and ordered re-entry return without mutating or dispatching.
 /// </remarks>
 public sealed class HumanInputResponseContinuationService : IHumanInputResponseContinuationWakePort, IGovernedLoopAuthenticatedWakeVerificationPort, IGovernedLoopWakeContinuationPort
 {
@@ -104,6 +106,10 @@ public sealed class HumanInputResponseContinuationService : IHumanInputResponseC
             return Wake(Map(initialRead.Status));
         }
         var initial = initialRead.Run!;
+        if (initial.Status == CustomLoopRunStatus.CancelRequested)
+        {
+            return Wake(HumanInputResponseContinuationWakeStatus.Stale);
+        }
         if (TryFindAcceptedTerminalReplay(initial, candidate.CheckpointId, out var terminalCheckpoint, out var terminalActivation))
         {
             return await ReplayTerminalWakeAsync(initial, terminalCheckpoint!, terminalActivation!, sleep, cancellationToken).ConfigureAwait(false);
@@ -138,6 +144,10 @@ public sealed class HumanInputResponseContinuationService : IHumanInputResponseC
         }
 
         var selectedRun = selectedRead.Run!;
+        if (selectedRun.Status == CustomLoopRunStatus.CancelRequested)
+        {
+            return Wake(HumanInputResponseContinuationWakeStatus.Stale);
+        }
         if (!TryFindWaitingCheckpoint(selectedRun, candidate.CheckpointId, out var selectedCheckpoint, out var selectedActivation)
             || !TryCreatePublication(selectedRun, selectedCheckpoint!, selectedActivation!, out var publication))
         {
@@ -220,6 +230,7 @@ public sealed class HumanInputResponseContinuationService : IHumanInputResponseC
         if (resolved.Status != HumanInputResponseContinuationWakeResolutionStatus.Found
             || resolved.Run is null
             || resolved.Checkpoint is null
+            || resolved.Run.Status == CustomLoopRunStatus.CancelRequested
             || !TryFindCheckpointForWake(resolved.Run, resolved.Checkpoint, out var checkpoint, out _)
             || checkpoint!.Posture != GovernedLoopHumanInputWaitingCheckpointPosture.AnsweredNotResumed
             || !TrySelectionReference(checkpoint, out var reference)
@@ -305,6 +316,10 @@ public sealed class HumanInputResponseContinuationService : IHumanInputResponseC
             || !TryFindCheckpointForWake(run, request.Checkpoint, out var checkpoint, out var activation))
         {
             return Continuation(GovernedLoopWakeContinuationStatus.NotCommitted, "human-input-checkpoint-stale");
+        }
+        if (run.Status == CustomLoopRunStatus.CancelRequested)
+        {
+            return Continuation(GovernedLoopWakeContinuationStatus.Conflict, "human-input-cancel-requested");
         }
 
         if (TryTerminalReceipt(checkpoint!, request, out var terminalEvidenceHash))
@@ -442,6 +457,10 @@ public sealed class HumanInputResponseContinuationService : IHumanInputResponseC
         string terminalEvidenceHash,
         CancellationToken cancellationToken)
     {
+        if (run.Status == CustomLoopRunStatus.CancelRequested)
+        {
+            return Continuation(GovernedLoopWakeContinuationStatus.Conflict, "human-input-cancel-requested");
+        }
         if (run.Status != CustomLoopRunStatus.Running)
         {
             return Continuation(GovernedLoopWakeContinuationStatus.Committed, terminalEvidenceHash);
@@ -513,6 +532,10 @@ public sealed class HumanInputResponseContinuationService : IHumanInputResponseC
         GovernedLoopSleepService sleep,
         CancellationToken cancellationToken)
     {
+        if (run.Status == CustomLoopRunStatus.CancelRequested)
+        {
+            return Wake(HumanInputResponseContinuationWakeStatus.Stale);
+        }
         if (!TrySelectionReference(checkpoint, out var selection)
             || !TryCreatePublication(run, checkpoint, activation, out var publication)
             || !TryCreatePublishedCheckpoint(publication, out var sleepCheckpoint)
@@ -553,7 +576,8 @@ public sealed class HumanInputResponseContinuationService : IHumanInputResponseC
         GovernedLoopHumanInputWaitingCheckpoint checkpoint,
         CancellationToken cancellationToken)
     {
-        if (!TryFindNoResponseReentry(run, checkpoint.Binding.CheckpointId, out var retained)
+        if (run.Status == CustomLoopRunStatus.CancelRequested
+            || !TryFindNoResponseReentry(run, checkpoint.Binding.CheckpointId, out var retained)
             || retained is null)
         {
             return false;
@@ -637,6 +661,7 @@ public sealed class HumanInputResponseContinuationService : IHumanInputResponseC
         var run = runRead.Run;
         if (runRead.Status != HumanInputResponseContinuationRunReadStatus.Found
             || run is null
+            || run.Status == CustomLoopRunStatus.CancelRequested
             || !TryFindWaitingCheckpoint(run, candidate.CheckpointId, out var checkpoint, out _))
         {
             return SelectionAttachment.Stale();
@@ -732,6 +757,10 @@ public sealed class HumanInputResponseContinuationService : IHumanInputResponseC
         HumanInputResponseLifecycleStoreSnapshot snapshot,
         CancellationToken cancellationToken)
     {
+        if (run.Status == CustomLoopRunStatus.CancelRequested)
+        {
+            return SelectionAttachment.Stale();
+        }
         if (!TryExactNoResponseLifecycle(snapshot, checkpoint, out var disposition, out var retiredAtUtc))
         {
             return SelectionAttachment.Invalid();

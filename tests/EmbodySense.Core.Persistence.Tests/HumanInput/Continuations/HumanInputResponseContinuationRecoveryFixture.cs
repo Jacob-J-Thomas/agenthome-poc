@@ -39,15 +39,22 @@ internal static class HumanInputResponseContinuationRecoveryFixture
 {
     internal static readonly DateTimeOffset Now = GovernedLoopSequentialApplicationTestFixture.Now;
 
-    internal static HumanInputContinuationRecoveryContext CreateWaitingContext(string runId = "human-input-continuation-run")
-        => CreateContext(runId, activeParallel: false);
+    internal static HumanInputContinuationRecoveryContext CreateWaitingContext(
+        string runId = "human-input-continuation-run",
+        string? workspaceId = null,
+        DateTimeOffset? now = null)
+        => CreateContext(runId, activeParallel: false, workspaceId ?? DefaultWorkspaceId, now ?? Now);
 
-    internal static HumanInputContinuationRecoveryContext CreateActivePendingContext(string runId = "human-input-active-continuation-run")
-        => CreateContext(runId, activeParallel: true);
+    internal static HumanInputContinuationRecoveryContext CreateActivePendingContext(
+        string runId = "human-input-active-continuation-run",
+        string? workspaceId = null,
+        DateTimeOffset? now = null)
+        => CreateContext(runId, activeParallel: true, workspaceId ?? DefaultWorkspaceId, now ?? Now);
 
-    private static HumanInputContinuationRecoveryContext CreateContext(string runId, bool activeParallel)
+    private const string DefaultWorkspaceId = "workspace-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    private static HumanInputContinuationRecoveryContext CreateContext(string runId, bool activeParallel, string workspaceId, DateTimeOffset now)
     {
-        const string WorkspaceId = "workspace-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         var configuration = new GovernedLoopHumanInputNodeConfiguration(
             GovernedLoopHumanInputNodeConfiguration.CurrentSchemaVersion,
             "confirmation",
@@ -66,13 +73,13 @@ internal static class HumanInputResponseContinuationRecoveryFixture
         Assert.True(builtPlan.Plan is not null, $"{builtPlan.Status}: {builtPlan.FailurePath}");
         var plan = builtPlan.Plan!;
         var execution = GovernedLoopExecutionBinding.Create(1, runId, artifact.RevisionArtifact.Revision, 1);
-        var context = CustomLoopContextSnapshot.CreateEmpty(Now);
+        var context = CustomLoopContextSnapshot.CreateEmpty(now);
         var invocation = GovernedLoopSequentialContractHash.Apply(new GovernedLoopSequentialInvocationSnapshot(
             1,
             "Continue the exact waiting Human Input request.",
             new CustomLoopModelSnapshot("provider", "model"),
             null,
-            Now,
+            now,
             context.SourceManifest,
             string.Empty));
         var publication = GovernedLoopRevisionPublicationPinFactory.Create(1, artifact.RevisionArtifact.Revision, "publish-sequential", Hash('7'));
@@ -85,8 +92,8 @@ internal static class HumanInputResponseContinuationRecoveryFixture
                 artifact.Graph.OwningRole,
                 publication),
             ceiling: AuthorityCeilingIntersection.EmptyCeiling(),
-            boundary: new AuthorityGrantBoundary(Now.AddHours(-1), Now.AddHours(1), AuthorityGrantCompletionConstraintKind.None),
-            recordedAtUtc: Now.AddHours(-2));
+            boundary: new AuthorityGrantBoundary(now.AddHours(-1), now.AddHours(1), AuthorityGrantCompletionConstraintKind.None),
+            recordedAtUtc: now.AddHours(-2));
         var grantReference = new AuthorityGrantReference(grant.GrantId, grant.Revision, grant.ContentHash);
         var admission = GovernedLoopAdmissionRequestHash.Apply(new GovernedLoopAdmissionRequest(
             1,
@@ -97,10 +104,10 @@ internal static class HumanInputResponseContinuationRecoveryFixture
             grantReference,
             Actor(),
             "test"));
-        var receipt = GovernedLoopSequentialApplicationTestFixture.AdmissionReceipt(artifact, execution, WorkspaceId, admission.OperationId, admission.RequestHash, artifact.ArtifactHash, artifact.LayoutHash, grant);
+        var receipt = GovernedLoopSequentialApplicationTestFixture.AdmissionReceipt(artifact, execution, workspaceId, admission.OperationId, admission.RequestHash, artifact.ArtifactHash, artifact.LayoutHash, grant, now);
         var binding = GovernedLoopSequentialContractHash.Apply(new GovernedLoopSequentialAdapterBinding(
             1,
-            WorkspaceId,
+            workspaceId,
             execution,
             admission.OperationId,
             receipt,
@@ -114,7 +121,7 @@ internal static class HumanInputResponseContinuationRecoveryFixture
         var projected = GovernedLoopSequentialLegacyDefinitionProjector.Project(binding, invocation, plan, artifact);
         Assert.Equal(GovernedLoopSequentialLegacyDefinitionProjectionStatus.Ready, projected.Status);
         var definition = Assert.IsType<CustomLoopDefinition>(projected.Definition);
-        var admittedEvent = AdmittedEvent(binding, activeParallel);
+        var admittedEvent = AdmittedEvent(binding, activeParallel, now);
         var initialized = Assert.IsType<GovernedLoopFrontierPosture>(GovernedLoopSequentialFrontierMachine.Initialize(
             binding,
             plan,
@@ -128,8 +135,8 @@ internal static class HumanInputResponseContinuationRecoveryFixture
             definition.Id,
             1,
             CustomLoopRunStatus.Admitted,
-            Now,
-            Now,
+            now,
+            now,
             null,
             "web",
             invocation.ModelSnapshot,
@@ -144,7 +151,7 @@ internal static class HumanInputResponseContinuationRecoveryFixture
             CustomLoopRunCheckpoint.Start(),
             [
                 admittedEvent,
-                new CustomLoopRunEvent(2, "human-input-continuation-admission-audit", Now, CustomLoopRunEventKind.AdmissionAuditCompleted, null, null, null, "Admission audit completed.", [], null, null, null, null, null, null, null, null, null, null),
+                new CustomLoopRunEvent(2, "human-input-continuation-admission-audit", now, CustomLoopRunEventKind.AdmissionAuditCompleted, null, null, null, "Admission audit completed.", [], null, null, null, null, null, null, null, null, null, null),
             ],
             null,
             null,
@@ -166,13 +173,13 @@ internal static class HumanInputResponseContinuationRecoveryFixture
             ready,
             1,
             "human-input-continuation-claim",
-            Now.AddMinutes(1)).Frontier);
+            now.AddMinutes(1)).Frontier);
         var running = seed with
         {
             LifecycleVersion = 2,
             Status = CustomLoopRunStatus.Running,
-            UpdatedAtUtc = Now.AddMinutes(1),
-            ExecutionClock = new CustomLoopExecutionClock(0, Now.AddMinutes(1)),
+            UpdatedAtUtc = now.AddMinutes(1),
+            ExecutionClock = new CustomLoopExecutionClock(0, now.AddMinutes(1)),
             Frontier = started,
         };
         var activation = started.Payload.Nodes[ready.ActivationOrdinal];
@@ -184,20 +191,20 @@ internal static class HumanInputResponseContinuationRecoveryFixture
             activation,
             1,
             "human-input-continuation-claim",
-            Now.AddMinutes(1)).Frontier);
-        var checkpoint = CreateCheckpoint(binding, running, node, waitingFrontier.Payload.Nodes[activation.ActivationOrdinal], waitingFrontier, configuration, Now.AddMinutes(1));
+            now.AddMinutes(1)).Frontier);
+        var checkpoint = CreateCheckpoint(binding, running, node, waitingFrontier.Payload.Nodes[activation.ActivationOrdinal], waitingFrontier, configuration, now.AddMinutes(1));
         var aggregateWaiting = waitingFrontier.Payload.Status == GovernedLoopFrontierStatus.Waiting;
         var waiting = running with
         {
             LifecycleVersion = 3,
             Status = aggregateWaiting ? CustomLoopRunStatus.Waiting : CustomLoopRunStatus.Running,
-            UpdatedAtUtc = Now.AddMinutes(1),
+            UpdatedAtUtc = now.AddMinutes(1),
             ExecutionClock = aggregateWaiting
                 ? new CustomLoopExecutionClock(60_000, null)
-                : new CustomLoopExecutionClock(0, Now.AddMinutes(1)),
+                : new CustomLoopExecutionClock(0, now.AddMinutes(1)),
             Frontier = waitingFrontier,
             HumanInputWaitingCheckpoints = [checkpoint],
-            Events = [.. running.Events, new CustomLoopRunEvent(3, "human-input-continuation-waiting", Now.AddMinutes(1), CustomLoopRunEventKind.LifecycleChanged, null, null, null, "Human Input waiting.", [], null, null, null, null, null, null, null, null, null, null)],
+            Events = [.. running.Events, new CustomLoopRunEvent(3, "human-input-continuation-waiting", now.AddMinutes(1), CustomLoopRunEventKind.LifecycleChanged, null, null, null, "Human Input waiting.", [], null, null, null, null, null, null, null, null, null, null)],
         };
         Assert.True(CustomLoopRunValidator.Validate(waiting).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(waiting).Errors));
         return new HumanInputContinuationRecoveryContext(seed, running, waiting, checkpoint, binding, plan, artifact, grant);
@@ -343,9 +350,9 @@ internal static class HumanInputResponseContinuationRecoveryFixture
             string.Empty));
     }
 
-    private static CustomLoopRunEvent AdmittedEvent(GovernedLoopSequentialAdapterBinding binding, bool activeParallel)
+    private static CustomLoopRunEvent AdmittedEvent(GovernedLoopSequentialAdapterBinding binding, bool activeParallel, DateTimeOffset now)
     {
-        var runEvent = new CustomLoopRunEvent(1, "human-input-continuation-admitted", Now, CustomLoopRunEventKind.Admitted, null, null, null, "Run admitted.", [], null, null, null, null, null, null, null, null, null, null);
+        var runEvent = new CustomLoopRunEvent(1, "human-input-continuation-admitted", now, CustomLoopRunEventKind.Admitted, null, null, null, "Run admitted.", [], null, null, null, null, null, null, null, null, null, null);
         var evidence = CustomLoopSequentialNodeEvidenceHash.Apply(new CustomLoopSequentialNodeEvidence(
             1,
             CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,

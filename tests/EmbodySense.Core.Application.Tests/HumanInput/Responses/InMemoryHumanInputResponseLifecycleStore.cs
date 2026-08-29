@@ -23,6 +23,8 @@ internal sealed class InMemoryHumanInputResponseLifecycleStore(
 
     internal Func<string, string, string, CancellationToken, Task<HumanInputResponseLifecycleStoreReadResult>>? ReadForMutationOverride { get; set; }
 
+    internal Func<HumanInputRequestReference, CancellationToken, Task<HumanInputResponseLifecycleStoreReadResult>>? ReadOverride { get; set; }
+
     internal Func<HumanInputResponseLifecycleStoreMutation, CancellationToken, Task<HumanInputResponseLifecycleStoreCommitResult>>? CommitOverride { get; set; }
 
     internal int ConflictsRemaining { get; set; }
@@ -42,13 +44,7 @@ internal sealed class InMemoryHumanInputResponseLifecycleStore(
         HumanInputRequestReference request,
         CancellationToken cancellationToken = default)
     {
-        var snapshot = Snapshot(request);
-        return Task.FromResult(
-            new HumanInputResponseLifecycleStoreReadResult(
-                snapshot is null ? HumanInputResponseLifecycleStoreReadStatus.NotFound : HumanInputResponseLifecycleStoreReadStatus.Ready,
-                _generation,
-                snapshot,
-                null));
+        return ReadOverride?.Invoke(request, cancellationToken) ?? Task.FromResult(ReadCurrent(request));
     }
 
     public Task<HumanInputResponseLifecycleStoreReadResult> ReadForMutationAsync(
@@ -193,6 +189,16 @@ internal sealed class InMemoryHumanInputResponseLifecycleStore(
     {
         _lifecycle = lifecycle;
         _generation++;
+    }
+
+    internal HumanInputResponseLifecycleStoreReadResult ReadCurrent(HumanInputRequestReference request)
+    {
+        var snapshot = Snapshot(request);
+        return new HumanInputResponseLifecycleStoreReadResult(
+            snapshot is null ? HumanInputResponseLifecycleStoreReadStatus.NotFound : HumanInputResponseLifecycleStoreReadStatus.Ready,
+            _generation,
+            snapshot,
+            null);
     }
 
     internal void ReplaceCurrentSnapshot(HumanInputResponseLifecycleStoreSnapshot snapshot)

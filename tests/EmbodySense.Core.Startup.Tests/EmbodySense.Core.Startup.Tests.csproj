@@ -37,6 +37,7 @@
     <Compile Include="..\EmbodySense.HumanInputContinuationHost\HumanInputResponseContinuationGraphFixture.cs" Link="Support\HumanInputResponseContinuationGraphFixture.cs" />
     <Compile Include="..\EmbodySense.HumanInputContinuationHost\HumanInputResponseContinuationHostAuthorityProvider.cs" Link="Support\HumanInputResponseContinuationHostAuthorityProvider.cs" />
     <Compile Include="..\EmbodySense.HumanInputContinuationHost\HumanInputResponseContinuationHostCapabilityAdmissionService.cs" Link="Support\HumanInputResponseContinuationHostCapabilityAdmissionService.cs" />
+    <Compile Include="..\EmbodySense.HumanInputContinuationHost\HumanInputRequestPublicationHostGrantResolver.cs" Link="Support\HumanInputRequestPublicationHostGrantResolver.cs" />
     <Compile Include="..\EmbodySense.HumanInputContinuationHost\HumanInputResponseContinuationHostCompletionTransaction.cs" Link="Support\HumanInputResponseContinuationHostCompletionTransaction.cs" />
     <Compile Include="..\EmbodySense.HumanInputContinuationHost\HumanInputResponseContinuationHostContextPort.cs" Link="Support\HumanInputResponseContinuationHostContextPort.cs" />
     <Compile Include="..\EmbodySense.HumanInputContinuationHost\HumanInputResponseContinuationHostConversationPublisher.cs" Link="Support\HumanInputResponseContinuationHostConversationPublisher.cs" />

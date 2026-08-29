@@ -122,6 +122,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
     private readonly HumanInputPolicyResolutionService? _humanInputPolicyResolutionService;
     private readonly IGovernedLoopSequentialHumanInputBindingSource? _humanInputBindingSource;
     private readonly IHumanInputRequestPublicationService? _humanInputRequestPublicationService;
+    private readonly ICustomLoopHumanInputCancellationConvergence? _humanInputCancellationConvergence;
     private readonly TimeProvider _timeProvider;
     private readonly ConcurrentDictionary<string, byte> _activeRuns = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _activeAttemptCancellations = new(StringComparer.Ordinal);
@@ -148,6 +149,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
     /// <param name="humanInputPolicyResolutionService">The exact policy resolver required to atomically park a canonical Human Input activation. A missing resolver fails closed without exposing a request.</param>
     /// <param name="humanInputBindingSource">The authoritative response source used only to rehydrate exact terminal Human Input data bindings for causal dependent activations. A missing source makes such an activation retryable without dispatch.</param>
     /// <param name="humanInputRequestPublicationService">The canonical checkpoint-to-request-ledger publisher. When Human Input policy resolution is configured, a missing publisher prevents checkpoint creation.</param>
+    /// <param name="humanInputCancellationConvergence">The canonical request/run convergence guard required before a checkpoint-backed run can terminalize as cancelled.</param>
     public CustomLoopOrderedRunner(
         ICustomLoopRunStore runStore,
         CustomLoopContextResolver contextResolver,
@@ -167,7 +169,8 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         IGovernedLoopFailureClassifier? failureClassifier = null,
         HumanInputPolicyResolutionService? humanInputPolicyResolutionService = null,
         IGovernedLoopSequentialHumanInputBindingSource? humanInputBindingSource = null,
-        IHumanInputRequestPublicationService? humanInputRequestPublicationService = null)
+        IHumanInputRequestPublicationService? humanInputRequestPublicationService = null,
+        ICustomLoopHumanInputCancellationConvergence? humanInputCancellationConvergence = null)
     {
         _runStore = runStore ?? throw new ArgumentNullException(nameof(runStore));
         _contextResolver = contextResolver ?? throw new ArgumentNullException(nameof(contextResolver));
@@ -188,6 +191,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         _humanInputPolicyResolutionService = humanInputPolicyResolutionService;
         _humanInputBindingSource = humanInputBindingSource;
         _humanInputRequestPublicationService = humanInputRequestPublicationService;
+        _humanInputCancellationConvergence = humanInputCancellationConvergence;
     }
 
     /// <summary>
@@ -9409,6 +9413,33 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         bool terminalOutcomeMayExist = true,
         IGovernedLoopSequentialAuditRecorder? terminalAuditRecorder = null)
     {
+        if (status == CustomLoopRunStatus.Cancelled && run.HumanInputWaitingCheckpoints.Count != 0)
+        {
+            var parentOperationId = run.Events.LastOrDefault(item => item.Kind == CustomLoopRunEventKind.LifecycleChanged && item.ControlExpectedLifecycleVersion is not null)?.EventId;
+            if (_humanInputCancellationConvergence is null || string.IsNullOrEmpty(parentOperationId))
+            {
+                return Result(CustomLoopOrderedRunStatus.NeedsReview, run, "A checkpoint-backed run cannot bypass Human Input cancellation convergence without one retained parent Cancel control receipt.");
+            }
+
+            CustomLoopHumanInputCancellationConvergenceResult convergence;
+            try
+            {
+                convergence = await _humanInputCancellationConvergence.ConvergeAsync(run, parentOperationId, IntegrityToken());
+            }
+            catch (Exception exception)
+            {
+                return Result(CustomLoopOrderedRunStatus.NeedsReview, run, $"Human Input cancellation convergence could not complete before terminalization: {SafeExceptionClass(exception)}.");
+            }
+
+            if (convergence.Status is not (CustomLoopHumanInputCancellationConvergenceStatus.Converged or CustomLoopHumanInputCancellationConvergenceStatus.NotApplicable)
+                || convergence.Run is null)
+            {
+                return Result(CustomLoopOrderedRunStatus.NeedsReview, convergence.Run ?? run, convergence.Detail);
+            }
+
+            run = convergence.Run;
+        }
+
         if (status == CustomLoopRunStatus.Completed && run.SequentialAdapterBinding is not null)
         {
             return await TerminateAsync(

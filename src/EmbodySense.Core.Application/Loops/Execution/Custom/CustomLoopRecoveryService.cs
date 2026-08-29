@@ -37,6 +37,7 @@ public sealed class CustomLoopRecoveryService
 
     private readonly ICustomLoopRunStore _runStore;
     private readonly IAuditLog _auditLog;
+    private readonly ICustomLoopHumanInputCancellationConvergence? _humanInputCancellationConvergence;
     private readonly TimeProvider _timeProvider;
 
     /// <summary>
@@ -45,11 +46,17 @@ public sealed class CustomLoopRecoveryService
     /// <param name="runStore">The run store.</param>
     /// <param name="auditLog">The audit log.</param>
     /// <param name="timeProvider">The time provider.</param>
-    public CustomLoopRecoveryService(ICustomLoopRunStore runStore, IAuditLog auditLog, TimeProvider? timeProvider = null)
+    /// <param name="humanInputCancellationConvergence">The shared Human Input cancellation convergence service, or null when Human Input is not composed.</param>
+    public CustomLoopRecoveryService(
+        ICustomLoopRunStore runStore,
+        IAuditLog auditLog,
+        TimeProvider? timeProvider = null,
+        ICustomLoopHumanInputCancellationConvergence? humanInputCancellationConvergence = null)
     {
         _runStore = runStore ?? throw new ArgumentNullException(nameof(runStore));
         _auditLog = auditLog ?? throw new ArgumentNullException(nameof(auditLog));
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _humanInputCancellationConvergence = humanInputCancellationConvergence;
     }
 
     /// <summary>
@@ -78,6 +85,40 @@ public sealed class CustomLoopRecoveryService
         if (!validation.IsValid)
         {
             return Result(CustomLoopRecoveryStatus.Failed, run, "The persisted custom-loop run is invalid and recovery did not mutate it.");
+        }
+
+        if (run.Status == CustomLoopRunStatus.CancelRequested && run.HumanInputWaitingCheckpoints.Count != 0)
+        {
+            var parentOperationId = run.Events.LastOrDefault(item => item.Kind == CustomLoopRunEventKind.LifecycleChanged && item.ControlExpectedLifecycleVersion is not null)?.EventId;
+            if (_humanInputCancellationConvergence is null || string.IsNullOrEmpty(parentOperationId))
+            {
+                return Result(CustomLoopRecoveryStatus.Failed, run, "CancelRequested recovery found canonical Human Input checkpoints but no shared parent-control convergence boundary; it did not terminalize the run.");
+            }
+
+            CustomLoopHumanInputCancellationConvergenceResult convergence;
+            try
+            {
+                convergence = await _humanInputCancellationConvergence.ConvergeAsync(run, parentOperationId, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception exception)
+            {
+                return Result(CustomLoopRecoveryStatus.Failed, run, $"Human Input cancellation convergence failed during recovery: {SafeExceptionClass(exception)}.");
+            }
+
+            if (convergence.Status is not (CustomLoopHumanInputCancellationConvergenceStatus.Converged or CustomLoopHumanInputCancellationConvergenceStatus.NotApplicable)
+                || convergence.Run is null)
+            {
+                var recoveryStatus = convergence.Status == CustomLoopHumanInputCancellationConvergenceStatus.Conflict
+                    ? CustomLoopRecoveryStatus.Conflict
+                    : CustomLoopRecoveryStatus.Failed;
+                return Result(recoveryStatus, convergence.Run ?? run, convergence.Detail);
+            }
+
+            run = convergence.Run;
         }
 
         var admissionAuditComplete = CustomLoopRunValidator.HasCompleteAdmissionAudit(run);
