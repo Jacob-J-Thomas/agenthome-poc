@@ -137,6 +137,20 @@ internal static class GovernedLoopHumanInputWaitingCheckpointTestData
         return Checkpoint(previous, GovernedLoopHumanInputWaitingCheckpointPosture.Superseded, [previous.Evidence[0], superseded]);
     }
 
+    internal static GovernedLoopHumanInputWaitingCheckpoint Rejected(GovernedLoopHumanInputWaitingCheckpoint? pending = null)
+    {
+        var previous = pending ?? Pending();
+        var rejected = Evidence(2, GovernedLoopHumanInputWaitingCheckpointEvidenceKind.Rejected, RequestedAtUtc.AddMinutes(5), null, null, null, null, null, previous.Evidence[0].EvidenceHash);
+        return Checkpoint(previous, GovernedLoopHumanInputWaitingCheckpointPosture.Rejected, [previous.Evidence[0], rejected]);
+    }
+
+    internal static GovernedLoopHumanInputWaitingCheckpoint NeedsReview(GovernedLoopHumanInputWaitingCheckpoint? pending = null)
+    {
+        var previous = pending ?? Pending();
+        var review = Evidence(2, GovernedLoopHumanInputWaitingCheckpointEvidenceKind.NeedsReview, RequestedAtUtc.AddMinutes(5), null, null, null, null, null, previous.Evidence[0].EvidenceHash);
+        return Checkpoint(previous, GovernedLoopHumanInputWaitingCheckpointPosture.NeedsReview, [previous.Evidence[0], review]);
+    }
+
     internal static HumanInputResponseSelectionReference Selection(HumanInputRequest request)
         => new(1, "selection-one", new HumanInputRequestReference(1, request.RequestId, request.RequestVersionId, request.RequestHash), Hash('a'));
 

@@ -118,6 +118,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
     private readonly IGovernedLoopCommandActionExecutor? _commandActionExecutor;
     private readonly IGovernedLoopFailureClassifier _failureClassifier;
     private readonly HumanInputPolicyResolutionService? _humanInputPolicyResolutionService;
+    private readonly IGovernedLoopSequentialHumanInputBindingSource? _humanInputBindingSource;
     private readonly TimeProvider _timeProvider;
     private readonly ConcurrentDictionary<string, byte> _activeRuns = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _activeAttemptCancellations = new(StringComparer.Ordinal);
@@ -142,6 +143,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
     /// <param name="commandActionExecutor">The canonical structured command Action executor. A missing executor rejects command dispatch without changing legacy execution.</param>
     /// <param name="failureClassifier">The pure canonical schema-1 failure classifier. The built-in classifier is used when omitted for compatibility with existing internal composition.</param>
     /// <param name="humanInputPolicyResolutionService">The exact policy resolver required to atomically park a canonical Human Input activation. A missing resolver fails closed without exposing a request.</param>
+    /// <param name="humanInputBindingSource">The authoritative response source used only to rehydrate exact terminal Human Input data bindings for causal dependent activations. A missing source makes such an activation retryable without dispatch.</param>
     public CustomLoopOrderedRunner(
         ICustomLoopRunStore runStore,
         CustomLoopContextResolver contextResolver,
@@ -159,7 +161,8 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         IGovernedLoopWorkspaceActionExecutor? workspaceActionExecutor = null,
         IGovernedLoopCommandActionExecutor? commandActionExecutor = null,
         IGovernedLoopFailureClassifier? failureClassifier = null,
-        HumanInputPolicyResolutionService? humanInputPolicyResolutionService = null)
+        HumanInputPolicyResolutionService? humanInputPolicyResolutionService = null,
+        IGovernedLoopSequentialHumanInputBindingSource? humanInputBindingSource = null)
     {
         _runStore = runStore ?? throw new ArgumentNullException(nameof(runStore));
         _contextResolver = contextResolver ?? throw new ArgumentNullException(nameof(contextResolver));
@@ -178,6 +181,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         _commandActionExecutor = commandActionExecutor;
         _failureClassifier = failureClassifier ?? new GovernedLoopFailureClassifier();
         _humanInputPolicyResolutionService = humanInputPolicyResolutionService;
+        _humanInputBindingSource = humanInputBindingSource;
     }
 
     /// <summary>
@@ -463,6 +467,139 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             || !string.Equals(run.Frontier.Payload.ContentHash, continuation.ResumedFrontierHash, StringComparison.Ordinal))
         {
             return Result(CustomLoopOrderedRunStatus.InvalidState, run, "Ordered Wait re-entry requires the exact durable Running continuation frontier.");
+        }
+
+        return await ContinueOwnedWaitAsync(run, request.Actor, context, cancellationToken).ConfigureAwait(false);
+    }
+
+    internal async Task<CustomLoopOrderedRunResult> ResumeHumanInputSequentialAsync(
+        GovernedLoopSequentialOrderedHumanInputResumeRequest request,
+        IGovernedLoopSequentialOrderedNodeEvidenceRecorder nodeEvidenceRecorder,
+        IGovernedLoopSequentialAuditRecorder auditRecorder,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(nodeEvidenceRecorder);
+        ArgumentNullException.ThrowIfNull(auditRecorder);
+        var context = CreateSequentialContext(
+            request.SchemaVersion,
+            request.Anchor,
+            request.Plan,
+            request.Artifact,
+            nodeEvidenceRecorder,
+            auditRecorder);
+        if (context is null
+            || !CustomLoopArtifactIdentifier.IsValid(request.CheckpointId)
+            || !IsHash(request.TerminalizationReceiptHash)
+            || string.IsNullOrWhiteSpace(request.Actor))
+        {
+            return Result(CustomLoopOrderedRunStatus.InvalidState, null, "The canonical Human Input resume hand-off is invalid and no ordered runtime work was dispatched.");
+        }
+
+        CustomLoopRunRecord? run;
+        try
+        {
+            run = await _runStore.GetAsync(context.Anchor.AdapterBinding.ExecutionBinding.RunId, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            return Result(CustomLoopOrderedRunStatus.Failed, null, $"The resumed Human Input run trace could not be loaded safely: {SafeExceptionClass(exception)}.");
+        }
+
+        if (run is null)
+        {
+            return Result(CustomLoopOrderedRunStatus.NotFound, null, "The custom-loop run does not exist.");
+        }
+
+        var checkpoint = run.HumanInputWaitingCheckpoints.SingleOrDefault(item => string.Equals(item.Binding.CheckpointId, request.CheckpointId, StringComparison.Ordinal));
+        var terminal = checkpoint?.Evidence.LastOrDefault();
+        var activation = checkpoint is null ? null : run.Frontier?.Payload.Nodes.ElementAtOrDefault(checkpoint.Binding.ActivationOrdinal);
+        if (!SequentialRunMatches(run, context)
+            || !CustomLoopRunValidator.ValidateForDispatch(run).IsValid
+            || checkpoint?.Posture != GovernedLoopHumanInputWaitingCheckpointPosture.Terminal
+            || terminal?.Kind != GovernedLoopHumanInputWaitingCheckpointEvidenceKind.Terminalized
+            || !string.Equals(terminal.TerminalizationReceiptHash, request.TerminalizationReceiptHash, StringComparison.Ordinal)
+            || activation is not { Descriptor.Kind: GovernedLoopNodeKind.HumanInput, Status: GovernedLoopNodeExecutionStatus.Completed }
+            || run.Status != CustomLoopRunStatus.Running)
+        {
+            return Result(CustomLoopOrderedRunStatus.InvalidState, run, "Ordered Human Input re-entry requires one exact terminal checkpoint and completed activation frontier.");
+        }
+
+        return await ContinueOwnedWaitAsync(run, request.Actor, context, cancellationToken).ConfigureAwait(false);
+    }
+
+    internal async Task<CustomLoopOrderedRunResult> ResumeHumanInputFailureSequentialAsync(
+        GovernedLoopSequentialOrderedHumanInputFailureResumeRequest request,
+        IGovernedLoopSequentialOrderedNodeEvidenceRecorder nodeEvidenceRecorder,
+        IGovernedLoopSequentialAuditRecorder auditRecorder,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(nodeEvidenceRecorder);
+        ArgumentNullException.ThrowIfNull(auditRecorder);
+        var context = CreateSequentialContext(
+            request.SchemaVersion,
+            request.Anchor,
+            request.Plan,
+            request.Artifact,
+            nodeEvidenceRecorder,
+            auditRecorder);
+        if (context is null
+            || !CustomLoopArtifactIdentifier.IsValid(request.CheckpointId)
+            || !IsHash(request.RetirementEvidenceHash)
+            || !CustomLoopArtifactIdentifier.IsValid(request.RetirementEventId)
+            || !IsHash(request.FailureEvidenceHash)
+            || string.IsNullOrWhiteSpace(request.Actor))
+        {
+            return Result(CustomLoopOrderedRunStatus.InvalidState, null, "The canonical Human Input failure-resume hand-off is invalid and no ordered runtime work was dispatched.");
+        }
+
+        CustomLoopRunRecord? run;
+        try
+        {
+            run = await _runStore.GetAsync(context.Anchor.AdapterBinding.ExecutionBinding.RunId, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            return Result(CustomLoopOrderedRunStatus.Failed, null, $"The resumed Human Input failure run trace could not be loaded safely: {SafeExceptionClass(exception)}.");
+        }
+
+        if (run is null)
+        {
+            return Result(CustomLoopOrderedRunStatus.NotFound, null, "The custom-loop run does not exist.");
+        }
+
+        var checkpoint = run.HumanInputWaitingCheckpoints.SingleOrDefault(item => string.Equals(item.Binding.CheckpointId, request.CheckpointId, StringComparison.Ordinal));
+        var retirement = checkpoint?.Evidence.LastOrDefault();
+        var activation = checkpoint is null ? null : run.Frontier?.Payload.Nodes.ElementAtOrDefault(checkpoint.Binding.ActivationOrdinal);
+        var node = activation is null ? null : context.Plan.Nodes.ElementAtOrDefault(activation.PlanOrdinal);
+        var retirementEvent = node is null || activation?.Attempt is null
+            ? null
+            : FindSequentialNodeEvidence(run, node, activation, activation.Attempt.Value);
+        if (!SequentialRunMatches(run, context)
+            || !CustomLoopRunValidator.ValidateForDispatch(run).IsValid
+            || checkpoint?.Posture is not (GovernedLoopHumanInputWaitingCheckpointPosture.Expired or GovernedLoopHumanInputWaitingCheckpointPosture.Rejected)
+            || retirement?.Kind is not (GovernedLoopHumanInputWaitingCheckpointEvidenceKind.Expired or GovernedLoopHumanInputWaitingCheckpointEvidenceKind.Rejected)
+            || !string.Equals(retirement.EvidenceHash, request.RetirementEvidenceHash, StringComparison.Ordinal)
+            || activation is not { Descriptor.Kind: GovernedLoopNodeKind.HumanInput, Status: GovernedLoopNodeExecutionStatus.Failed, OutcomeEvidenceId: not null, OutcomeEvidenceHash: not null }
+            || node is null
+            || !string.Equals(node.NodeId, activation.NodeId, StringComparison.Ordinal)
+            || !string.Equals(activation.OutcomeEvidenceId, request.RetirementEventId, StringComparison.Ordinal)
+            || retirementEvent is not { SequentialNodeEvidence: { Kind: CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection, FailureEvidenceHash: not null } evidence, FailureEvidence: not null }
+            || !string.Equals(retirementEvent.EventId, request.RetirementEventId, StringComparison.Ordinal)
+            || !string.Equals(retirementEvent.FailureEvidence.ContentHash, request.FailureEvidenceHash, StringComparison.Ordinal)
+            || !string.Equals(evidence.FailureEvidenceHash, request.FailureEvidenceHash, StringComparison.Ordinal)
+            || run.Status != CustomLoopRunStatus.Running)
+        {
+            return Result(CustomLoopOrderedRunStatus.InvalidState, run, "Ordered Human Input failure re-entry requires one exact retired checkpoint, classified failure, and routed Running frontier.");
         }
 
         return await ContinueOwnedWaitAsync(run, request.Actor, context, cancellationToken).ConfigureAwait(false);
@@ -882,6 +1019,35 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             }
 
             var node = selected.Node!;
+            var preflightBindings = await GovernedLoopSequentialBindingResolver.ResolveAsync(
+                context.Artifact,
+                context.Plan,
+                node,
+                selected.Activation!,
+                run,
+                context.HumanInputBindings,
+                cancellationToken);
+            if (preflightBindings.RequiresHumanInputBinding)
+            {
+                if (preflightBindings.Status == GovernedLoopSequentialBindingResolutionStatus.Unavailable)
+                {
+                    return Result(
+                        CustomLoopOrderedRunStatus.Failed,
+                        run,
+                        "The exact terminal Human Input binding source is temporarily unavailable; no activation was claimed or dispatched.");
+                }
+
+                if (preflightBindings.Status != GovernedLoopSequentialBindingResolutionStatus.Resolved)
+                {
+                    return await TerminateAsync(
+                        run,
+                        actor,
+                        CustomLoopRunStatus.NeedsReview,
+                        "human_input_binding_invalid",
+                        "The exact terminal Human Input binding could not be rehydrated; automatic dispatch is forbidden.");
+                }
+            }
+
             if (selected.Status == GovernedLoopSequentialFrontierSelectionStatus.Ready
                 && CycleClaimDeadlineFailure(run, context.Plan, node, selected.Activation!, Now(run)) is { } cycleDeadlineFailure)
             {
@@ -1387,9 +1553,16 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         GovernedLoopConditionEvaluationResult? evaluation = null;
         if (node.Descriptor.Kind == GovernedLoopNodeKind.Condition)
         {
-            var binding = GovernedLoopSequentialBindingResolver.Resolve(context.Artifact, context.Plan, node, selection.Activation, run);
+            var binding = await GovernedLoopSequentialBindingResolver.ResolveAsync(
+                context.Artifact,
+                context.Plan,
+                node,
+                selection.Activation,
+                run,
+                context.HumanInputBindings,
+                cancellationToken);
             var graphNode = context.Artifact.Graph.Nodes.SingleOrDefault(candidate => string.Equals(candidate.Id, node.NodeId, StringComparison.Ordinal));
-            if (binding.IsResolved && binding.Inputs.Count == 1 && graphNode is not null)
+            if (binding.Status == GovernedLoopSequentialBindingResolutionStatus.Resolved && binding.Inputs.Count == 1 && graphNode is not null)
             {
                 evaluation = GovernedLoopConditionEvaluator.Evaluate(graphNode, binding.Inputs[0].Value);
             }
@@ -3679,26 +3852,32 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         return Math.Max(run.Checkpoint.NextStepIndex, stepIndex + 1);
     }
 
-    private static bool TryResolveCanonicalExitResult(
+    private static async Task<(GovernedLoopSequentialBindingResolutionStatus Status, CustomLoopRetainedOutput? Result)> TryResolveCanonicalExitResultAsync(
         CustomLoopRunRecord run,
         SequentialNodeExecutionContext sequentialNode,
-        out CustomLoopRetainedOutput result)
+        CancellationToken cancellationToken)
     {
-        result = null!;
-        var bindings = GovernedLoopSequentialBindingResolver.Resolve(
+        var bindings = await GovernedLoopSequentialBindingResolver.ResolveAsync(
             sequentialNode.Artifact,
             sequentialNode.Plan,
             sequentialNode.Node,
             sequentialNode.Activation,
-            run);
-        var exact = bindings.IsResolved
+            run,
+            sequentialNode.HumanInputBindings ?? new GovernedLoopSequentialHumanInputBindingCache(null),
+            cancellationToken);
+        if (bindings.Status == GovernedLoopSequentialBindingResolutionStatus.Unavailable)
+        {
+            return (GovernedLoopSequentialBindingResolutionStatus.Unavailable, null);
+        }
+
+        var exact = bindings.Status == GovernedLoopSequentialBindingResolutionStatus.Resolved
             ? bindings.Inputs.Where(binding => binding.BindingKind == GovernedLoopBindingKind.Data
                 && string.Equals(binding.TargetNodeId, sequentialNode.Node.NodeId, StringComparison.Ordinal)
                 && string.Equals(binding.TargetPortId, "result", StringComparison.Ordinal)).ToArray()
             : [];
         if (bindings.Inputs.Count != 1 || exact.Length != 1)
         {
-            return false;
+            return (GovernedLoopSequentialBindingResolutionStatus.Invalid, null);
         }
 
         string? content;
@@ -3708,20 +3887,21 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         }
         catch (JsonException)
         {
-            return false;
+            return (GovernedLoopSequentialBindingResolutionStatus.Invalid, null);
         }
 
         if (content is null || content.Length > CustomLoopLimits.MaxCanonicalModelOutputCharacters)
         {
-            return false;
+            return (GovernedLoopSequentialBindingResolutionStatus.Invalid, null);
         }
 
-        result = new CustomLoopRetainedOutput(
-            exact[0].SourceNodeId,
-            run.Checkpoint.Iteration,
-            content,
-            CustomLoopTraceContentHash.Compute(content));
-        return true;
+        return (
+            GovernedLoopSequentialBindingResolutionStatus.Resolved,
+            new CustomLoopRetainedOutput(
+                exact[0].SourceNodeId,
+                run.Checkpoint.Iteration,
+                content,
+                CustomLoopTraceContentHash.Compute(content)));
     }
 
     private async Task<RunAdvance> DispatchAndAdvanceSequentialInferenceAsync(
@@ -3853,13 +4033,15 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 var effectiveAssignments = run.Checkpoint.ToolRequestsUsed < CustomLoopLimits.MaxModelVisibleGovernedToolRequestsPerRun
                     ? attemptStarted.ToolAuthority.EffectiveAssignments
                     : [];
-                var exactBindings = GovernedLoopSequentialBindingResolver.Resolve(
+                var exactBindings = await GovernedLoopSequentialBindingResolver.ResolveAsync(
                     context.Artifact,
                     context.Plan,
                     node,
                     activation,
-                    run);
-                if (!exactBindings.IsResolved)
+                    run,
+                    context.HumanInputBindings,
+                    IntegrityToken());
+                if (exactBindings.Status != GovernedLoopSequentialBindingResolutionStatus.Resolved)
                 {
                     throw new InvalidOperationException($"The exact canonical inference bindings could not be reconstructed ({exactBindings.FailureCode}).");
                 }
@@ -3997,7 +4179,17 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             dispatchState,
             cancellationToken,
             deferCheckpoint: true,
-            new SequentialNodeExecutionContext(context.Anchor.AdapterBinding, context.Artifact, context.Plan, node, activation, attempt, attemptOperationId, context.AllowedCapabilityIds, context.AuditRecorder));
+            new SequentialNodeExecutionContext(
+                context.Anchor.AdapterBinding,
+                context.Artifact,
+                context.Plan,
+                node,
+                activation,
+                attempt,
+                attemptOperationId,
+                context.AllowedCapabilityIds,
+                context.AuditRecorder,
+                context.HumanInputBindings));
     }
 
     private async Task<RunAdvance> DispatchAndAdvanceSequentialPureNodeAsync(
@@ -4593,8 +4785,15 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 return new RunAdvance(invalid.Run, invalid);
             }
 
-            var retainedResolution = GovernedLoopSequentialBindingResolver.Resolve(context.Artifact, context.Plan, node, activation, run);
-            if (!retainedResolution.IsResolved
+            var retainedResolution = await GovernedLoopSequentialBindingResolver.ResolveAsync(
+                context.Artifact,
+                context.Plan,
+                node,
+                activation,
+                run,
+                context.HumanInputBindings,
+                IntegrityToken());
+            if (retainedResolution.Status != GovernedLoopSequentialBindingResolutionStatus.Resolved
                 || !PureNodeInputsEqual(retainedResolution.Inputs, retainedOutcome.Inputs)
                 || !TryProjectPureNodeCheckpoint(run, context, node, retainedOutcome, out var retainedCheckpoint, out _))
             {
@@ -4694,7 +4893,8 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             attempt,
             attemptOperationId,
             context.AllowedCapabilityIds,
-            context.AuditRecorder);
+            context.AuditRecorder,
+            context.HumanInputBindings);
         var started = FindSequentialDispatchStart(run, node, activation, attempt, attemptOperationId);
         if (started is null)
         {
@@ -4730,8 +4930,15 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             return await RejectSequentialPureNodeAsync(run, actor, sequentialNode, null, CanonicalPureNodeCancellationDetail, CustomLoopRunStatus.Cancelled);
         }
 
-        var resolution = GovernedLoopSequentialBindingResolver.Resolve(context.Artifact, context.Plan, node, sequentialNode.Activation, run);
-        if (!resolution.IsResolved)
+        var resolution = await GovernedLoopSequentialBindingResolver.ResolveAsync(
+            context.Artifact,
+            context.Plan,
+            node,
+            sequentialNode.Activation,
+            run,
+            context.HumanInputBindings,
+            cancellationToken);
+        if (resolution.Status != GovernedLoopSequentialBindingResolutionStatus.Resolved)
         {
             return await RejectSequentialPureNodeAsync(
                 run,
@@ -5645,12 +5852,21 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             attempt,
             attemptOperationId,
             context.AllowedCapabilityIds,
-            context.AuditRecorder);
-        if (!TryResolveCanonicalExitResult(run, sequentialNode, out var exactExitResult))
+            context.AuditRecorder,
+            context.HumanInputBindings);
+        var exitBinding = await TryResolveCanonicalExitResultAsync(run, sequentialNode, cancellationToken);
+        if (exitBinding.Status != GovernedLoopSequentialBindingResolutionStatus.Resolved)
         {
+            if (exitBinding.Status == GovernedLoopSequentialBindingResolutionStatus.Unavailable)
+            {
+                return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.Failed, run, "The exact terminal Human Input binding source is temporarily unavailable; Exit was not dispatched."));
+            }
+
             var invalid = await TerminateAsync(run, actor, CustomLoopRunStatus.NeedsReview, "canonical_exit_binding_invalid", "Canonical Exit could not resolve its exact activation-scoped Data input; checkpoint fallback is forbidden.");
             return new RunAdvance(invalid.Run, invalid);
         }
+
+        var exactExitResult = exitBinding.Result!;
 
         var exactTerminal = FindSequentialNodeEvidence(run, node, activation, attempt);
         var exactStart = FindSequentialDispatchStart(run, node, activation, attempt, attemptOperationId);
@@ -5942,13 +6158,15 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             }
             else
             {
-                var exactBindings = GovernedLoopSequentialBindingResolver.Resolve(
+                var exactBindings = await GovernedLoopSequentialBindingResolver.ResolveAsync(
                     sequentialNode.Artifact,
                     sequentialNode.Plan,
                     sequentialNode.Node,
                     sequentialNode.Activation,
-                    run);
-                if (!exactBindings.IsResolved)
+                    run,
+                    sequentialNode.HumanInputBindings ?? new GovernedLoopSequentialHumanInputBindingCache(null),
+                    cancellationToken);
+                if (exactBindings.Status != GovernedLoopSequentialBindingResolutionStatus.Resolved)
                 {
                     throw new InvalidOperationException($"The exact canonical inference bindings could not be resolved ({exactBindings.FailureCode}).");
                 }
@@ -6745,13 +6963,17 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         CancellationToken cancellationToken,
         SequentialNodeExecutionContext? sequentialNode = null)
     {
-        var iterationResult = sequentialNode is null
-            ? run.Checkpoint.CurrentIterationResult
-            : TryResolveCanonicalExitResult(run, sequentialNode, out var exactExitResult)
-                ? exactExitResult
-                : null;
+        var exitBinding = sequentialNode is null
+            ? (GovernedLoopSequentialBindingResolutionStatus.Resolved, run.Checkpoint.CurrentIterationResult)
+            : await TryResolveCanonicalExitResultAsync(run, sequentialNode, cancellationToken);
+        var iterationResult = exitBinding.Item2;
         if (iterationResult is null)
         {
+            if (exitBinding.Item1 == GovernedLoopSequentialBindingResolutionStatus.Unavailable)
+            {
+                return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.Failed, run, "The exact terminal Human Input binding source is temporarily unavailable; Exit completion was not advanced."));
+            }
+
             var terminal = await TerminateAsync(
                 run,
                 actor,
@@ -7930,13 +8152,15 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 var effectiveAssignments = run.Checkpoint.ToolRequestsUsed < CustomLoopLimits.MaxModelVisibleGovernedToolRequestsPerRun
                     ? start.ToolAuthority.EffectiveAssignments
                     : [];
-                var exactBindings = GovernedLoopSequentialBindingResolver.Resolve(
+                var exactBindings = await GovernedLoopSequentialBindingResolver.ResolveAsync(
                     context.Artifact,
                     context.Plan,
                     node,
                     activation,
-                    run);
-                if (!exactBindings.IsResolved)
+                    run,
+                    context.HumanInputBindings,
+                    IntegrityToken());
+                if (exactBindings.Status != GovernedLoopSequentialBindingResolutionStatus.Resolved)
                 {
                     throw new InvalidOperationException($"The exact canonical inference bindings could not be reconstructed ({exactBindings.FailureCode}).");
                 }
@@ -11076,7 +11300,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         return value.IsNormalized(NormalizationForm.FormC) ? value : null;
     }
 
-    private static SequentialExecutionContext? CreateSequentialContext(
+    private SequentialExecutionContext? CreateSequentialContext(
         int schemaVersion,
         GovernedLoopSequentialRunAnchor? anchor,
         GovernedLoopSequentialPlan? plan,
@@ -11137,7 +11361,14 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 return null;
             }
 
-            return new SequentialExecutionContext(anchor, plan, artifact, allowedCapabilityIds.AsReadOnly(), nodeEvidenceRecorder, auditRecorder);
+            return new SequentialExecutionContext(
+                anchor,
+                plan,
+                artifact,
+                allowedCapabilityIds.AsReadOnly(),
+                nodeEvidenceRecorder,
+                auditRecorder,
+                new GovernedLoopSequentialHumanInputBindingCache(_humanInputBindingSource));
         }
         catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or NotSupportedException)
         {
@@ -11354,6 +11585,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 or EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Join
                 or EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Action
                 or EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Wait
+                or EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.HumanInput
                 => runEvent.Kind is CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeAttemptFailed,
             EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Exit
                 => runEvent.Kind is CustomLoopRunEventKind.ExitDecisionCompleted or CustomLoopRunEventKind.NodeOutcomeObserved or CustomLoopRunEventKind.NodeAttemptFailed,
@@ -11413,7 +11645,8 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         GovernedLoopGraphRevisionArtifact Artifact,
         IReadOnlyList<CapabilityId> AllowedCapabilityIds,
         IGovernedLoopSequentialOrderedNodeEvidenceRecorder NodeEvidenceRecorder,
-        IGovernedLoopSequentialAuditRecorder AuditRecorder);
+        IGovernedLoopSequentialAuditRecorder AuditRecorder,
+        GovernedLoopSequentialHumanInputBindingCache HumanInputBindings);
 
     private sealed record SequentialNodeExecutionContext(
         GovernedLoopSequentialAdapterBinding Binding,
@@ -11424,7 +11657,8 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         int Attempt,
         string AttemptOperationId,
         IReadOnlyList<CapabilityId> AllowedCapabilityIds,
-        IGovernedLoopSequentialAuditRecorder AuditRecorder);
+        IGovernedLoopSequentialAuditRecorder AuditRecorder,
+        GovernedLoopSequentialHumanInputBindingCache? HumanInputBindings = null);
 
     private sealed record CanonicalOutput(string Text, int OriginalCharacterCount, bool Truncated);
 

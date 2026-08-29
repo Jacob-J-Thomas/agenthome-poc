@@ -22,5 +22,11 @@ public enum GovernedLoopHumanInputWaitingCheckpointEvidenceKind
     Superseded = 5,
 
     /// <summary>A later runner recorded terminal consumption without this contract performing a resume.</summary>
-    Terminalized = 6
+    Terminalized = 6,
+
+    /// <summary>An authenticated lifecycle actor rejected the exact request without submitting response data.</summary>
+    Rejected = 7,
+
+    /// <summary>The lifecycle superseded the exact request but did not prove the distinct replacement checkpoint required for automatic routing.</summary>
+    NeedsReview = 8
 }

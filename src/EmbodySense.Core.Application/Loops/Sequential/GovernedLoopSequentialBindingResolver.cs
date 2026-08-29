@@ -3,6 +3,11 @@ using EmbodySense.Core.Application.Loops.Sequential.Models;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Execution.Models;
+using EmbodySense.Core.Common.Loops.HumanInput;
+using EmbodySense.Core.Common.Loops.HumanInput.Checkpoints;
+using EmbodySense.Core.Common.Loops.HumanInput.Checkpoints.Models;
+using EmbodySense.Core.Common.HumanInput.Responses;
+using EmbodySense.Core.Common.HumanInput.Responses.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.PureNodes;
@@ -15,7 +20,7 @@ using EmbodySense.Core.Common.CommandActions.Models;
 namespace EmbodySense.Core.Application.Loops.Sequential;
 
 /// <summary>Materializes only the exact graph-declared data inputs causally available to one deterministic node activation.</summary>
-/// <remarks>The resolver has no provider, effect, authority, filesystem, network, clock, or ambient-context dependency.</remarks>
+/// <remarks>The resolver has no provider, effect, authority, filesystem, clock, or ambient-context dependency. Human Input values are read only through the exact checkpoint-bound application port.</remarks>
 public static class GovernedLoopSequentialBindingResolver
 {
     /// <summary>Resolves the exact graph-pinned inputs for the sole current activation of one deterministic node.</summary>
@@ -53,6 +58,35 @@ public static class GovernedLoopSequentialBindingResolver
         try
         {
             return ResolveExact(artifact!, plan!, node!, activation!, run!);
+        }
+        catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or JsonException)
+        {
+            return Rejected("canonical-binding.source-evidence-invalid", "$.bindings");
+        }
+    }
+
+    internal static async Task<GovernedLoopSequentialBindingResolutionResult> ResolveAsync(
+        GovernedLoopGraphRevisionArtifact? artifact,
+        GovernedLoopSequentialPlan? plan,
+        GovernedLoopSequentialPlanNode? node,
+        GovernedLoopNodeExecutionEvidence? activation,
+        CustomLoopRunRecord? run,
+        GovernedLoopSequentialHumanInputBindingCache humanInputBindings,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(humanInputBindings);
+        if (!IsExactContext(artifact, plan, node, activation, run))
+        {
+            return Rejected("canonical-binding.context-invalid", "$");
+        }
+
+        try
+        {
+            return await ResolveExactAsync(artifact!, plan!, node!, activation!, run!, humanInputBindings, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or JsonException)
         {
@@ -105,11 +139,68 @@ public static class GovernedLoopSequentialBindingResolver
             }
         }
 
-        return new GovernedLoopSequentialBindingResolutionResult(
-            true,
-            Array.AsReadOnly(inputs.ToArray()),
-            null,
-            null);
+        return Resolved(inputs, requiresHumanInputBinding: false);
+    }
+
+    private static async Task<GovernedLoopSequentialBindingResolutionResult> ResolveExactAsync(
+        GovernedLoopGraphRevisionArtifact artifact,
+        GovernedLoopSequentialPlan plan,
+        GovernedLoopSequentialPlanNode node,
+        GovernedLoopNodeExecutionEvidence activation,
+        CustomLoopRunRecord run,
+        GovernedLoopSequentialHumanInputBindingCache humanInputBindings,
+        CancellationToken cancellationToken)
+    {
+        var graph = artifact.Graph;
+        var graphNode = graph.Nodes.SingleOrDefault(value => string.Equals(value.Id, node.NodeId, StringComparison.Ordinal));
+        if (graphNode is null
+            || graphNode.Descriptor.Kind is not (GovernedLoopNodeKind.Transform or GovernedLoopNodeKind.Validate or GovernedLoopNodeKind.Condition or GovernedLoopNodeKind.Inference or GovernedLoopNodeKind.Action or GovernedLoopNodeKind.Exit))
+        {
+            return Rejected("canonical-binding.node-invalid", "$.bindings");
+        }
+
+        var inputs = new List<GovernedLoopTypedBindingValue>();
+        var requiresHumanInputBinding = false;
+        foreach (var binding in graph.Bindings
+                     .Where(value => string.Equals(value.ToNodeId, graphNode.Id, StringComparison.Ordinal))
+                     .OrderBy(value => value.Id, StringComparer.Ordinal))
+        {
+            var source = binding.Kind == GovernedLoopBindingKind.Data
+                ? await ResolveSourceValueAsync(artifact, plan, run, activation, binding.FromNodeId, binding.FromPortId, humanInputBindings, cancellationToken).ConfigureAwait(false)
+                : default;
+            requiresHumanInputBinding |= source.RequiresHumanInputBinding;
+            var resolved = binding.Kind switch
+            {
+                GovernedLoopBindingKind.Data when source.Status == GovernedLoopSequentialBindingResolutionStatus.Resolved => source.Value,
+                GovernedLoopBindingKind.Data when source.Status == GovernedLoopSequentialBindingResolutionStatus.Unavailable => null,
+                GovernedLoopBindingKind.Context => TryResolveInvocationContextValue(artifact, plan, run, activation, binding, out var contextValue)
+                    ? contextValue
+                    : null,
+                _ => null,
+            };
+            if (binding.Kind == GovernedLoopBindingKind.Data && source.Status == GovernedLoopSequentialBindingResolutionStatus.Unavailable)
+            {
+                return Unavailable("canonical-binding.human-input-unavailable", $"$.bindings[{binding.Id}]", requiresHumanInputBinding);
+            }
+            if (resolved is null)
+            {
+                return Rejected(
+                    source.RequiresHumanInputBinding ? "canonical-binding.human-input-invalid" : "canonical-binding.source-evidence-invalid",
+                    $"$.bindings[{binding.Id}]",
+                    requiresHumanInputBinding);
+            }
+
+            try
+            {
+                inputs.Add(GovernedLoopTypedBindingValue.Create(graph, binding.Id, resolved));
+            }
+            catch (Exception exception) when (exception is ArgumentException or InvalidOperationException)
+            {
+                return Rejected("canonical-binding.schema-mismatch", $"$.bindings[{binding.Id}]", requiresHumanInputBinding);
+            }
+        }
+
+        return Resolved(inputs, requiresHumanInputBinding);
     }
 
     private static bool TryResolveInvocationContextValue(
@@ -216,6 +307,11 @@ public static class GovernedLoopSequentialBindingResolver
                     out _);
         }
 
+        if (GovernedLoopSequentialNodeDescriptors.IsHumanInput(source.Descriptor))
+        {
+            return false;
+        }
+
         if (!GovernedLoopSequentialNodeDescriptors.IsPure(source.Descriptor)
             || outcomeEvent is not { Kind: CustomLoopRunEventKind.NodeAttemptCompleted, PureNodeOutcomeJson: { } outcomeJson })
         {
@@ -237,6 +333,121 @@ public static class GovernedLoopSequentialBindingResolver
 
         value = outputs[0].Value;
         return true;
+    }
+
+    private static async Task<(GovernedLoopSequentialBindingResolutionStatus Status, GovernedLoopTypedValue? Value, bool RequiresHumanInputBinding)> ResolveSourceValueAsync(
+        GovernedLoopGraphRevisionArtifact artifact,
+        GovernedLoopSequentialPlan plan,
+        CustomLoopRunRecord run,
+        GovernedLoopNodeExecutionEvidence targetActivation,
+        string sourceNodeId,
+        string sourcePortId,
+        GovernedLoopSequentialHumanInputBindingCache humanInputBindings,
+        CancellationToken cancellationToken)
+    {
+        if (!TryResolveCausalSourceActivation(plan, run, targetActivation, sourceNodeId, out var sourceActivation)
+            || sourceActivation is null)
+        {
+            return (GovernedLoopSequentialBindingResolutionStatus.Invalid, null, false);
+        }
+
+        var source = plan.Nodes[sourceActivation.PlanOrdinal];
+        if (!HasExactCompletedFrontierEvidence(run, source, sourceActivation, out var outcomeEvent))
+        {
+            return (GovernedLoopSequentialBindingResolutionStatus.Invalid, null, false);
+        }
+
+        if (!GovernedLoopSequentialNodeDescriptors.IsHumanInput(source.Descriptor))
+        {
+            return TryResolveSourceValue(artifact, plan, run, targetActivation, sourceNodeId, sourcePortId, out var value)
+                ? (GovernedLoopSequentialBindingResolutionStatus.Resolved, value, false)
+                : (GovernedLoopSequentialBindingResolutionStatus.Invalid, null, false);
+        }
+
+        if (!TryFindExactTerminalHumanInputCheckpoint(artifact, run, source, sourceActivation, outcomeEvent, sourcePortId, out var checkpoint)
+            || checkpoint is null)
+        {
+            return (GovernedLoopSequentialBindingResolutionStatus.Invalid, null, true);
+        }
+
+        var resolved = await humanInputBindings.ResolveAsync(checkpoint, cancellationToken).ConfigureAwait(false);
+        if (resolved.Status == GovernedLoopSequentialHumanInputBindingReadStatus.Unavailable)
+        {
+            return (GovernedLoopSequentialBindingResolutionStatus.Unavailable, null, true);
+        }
+        if (resolved.Status != GovernedLoopSequentialHumanInputBindingReadStatus.Ready
+            || !BindingMatchesCheckpoint(resolved.Binding, checkpoint))
+        {
+            return (GovernedLoopSequentialBindingResolutionStatus.Invalid, null, true);
+        }
+
+        return (GovernedLoopSequentialBindingResolutionStatus.Resolved, resolved.Binding!.Value, true);
+    }
+
+    private static bool TryFindExactTerminalHumanInputCheckpoint(
+        GovernedLoopGraphRevisionArtifact artifact,
+        CustomLoopRunRecord run,
+        GovernedLoopSequentialPlanNode source,
+        GovernedLoopNodeExecutionEvidence activation,
+        CustomLoopRunEvent? outcomeEvent,
+        string sourcePortId,
+        out GovernedLoopHumanInputWaitingCheckpoint? checkpoint)
+    {
+        checkpoint = null;
+        var graphNode = artifact.Graph.Nodes.SingleOrDefault(candidate => string.Equals(candidate.Id, source.NodeId, StringComparison.Ordinal));
+        var matches = run.HumanInputWaitingCheckpoints.Where(candidate => candidate is not null
+            && candidate.Posture == GovernedLoopHumanInputWaitingCheckpointPosture.Terminal
+            && candidate.Binding.ActivationOrdinal == activation.ActivationOrdinal
+            && candidate.Binding.NodeVisitOrdinal == activation.VisitOrdinal
+            && string.Equals(candidate.Binding.NodeId, activation.NodeId, StringComparison.Ordinal)
+            && string.Equals(candidate.Binding.CycleId, activation.CycleId, StringComparison.Ordinal)
+            && candidate.Binding.CycleIteration == activation.CycleIteration).Take(2).ToArray();
+        if (graphNode is null
+            || !GovernedLoopSequentialNodeDescriptors.IsHumanInput(graphNode.Descriptor)
+            || !string.Equals(sourcePortId, GovernedLoopHumanInputVocabulary.ResponsePortId, StringComparison.Ordinal)
+            || matches.Length != 1
+            || outcomeEvent is not { Kind: CustomLoopRunEventKind.NodeAttemptCompleted, SequentialNodeEvidence: { Kind: CustomLoopSequentialNodeEvidenceKind.CompletedOutcome, Disposition: CustomLoopSequentialNodeDisposition.Completed } evidence }
+            || !string.Equals(activation.OutcomeEvidenceId, outcomeEvent.EventId, StringComparison.Ordinal)
+            || !string.Equals(activation.OutcomeEvidenceHash, evidence.OutcomeArtifactHash, StringComparison.Ordinal)
+            || !string.Equals(matches[0].Binding.Execution.RunId, run.Id, StringComparison.Ordinal)
+            || !string.Equals(matches[0].Binding.GraphArtifactHash, artifact.ArtifactHash, StringComparison.Ordinal)
+            || !string.Equals(matches[0].Binding.GraphLayoutHash, artifact.LayoutHash, StringComparison.Ordinal)
+            || !string.Equals(matches[0].Request.Binding.NodeId, source.NodeId, StringComparison.Ordinal)
+            || !string.Equals(matches[0].Request.Binding.RunId, run.Id, StringComparison.Ordinal)
+            || !string.Equals(matches[0].Request.Binding.CheckpointId, matches[0].Binding.CheckpointId, StringComparison.Ordinal)
+            || !string.Equals(JsonSerializer.Serialize(matches[0].NodeConfiguration), JsonSerializer.Serialize(graphNode.HumanInputConfiguration), StringComparison.Ordinal)
+            || matches[0].Evidence is not
+        [
+        { Kind: GovernedLoopHumanInputWaitingCheckpointEvidenceKind.Published },
+        { Kind: GovernedLoopHumanInputWaitingCheckpointEvidenceKind.Answered, AnswerSelection: not null },
+        { Kind: GovernedLoopHumanInputWaitingCheckpointEvidenceKind.Terminalized, TerminalizationReceiptHash: not null },
+        ])
+        {
+            return false;
+        }
+
+        checkpoint = matches[0];
+        return true;
+    }
+
+    private static bool BindingMatchesCheckpoint(
+        GovernedLoopSequentialHumanInputBinding? binding,
+        GovernedLoopHumanInputWaitingCheckpoint checkpoint)
+    {
+        if (binding is null)
+        {
+            return false;
+        }
+
+        var selection = checkpoint.Evidence.Length > 1 ? checkpoint.Evidence[1].AnswerSelection : null;
+        return binding.SchemaVersion == GovernedLoopSequentialHumanInputBinding.CurrentSchemaVersion
+            && string.Equals(binding.CheckpointId, checkpoint.Binding.CheckpointId, StringComparison.Ordinal)
+            && selection is not null
+            && HumanInputResponseSelectionHash.Matches(binding.Selection)
+            && Equals(HumanInputResponseSelectionReference.Create(binding.Selection), selection)
+            && binding.Selection.Responses.Any(reference => Equals(reference, binding.Response))
+            && GovernedLoopTypedValue.TryDeserialize(binding.Value.CanonicalJson, out var canonical, out _)
+            && Equals(canonical, binding.Value);
     }
 
     private static bool TryResolveCausalSourceActivation(
@@ -471,6 +682,35 @@ public static class GovernedLoopSequentialBindingResolver
         }
     }
 
-    private static GovernedLoopSequentialBindingResolutionResult Rejected(string code, string path)
-        => new(false, Array.Empty<GovernedLoopTypedBindingValue>(), code, path);
+    private static GovernedLoopSequentialBindingResolutionResult Resolved(
+        IReadOnlyList<GovernedLoopTypedBindingValue> inputs,
+        bool requiresHumanInputBinding)
+        => new(
+            GovernedLoopSequentialBindingResolutionStatus.Resolved,
+            Array.AsReadOnly(inputs.ToArray()),
+            null,
+            null,
+            requiresHumanInputBinding);
+
+    private static GovernedLoopSequentialBindingResolutionResult Rejected(
+        string code,
+        string path,
+        bool requiresHumanInputBinding = false)
+        => new(
+            GovernedLoopSequentialBindingResolutionStatus.Invalid,
+            Array.Empty<GovernedLoopTypedBindingValue>(),
+            code,
+            path,
+            requiresHumanInputBinding);
+
+    private static GovernedLoopSequentialBindingResolutionResult Unavailable(
+        string code,
+        string path,
+        bool requiresHumanInputBinding)
+        => new(
+            GovernedLoopSequentialBindingResolutionStatus.Unavailable,
+            Array.Empty<GovernedLoopTypedBindingValue>(),
+            code,
+            path,
+            requiresHumanInputBinding);
 }

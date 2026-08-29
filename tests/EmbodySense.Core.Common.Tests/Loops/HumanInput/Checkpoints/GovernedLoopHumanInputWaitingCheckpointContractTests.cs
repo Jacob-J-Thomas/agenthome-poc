@@ -60,9 +60,11 @@ public sealed class GovernedLoopHumanInputWaitingCheckpointContractTests
         var expired = GovernedLoopHumanInputWaitingCheckpointTestData.Expired(pending);
         var cancelled = GovernedLoopHumanInputWaitingCheckpointTestData.Cancelled(pending);
         var superseded = GovernedLoopHumanInputWaitingCheckpointTestData.Superseded(pending);
+        var rejected = GovernedLoopHumanInputWaitingCheckpointTestData.Rejected(pending);
+        var needsReview = GovernedLoopHumanInputWaitingCheckpointTestData.NeedsReview(pending);
         var terminal = GovernedLoopHumanInputWaitingCheckpointTestData.Terminal(answered);
 
-        Assert.All(new[] { pending, answered, expired, cancelled, superseded, terminal }, checkpoint =>
+        Assert.All(new[] { pending, answered, expired, cancelled, superseded, rejected, needsReview, terminal }, checkpoint =>
         {
             var validation = GovernedLoopHumanInputWaitingCheckpointContractValidator.Validate(checkpoint);
             Assert.True(validation.IsValid, string.Join("; ", validation.Errors.Select(error => error.Code)));
@@ -72,6 +74,8 @@ public sealed class GovernedLoopHumanInputWaitingCheckpointContractTests
         Assert.True(GovernedLoopHumanInputWaitingCheckpointStateTransitionValidator.ValidateTransition(pending, expired).IsValid);
         Assert.True(GovernedLoopHumanInputWaitingCheckpointStateTransitionValidator.ValidateTransition(pending, cancelled).IsValid);
         Assert.True(GovernedLoopHumanInputWaitingCheckpointStateTransitionValidator.ValidateTransition(pending, superseded).IsValid);
+        Assert.True(GovernedLoopHumanInputWaitingCheckpointStateTransitionValidator.ValidateTransition(pending, rejected).IsValid);
+        Assert.True(GovernedLoopHumanInputWaitingCheckpointStateTransitionValidator.ValidateTransition(pending, needsReview).IsValid);
         Assert.True(GovernedLoopHumanInputWaitingCheckpointStateTransitionValidator.ValidateTransition(answered, terminal).IsValid);
         Assert.True(GovernedLoopHumanInputWaitingCheckpointStateTransitionValidator.ValidateTransition(terminal, terminal).IsValid);
         Assert.False(GovernedLoopHumanInputWaitingCheckpointStateTransitionValidator.ValidateTransition(pending, terminal).IsValid);
@@ -90,6 +94,40 @@ public sealed class GovernedLoopHumanInputWaitingCheckpointContractTests
         Assert.True(GovernedLoopHumanInputWaitingCheckpointStateTransitionValidator.ValidateTransition(pending, expired).IsValid);
         Assert.Contains(GovernedLoopHumanInputWaitingCheckpointContractValidator.Validate(atEndpoint).Errors, error => error.Code == "expired_at_or_before_deadline");
         Assert.False(GovernedLoopHumanInputWaitingCheckpointStateTransitionValidator.ValidateTransition(pending, atEndpoint).IsValid);
+    }
+
+    [Theory]
+    [InlineData(GovernedLoopHumanInputWaitingCheckpointPosture.Rejected, GovernedLoopHumanInputWaitingCheckpointEvidenceKind.Rejected)]
+    [InlineData(GovernedLoopHumanInputWaitingCheckpointPosture.NeedsReview, GovernedLoopHumanInputWaitingCheckpointEvidenceKind.NeedsReview)]
+    public void Rejection_and_supersession_review_reject_self_hashed_evidence_after_the_inclusive_response_endpoint(
+        GovernedLoopHumanInputWaitingCheckpointPosture posture,
+        GovernedLoopHumanInputWaitingCheckpointEvidenceKind kind)
+    {
+        var pending = GovernedLoopHumanInputWaitingCheckpointTestData.Pending();
+        var lateEvidence = GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(new GovernedLoopHumanInputWaitingCheckpointEvidence(
+            1,
+            2,
+            kind,
+            pending.Request.Timing.ExpiresAtUtc.AddTicks(1),
+            null,
+            null,
+            null,
+            null,
+            null,
+            pending.Evidence[0].EvidenceHash,
+            string.Empty));
+        var late = GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(new GovernedLoopHumanInputWaitingCheckpoint(
+            1,
+            pending.Binding,
+            pending.NodeConfiguration,
+            pending.ResolvedPolicy,
+            pending.Request,
+            posture,
+            [pending.Evidence[0], lateEvidence],
+            string.Empty));
+
+        Assert.Contains(GovernedLoopHumanInputWaitingCheckpointContractValidator.Validate(late).Errors, error => error.Code == "terminal_after_deadline");
+        Assert.False(GovernedLoopHumanInputWaitingCheckpointStateTransitionValidator.ValidateTransition(pending, late).IsValid);
     }
 
     [Fact]

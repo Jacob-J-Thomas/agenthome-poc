@@ -26,7 +26,7 @@ public sealed class GovernedLoopSequentialBindingResolverTests
     {
         var result = GovernedLoopSequentialBindingResolver.Resolve(null, null, null, null);
 
-        Assert.False(result.IsResolved);
+        Assert.NotEqual(GovernedLoopSequentialBindingResolutionStatus.Resolved, result.Status);
         Assert.Empty(result.Inputs);
         Assert.Equal("canonical-binding.activation-invalid", result.FailureCode);
         Assert.Equal("$.frontier", result.FailurePath);
@@ -46,7 +46,7 @@ public sealed class GovernedLoopSequentialBindingResolverTests
 
         var identityResolution = GovernedLoopSequentialBindingResolver.Resolve(context.Artifact, context.Plan, identity, context.Run);
 
-        Assert.True(identityResolution.IsResolved, $"{identityResolution.FailureCode} at {identityResolution.FailurePath}");
+        Assert.Equal(GovernedLoopSequentialBindingResolutionStatus.Resolved, identityResolution.Status);
         var identityInput = Assert.Single(identityResolution.Inputs);
         Assert.Equal("request-to-identity", identityInput.BindingId);
         Assert.Equal(GovernedLoopValueKind.Text, identityInput.Value.Kind);
@@ -58,7 +58,7 @@ public sealed class GovernedLoopSequentialBindingResolverTests
 
         var validationResolution = GovernedLoopSequentialBindingResolver.Resolve(context.Artifact, context.Plan, validation, afterInference);
 
-        Assert.True(validationResolution.IsResolved);
+        Assert.Equal(GovernedLoopSequentialBindingResolutionStatus.Resolved, validationResolution.Status);
         var validationInput = Assert.Single(validationResolution.Inputs);
         Assert.Equal("result-to-validation", validationInput.BindingId);
         Assert.Equal(GovernedLoopValueKind.Text, validationInput.Value.Kind);
@@ -71,7 +71,7 @@ public sealed class GovernedLoopSequentialBindingResolverTests
             Node(context, "equal-false"),
             afterValidation);
 
-        Assert.True(equalityResolution.IsResolved);
+        Assert.Equal(GovernedLoopSequentialBindingResolutionStatus.Resolved, equalityResolution.Status);
         Assert.Equal(["validation-to-equality-left", "validation-to-equality-right"], equalityResolution.Inputs.Select(input => input.BindingId));
         Assert.All(equalityResolution.Inputs, input =>
         {
@@ -92,7 +92,7 @@ public sealed class GovernedLoopSequentialBindingResolverTests
             Node(context, "validate-length"),
             context.Run);
 
-        Assert.False(result.IsResolved);
+        Assert.NotEqual(GovernedLoopSequentialBindingResolutionStatus.Resolved, result.Status);
         Assert.Empty(result.Inputs);
         Assert.Equal("canonical-binding.activation-invalid", result.FailureCode);
         Assert.Equal("$.frontier", result.FailurePath);
@@ -125,7 +125,7 @@ public sealed class GovernedLoopSequentialBindingResolverTests
             Node(prepared.Context, "equal-false"),
             tampered);
 
-        Assert.False(result.IsResolved);
+        Assert.NotEqual(GovernedLoopSequentialBindingResolutionStatus.Resolved, result.Status);
         Assert.Empty(result.Inputs);
         Assert.Equal("canonical-binding.source-evidence-invalid", result.FailureCode);
         Assert.Equal("$.bindings[validation-to-equality-left]", result.FailurePath);
@@ -147,7 +147,7 @@ public sealed class GovernedLoopSequentialBindingResolverTests
             Node(context, "validate-length"),
             bounded);
 
-        Assert.True(accepted.IsResolved);
+        Assert.Equal(GovernedLoopSequentialBindingResolutionStatus.Resolved, accepted.Status);
         Assert.Equal(CustomLoopLimits.MaxCanonicalModelOutputCharacters, JsonSerializer.Deserialize<string>(Assert.Single(accepted.Inputs).Value.CanonicalValueJson)!.Length);
 
         var overBound = ReplaceCompletedEvidence(
@@ -166,7 +166,7 @@ public sealed class GovernedLoopSequentialBindingResolverTests
             Node(context, "validate-length"),
             overBound);
 
-        Assert.False(rejected.IsResolved);
+        Assert.NotEqual(GovernedLoopSequentialBindingResolutionStatus.Resolved, rejected.Status);
         Assert.Empty(rejected.Inputs);
         Assert.Equal("canonical-binding.context-invalid", rejected.FailureCode);
         Assert.Equal("$", rejected.FailurePath);

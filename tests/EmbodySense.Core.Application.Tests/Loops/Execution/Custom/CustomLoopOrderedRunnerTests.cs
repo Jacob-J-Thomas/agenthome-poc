@@ -7013,7 +7013,8 @@ public sealed partial class CustomLoopOrderedRunnerTests
         IGovernedLoopWorkspaceActionExecutor? workspaceActionExecutor = null,
         IGovernedLoopCommandActionExecutor? commandActionExecutor = null,
         IGovernedLoopFailureClassifier? failureClassifier = null,
-        HumanInputPolicyResolutionService? humanInputPolicyResolutionService = null)
+        HumanInputPolicyResolutionService? humanInputPolicyResolutionService = null,
+        IGovernedLoopSequentialHumanInputBindingSource? humanInputBindingSource = null)
     {
         return new CustomLoopOrderedRunner(
             store,
@@ -7036,7 +7037,8 @@ public sealed partial class CustomLoopOrderedRunnerTests
             workspaceActionExecutor: workspaceActionExecutor,
             commandActionExecutor: commandActionExecutor,
             failureClassifier: failureClassifier,
-            humanInputPolicyResolutionService: humanInputPolicyResolutionService);
+            humanInputPolicyResolutionService: humanInputPolicyResolutionService,
+            humanInputBindingSource: humanInputBindingSource);
     }
 
     private static GovernedLoopWorkspaceActionExecutionResult WorkspaceActionOutcome(WorkspaceActionResultStatus status)

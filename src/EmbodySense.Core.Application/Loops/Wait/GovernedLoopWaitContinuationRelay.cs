@@ -1,5 +1,6 @@
 using EmbodySense.Core.Application.Loops.Sleep;
 using EmbodySense.Core.Application.Loops.Sleep.Models;
+using EmbodySense.Core.Common.Loops.HumanInput;
 
 namespace EmbodySense.Core.Application.Loops.Wait;
 
@@ -9,6 +10,7 @@ public sealed class GovernedLoopWaitContinuationRelay : IGovernedLoopWakeContinu
 {
     private IGovernedLoopWakeContinuationPort? _target;
     private IGovernedLoopWakeContinuationPort? _retryTarget;
+    private IGovernedLoopWakeContinuationPort? _humanInputTarget;
 
     /// <summary>Binds the sole canonical continuation target exactly once.</summary>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="target"/> is null.</exception>
@@ -34,6 +36,18 @@ public sealed class GovernedLoopWaitContinuationRelay : IGovernedLoopWakeContinu
         }
     }
 
+    /// <summary>Binds the sole canonical Human Input continuation target exactly once.</summary>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="target"/> is null.</exception>
+    /// <exception cref="InvalidOperationException">Thrown when a Human Input target was already bound.</exception>
+    public void BindHumanInput(IGovernedLoopWakeContinuationPort target)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        if (ReferenceEquals(target, this) || Interlocked.CompareExchange(ref _humanInputTarget, target, null) is not null)
+        {
+            throw new InvalidOperationException("The governed Wait continuation relay may be bound exactly once to a Human Input target.");
+        }
+    }
+
     /// <inheritdoc />
     public Task<GovernedLoopWakeContinuationResult?> ContinueAsync(
         GovernedLoopWakeContinuationRequest request,
@@ -55,7 +69,9 @@ public sealed class GovernedLoopWaitContinuationRelay : IGovernedLoopWakeContinu
                     EvidenceReference: "wait-continuation-not-composed"));
 
     private IGovernedLoopWakeContinuationPort? Target(GovernedLoopWakeContinuationRequest request)
-        => request.Checkpoint.Binding.WaitOperationId.StartsWith("retry-", StringComparison.Ordinal)
-            ? Volatile.Read(ref _retryTarget)
-            : Volatile.Read(ref _target);
+        => request.Checkpoint.AuthenticatedEventReference?.StartsWith(GovernedLoopHumanInputContinuationVocabulary.AuthenticatedEventReferencePrefix, StringComparison.Ordinal) == true
+            ? Volatile.Read(ref _humanInputTarget)
+            : request.Checkpoint.Binding.WaitOperationId.StartsWith("retry-", StringComparison.Ordinal)
+                ? Volatile.Read(ref _retryTarget)
+                : Volatile.Read(ref _target);
 }

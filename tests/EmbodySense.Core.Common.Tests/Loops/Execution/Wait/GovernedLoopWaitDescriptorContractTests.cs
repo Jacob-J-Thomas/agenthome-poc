@@ -1,5 +1,6 @@
 using EmbodySense.Core.Common.Loops.Execution.Wait;
 using EmbodySense.Core.Common.Loops.Execution.Wait.Models;
+using EmbodySense.Core.Common.Loops.HumanInput;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 
 namespace EmbodySense.Core.Common.Tests.Loops.Execution.Wait;
@@ -66,6 +67,21 @@ public sealed class GovernedLoopWaitDescriptorContractTests
         Assert.Equal("governed-event-1", condition.AuthenticatedEventReference);
         Assert.Null(condition.WakeDeadlineUtc);
         Assert.All(invalid, parameters => Assert.False(GovernedLoopWaitContractValidator.ValidateDescriptor(descriptor, parameters).IsValid));
+    }
+
+    [Fact]
+    public void Authored_authenticated_event_cannot_claim_the_reserved_human_input_response_namespace()
+    {
+        var reserved = GovernedLoopWaitContractTestFixture.EventParameters(
+            GovernedLoopHumanInputContinuationVocabulary.AuthenticatedEventReferencePrefix + "checkpoint-one");
+
+        Assert.False(GovernedLoopWaitContractValidator.ValidateDescriptor(GovernedLoopWaitContractTestFixture.EventDescriptor(), reserved).IsValid);
+        Assert.False(GovernedLoopWaitContractValidator.TryCreateCondition(
+            GovernedLoopWaitContractTestFixture.EventDescriptor(),
+            reserved,
+            out var condition,
+            out _));
+        Assert.Null(condition);
     }
 
     [Theory]

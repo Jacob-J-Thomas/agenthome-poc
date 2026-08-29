@@ -198,7 +198,7 @@ public static class GovernedLoopExecutionStateMatrix
         {
             GovernedLoopRunStatus.Admitted => next is GovernedLoopRunStatus.Running or GovernedLoopRunStatus.Waiting or GovernedLoopRunStatus.PauseRequested or GovernedLoopRunStatus.Paused or GovernedLoopRunStatus.CancelRequested or GovernedLoopRunStatus.Cancelled or GovernedLoopRunStatus.Failed or GovernedLoopRunStatus.NeedsReview,
             GovernedLoopRunStatus.Running => next is GovernedLoopRunStatus.Waiting or GovernedLoopRunStatus.PauseRequested or GovernedLoopRunStatus.Paused or GovernedLoopRunStatus.CancelRequested or GovernedLoopRunStatus.Completed or GovernedLoopRunStatus.Failed or GovernedLoopRunStatus.NeedsReview,
-            GovernedLoopRunStatus.Waiting => next is GovernedLoopRunStatus.Running or GovernedLoopRunStatus.PauseRequested or GovernedLoopRunStatus.Paused or GovernedLoopRunStatus.CancelRequested or GovernedLoopRunStatus.Failed or GovernedLoopRunStatus.NeedsReview,
+            GovernedLoopRunStatus.Waiting => next is GovernedLoopRunStatus.Running or GovernedLoopRunStatus.PauseRequested or GovernedLoopRunStatus.Paused or GovernedLoopRunStatus.CancelRequested or GovernedLoopRunStatus.Cancelled or GovernedLoopRunStatus.Failed or GovernedLoopRunStatus.NeedsReview,
             GovernedLoopRunStatus.PauseRequested => next is GovernedLoopRunStatus.Paused or GovernedLoopRunStatus.CancelRequested or GovernedLoopRunStatus.Completed or GovernedLoopRunStatus.Failed or GovernedLoopRunStatus.NeedsReview,
             GovernedLoopRunStatus.Paused => next is GovernedLoopRunStatus.Running or GovernedLoopRunStatus.Waiting or GovernedLoopRunStatus.CancelRequested or GovernedLoopRunStatus.Cancelled or GovernedLoopRunStatus.Failed or GovernedLoopRunStatus.NeedsReview,
             GovernedLoopRunStatus.CancelRequested => next is GovernedLoopRunStatus.Cancelled or GovernedLoopRunStatus.Failed or GovernedLoopRunStatus.NeedsReview,
@@ -226,7 +226,7 @@ public static class GovernedLoopExecutionStateMatrix
         {
             GovernedLoopNodeExecutionStatus.Ready => next is GovernedLoopNodeExecutionStatus.Running or GovernedLoopNodeExecutionStatus.Skipped or GovernedLoopNodeExecutionStatus.Failed or GovernedLoopNodeExecutionStatus.ReviewBlocked,
             GovernedLoopNodeExecutionStatus.Running => next is GovernedLoopNodeExecutionStatus.Completed or GovernedLoopNodeExecutionStatus.Waiting or GovernedLoopNodeExecutionStatus.Failed or GovernedLoopNodeExecutionStatus.ReviewBlocked,
-            GovernedLoopNodeExecutionStatus.Waiting => next is GovernedLoopNodeExecutionStatus.Running or GovernedLoopNodeExecutionStatus.Failed or GovernedLoopNodeExecutionStatus.ReviewBlocked,
+            GovernedLoopNodeExecutionStatus.Waiting => next is GovernedLoopNodeExecutionStatus.Running or GovernedLoopNodeExecutionStatus.Completed or GovernedLoopNodeExecutionStatus.Failed or GovernedLoopNodeExecutionStatus.ReviewBlocked,
             GovernedLoopNodeExecutionStatus.ReviewBlocked => next is GovernedLoopNodeExecutionStatus.Running or GovernedLoopNodeExecutionStatus.Failed,
             _ => false
         };
