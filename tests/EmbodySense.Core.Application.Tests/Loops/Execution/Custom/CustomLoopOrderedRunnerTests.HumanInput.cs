@@ -35,6 +35,7 @@ using EmbodySense.Core.Common.Authority;
 using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.Governance.Audit;
+using EmbodySense.Core.Common.HumanInput;
 using EmbodySense.Core.Common.HumanInput.Models;
 using EmbodySense.Core.Common.HumanInput.Lifecycle.Models;
 using EmbodySense.Core.Common.HumanInput.Responses;
@@ -953,6 +954,61 @@ public sealed partial class CustomLoopOrderedRunnerTests
         Assert.Equal(2, cancellations.Length);
         Assert.Equal(4, lifecycle.Commits.Count);
         Assert.All(checkpoints, checkpoint => Assert.Equal(HumanInputRequestLifecycleStatus.Cancelled, lifecycle.Snapshot(checkpoint.Request.RequestId)!.Head.Status));
+    }
+
+    [Fact]
+    public async Task Cancellation_retires_the_historical_checkpoint_bound_in_canonical_order_once_each_and_terminalizes()
+    {
+        const int HistoricalCheckpointReconciliationAttemptBound = 32;
+
+        var context = await HumanInputPublicationContextAsync();
+        var runs = new FakeRunStore(context.Run);
+        var lifecycle = new InMemoryHumanInputRequestLifecycleStore();
+        var publication = Publication(context, runs, lifecycle);
+        var parked = await Runtime(
+            context,
+            runs,
+            new QueueExecutor(),
+            new RecordingPublisher(),
+            HumanInputPolicyResolver(context),
+            humanInputRequestPublicationService: publication).RunAsync(Request(context));
+        runs.ReplaceCurrent(CreateHistoricalBoundPendingHumanInputRun(runs.Current, HistoricalCheckpointReconciliationAttemptBound));
+        var checkpoints = runs.Current.HumanInputWaitingCheckpoints
+            .OrderBy(checkpoint => checkpoint.Binding.ActivationOrdinal)
+            .ThenBy(checkpoint => checkpoint.Binding.NodeVisitOrdinal)
+            .ThenBy(checkpoint => checkpoint.Binding.CheckpointId, StringComparer.Ordinal)
+            .ToArray();
+        var pending = checkpoints.Where(checkpoint => checkpoint.Posture == GovernedLoopHumanInputWaitingCheckpointPosture.Pending).ToArray();
+        foreach (var checkpoint in pending)
+        {
+            if (lifecycle.Snapshot(checkpoint.Request.RequestId) is not null)
+            {
+                continue;
+            }
+
+            var published = await publication.PublishAsync(new HumanInputRequestPublicationRequest(
+                runs.Current.Id,
+                checkpoint.Binding.CheckpointId,
+                checkpoint.CheckpointHash));
+            Assert.Equal(HumanInputRequestPublicationStatus.Published, published.Status);
+        }
+
+        var cancellation = HumanInputCancellationLifecycle(context, runs, lifecycle, new FakeControlOperationStore());
+        var cancelled = await cancellation.CancelAsync(new CustomLoopCancelRequest(
+            runs.Current.Id,
+            runs.Current.LifecycleVersion,
+            "cancel-historical-human-input-checkpoint-bound",
+            AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Waiting, parked.Status);
+        Assert.Equal(HistoricalCheckpointReconciliationAttemptBound, pending.Length);
+        Assert.Equal(CustomLoopControlStatus.Cancelled, cancelled.Status);
+        Assert.Equal(CustomLoopRunStatus.Cancelled, runs.Current.Status);
+        Assert.All(runs.Current.HumanInputWaitingCheckpoints, checkpoint => Assert.True(checkpoint.Posture is GovernedLoopHumanInputWaitingCheckpointPosture.Cancelled or GovernedLoopHumanInputWaitingCheckpointPosture.Terminal));
+        var cancellations = lifecycle.Commits.Where(commit => commit.Mutation.Operation.Kind == HumanInputRequestLifecycleOperationKind.Cancel).ToArray();
+        Assert.Equal(pending.Select(checkpoint => checkpoint.Request.RequestId), cancellations.Select(commit => commit.Mutation.Operation.TargetRequestId));
+        Assert.Equal(pending.Length, cancellations.Length);
+        Assert.All(pending, checkpoint => Assert.Equal(HumanInputRequestLifecycleStatus.Cancelled, lifecycle.Snapshot(checkpoint.Request.RequestId)!.Head.Status));
     }
 
     [Fact]
@@ -3260,6 +3316,131 @@ public sealed partial class CustomLoopOrderedRunnerTests
         Assert.Equal(CustomLoopOrderedRunStatus.Waiting, parked.Status);
         return (context, runs, lifecycle, Assert.Single(runs.Current.HumanInputWaitingCheckpoints));
     }
+
+    private static CustomLoopRunRecord CreateHistoricalBoundPendingHumanInputRun(CustomLoopRunRecord run, int pendingCheckpointCount)
+    {
+        var templateCheckpoint = run.HumanInputWaitingCheckpoints.First();
+        var adapter = Assert.IsType<GovernedLoopSequentialAdapterBinding>(run.SequentialAdapterBinding);
+        var templateActivation = Assert.IsType<GovernedLoopNodeExecutionEvidence>(run.Frontier?.Payload.Nodes.ElementAtOrDefault(templateCheckpoint.Binding.ActivationOrdinal));
+        var firstSyntheticActivationOrdinal = run.Frontier!.Payload.Nodes.Count;
+        var syntheticCheckpointCount = pendingCheckpointCount - run.HumanInputWaitingCheckpoints.Count(checkpoint => checkpoint.Posture == GovernedLoopHumanInputWaitingCheckpointPosture.Pending);
+        Assert.True(syntheticCheckpointCount >= 0);
+        var nodes = run.Frontier.Payload.Nodes
+            .Concat(Enumerable.Range(firstSyntheticActivationOrdinal, syntheticCheckpointCount)
+            .Select(index => GovernedLoopNodeExecutionEvidence.CreateActivation(
+                index,
+                index,
+                1,
+                HistoricalBoundHumanInputNodeId(index),
+                templateActivation.Descriptor,
+                [],
+                [],
+                GovernedLoopNodeExecutionStatus.Waiting,
+                1,
+                $"historical-bound-human-input-attempt-{index:D3}")))
+            .ToArray();
+        var frontier = GovernedLoopFrontierPosture.Create(
+            adapter.ExecutionBinding,
+            adapter.WorkspaceId,
+            adapter.GraphArtifactHash,
+            adapter.GraphLayoutHash,
+            adapter.AdmissionReceiptHash,
+            checked(run.Frontier!.Payload.FrontierVersion + 1),
+            GovernedLoopExecutionLimits.Schema1ConcurrencyCeiling,
+            GovernedLoopFrontierStatus.Waiting,
+            nodes,
+            run.Frontier.Payload.UpdatedAtUtc,
+            string.Empty);
+        var pending = Enumerable.Range(firstSyntheticActivationOrdinal, syntheticCheckpointCount)
+            .Select(index => CreateHistoricalBoundHumanInputCheckpoint(templateCheckpoint, adapter, frontier, index))
+            .ToArray();
+        var checkpoints = new[] { templateCheckpoint }
+            .Concat(pending)
+            .OrderBy(checkpoint => checkpoint.Binding.ActivationOrdinal)
+            .ThenBy(checkpoint => checkpoint.Binding.NodeVisitOrdinal)
+            .ThenBy(checkpoint => checkpoint.Binding.CheckpointId, StringComparer.Ordinal)
+            .ToArray();
+        var historicalBound = run with
+        {
+            Frontier = frontier,
+            HumanInputWaitingCheckpoints = checkpoints,
+        };
+        Assert.True(CustomLoopRunValidator.Validate(historicalBound).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(historicalBound).Errors));
+        return historicalBound;
+    }
+
+    private static GovernedLoopHumanInputWaitingCheckpoint CreateHistoricalBoundHumanInputCheckpoint(
+        GovernedLoopHumanInputWaitingCheckpoint template,
+        GovernedLoopSequentialAdapterBinding adapter,
+        GovernedLoopFrontierPosture frontier,
+        int index)
+    {
+        var nodeId = HistoricalBoundHumanInputNodeId(index);
+        var checkpointId = $"historical-bound-human-input-checkpoint-{index:D3}";
+        var policy = HumanInputPolicyResolutionSnapshot.TryCreate(
+            adapter.WorkspaceId,
+            adapter.ExecutionBinding.Revision.GraphId,
+            adapter.ExecutionBinding.Revision.RevisionId,
+            nodeId,
+            template.ResolvedPolicy.ActorId,
+            template.ResolvedPolicy.TimeoutPolicy,
+            template.ResolvedPolicy.FailurePolicy,
+            template.ResolvedPolicy.ResolvedAtUtc);
+        Assert.NotNull(policy);
+        var binding = new GovernedLoopHumanInputWaitingCheckpointBinding(
+            GovernedLoopHumanInputWaitingCheckpointContractLimits.CurrentSchemaVersion,
+            adapter.WorkspaceId,
+            adapter.ExecutionBinding,
+            template.Binding.Publication,
+            adapter.GraphArtifactHash,
+            adapter.GraphLayoutHash,
+            adapter.AdmissionReceiptHash,
+            frontier.Payload.FrontierVersion,
+            frontier.Payload.ContentHash,
+            index,
+            null,
+            null,
+            nodeId,
+            1,
+            checkpointId);
+        var request = HumanInputRequestHash.Apply(new HumanInputRequest(
+            HumanInputRequest.CurrentSchemaVersion,
+            $"historical-bound-human-input-request-{index:D3}",
+            $"historical-bound-human-input-request-version-{index:D3}",
+            new HumanInputRequestBinding(adapter.WorkspaceId, adapter.ExecutionBinding.Revision.GraphId, adapter.ExecutionBinding.Revision.RevisionId, nodeId, adapter.ExecutionBinding.RunId, checkpointId),
+            template.NodeConfiguration.Purpose!,
+            template.NodeConfiguration.Prompt!,
+            template.NodeConfiguration.ResponseSchema!,
+            template.NodeConfiguration.PrivacyClass,
+            template.NodeConfiguration.EligibleRespondents!.Select(item => item!).ToArray(),
+            new HumanInputTiming(policy.ResolvedAtUtc, policy.ExpiresAtUtc),
+            template.NodeConfiguration.ResponsePolicy!,
+            new HumanInputContinuationBinding(HumanInputContinuationPolicyKind.BoundNodeAndCheckpointOnly, nodeId, checkpointId),
+            string.Empty));
+        var evidence = GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(new GovernedLoopHumanInputWaitingCheckpointEvidence(
+            GovernedLoopHumanInputWaitingCheckpointContractLimits.CurrentSchemaVersion,
+            1,
+            GovernedLoopHumanInputWaitingCheckpointEvidenceKind.Published,
+            policy.ResolvedAtUtc,
+            null,
+            null,
+            null,
+            null,
+            null,
+            string.Empty,
+            string.Empty));
+        return GovernedLoopHumanInputWaitingCheckpointContractHash.Apply(new GovernedLoopHumanInputWaitingCheckpoint(
+            GovernedLoopHumanInputWaitingCheckpoint.CurrentSchemaVersion,
+            binding,
+            template.NodeConfiguration,
+            policy,
+            request,
+            GovernedLoopHumanInputWaitingCheckpointPosture.Pending,
+            [evidence],
+            string.Empty));
+    }
+
+    private static string HistoricalBoundHumanInputNodeId(int index) => $"historical-bound-human-input-node-{index:D3}";
 
     private static CustomLoopRunStoreResult CheckpointRetirementResult(CustomLoopRunStoreStatus status, CustomLoopRunRecord run)
         => status switch

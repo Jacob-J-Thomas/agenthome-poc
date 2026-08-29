@@ -14,6 +14,7 @@ using EmbodySense.Core.Common.HumanInput.Lifecycle.Models;
 using EmbodySense.Core.Common.HumanInput.Models;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.HumanInput.Checkpoints;
 using EmbodySense.Core.Common.Loops.HumanInput.Checkpoints.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
@@ -27,7 +28,6 @@ namespace EmbodySense.Core.Application.Loops.Execution.Custom;
 /// append-only checkpoint history.</remarks>
 public sealed class CustomLoopHumanInputCancellationConvergenceService : ICustomLoopHumanInputCancellationConvergence
 {
-    private const int MaximumCheckpointReconciliationAttempts = 32;
     private const string CancellationReasonText = "loop-cancellation-human-input";
     private readonly ICapabilityAuthorityTransaction _authorityTransaction;
     private readonly ICustomLoopControlOperationStore _controlOperations;
@@ -106,7 +106,7 @@ public sealed class CustomLoopHumanInputCancellationConvergenceService : ICustom
             return Result(CustomLoopHumanInputCancellationConvergenceStatus.Corrupt, null, "The retained parent control receipt is missing, divergent, or not a retryable Cancel request for this run.");
         }
 
-        for (var attempt = 0; attempt < MaximumCheckpointReconciliationAttempts; attempt++)
+        for (var attempt = 0; attempt <= GovernedLoopExecutionLimits.MaxFrontierNodes; attempt++)
         {
             var run = await ReadRunAsync(runId, cancellationToken).ConfigureAwait(false);
             if (run is null)
