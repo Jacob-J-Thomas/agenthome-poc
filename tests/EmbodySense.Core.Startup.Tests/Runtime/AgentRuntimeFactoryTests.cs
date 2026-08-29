@@ -64,6 +64,7 @@ using EmbodySense.Core.Common.Triggers;
 using EmbodySense.Core.Common.Triggers.Models;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Common.HumanInput.Lifecycle.Models;
+using EmbodySense.Core.Common.HumanInput;
 using EmbodySense.Core.Common.HumanInput.Models;
 using EmbodySense.Core.Common.HumanInput.Responses.Models;
 using EmbodySense.Core.Common.Runtime;
@@ -1943,6 +1944,11 @@ public sealed class AgentRuntimeFactoryTests
             new HumanInputResponseValue(HumanInputResponseKind.Text, "private-response-value", null, null, null, null),
             "private-response-explanation");
 
+        var invalidResponseValue = await runtime.HumanInput.SubmitResponseAsync(submit with
+        {
+            OperationId = "submit-oversized-response",
+            Value = new HumanInputResponseValue(HumanInputResponseKind.Text, new string('x', HumanInputLimits.MaxResponseTextCharacters + 1), null, null, null, null)
+        });
         var committed = await runtime.HumanInput.SubmitResponseAsync(submit);
         var mismatchedRequestId = await runtime.HumanInput.SubmitResponseAsync(submit with
         {
@@ -1964,6 +1970,7 @@ public sealed class AgentRuntimeFactoryTests
         Assert.Equal(HumanInputOperationStatus.Committed, committed.Status);
         Assert.Equal(HumanInputOperationStatus.Invalid, invalidLifecycle.Status);
         Assert.Equal(HumanInputOperationStatus.Invalid, invalidResponse.Status);
+        Assert.Equal(HumanInputOperationStatus.Invalid, invalidResponseValue.Status);
         Assert.Equal(HumanInputOperationStatus.NotFound, missingTarget.Status);
         Assert.Equal(HumanInputOperationStatus.NotFound, missingRequest.Status);
         Assert.Equal(HumanInputOperationStatus.Conflict, mismatchedRequestId.Status);
@@ -2008,6 +2015,11 @@ public sealed class AgentRuntimeFactoryTests
             OperationId = "cancel-mismatched-request",
             RequestId = "different-request-id"
         });
+        var invalidLifecycleRequestId = await runtime.HumanInput.SubmitLifecycleAsync(cancel with
+        {
+            OperationId = "cancel-invalid-request-id",
+            RequestId = string.Empty
+        });
         var invalidLifecycleOperation = await runtime.HumanInput.SubmitLifecycleAsync(cancel with { OperationId = string.Empty });
         var invalidLifecycleReason = await runtime.HumanInput.SubmitLifecycleAsync(cancel with { OperationId = "cancel-invalid-reason", Reason = string.Empty });
         provider.LifecycleTermsStatus = AgentRuntimeHumanInputAuthorityStatus.Denied;
@@ -2039,6 +2051,7 @@ public sealed class AgentRuntimeFactoryTests
         Assert.Equal(HumanInputOperationStatus.Committed, cancelled.Status);
         Assert.Equal(HumanInputOperationStatus.NotFound, missingLifecycleBinding.Status);
         Assert.Equal(HumanInputOperationStatus.Invalid, mismatchedLifecycleRequest.Status);
+        Assert.Equal(HumanInputOperationStatus.Invalid, invalidLifecycleRequestId.Status);
         Assert.Equal(HumanInputOperationStatus.Invalid, invalidLifecycleOperation.Status);
         Assert.Equal(HumanInputOperationStatus.Invalid, invalidLifecycleReason.Status);
         Assert.Equal(HumanInputOperationStatus.Denied, deniedTerms.Status);
@@ -2232,8 +2245,23 @@ public sealed class AgentRuntimeFactoryTests
                 HumanInputRequestStoreTestData.Reference(request),
                 null,
                 "cancel request"));
+            var page = await runtime.HumanInput.ListAsync();
+            var read = await runtime.HumanInput.ReadAsync(request.RequestId);
+            var response = await runtime.HumanInput.SubmitResponseAsync(new HumanInputResponseOperationInput(
+                "unavailable-catalog-response",
+                HumanInputResponseOperationKind.Submit,
+                request.RequestId,
+                head.LifecycleVersion,
+                head.Status,
+                HumanInputRequestStoreTestData.Reference(request),
+                "unavailable-catalog-response",
+                new HumanInputResponseValue(HumanInputResponseKind.Text, "private-response", null, null, null, null),
+                null));
 
             Assert.Equal(HumanInputOperationStatus.Unavailable, result.Status);
+            Assert.Equal(HumanInputRequestPosturePageStatus.Unavailable, page.Status);
+            Assert.Equal(HumanInputRequestPostureReadStatus.Unavailable, read.Status);
+            Assert.Equal(HumanInputOperationStatus.Unavailable, response.Status);
         }
 
         using var ambiguousWorkspace = new TestWorkspace();
@@ -2266,8 +2294,23 @@ public sealed class AgentRuntimeFactoryTests
             HumanInputRequestStoreTestData.Reference(interruptedRequest),
             null,
             "cancel request"));
+        var ambiguousPage = await ambiguousRuntime.HumanInput.ListAsync();
+        var ambiguousRead = await ambiguousRuntime.HumanInput.ReadAsync(interruptedRequest.RequestId);
+        var ambiguousResponse = await ambiguousRuntime.HumanInput.SubmitResponseAsync(new HumanInputResponseOperationInput(
+            "ambiguous-catalog-response",
+            HumanInputResponseOperationKind.Submit,
+            interruptedRequest.RequestId,
+            interruptedHead.LifecycleVersion,
+            interruptedHead.Status,
+            HumanInputRequestStoreTestData.Reference(interruptedRequest),
+            "ambiguous-catalog-response",
+            new HumanInputResponseValue(HumanInputResponseKind.Text, "private-response", null, null, null, null),
+            null));
 
         Assert.Equal(HumanInputOperationStatus.Ambiguous, ambiguous.Status);
+        Assert.Equal(HumanInputRequestPosturePageStatus.Ambiguous, ambiguousPage.Status);
+        Assert.Equal(HumanInputRequestPostureReadStatus.Ambiguous, ambiguousRead.Status);
+        Assert.Equal(HumanInputOperationStatus.Ambiguous, ambiguousResponse.Status);
     }
 
     [Fact]
