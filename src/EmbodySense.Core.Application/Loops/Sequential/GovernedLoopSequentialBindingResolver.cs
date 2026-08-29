@@ -1,6 +1,8 @@
 using System.Text.Json;
+using EmbodySense.Core.Application.Loops.GraphValidation;
 using EmbodySense.Core.Application.Loops.Sequential.Models;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Execution.Models;
 using EmbodySense.Core.Common.Loops.HumanInput;
@@ -364,6 +366,11 @@ public static class GovernedLoopSequentialBindingResolver
                 : (GovernedLoopSequentialBindingResolutionStatus.Invalid, null, false);
         }
 
+        if (!IsExactHumanInputResponseConditionTarget(artifact.Graph, targetActivation, sourcePortId))
+        {
+            return (GovernedLoopSequentialBindingResolutionStatus.Invalid, null, true);
+        }
+
         if (!TryFindExactTerminalHumanInputCheckpoint(artifact, run, source, sourceActivation, outcomeEvent, sourcePortId, out var checkpoint)
             || checkpoint is null)
         {
@@ -382,6 +389,22 @@ public static class GovernedLoopSequentialBindingResolver
         }
 
         return (GovernedLoopSequentialBindingResolutionStatus.Resolved, resolved.Binding!.Value, true);
+    }
+
+    private static bool IsExactHumanInputResponseConditionTarget(
+        GovernedLoopGraphDefinition graph,
+        GovernedLoopNodeExecutionEvidence targetActivation,
+        string sourcePortId)
+    {
+        var target = graph.Nodes.SingleOrDefault(candidate => string.Equals(candidate.Id, targetActivation.NodeId, StringComparison.Ordinal));
+        var schemas = graph.ValueSchemas.ToDictionary(schema => schema.Id, StringComparer.Ordinal);
+        return string.Equals(sourcePortId, GovernedLoopHumanInputVocabulary.ResponsePortId, StringComparison.Ordinal)
+            && target is not null
+            && target.Descriptor.Kind == GovernedLoopNodeKind.Condition
+            && GovernedLoopTopologyNodeCatalogContract.TryResolve(target.Descriptor, out var canonical)
+            && canonical is not null
+            && GovernedLoopTopologyNodeCatalogContract.HasExactCatalogSemantics(canonical)
+            && GovernedLoopTopologyNodeCatalogContract.HasExactSchemaSemantics(target, schemas);
     }
 
     private static bool TryFindExactTerminalHumanInputCheckpoint(

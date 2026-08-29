@@ -29,6 +29,19 @@
     <Compile Include="..\EmbodySense.Core.Application.Tests\Loops\Sequential\GovernedLoopSequentialApplicationTestFixture.cs" Link="Support\GovernedLoopSequentialApplicationTestFixture.cs" />
     <Compile Include="..\EmbodySense.Core.Common.Tests\TriggerDeliveryTestData.cs" Link="Support\TriggerDeliveryTestData.cs" />
     <Compile Include="..\EmbodySense.Core.Common.Tests\Triggers\Schedules\ScheduleContractTestData.cs" Link="Support\ScheduleContractTestData.cs" />
+    <Compile Include="..\EmbodySense.Core.Persistence.Tests\HumanInput\Continuations\HumanInputContinuationAuthorityTransaction.cs" Link="Support\HumanInputContinuationAuthorityTransaction.cs" />
+    <Compile Include="..\EmbodySense.Core.Persistence.Tests\HumanInput\Continuations\HumanInputContinuationRecoveryContext.cs" Link="Support\HumanInputContinuationRecoveryContext.cs" />
+    <Compile Include="..\EmbodySense.Core.Persistence.Tests\HumanInput\Continuations\HumanInputContinuationResponseActorAuthenticator.cs" Link="Support\HumanInputContinuationResponseActorAuthenticator.cs" />
+    <Compile Include="..\EmbodySense.Core.Persistence.Tests\HumanInput\Continuations\HumanInputResponseContinuationRecoveryFixture.cs" Link="Support\HumanInputResponseContinuationRecoveryFixture.cs" />
+    <Compile Include="..\EmbodySense.Core.Persistence.Tests\HumanInput\Requests\HumanInputRequestStoreTestData.cs" Link="Support\HumanInputRequestStoreTestData.cs" />
+    <Compile Include="..\EmbodySense.HumanInputContinuationHost\HumanInputResponseContinuationGraphFixture.cs" Link="Support\HumanInputResponseContinuationGraphFixture.cs" />
+    <Compile Include="..\EmbodySense.HumanInputContinuationHost\HumanInputResponseContinuationHostAuthorityProvider.cs" Link="Support\HumanInputResponseContinuationHostAuthorityProvider.cs" />
+    <Compile Include="..\EmbodySense.HumanInputContinuationHost\HumanInputResponseContinuationHostCapabilityAdmissionService.cs" Link="Support\HumanInputResponseContinuationHostCapabilityAdmissionService.cs" />
+    <Compile Include="..\EmbodySense.HumanInputContinuationHost\HumanInputResponseContinuationHostCompletionTransaction.cs" Link="Support\HumanInputResponseContinuationHostCompletionTransaction.cs" />
+    <Compile Include="..\EmbodySense.HumanInputContinuationHost\HumanInputResponseContinuationHostContextPort.cs" Link="Support\HumanInputResponseContinuationHostContextPort.cs" />
+    <Compile Include="..\EmbodySense.HumanInputContinuationHost\HumanInputResponseContinuationHostConversationPublisher.cs" Link="Support\HumanInputResponseContinuationHostConversationPublisher.cs" />
+    <Compile Include="..\EmbodySense.HumanInputContinuationHost\HumanInputResponseContinuationHostCurrentPosturePort.cs" Link="Support\HumanInputResponseContinuationHostCurrentPosturePort.cs" />
+    <Compile Include="..\EmbodySense.HumanInputContinuationHost\HumanInputResponseContinuationHostInferenceExecutor.cs" Link="Support\HumanInputResponseContinuationHostInferenceExecutor.cs" />
   </ItemGroup>
 
   <PropertyGroup>

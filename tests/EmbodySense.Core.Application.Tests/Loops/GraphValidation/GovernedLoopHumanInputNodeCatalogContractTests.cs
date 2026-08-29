@@ -59,6 +59,8 @@ public sealed class GovernedLoopHumanInputNodeCatalogContractTests
         Assert.False(GovernedLoopHumanInputNodeCatalogContract.TryResolve(descriptor.Descriptor with { TypeId = "human-review" }, out _));
         Assert.False(GovernedLoopHumanInputNodeCatalogContract.TryResolve(descriptor.Descriptor with { Version = 2 }, out _));
         Assert.All(mutations, mutation => Assert.False(GovernedLoopHumanInputNodeCatalogContract.HasExactCatalogSemantics(mutation)));
+        Assert.True(GovernedLoopHumanInputNodeCatalogContract.HasExactCatalogStructure(descriptor with { IsExecutable = false }));
+        Assert.False(GovernedLoopHumanInputNodeCatalogContract.HasExactCatalogStructure(descriptor with { RequiredCapabilityIds = ["org.embodysense/workspace-read"] }));
     }
 
     [Fact]

@@ -42,7 +42,7 @@ namespace EmbodySense.Core.Application.HumanInput.Continuations;
 /// and coordinator ownership. A selection is durably attached to its exact checkpoint before wake submission, and the
 /// terminal checkpoint plus completed activation frontier are durably committed before ordered re-entry.
 /// </remarks>
-public sealed class HumanInputResponseContinuationService : IGovernedLoopAuthenticatedWakeVerificationPort, IGovernedLoopWakeContinuationPort
+public sealed class HumanInputResponseContinuationService : IHumanInputResponseContinuationWakePort, IGovernedLoopAuthenticatedWakeVerificationPort, IGovernedLoopWakeContinuationPort
 {
     private const string TerminalReceiptPrefix = "human-input-";
     private readonly ICustomLoopRunStore _runs;

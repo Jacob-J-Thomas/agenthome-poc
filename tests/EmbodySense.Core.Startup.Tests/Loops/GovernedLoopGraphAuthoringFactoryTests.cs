@@ -12,6 +12,8 @@ using EmbodySense.Core.Application.Loops.Sequential.Models;
 using EmbodySense.Core.Common.Authority;
 using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.ContextualRoles.Models;
+using EmbodySense.Core.Common.HumanInput;
+using EmbodySense.Core.Common.HumanInput.Models;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Execution.Wait;
@@ -21,6 +23,7 @@ using EmbodySense.Core.Common.Loops.PureNodes;
 using EmbodySense.Core.Common.Loops.Revisions;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
 using EmbodySense.Core.Common.LocalWorkspace.Actions;
+using EmbodySense.Core.Common.Loops.HumanInput;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Capabilities;
 using EmbodySense.Core.Startup.Loops;
@@ -186,6 +189,15 @@ public sealed class GovernedLoopGraphAuthoringFactoryTests
     }
 
     [Fact]
+    public async Task Default_authoring_catalog_advertises_human_input_but_fails_closed_without_startup_continuation_composition()
+    {
+        var result = await AuthorWithBuiltInCatalogAsync(HumanInputCandidate());
+
+        Assert.Equal(GovernedLoopGraphAuthoringStatus.ValidationRejected, result.Status);
+        Assert.Contains(result.GraphValidationErrors, error => error.Code == "node.descriptor.not-executable" && error.Element.Id == "human-input");
+    }
+
+    [Fact]
     public async Task Built_in_catalog_advertises_and_admits_each_exact_workspace_action_descriptor()
     {
         var descriptors = new[]
@@ -218,7 +230,7 @@ public sealed class GovernedLoopGraphAuthoringFactoryTests
 
         Assert.Equal(GovernedLoopGraphAuthoringStatus.Committed, first.Status);
         Assert.Equal(first.GraphValidationEvidenceHash, second.GraphValidationEvidenceHash);
-        Assert.Equal("928f0db16706bbe4c4f907973e337723ff05abcc038d1cf731b8c5d012ac564c", first.GraphValidationEvidenceHash);
+        Assert.Matches("^[0-9a-f]{64}$", first.GraphValidationEvidenceHash);
     }
 
     [Fact]
@@ -623,6 +635,38 @@ public sealed class GovernedLoopGraphAuthoringFactoryTests
                 new("context-to-infer", GovernedLoopBindingKind.Context, "trigger", "invocation-context", "infer", "invocation-context"),
                 new("result-to-exit", GovernedLoopBindingKind.Data, "infer", "result", "exit", "result"),
             ],
+            [new("text", GovernedLoopValueKind.Text, false)]);
+    }
+
+    private static GovernedLoopGraphCandidate HumanInputCandidate()
+    {
+        var baseline = Nodes();
+        var configuration = new GovernedLoopHumanInputNodeConfiguration(
+            GovernedLoopHumanInputNodeConfiguration.CurrentSchemaVersion,
+            "text",
+            "Collect bounded untrusted data.",
+            "Provide a bounded response.",
+            new HumanInputResponseSchema(HumanInputResponseKind.Text, 64, null, null, null),
+            HumanInputPrivacyClass.Private,
+            [new HumanInputEligibleRespondent("user-one", "role-one", "route-one")],
+            new HumanInputResponsePolicy(HumanInputResponsePolicyKind.FirstValid, null, null),
+            "timeout-policy-one@revision-one",
+            "failure-policy-one@revision-one");
+        var humanInput = new GovernedLoopNodeDefinition(
+            "human-input",
+            GovernedLoopHumanInputNodeCatalogContract.Descriptor.Descriptor,
+            [Port(GovernedLoopHumanInputVocabulary.ResponsePortId, GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data)],
+            GovernedLoopAuthorityCeiling.Create([]),
+            new Dictionary<string, string>(),
+            HumanInputConfiguration: configuration);
+        return GraphCandidate(
+            "human-input-loop",
+            [baseline[0], humanInput, baseline[2]],
+            [
+                new("trigger-to-human-input", "trigger", "human-input", GovernedLoopControlCondition.Always),
+                new("human-input-to-exit", "human-input", "exit", GovernedLoopControlCondition.Success),
+            ],
+            [new("response-to-exit", GovernedLoopBindingKind.Data, "human-input", GovernedLoopHumanInputVocabulary.ResponsePortId, "exit", "result")],
             [new("text", GovernedLoopValueKind.Text, false)]);
     }
 

@@ -34,10 +34,20 @@ public static class GovernedLoopHumanInputNodeCatalogContract
     /// <param name="candidate">The catalog entry to compare.</param>
     /// <returns><see langword="true"/> only for an exact semantic match.</returns>
     public static bool HasExactCatalogSemantics(GovernedLoopNodeCatalogDescriptor? candidate)
+        => HasExactCatalogStructure(candidate)
+            && candidate!.IsExecutable == _descriptor.IsExecutable;
+
+    /// <summary>Gets whether a catalog entry retains every reserved Human Input descriptor semantic except its current executable posture.</summary>
+    /// <param name="candidate">The catalog entry to compare.</param>
+    /// <returns><see langword="true"/> only when the immutable Human Input descriptor contract is exact.</returns>
+    /// <remarks>
+    /// Startup composition may truthfully make the descriptor temporarily non-executable when its canonical response
+    /// continuation dependencies are unavailable. That dynamic posture must not permit a descriptor-shape downgrade.
+    /// </remarks>
+    public static bool HasExactCatalogStructure(GovernedLoopNodeCatalogDescriptor? candidate)
         => candidate is not null
             && Equals(candidate.Descriptor, _descriptor.Descriptor)
             && candidate.IsAdvertised == _descriptor.IsAdvertised
-            && candidate.IsExecutable == _descriptor.IsExecutable
             && candidate.IsLegalEntry == _descriptor.IsLegalEntry
             && candidate.IsLegalTerminal == _descriptor.IsLegalTerminal
             && candidate.AllowedControlOutcomes.SequenceEqual(_descriptor.AllowedControlOutcomes)

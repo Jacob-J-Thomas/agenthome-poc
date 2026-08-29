@@ -7,8 +7,12 @@ using EmbodySense.Core.Application.Tests.Loops.Sequential;
 using EmbodySense.Core.Application.Tests.Governance.Authority.Grants;
 using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.ContextualRoles.Models;
+using EmbodySense.Core.Common.HumanInput;
+using EmbodySense.Core.Common.HumanInput.Models;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
+using EmbodySense.Core.Common.Loops.Failures;
+using EmbodySense.Core.Common.Loops.HumanInput;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.PureNodes;
 
@@ -39,6 +43,37 @@ public sealed class GovernedLoopGraphValidationServiceTests
         Assert.Equal(first.Graph.ExecutableHash, second.Graph!.ExecutableHash);
         Assert.Equal(first.Evidence, second.Evidence);
         Assert.Equal(64, first.Evidence!.CombinedHash.Length);
+    }
+
+    [Theory]
+    [InlineData(false, "response-to-exit")]
+    [InlineData(true, "response-to-inference")]
+    public async Task ValidateRejectsHumanInputResponseBindingsOutsideAnExactDeterministicCondition(
+        bool targetsInference,
+        string bindingId)
+    {
+        var candidate = HumanInputResponseBindingCandidate(targetsInference);
+        var result = await Service(
+            ExactHumanInputTopologyCatalog(candidate),
+            HumanInputAuthority()).ValidateAsync(candidate);
+
+        Assert.False(result.IsValid);
+        Assert.Contains(
+            result.Errors,
+            error => error.Code == "binding.human-input-response.target-unsupported"
+                && error.Element.Id == bindingId);
+    }
+
+    [Fact]
+    public async Task ValidateAdmitsAnExactHumanInputResponseBindingToAnExactDeterministicCondition()
+    {
+        var candidate = HumanInputResponseConditionCandidate();
+        var result = await Service(
+            ExactHumanInputConditionCatalog(candidate),
+            HumanInputAuthority()).ValidateAsync(candidate);
+
+        Assert.True(result.IsValid, string.Join(Environment.NewLine, result.Errors.Select(error => $"{error.Code}: {error.Message}")));
+        Assert.NotNull(result.Graph);
     }
 
     [Fact]
@@ -1426,6 +1461,22 @@ public sealed class GovernedLoopGraphValidationServiceTests
         return AuthorityFromRevision(revision);
     }
 
+    private static GovernedLoopAuthoritySnapshot HumanInputAuthority()
+        => Authority(capabilityIds: HumanInputAuthorityCapabilities()) with
+        {
+            MaxPayloadCharacters = CustomLoopLimits.MaxGraphAggregatePayloadCharacters,
+            MaxResourceUnits = CustomLoopLimits.MaxGraphAggregateResourceUnits,
+        };
+
+    private static IReadOnlyList<string> HumanInputAuthorityCapabilities()
+        =>
+        [
+            GovernedLoopSequentialApplicationTestFixture.ConversationTurnCapabilityId,
+            ModelInferenceCapability,
+            ModelProfileCapability,
+            WorkspaceReadCapability,
+        ];
+
     private static GovernedLoopAuthoritySnapshot AuthorityFromRevision(ContextualRoleRevision revision)
     {
         var pin = new ContextualRoleRevisionPin(revision.Identity, revision.ContentHash);
@@ -1499,6 +1550,22 @@ public sealed class GovernedLoopGraphValidationServiceTests
                 .Where(descriptor => !GovernedLoopTopologyNodeCatalogContract.TryResolve(descriptor.Descriptor, out _))
                 .DistinctBy(descriptor => descriptor.Descriptor),
             .. GovernedLoopTopologyNodeCatalogContract.Descriptors,
+        ];
+
+    private static GovernedLoopNodeCatalogDescriptor[] ExactHumanInputTopologyCatalog(GovernedLoopGraphCandidate candidate)
+        =>
+        [
+            .. ExactTopologyCatalog(candidate)
+                .Where(descriptor => !GovernedLoopHumanInputNodeCatalogContract.TryResolve(descriptor.Descriptor, out _)),
+            GovernedLoopHumanInputNodeCatalogContract.Descriptor,
+        ];
+
+    private static GovernedLoopNodeCatalogDescriptor[] ExactHumanInputConditionCatalog(GovernedLoopGraphCandidate candidate)
+        =>
+        [
+            .. ExactHumanInputTopologyCatalog(candidate)
+                .Where(descriptor => !GovernedLoopFailNodeCatalogContract.TryResolve(descriptor.Descriptor, out _)),
+            .. GovernedLoopFailNodeCatalogContract.Descriptors,
         ];
 
     private static GovernedLoopNodeCatalogDescriptor[] ExactSchemaConformanceCycleCatalog(GovernedLoopGraphCandidate candidate)
@@ -1842,13 +1909,15 @@ public sealed class GovernedLoopGraphValidationServiceTests
         return CandidateFromGraph(artifact.Graph);
     }
 
-    private static GovernedLoopGraphCandidate CandidateFromGraph(GovernedLoopGraphDefinition graph)
+    private static GovernedLoopGraphCandidate CandidateFromGraph(
+        GovernedLoopGraphDefinition graph,
+        ContextualRoleRevisionPin? owningRole = null)
         => new(
             graph.SchemaVersion,
             graph.GraphId,
             graph.RevisionId,
             graph.Purpose,
-            RolePin(),
+            owningRole ?? RolePin(),
             graph.EntryNodeId,
             graph.TerminalNodeIds.Cast<string?>().ToArray(),
             graph.AuthorityCeiling,
@@ -1985,6 +2054,114 @@ public sealed class GovernedLoopGraphValidationServiceTests
     }
 
     private static GovernedLoopValueSchemaDefinition[] Schemas() => [new("text", GovernedLoopValueKind.Text, false)];
+
+    private static GovernedLoopGraphCandidate HumanInputResponseBindingCandidate(bool targetsInference)
+    {
+        var trigger = GovernedLoopSequentialApplicationTestFixture.Trigger("trigger");
+        var humanInput = new GovernedLoopNodeDefinition(
+            "human-input",
+            GovernedLoopHumanInputNodeCatalogContract.Descriptor.Descriptor,
+            [new GovernedLoopPortDefinition(GovernedLoopHumanInputVocabulary.ResponsePortId, GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "text", true)],
+            GovernedLoopAuthorityCeiling.Create([]),
+            new Dictionary<string, string>(),
+            HumanInputConfiguration: new GovernedLoopHumanInputNodeConfiguration(
+                GovernedLoopHumanInputNodeConfiguration.CurrentSchemaVersion,
+                "text",
+                "Collect one bounded response.",
+                "Provide one bounded response.",
+                new HumanInputResponseSchema(HumanInputResponseKind.Text, 64, null, null, null),
+                HumanInputPrivacyClass.Private,
+                [new HumanInputEligibleRespondent("user-one", "role-one", "route-one")],
+                new HumanInputResponsePolicy(HumanInputResponsePolicyKind.FirstValid, null, null),
+                "timeout-policy-one@revision-one",
+                "failure-policy-one@revision-one"));
+        var exit = GovernedLoopSequentialApplicationTestFixture.Exit("exit");
+        var nodes = targetsInference
+            ? new[] { trigger, humanInput, GovernedLoopSequentialApplicationTestFixture.Inference("infer"), exit }
+            : new[] { trigger, humanInput, exit };
+        var edges = targetsInference
+            ? new[]
+            {
+                new GovernedLoopControlEdgeDefinition("trigger-to-human-input", "trigger", "human-input", GovernedLoopControlCondition.Always),
+                new GovernedLoopControlEdgeDefinition("human-input-to-inference", "human-input", "infer", GovernedLoopControlCondition.Success),
+                new GovernedLoopControlEdgeDefinition("inference-to-exit", "infer", "exit", GovernedLoopControlCondition.Success),
+            }
+            : new[]
+            {
+                new GovernedLoopControlEdgeDefinition("trigger-to-human-input", "trigger", "human-input", GovernedLoopControlCondition.Always),
+                new GovernedLoopControlEdgeDefinition("human-input-to-exit", "human-input", "exit", GovernedLoopControlCondition.Success),
+            };
+        var bindings = targetsInference
+            ? new[]
+            {
+                new GovernedLoopBindingDefinition("response-to-inference", GovernedLoopBindingKind.Data, "human-input", GovernedLoopHumanInputVocabulary.ResponsePortId, "infer", "request"),
+                new GovernedLoopBindingDefinition("context-to-inference", GovernedLoopBindingKind.Context, "trigger", "invocation-context", "infer", "invocation-context"),
+                new GovernedLoopBindingDefinition("inference-to-exit", GovernedLoopBindingKind.Data, "infer", "result", "exit", "result"),
+            }
+            : [new GovernedLoopBindingDefinition("response-to-exit", GovernedLoopBindingKind.Data, "human-input", GovernedLoopHumanInputVocabulary.ResponsePortId, "exit", "result")];
+        var artifact = GovernedLoopSequentialApplicationTestFixture.Artifact(
+            nodes,
+            edges,
+            ["exit"],
+            RolePin(capabilityIds: HumanInputAuthorityCapabilities()),
+            bindings,
+            authorityCeiling: GovernedLoopAuthorityCeiling.Create(HumanInputAuthorityCapabilities()));
+        return CandidateFromGraph(artifact.Graph, artifact.Graph.OwningRole);
+    }
+
+    private static GovernedLoopGraphCandidate HumanInputResponseConditionCandidate()
+    {
+        var trigger = GovernedLoopSequentialApplicationTestFixture.Trigger("trigger");
+        var humanInput = new GovernedLoopNodeDefinition(
+            "human-input",
+            GovernedLoopHumanInputNodeCatalogContract.Descriptor.Descriptor,
+            [new GovernedLoopPortDefinition(GovernedLoopHumanInputVocabulary.ResponsePortId, GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "text", true)],
+            GovernedLoopAuthorityCeiling.Create([]),
+            new Dictionary<string, string>(),
+            HumanInputConfiguration: new GovernedLoopHumanInputNodeConfiguration(
+                GovernedLoopHumanInputNodeConfiguration.CurrentSchemaVersion,
+                "text",
+                "Collect one bounded response.",
+                "Provide one bounded response.",
+                new HumanInputResponseSchema(HumanInputResponseKind.Text, 64, null, null, null),
+                HumanInputPrivacyClass.Private,
+                [new HumanInputEligibleRespondent("user-one", "role-one", "route-one")],
+                new HumanInputResponsePolicy(HumanInputResponsePolicyKind.FirstValid, null, null),
+                "timeout-policy-one@revision-one",
+                "failure-policy-one@revision-one"));
+        var condition = new GovernedLoopNodeDefinition(
+            "response-condition",
+            GovernedLoopSequentialNodeDescriptors.ExactTextCondition,
+            [new GovernedLoopPortDefinition(GovernedLoopTopologyNodeVocabulary.ValuePort, GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data, "text", true)],
+            GovernedLoopAuthorityCeiling.Create([]),
+            new Dictionary<string, string> { [GovernedLoopTopologyNodeVocabulary.ExpectedParameter] = "allow" });
+        var fail = new GovernedLoopNodeDefinition(
+            "fail",
+            GovernedLoopSequentialNodeDescriptors.FailTerminal,
+            [],
+            GovernedLoopAuthorityCeiling.Create([]),
+            new Dictionary<string, string>
+            {
+                [GovernedLoopFailNodeVocabulary.CodeParameter] = "response-rejected",
+                [GovernedLoopFailNodeVocabulary.ExplanationParameter] = "The response route reached its deterministic rejection terminal.",
+            });
+        var artifact = GovernedLoopSequentialApplicationTestFixture.Artifact(
+            [trigger, humanInput, condition, GovernedLoopSequentialApplicationTestFixture.Exit("exit"), fail],
+            [
+                new GovernedLoopControlEdgeDefinition("trigger-to-human-input", "trigger", "human-input", GovernedLoopControlCondition.Always),
+                new GovernedLoopControlEdgeDefinition("human-input-to-condition", "human-input", "response-condition", GovernedLoopControlCondition.Success),
+                new GovernedLoopControlEdgeDefinition("condition-to-exit", "response-condition", "exit", GovernedLoopControlCondition.True),
+                new GovernedLoopControlEdgeDefinition("condition-to-fail", "response-condition", "fail", GovernedLoopControlCondition.False),
+            ],
+            ["exit", "fail"],
+            RolePin(capabilityIds: HumanInputAuthorityCapabilities()),
+            [
+                new GovernedLoopBindingDefinition("response-to-condition", GovernedLoopBindingKind.Data, "human-input", GovernedLoopHumanInputVocabulary.ResponsePortId, "response-condition", GovernedLoopTopologyNodeVocabulary.ValuePort),
+                new GovernedLoopBindingDefinition("request-to-exit", GovernedLoopBindingKind.Data, "trigger", "request", "exit", "result"),
+            ],
+            authorityCeiling: GovernedLoopAuthorityCeiling.Create(HumanInputAuthorityCapabilities()));
+        return CandidateFromGraph(artifact.Graph, artifact.Graph.OwningRole);
+    }
 
     private static GovernedLoopNodeDefinition[] Nodes()
     {

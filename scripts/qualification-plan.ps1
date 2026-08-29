@@ -322,6 +322,90 @@ $script:QualificationLinkedTestMappings = @(
             "tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj",
             "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj"
         )
+    },
+    [pscustomobject]@{
+        Path = "tests/EmbodySense.Core.Persistence.Tests/HumanInput/Continuations/HumanInputContinuationAuthorityTransaction.cs"
+        TestProjects = @(
+            "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj",
+            "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj"
+        )
+    },
+    [pscustomobject]@{
+        Path = "tests/EmbodySense.Core.Persistence.Tests/HumanInput/Continuations/HumanInputContinuationRecoveryContext.cs"
+        TestProjects = @(
+            "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj",
+            "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj"
+        )
+    },
+    [pscustomobject]@{
+        Path = "tests/EmbodySense.Core.Persistence.Tests/HumanInput/Continuations/HumanInputContinuationResponseActorAuthenticator.cs"
+        TestProjects = @(
+            "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj",
+            "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj"
+        )
+    },
+    [pscustomobject]@{
+        Path = "tests/EmbodySense.Core.Persistence.Tests/HumanInput/Continuations/HumanInputResponseContinuationRecoveryFixture.cs"
+        TestProjects = @(
+            "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj",
+            "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj"
+        )
+    },
+    [pscustomobject]@{
+        Path = "tests/EmbodySense.Core.Persistence.Tests/HumanInput/Requests/HumanInputRequestStoreTestData.cs"
+        TestProjects = @(
+            "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj",
+            "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj"
+        )
+    },
+    [pscustomobject]@{
+        Path = "tests/EmbodySense.HumanInputContinuationHost/HumanInputResponseContinuationGraphFixture.cs"
+        TestProjects = @(
+            "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj",
+            "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj"
+        )
+    },
+    [pscustomobject]@{
+        Path = "tests/EmbodySense.HumanInputContinuationHost/HumanInputResponseContinuationHostAuthorityProvider.cs"
+        TestProjects = @(
+            "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj"
+        )
+    },
+    [pscustomobject]@{
+        Path = "tests/EmbodySense.HumanInputContinuationHost/HumanInputResponseContinuationHostCapabilityAdmissionService.cs"
+        TestProjects = @(
+            "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj"
+        )
+    },
+    [pscustomobject]@{
+        Path = "tests/EmbodySense.HumanInputContinuationHost/HumanInputResponseContinuationHostCompletionTransaction.cs"
+        TestProjects = @(
+            "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj"
+        )
+    },
+    [pscustomobject]@{
+        Path = "tests/EmbodySense.HumanInputContinuationHost/HumanInputResponseContinuationHostContextPort.cs"
+        TestProjects = @(
+            "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj"
+        )
+    },
+    [pscustomobject]@{
+        Path = "tests/EmbodySense.HumanInputContinuationHost/HumanInputResponseContinuationHostConversationPublisher.cs"
+        TestProjects = @(
+            "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj"
+        )
+    },
+    [pscustomobject]@{
+        Path = "tests/EmbodySense.HumanInputContinuationHost/HumanInputResponseContinuationHostCurrentPosturePort.cs"
+        TestProjects = @(
+            "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj"
+        )
+    },
+    [pscustomobject]@{
+        Path = "tests/EmbodySense.HumanInputContinuationHost/HumanInputResponseContinuationHostInferenceExecutor.cs"
+        TestProjects = @(
+            "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj"
+        )
     }
 )
 $script:QualificationFocusedHelperMappings = @(

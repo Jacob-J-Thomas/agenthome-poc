@@ -515,6 +515,11 @@ internal sealed class GovernedLoopBackgroundRuntimeHost : ICustomLoopExecutionAc
                 AgentRuntimeGovernedLoopBackgroundOwnership.None,
                 "governed_local_background_stopped: local admission drained to a durable safe boundary."),
             GovernedLoopLocalCoordinatorStopStatus.AlreadyStopped when IsConfirmedStopped(current) => AlreadyStopped(),
+            GovernedLoopLocalCoordinatorStopStatus.AlreadyStopped when IsConfirmedFailed(stop.Snapshot, current) => new(
+                AgentRuntimeGovernedLoopBackgroundStopStatus.Failed,
+                AgentRuntimeGovernedLoopBackgroundReadiness.Degraded,
+                AgentRuntimeGovernedLoopBackgroundOwnership.None,
+                "governed_local_background_failed: durable coordinator evidence terminated fail closed before this runtime requested stop."),
             GovernedLoopLocalCoordinatorStopStatus.AlreadyStopped => new(
                 AgentRuntimeGovernedLoopBackgroundStopStatus.Unavailable,
                 current.Readiness,
@@ -576,6 +581,13 @@ internal sealed class GovernedLoopBackgroundRuntimeHost : ICustomLoopExecutionAc
 
     private static bool IsConfirmedStopped(AgentRuntimeGovernedLoopBackgroundStatus status)
         => status.Readiness == AgentRuntimeGovernedLoopBackgroundReadiness.Stopped
+            && status.Ownership == AgentRuntimeGovernedLoopBackgroundOwnership.None;
+
+    private static bool IsConfirmedFailed(
+        GovernedLoopCoordinatorSnapshot? snapshot,
+        AgentRuntimeGovernedLoopBackgroundStatus status)
+        => snapshot?.LatestLifecycle.Status == GovernedLoopCoordinatorStatus.Failed
+            && status.Readiness == AgentRuntimeGovernedLoopBackgroundReadiness.Degraded
             && status.Ownership == AgentRuntimeGovernedLoopBackgroundOwnership.None;
 
     private static async Task DisposeAfterDrainAsync(

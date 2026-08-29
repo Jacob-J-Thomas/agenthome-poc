@@ -41,8 +41,9 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
     private readonly IReadOnlyList<CommandActionRegistration> _commandActions;
     private readonly ICapabilityCatalogStore? _capabilityCatalog;
     private readonly ICommandActionNativeHost? _commandActionNativeHost;
+    private readonly Func<bool>? _isHumanInputExecutable;
 
-    internal BuiltInGovernedLoopNodeCatalog() : this(Array.Empty<CommandActionRegistration>(), null)
+    internal BuiltInGovernedLoopNodeCatalog() : this(Array.Empty<CommandActionRegistration>(), isHumanInputExecutable: static () => false)
     {
     }
 
@@ -50,7 +51,8 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
         IEnumerable<CommandActionRegistration> commandActions,
         Func<CommandActionRegistration, bool>? isCommandActionExecutable = null,
         ICapabilityCatalogStore? capabilityCatalog = null,
-        ICommandActionNativeHost? commandActionNativeHost = null)
+        ICommandActionNativeHost? commandActionNativeHost = null,
+        Func<bool>? isHumanInputExecutable = null)
     {
         ArgumentNullException.ThrowIfNull(commandActions);
         var registrations = commandActions.Take(257).ToArray();
@@ -61,7 +63,8 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
         _commandActions = Array.AsReadOnly(registrations);
         _capabilityCatalog = capabilityCatalog;
         _commandActionNativeHost = commandActionNativeHost;
-        _initialSnapshot = CreateSnapshot(registrations, isCommandActionExecutable);
+        _isHumanInputExecutable = isHumanInputExecutable;
+        _initialSnapshot = CreateSnapshot(registrations, isCommandActionExecutable, isHumanInputExecutable: IsHumanInputExecutable);
     }
 
     /// <inheritdoc />
@@ -132,7 +135,8 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
             return CreateSnapshot(
                 _commandActions,
                 registration => executableCommandActions.Contains(registration.Template.ContentHash),
-                capabilityId => HasCurrentExecutableCapabilities(capabilityId, current));
+                capabilityId => HasCurrentExecutableCapabilities(capabilityId, current),
+                IsHumanInputExecutable);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -147,8 +151,10 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
     private static GovernedLoopNodeCatalogSnapshot CreateSnapshot(
         IReadOnlyList<CommandActionRegistration> commandActions,
         Func<CommandActionRegistration, bool>? isCommandActionExecutable,
-        Func<string, bool>? isCapabilityExecutable = null)
+        Func<string, bool>? isCapabilityExecutable = null,
+        Func<bool>? isHumanInputExecutable = null)
     {
+        var humanInputExecutable = IsHumanInputExecutable(isHumanInputExecutable);
         var graphCompatibleCommandActions = commandActions
             .Select(registration => new
             {
@@ -162,7 +168,7 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
             .Concat(GovernedLoopPureNodeCatalogContract.Descriptors)
             .Concat(GovernedLoopTopologyNodeCatalogContract.Descriptors)
             .Concat(GovernedLoopWaitNodeCatalogContract.Descriptors)
-            .Append(GovernedLoopHumanInputNodeCatalogContract.Descriptor)
+            .Append(GovernedLoopHumanInputNodeCatalogContract.Descriptor with { IsExecutable = humanInputExecutable })
             .Concat(GovernedLoopFailNodeCatalogContract.Descriptors)
             .Concat(graphCompatibleCommandActions.Select(candidate => CommandAction(candidate.Registration, candidate.PayloadCharacters, isCommandActionExecutable?.Invoke(candidate.Registration) == true)))
             .Select(descriptor => isCapabilityExecutable is null
@@ -201,6 +207,21 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
             && entry.Lifecycle.Health == CapabilityHealthState.Healthy
             && entry.Lifecycle.Retirement is CapabilityRetirementState.Active or CapabilityRetirementState.Deprecated
             && entry.Lifecycle.Trust == CapabilityTrustState.Verified;
+
+    private bool IsHumanInputExecutable()
+        => IsHumanInputExecutable(_isHumanInputExecutable);
+
+    private static bool IsHumanInputExecutable(Func<bool>? probe)
+    {
+        try
+        {
+            return probe?.Invoke() ?? false;
+        }
+        catch
+        {
+            return false;
+        }
+    }
 
     private static bool HasExpectedDescriptorIdentity(
         string capabilityId,
