@@ -11,6 +11,7 @@ using EmbodySense.Core.Application.HumanInput.Continuations;
 using EmbodySense.Core.Application.HumanInput.Catalog;
 using EmbodySense.Core.Application.HumanInput.Lifecycle;
 using EmbodySense.Core.Application.HumanInput.Policies;
+using EmbodySense.Core.Application.HumanInput.Publication;
 using EmbodySense.Core.Application.HumanInput.Responses;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Admission;
@@ -660,6 +661,13 @@ public sealed class AgentRuntimeFactory
             var humanInputPolicyStore = new HumanInputPolicyFileStore(paths);
             var humanInputPolicyResolutionService = new HumanInputPolicyResolutionService(humanInputPolicyStore);
             var humanInputResponses = new HumanInputRequestStore(paths, _capabilityTrustProvider, authorityTransaction: capabilityAuthority);
+            var humanInputPublication = new HumanInputRequestPublicationService(
+                customRunStore,
+                humanInputResponses,
+                governedGrantResolver,
+                capabilityAuthority,
+                workspaceId,
+                operationalClock);
             var humanInputFacade = new HumanInputRuntimeFacade(
                 workspaceId,
                 (IHumanInputRequestCatalog)humanInputResponses,
@@ -693,7 +701,8 @@ public sealed class AgentRuntimeFactory
                 commandActionExecutor: governedCommandActionExecutor,
                 failureClassifier: failureClassifier,
                 humanInputPolicyResolutionService: humanInputPolicyResolutionService,
-                humanInputBindingSource: humanInputBindingSource);
+                humanInputBindingSource: humanInputBindingSource,
+                humanInputRequestPublicationService: humanInputPublication);
             var governedAdmissionStore = new GovernedLoopAdmissionStore(paths, _capabilityTrustProvider, authorityTransaction: capabilityAuthority);
             var governedAdmission = new GovernedLoopAdmissionService(
                 workspaceId,
@@ -943,6 +952,7 @@ public sealed class AgentRuntimeFactory
                 localBackgroundWork,
                 humanInputRecovery,
                 humanInputPolicyStore,
+                humanInputPublication,
                 humanInputContinuation,
                 CustomLoopLimits.MaxRecentRunsPageSize,
                 operationalClock,

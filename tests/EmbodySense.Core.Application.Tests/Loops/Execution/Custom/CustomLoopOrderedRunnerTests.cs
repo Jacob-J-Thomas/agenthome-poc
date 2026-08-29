@@ -6,12 +6,14 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using EmbodySense.Core.Application.Governance.Audit;
+using EmbodySense.Core.Application.Governance.Authority.Grants.Models;
 using EmbodySense.Core.Application.Governance.Tools;
 using EmbodySense.Core.Application.Governance.Tools.Models;
 using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Application.HumanInput.Policies;
 using EmbodySense.Core.Application.Capabilities.Models;
 using EmbodySense.Core.Application.Loops;
+using EmbodySense.Core.Application.HumanInput.Publication;
 using EmbodySense.Core.Application.Loops.Admission;
 using EmbodySense.Core.Application.Loops.Admission.Models;
 using EmbodySense.Core.Application.Loops.EffectAuthorityEvidence.Models;
@@ -7014,7 +7016,8 @@ public sealed partial class CustomLoopOrderedRunnerTests
         IGovernedLoopCommandActionExecutor? commandActionExecutor = null,
         IGovernedLoopFailureClassifier? failureClassifier = null,
         HumanInputPolicyResolutionService? humanInputPolicyResolutionService = null,
-        IGovernedLoopSequentialHumanInputBindingSource? humanInputBindingSource = null)
+        IGovernedLoopSequentialHumanInputBindingSource? humanInputBindingSource = null,
+        IHumanInputRequestPublicationService? humanInputRequestPublicationService = null)
     {
         return new CustomLoopOrderedRunner(
             store,
@@ -7038,7 +7041,8 @@ public sealed partial class CustomLoopOrderedRunnerTests
             commandActionExecutor: commandActionExecutor,
             failureClassifier: failureClassifier,
             humanInputPolicyResolutionService: humanInputPolicyResolutionService,
-            humanInputBindingSource: humanInputBindingSource);
+            humanInputBindingSource: humanInputBindingSource,
+            humanInputRequestPublicationService: humanInputRequestPublicationService);
     }
 
     private static GovernedLoopWorkspaceActionExecutionResult WorkspaceActionOutcome(WorkspaceActionResultStatus status)
@@ -7166,7 +7170,8 @@ public sealed partial class CustomLoopOrderedRunnerTests
     private static async Task<SequentialTestContext> SequentialContextAsync(
         CustomLoopRunRecord run,
         AuthorityGrantCompletionConstraintKind completionConstraint = AuthorityGrantCompletionConstraintKind.None,
-        Func<EmbodySense.Core.Common.ContextualRoles.Models.ContextualRoleRevisionPin, GovernedLoopGraphRevisionArtifact>? artifactFactory = null)
+        Func<EmbodySense.Core.Common.ContextualRoles.Models.ContextualRoleRevisionPin, GovernedLoopGraphRevisionArtifact>? artifactFactory = null,
+        bool bindResolvedGrantToArtifact = false)
     {
         var seedHarness = GovernedLoopAdmissionTestHarness.Create(
             completionConstraint: completionConstraint,
@@ -7186,6 +7191,27 @@ public sealed partial class CustomLoopOrderedRunnerTests
             artifact.RevisionArtifact.Revision,
             "publish-sequential",
             Hash("publication-lifecycle"));
+        var authorityGrantReference = seedReceipt.Intent.AuthorityGrant;
+        if (bindResolvedGrantToArtifact)
+        {
+            var retainedGrant = Assert.IsType<AuthorityGrant>(seedHarness.GrantResolution.Grant);
+            var exactGrant = AuthorityGrantApplicationTestFixture.Grant(
+                binding: retainedGrant.Binding with { Loop = publication },
+                ceiling: retainedGrant.RequestedCeiling,
+                boundary: AuthorityGrantApplicationTestFixture.Boundary(
+                    effective: _now.AddMinutes(-1),
+                    expires: _now.AddHours(1),
+                    completionConstraint: completionConstraint),
+                recordedAtUtc: _now.AddMinutes(-2));
+            authorityGrantReference = new AuthorityGrantReference(exactGrant.GrantId, exactGrant.Revision, exactGrant.ContentHash);
+            seedHarness.GrantResolution = new AuthorityGrantResolution(
+                AuthorityGrantResolutionStatus.Active,
+                authorityGrantReference,
+                exactGrant,
+                exactGrant.RequestedCeiling,
+                seedHarness.GrantResolution.DependencyEvidenceHash,
+                _now);
+        }
         var invocation = GovernedLoopSequentialContractHash.Apply(new GovernedLoopSequentialInvocationSnapshot(
             1,
             run.TriggerPrompt,
@@ -7200,7 +7226,7 @@ public sealed partial class CustomLoopOrderedRunnerTests
             invocation.ContentHash,
             string.Empty,
             publication,
-            seedReceipt.Intent.AuthorityGrant,
+            authorityGrantReference,
             seedReceipt.Intent.ActorId,
             run.Surface));
         var intent = new GovernedLoopAdmissionIntent(

@@ -114,7 +114,12 @@ public sealed class HumanInputResponseContinuationService : IHumanInputResponseC
                 ? Wake(HumanInputResponseContinuationWakeStatus.Retired)
                 : Wake(HumanInputResponseContinuationWakeStatus.Unavailable);
         }
-        if (!TryFindWaitingCheckpoint(initial, candidate.CheckpointId, out var checkpoint, out var activation))
+        if (!TryFindWaitingCheckpoint(initial, candidate.CheckpointId, out var checkpoint, out _))
+        {
+            return Wake(HumanInputResponseContinuationWakeStatus.Stale);
+        }
+        if (checkpoint!.Posture == GovernedLoopHumanInputWaitingCheckpointPosture.Pending
+            && !HasExactCandidateCheckpoint(initial, candidate))
         {
             return Wake(HumanInputResponseContinuationWakeStatus.Stale);
         }
@@ -642,6 +647,10 @@ public sealed class HumanInputResponseContinuationService : IHumanInputResponseC
             return SelectionAttachment.Replayed(retained!);
         }
         if (checkpoint.Posture != GovernedLoopHumanInputWaitingCheckpointPosture.Pending)
+        {
+            return SelectionAttachment.Stale();
+        }
+        if (!HasExactCandidateCheckpoint(run, candidate))
         {
             return SelectionAttachment.Stale();
         }
@@ -1999,7 +2008,12 @@ public sealed class HumanInputResponseContinuationService : IHumanInputResponseC
     private static bool IsCandidate(HumanInputResponseContinuationCandidate? candidate)
         => candidate is not null
             && CustomLoopArtifactIdentifier.IsValid(candidate.RunId)
-            && EmbodySense.Core.Common.HumanInput.HumanInputIdentifier.IsValid(candidate.CheckpointId);
+            && EmbodySense.Core.Common.HumanInput.HumanInputIdentifier.IsValid(candidate.CheckpointId)
+            && IsHash(candidate.CheckpointHash);
+
+    private static bool HasExactCandidateCheckpoint(CustomLoopRunRecord run, HumanInputResponseContinuationCandidate candidate)
+        => run.HumanInputWaitingCheckpoints.Count(checkpoint => string.Equals(checkpoint.Binding.CheckpointId, candidate.CheckpointId, StringComparison.Ordinal)
+            && string.Equals(checkpoint.CheckpointHash, candidate.CheckpointHash, StringComparison.Ordinal)) == 1;
 
     private static bool IsHash(string? value)
         => value is { Length: 64 } && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');

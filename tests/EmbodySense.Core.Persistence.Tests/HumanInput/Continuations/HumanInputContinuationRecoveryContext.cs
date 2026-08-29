@@ -1,4 +1,5 @@
 using EmbodySense.Core.Application.Loops.Sequential.Models;
+using EmbodySense.Core.Common.Authority.Grants.Models;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.HumanInput.Checkpoints;
@@ -15,4 +16,5 @@ internal sealed record HumanInputContinuationRecoveryContext(
     GovernedLoopHumanInputWaitingCheckpoint Checkpoint,
     GovernedLoopSequentialAdapterBinding Binding,
     GovernedLoopSequentialPlan Plan,
-    GovernedLoopGraphRevisionArtifact Artifact);
+    GovernedLoopGraphRevisionArtifact Artifact,
+    AuthorityGrant Grant);

@@ -11,6 +11,8 @@ using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Application.Governance.Tools;
 using EmbodySense.Core.Application.HumanInput.Policies;
 using EmbodySense.Core.Application.HumanInput.Policies.Models;
+using EmbodySense.Core.Application.HumanInput.Publication;
+using EmbodySense.Core.Application.HumanInput.Publication.Models;
 using EmbodySense.Core.Application.Inference.Profiles;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.EffectAuthorityUsage;
@@ -119,6 +121,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
     private readonly IGovernedLoopFailureClassifier _failureClassifier;
     private readonly HumanInputPolicyResolutionService? _humanInputPolicyResolutionService;
     private readonly IGovernedLoopSequentialHumanInputBindingSource? _humanInputBindingSource;
+    private readonly IHumanInputRequestPublicationService? _humanInputRequestPublicationService;
     private readonly TimeProvider _timeProvider;
     private readonly ConcurrentDictionary<string, byte> _activeRuns = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _activeAttemptCancellations = new(StringComparer.Ordinal);
@@ -144,6 +147,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
     /// <param name="failureClassifier">The pure canonical schema-1 failure classifier. The built-in classifier is used when omitted for compatibility with existing internal composition.</param>
     /// <param name="humanInputPolicyResolutionService">The exact policy resolver required to atomically park a canonical Human Input activation. A missing resolver fails closed without exposing a request.</param>
     /// <param name="humanInputBindingSource">The authoritative response source used only to rehydrate exact terminal Human Input data bindings for causal dependent activations. A missing source makes such an activation retryable without dispatch.</param>
+    /// <param name="humanInputRequestPublicationService">The canonical checkpoint-to-request-ledger publisher. When Human Input policy resolution is configured, a missing publisher prevents checkpoint creation.</param>
     public CustomLoopOrderedRunner(
         ICustomLoopRunStore runStore,
         CustomLoopContextResolver contextResolver,
@@ -162,7 +166,8 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         IGovernedLoopCommandActionExecutor? commandActionExecutor = null,
         IGovernedLoopFailureClassifier? failureClassifier = null,
         HumanInputPolicyResolutionService? humanInputPolicyResolutionService = null,
-        IGovernedLoopSequentialHumanInputBindingSource? humanInputBindingSource = null)
+        IGovernedLoopSequentialHumanInputBindingSource? humanInputBindingSource = null,
+        IHumanInputRequestPublicationService? humanInputRequestPublicationService = null)
     {
         _runStore = runStore ?? throw new ArgumentNullException(nameof(runStore));
         _contextResolver = contextResolver ?? throw new ArgumentNullException(nameof(contextResolver));
@@ -182,6 +187,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         _failureClassifier = failureClassifier ?? new GovernedLoopFailureClassifier();
         _humanInputPolicyResolutionService = humanInputPolicyResolutionService;
         _humanInputBindingSource = humanInputBindingSource;
+        _humanInputRequestPublicationService = humanInputRequestPublicationService;
     }
 
     /// <summary>
@@ -2927,6 +2933,18 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             return new RunAdvance(unavailable.Run, unavailable);
         }
 
+        if (_humanInputRequestPublicationService is null)
+        {
+            var unavailable = await TerminateAsync(
+                run,
+                actor,
+                CustomLoopRunStatus.NeedsReview,
+                "human_input_request_publication_unavailable",
+                "The exact Human Input request publication boundary is unavailable; no request checkpoint or delivery opportunity was exposed.",
+                terminalAuditRecorder: context.AuditRecorder).ConfigureAwait(false);
+            return new RunAdvance(unavailable.Run, unavailable);
+        }
+
         var graphNode = context.Artifact.Graph.Nodes.SingleOrDefault(candidate => string.Equals(candidate.Id, node.NodeId, StringComparison.Ordinal));
         var configuration = graphNode?.HumanInputConfiguration;
         if (graphNode is null
@@ -3060,8 +3078,36 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.InvalidState, durable, "The Human Input checkpoint persistence acknowledgement did not retain the exact checkpoint identity and hash."));
         }
 
+        HumanInputRequestPublicationResult publication;
+        try
+        {
+            using var publicationBoundary = new CancellationTokenSource(_integrityWriteTimeout);
+            publication = await _humanInputRequestPublicationService.PublishAsync(
+                new HumanInputRequestPublicationRequest(durable.Id, checkpoint.Binding.CheckpointId, checkpoint.CheckpointHash),
+                publicationBoundary.Token).ConfigureAwait(false);
+        }
+        catch
+        {
+            return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.Waiting, durable, "The durable Human Input checkpoint awaits request-publication reconciliation."));
+        }
+
+        if (publication is null || !Enum.IsDefined(publication.Status))
+        {
+            return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.InvalidState, durable, "The durable Human Input checkpoint publication result was invalid and requires reconciliation."));
+        }
+
+        if (publication.Status is HumanInputRequestPublicationStatus.Unavailable or HumanInputRequestPublicationStatus.Stale)
+        {
+            return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.Waiting, durable, "The durable Human Input checkpoint awaits request-publication reconciliation."));
+        }
+
+        if (publication.Status is not (HumanInputRequestPublicationStatus.Published or HumanInputRequestPublicationStatus.Replayed))
+        {
+            return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.InvalidState, durable, "The durable Human Input checkpoint publication evidence was rejected and requires reconciliation."));
+        }
+
         return durable.Status == CustomLoopRunStatus.Waiting
-            ? new RunAdvance(null, Result(CustomLoopOrderedRunStatus.Waiting, durable, "The exact Human Input request checkpoint is durably waiting before any notification or delivery opportunity."))
+            ? new RunAdvance(null, Result(CustomLoopOrderedRunStatus.Waiting, durable, "The exact Human Input request checkpoint and canonical request lifecycle are durably reconciled."))
             : durable.Status == CustomLoopRunStatus.Running && durable.Frontier?.Payload.Status == GovernedLoopFrontierStatus.Active
                 ? new RunAdvance(durable, null)
                 : new RunAdvance(null, Result(CustomLoopOrderedRunStatus.InvalidState, durable, "The Human Input checkpoint does not compose with the durable aggregate lifecycle."));

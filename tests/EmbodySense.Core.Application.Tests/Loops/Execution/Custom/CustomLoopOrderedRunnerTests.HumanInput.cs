@@ -1,6 +1,10 @@
 using System.Collections.Immutable;
+using EmbodySense.Core.Application.Governance.Authority.Grants.Models;
 using EmbodySense.Core.Application.HumanInput.Policies;
 using EmbodySense.Core.Application.HumanInput.Policies.Models;
+using EmbodySense.Core.Application.HumanInput.Lifecycle.Models;
+using EmbodySense.Core.Application.HumanInput.Publication;
+using EmbodySense.Core.Application.HumanInput.Publication.Models;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
 using EmbodySense.Core.Application.Loops.Execution.Custom.Models;
@@ -12,11 +16,15 @@ using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Loops.Sequential;
 using EmbodySense.Core.Application.Loops.Sequential.Models;
 using EmbodySense.Core.Application.Tests.HumanInput.Policies;
+using EmbodySense.Core.Application.Tests.HumanInput.Lifecycle;
+using EmbodySense.Core.Application.Tests.Governance.Authority.Grants;
 using EmbodySense.Core.Application.Tests.Loops.Sequential;
+using EmbodySense.Core.Common.Authority;
 using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.HumanInput.Models;
+using EmbodySense.Core.Common.HumanInput.Lifecycle.Models;
 using EmbodySense.Core.Common.HumanInput.Responses;
 using EmbodySense.Core.Common.HumanInput.Responses.Models;
 using EmbodySense.Core.Common.Loops.Custom;
@@ -51,6 +59,7 @@ public sealed partial class CustomLoopOrderedRunnerTests
         var store = new FakeRunStore(context.Run);
         var executor = new QueueExecutor();
         var publisher = new RecordingPublisher();
+        var requestPublication = new RecordingHumanInputRequestPublicationService();
         CustomLoopRunRecord? observedCheckpointCandidate = null;
         store.BeforeUpdate = (candidate, _) =>
         {
@@ -72,9 +81,10 @@ public sealed partial class CustomLoopOrderedRunnerTests
             Assert.Equal(GovernedLoopHumanInputWaitingCheckpointEvidenceKind.Published, Assert.Single(checkpoint.Evidence).Kind);
             Assert.Empty(executor.Requests);
             Assert.Empty(publisher.Requests);
+            Assert.Empty(requestPublication.Requests);
         };
 
-        var runtime = Runtime(context, store, executor, publisher, HumanInputPolicyResolver(context));
+        var runtime = Runtime(context, store, executor, publisher, HumanInputPolicyResolver(context), humanInputRequestPublicationService: requestPublication);
         var parked = await runtime.RunAsync(Request(context));
 
         Assert.True(parked.Status == CustomLoopOrderedRunStatus.Waiting, parked.Detail);
@@ -96,6 +106,10 @@ public sealed partial class CustomLoopOrderedRunnerTests
         Assert.Equal("failure-policy-one@revision-one", checkpoint.ResolvedPolicy.FailurePolicy.Reference.ToString());
         Assert.Empty(executor.Requests);
         Assert.Empty(publisher.Requests);
+        var publishedRequest = Assert.Single(requestPublication.Requests);
+        Assert.Equal(store.Current.Id, publishedRequest.RunId);
+        Assert.Equal(checkpoint.Binding.CheckpointId, publishedRequest.CheckpointId);
+        Assert.Equal(checkpoint.CheckpointHash, publishedRequest.CheckpointHash);
 
         var writesBeforeReplay = store.Writes.Count;
         var replay = await Runtime(context, store, executor, publisher, HumanInputPolicyResolver(context)).RunAsync(Request(context));
@@ -103,6 +117,281 @@ public sealed partial class CustomLoopOrderedRunnerTests
         Assert.Equal(CustomLoopOrderedRunStatus.InvalidState, replay.Status);
         Assert.Equal(writesBeforeReplay, store.Writes.Count);
         Assert.Single(store.Current.HumanInputWaitingCheckpoints);
+        Assert.Single(requestPublication.Requests);
+    }
+
+    [Fact]
+    public async Task Human_input_admission_fails_closed_before_checkpoint_when_publication_port_is_missing()
+    {
+        var context = await HumanInputContextAsync();
+        var store = new FakeRunStore(context.Run);
+        var executor = new QueueExecutor();
+        var publisher = new RecordingPublisher();
+
+        var result = await Runtime(
+            context,
+            store,
+            executor,
+            publisher,
+            HumanInputPolicyResolver(context),
+            composeHumanInputRequestPublicationService: false).RunAsync(Request(context));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.NeedsReview, result.Status);
+        Assert.Equal(CustomLoopRunStatus.NeedsReview, store.Current.Status);
+        Assert.Equal("human_input_request_publication_unavailable", store.Current.FailureCode);
+        Assert.Empty(store.Current.HumanInputWaitingCheckpoints);
+        Assert.Empty(executor.Requests);
+        Assert.Empty(publisher.Requests);
+    }
+
+    [Fact]
+    public async Task Durable_human_input_checkpoint_publication_creates_once_and_replays_after_grant_expiry()
+    {
+        var context = await HumanInputPublicationContextAsync();
+        var runs = new FakeRunStore(context.Run);
+        var lifecycle = new InMemoryHumanInputRequestLifecycleStore();
+        var publication = Publication(context, runs, lifecycle);
+        var parked = await Runtime(
+            context,
+            runs,
+            new QueueExecutor(),
+            new RecordingPublisher(),
+            HumanInputPolicyResolver(context),
+            humanInputRequestPublicationService: publication).RunAsync(Request(context));
+        var checkpoint = Assert.Single(runs.Current.HumanInputWaitingCheckpoints);
+        var request = new HumanInputRequestPublicationRequest(runs.Current.Id, checkpoint.Binding.CheckpointId, checkpoint.CheckpointHash);
+
+        context.Store.GrantResolution = context.Store.GrantResolution with
+        {
+            Status = AuthorityGrantResolutionStatus.Unavailable,
+            Grant = null,
+            DependencyEvidenceHash = string.Empty,
+            EvaluatedAtUtc = default,
+        };
+        var replayed = await publication.PublishAsync(request);
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Waiting, parked.Status);
+        Assert.Equal(HumanInputRequestPublicationStatus.Replayed, replayed.Status);
+        var commit = Assert.Single(lifecycle.Commits);
+        Assert.NotNull(commit.Mutation.RequestToAppend);
+        Assert.Equal(checkpoint.Request.RequestId, commit.Mutation.RequestToAppend.RequestId);
+        Assert.Equal(checkpoint.Request.RequestVersionId, commit.Mutation.RequestToAppend.RequestVersionId);
+        Assert.Equal(checkpoint.Request.Binding, commit.Mutation.RequestToAppend.Binding);
+        Assert.Equal(checkpoint.Request.RequestHash, commit.Mutation.RequestToAppend.RequestHash);
+        Assert.Equal(runs.Current.AdmissionActor, commit.Mutation.Operation.ActorId.Value);
+        Assert.Equal(context.Anchor.AdapterBinding.AdmissionReceipt.Intent.AuthorityGrant, commit.Mutation.Operation.GrantReference);
+        Assert.Equal(context.Anchor.AdapterBinding.AdmissionReceiptHash, commit.Mutation.Operation.AuthorityEvidenceHash);
+        Assert.Equal(CancellationToken.None, commit.CancellationToken);
+        Assert.Equal(2, lifecycle.MutationReads.Count);
+        Assert.All(lifecycle.MutationReads, read =>
+        {
+            Assert.Equal(commit.Mutation.Operation.OperationId, read.OperationId);
+            Assert.Equal(commit.Mutation.Operation.RequestHash, read.RequestHash);
+        });
+        var snapshot = Assert.IsType<HumanInputRequestLifecycleStoreSnapshot>(lifecycle.Snapshot(checkpoint.Request.RequestId));
+        Assert.Equal(HumanInputRequestLifecycleStatus.Pending, snapshot.Head.Status);
+        Assert.Single(snapshot.RequestVersions);
+        Assert.Single(snapshot.Operations);
+    }
+
+    [Fact]
+    public async Task Publication_health_probe_distinguishes_a_clean_empty_ledger_from_unavailable_or_ambiguous_evidence()
+    {
+        var context = await HumanInputPublicationContextAsync();
+        var lifecycle = new InMemoryHumanInputRequestLifecycleStore();
+        var publication = Publication(context, new FakeRunStore(context.Run), lifecycle);
+
+        var healthy = await publication.ProbeAsync();
+        lifecycle.ReadOverride = (_, _) => Task.FromResult(new HumanInputRequestLifecycleStoreReadResult(
+            HumanInputRequestLifecycleStoreReadStatus.Unavailable,
+            0,
+            null,
+            null,
+            null));
+        var unavailable = await publication.ProbeAsync();
+        lifecycle.ReadOverride = (_, _) => Task.FromResult(new HumanInputRequestLifecycleStoreReadResult(
+            HumanInputRequestLifecycleStoreReadStatus.Ambiguous,
+            0,
+            null,
+            null,
+            null));
+        var corrupt = await publication.ProbeAsync();
+        lifecycle.ReadOverride = (_, _) => Task.FromException<HumanInputRequestLifecycleStoreReadResult>(new IOException("simulated publication-ledger outage"));
+        var faulted = await publication.ProbeAsync();
+
+        Assert.Equal(HumanInputRequestPublicationHealthStatus.Ready, healthy.Status);
+        Assert.Equal(HumanInputRequestPublicationHealthStatus.Unavailable, unavailable.Status);
+        Assert.Equal(HumanInputRequestPublicationHealthStatus.Corrupt, corrupt.Status);
+        Assert.Equal(HumanInputRequestPublicationHealthStatus.Unavailable, faulted.Status);
+        Assert.All(lifecycle.Reads, read => Assert.Equal("human-input-publication-health", read.RequestId));
+    }
+
+    [Fact]
+    public async Task Parallel_active_human_input_checkpoint_is_published_before_the_other_ready_branch_advances()
+    {
+        var context = await ParallelHumanInputPublicationContextAsync();
+        var runs = new FakeRunStore(context.Run);
+        var lifecycle = new InMemoryHumanInputRequestLifecycleStore();
+
+        var parked = await Runtime(
+            context,
+            runs,
+            new QueueExecutor(Result("parallel Human Input source")),
+            new RecordingPublisher(),
+            HumanInputPolicyResolver(context),
+            humanInputRequestPublicationService: Publication(context, runs, lifecycle)).RunAsync(Request(context));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Waiting, parked.Status);
+        var checkpoints = runs.Current.HumanInputWaitingCheckpoints.OrderBy(checkpoint => checkpoint.Binding.FrontierVersion).ToArray();
+        Assert.Equal(2, checkpoints.Length);
+        Assert.Equal(
+            checkpoints.Select(checkpoint => checkpoint.Request.RequestId),
+            lifecycle.Commits.Select(commit => commit.Mutation.Operation.TargetRequestId));
+        Assert.All(checkpoints, checkpoint =>
+        {
+            var snapshot = Assert.IsType<HumanInputRequestLifecycleStoreSnapshot>(lifecycle.Snapshot(checkpoint.Request.RequestId));
+            Assert.Equal(HumanInputRequestLifecycleStatus.Pending, snapshot.Head.Status);
+            Assert.Single(snapshot.RequestVersions);
+            Assert.Single(snapshot.Operations);
+        });
+    }
+
+    [Fact]
+    public async Task Ambiguous_post_commit_request_publication_recovers_exactly_once_before_the_runner_returns_waiting()
+    {
+        var context = await HumanInputPublicationContextAsync();
+        var runs = new FakeRunStore(context.Run);
+        var lifecycle = new InMemoryHumanInputRequestLifecycleStore();
+        lifecycle.CommitOverride = (mutation, _) =>
+        {
+            lifecycle.CommitOverride = null;
+            lifecycle.CommitDurably(mutation);
+            throw new IOException("simulated lost request-publication acknowledgement");
+        };
+        var publication = Publication(context, runs, lifecycle);
+
+        var parked = await Runtime(
+            context,
+            runs,
+            new QueueExecutor(),
+            new RecordingPublisher(),
+            HumanInputPolicyResolver(context),
+            humanInputRequestPublicationService: publication).RunAsync(Request(context));
+        var checkpoint = Assert.Single(runs.Current.HumanInputWaitingCheckpoints);
+        context.Store.GrantResolution = context.Store.GrantResolution with
+        {
+            Status = AuthorityGrantResolutionStatus.Unavailable,
+            Grant = null,
+            DependencyEvidenceHash = string.Empty,
+            EvaluatedAtUtc = default,
+        };
+
+        var replayed = await publication.PublishAsync(new HumanInputRequestPublicationRequest(
+            runs.Current.Id,
+            checkpoint.Binding.CheckpointId,
+            checkpoint.CheckpointHash));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Waiting, parked.Status);
+        Assert.Equal(HumanInputRequestPublicationStatus.Replayed, replayed.Status);
+        Assert.Single(lifecycle.Commits);
+        var snapshot = Assert.IsType<HumanInputRequestLifecycleStoreSnapshot>(lifecycle.Snapshot(checkpoint.Request.RequestId));
+        Assert.Equal(HumanInputRequestLifecycleStatus.Pending, snapshot.Head.Status);
+        Assert.Single(snapshot.RequestVersions);
+        Assert.Single(snapshot.Operations);
+    }
+
+    [Theory]
+    [InlineData(AuthorityGrantResolutionStatus.NotFound)]
+    [InlineData(AuthorityGrantResolutionStatus.Expired)]
+    [InlineData(AuthorityGrantResolutionStatus.CeilingExceeded)]
+    [InlineData(AuthorityGrantResolutionStatus.Unavailable)]
+    public async Task First_request_publication_fails_closed_when_the_exact_admission_grant_is_not_active(
+        AuthorityGrantResolutionStatus grantStatus)
+    {
+        var context = await HumanInputPublicationContextAsync();
+        context.Store.GrantResolution = context.Store.GrantResolution with
+        {
+            Status = grantStatus,
+            Grant = null,
+            EffectiveCeiling = AuthorityCeilingIntersection.EmptyCeiling(),
+            DependencyEvidenceHash = string.Empty,
+            EvaluatedAtUtc = default,
+        };
+        var runs = new FakeRunStore(context.Run);
+        var lifecycle = new InMemoryHumanInputRequestLifecycleStore();
+
+        var result = await Runtime(
+            context,
+            runs,
+            new QueueExecutor(),
+            new RecordingPublisher(),
+            HumanInputPolicyResolver(context),
+            humanInputRequestPublicationService: Publication(context, runs, lifecycle)).RunAsync(Request(context));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Waiting, result.Status);
+        Assert.Equal(CustomLoopRunStatus.Waiting, runs.Current.Status);
+        Assert.Single(runs.Current.HumanInputWaitingCheckpoints);
+        Assert.Empty(lifecycle.Commits);
+    }
+
+    [Fact]
+    public async Task Durable_nonpending_human_input_checkpoint_without_its_exact_create_is_corrupt()
+    {
+        var context = await HumanInputContextAsync();
+        var runs = new FakeRunStore(context.Run);
+        var parked = await Runtime(context, runs, new QueueExecutor(), new RecordingPublisher(), HumanInputPolicyResolver(context)).RunAsync(Request(context));
+        var answered = AnswerHumanInputCheckpointForOrderedReentry(runs.Current, _now.AddMinutes(1));
+        runs.ReplaceCurrent(answered);
+        var checkpoint = Assert.Single(runs.Current.HumanInputWaitingCheckpoints);
+
+        var result = await Publication(context, runs, new InMemoryHumanInputRequestLifecycleStore()).PublishAsync(
+            new HumanInputRequestPublicationRequest(runs.Current.Id, checkpoint.Binding.CheckpointId, checkpoint.CheckpointHash));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Waiting, parked.Status);
+        Assert.Equal(HumanInputRequestPublicationStatus.Corrupt, result.Status);
+    }
+
+    [Fact]
+    public async Task Human_input_checkpoint_publication_maps_stale_corrupt_and_unavailable_canonical_reads_closed()
+    {
+        var context = await HumanInputContextAsync();
+        var runs = new FakeRunStore(context.Run);
+        var parked = await Runtime(context, runs, new QueueExecutor(), new RecordingPublisher(), HumanInputPolicyResolver(context)).RunAsync(Request(context));
+        var checkpoint = Assert.Single(runs.Current.HumanInputWaitingCheckpoints);
+        var publication = Publication(context, runs, new InMemoryHumanInputRequestLifecycleStore());
+        var request = new HumanInputRequestPublicationRequest(runs.Current.Id, checkpoint.Binding.CheckpointId, checkpoint.CheckpointHash);
+
+        var stale = await publication.PublishAsync(request with { CheckpointHash = new string('b', 64) });
+        runs.ReplaceCurrent(MutateHumanInputWaitingCheckpoint(runs.Current, futureDivergence: false), validate: false);
+        var corrupt = await publication.PublishAsync(request);
+        runs.GetException = new IOException("simulated canonical run read failure");
+        var unavailable = await publication.PublishAsync(request);
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Waiting, parked.Status);
+        Assert.Equal(HumanInputRequestPublicationStatus.Stale, stale.Status);
+        Assert.Equal(HumanInputRequestPublicationStatus.Corrupt, corrupt.Status);
+        Assert.Equal(HumanInputRequestPublicationStatus.Unavailable, unavailable.Status);
+    }
+
+    [Fact]
+    public async Task Cancellation_that_is_durable_before_first_request_publication_exposes_no_request_lifecycle()
+    {
+        var context = await HumanInputPublicationContextAsync();
+        var runs = new FakeRunStore(context.Run);
+        var parked = await Runtime(context, runs, new QueueExecutor(), new RecordingPublisher(), HumanInputPolicyResolver(context)).RunAsync(Request(context));
+        var checkpoint = Assert.Single(runs.Current.HumanInputWaitingCheckpoints);
+        runs.ReplaceCurrent(CreatePureCancellationTerminalSuccessor(runs.Current, includePause: false, includeTerminalWarning: false));
+        var lifecycle = new InMemoryHumanInputRequestLifecycleStore();
+
+        var result = await Publication(context, runs, lifecycle).PublishAsync(new HumanInputRequestPublicationRequest(
+            runs.Current.Id,
+            checkpoint.Binding.CheckpointId,
+            checkpoint.CheckpointHash));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Waiting, parked.Status);
+        Assert.Equal(CustomLoopRunStatus.Cancelled, runs.Current.Status);
+        Assert.Equal(HumanInputRequestPublicationStatus.Corrupt, result.Status);
+        Assert.Empty(lifecycle.Commits);
     }
 
     [Fact]
@@ -1041,6 +1330,9 @@ public sealed partial class CustomLoopOrderedRunnerTests
         Assert.Equal(checkpoints.Select(checkpoint => checkpoint.CheckpointHash), parked.Store.Current.HumanInputWaitingCheckpoints.Select(checkpoint => checkpoint.CheckpointHash));
         Assert.Equal(inferenceDispatches, parked.Executor.Requests.Count);
         Assert.Empty(parked.Publisher.Requests);
+        Assert.Equal(
+            checkpoints.Select(checkpoint => checkpoint.Binding.CheckpointId),
+            parked.RequestPublication.Requests.Select(request => request.CheckpointId));
     }
 
     [Fact]
@@ -1680,20 +1972,27 @@ public sealed partial class CustomLoopOrderedRunnerTests
         Assert.Equal(GovernedLoopFrontierStatus.ReviewBlocked, attempted.Frontier?.Payload.Status);
     }
 
-    private static async Task<(FakeRunStore Store, QueueExecutor Executor, RecordingPublisher Publisher)> ParkParallelHumanInputAsync()
+    private static async Task<(FakeRunStore Store, QueueExecutor Executor, RecordingPublisher Publisher, RecordingHumanInputRequestPublicationService RequestPublication)> ParkParallelHumanInputAsync()
     {
         var context = await ParallelHumanInputContextAsync();
         var store = new FakeRunStore(context.Run);
         var executor = new QueueExecutor(Result("parallel Human Input source"));
         var publisher = new RecordingPublisher();
+        var requestPublication = new RecordingHumanInputRequestPublicationService();
 
-        var parked = await Runtime(context, store, executor, publisher, HumanInputPolicyResolver(context)).RunAsync(Request(context));
+        var parked = await Runtime(
+            context,
+            store,
+            executor,
+            publisher,
+            HumanInputPolicyResolver(context),
+            humanInputRequestPublicationService: requestPublication).RunAsync(Request(context));
 
         Assert.Equal(CustomLoopOrderedRunStatus.Waiting, parked.Status);
         Assert.Equal(CustomLoopRunStatus.Waiting, store.Current.Status);
         Assert.Equal(2, store.Current.HumanInputWaitingCheckpoints.Count);
         Assert.True(CustomLoopRunValidator.Validate(store.Current).IsValid);
-        return (store, executor, publisher);
+        return (store, executor, publisher, requestPublication);
     }
 
     private static async Task<SequentialTestContext> HumanInputContextAsync()
@@ -1706,6 +2005,18 @@ public sealed partial class CustomLoopOrderedRunnerTests
                 Assert.True(plan.Plan is not null, $"{plan.Status}: {plan.FailurePath}");
                 return artifact;
             });
+
+    private static async Task<SequentialTestContext> HumanInputPublicationContextAsync()
+        => await SequentialContextAsync(
+            Run(SequentialDefinition()),
+            artifactFactory: role =>
+            {
+                var artifact = HumanInputArtifact(role);
+                var plan = GovernedLoopSequentialPlanBuilder.Build(artifact);
+                Assert.True(plan.Plan is not null, $"{plan.Status}: {plan.FailurePath}");
+                return artifact;
+            },
+            bindResolvedGrantToArtifact: true);
 
     private static async Task<SequentialTestContext> HumanInputFailureContextAsync()
         => await SequentialContextAsync(
@@ -1751,6 +2062,18 @@ public sealed partial class CustomLoopOrderedRunnerTests
                 return artifact;
             });
 
+    private static async Task<SequentialTestContext> ParallelHumanInputPublicationContextAsync()
+        => await SequentialContextAsync(
+            Run(SequentialDefinition()),
+            artifactFactory: role =>
+            {
+                var artifact = ParallelHumanInputArtifact(role);
+                var plan = GovernedLoopSequentialPlanBuilder.Build(artifact);
+                Assert.True(plan.Plan is not null, $"{plan.Status}: {plan.FailurePath}");
+                return artifact;
+            },
+            bindResolvedGrantToArtifact: true);
+
     private static GovernedLoopSequentialOrderedRuntimeAdapter Runtime(
         SequentialTestContext context,
         FakeRunStore store,
@@ -1759,7 +2082,9 @@ public sealed partial class CustomLoopOrderedRunnerTests
         HumanInputPolicyResolutionService? resolver,
         TimeProvider? runnerTimeProvider = null,
         RecordingAuditLog? audit = null,
-        IGovernedLoopSequentialHumanInputBindingSource? humanInputBindingSource = null)
+        IGovernedLoopSequentialHumanInputBindingSource? humanInputBindingSource = null,
+        IHumanInputRequestPublicationService? humanInputRequestPublicationService = null,
+        bool composeHumanInputRequestPublicationService = true)
     {
         var evidence = new SequentialEvidenceHarness(store, context.Evidence);
         return new GovernedLoopSequentialOrderedRuntimeAdapter(
@@ -1770,7 +2095,10 @@ public sealed partial class CustomLoopOrderedRunnerTests
                 audit,
                 timeProvider: runnerTimeProvider ?? new FixedTimeProvider(_now),
                 humanInputPolicyResolutionService: resolver,
-                humanInputBindingSource: humanInputBindingSource),
+                humanInputBindingSource: humanInputBindingSource,
+                humanInputRequestPublicationService: composeHumanInputRequestPublicationService
+                    ? humanInputRequestPublicationService ?? new RecordingHumanInputRequestPublicationService()
+                    : humanInputRequestPublicationService),
             evidence,
             evidence);
     }
@@ -2011,6 +2339,18 @@ public sealed partial class CustomLoopOrderedRunnerTests
         source.Results.TryAdd(failure.Reference, new HumanInputPolicySourceReadResult(HumanInputPolicySourceReadStatus.Ready, failure, 1));
         return new HumanInputPolicyResolutionService(source, timeProvider ?? new FixedTimeProvider(resolvedAtUtc ?? _now));
     }
+
+    private static HumanInputRequestPublicationService Publication(
+        SequentialTestContext context,
+        FakeRunStore runs,
+        InMemoryHumanInputRequestLifecycleStore lifecycle)
+        => new(
+            runs,
+            lifecycle,
+            context.Store,
+            context.Store,
+            context.Anchor.AdapterBinding.WorkspaceId,
+            new FixedTimeProvider(AuthorityGrantApplicationTestFixture.Now));
 
     private static HumanInputPolicyArtifact TimeoutPolicy(GovernedLoopSequentialAdapterBinding binding, string actorId)
         => HumanInputPolicyArtifactHash.Apply(new HumanInputPolicyArtifact(

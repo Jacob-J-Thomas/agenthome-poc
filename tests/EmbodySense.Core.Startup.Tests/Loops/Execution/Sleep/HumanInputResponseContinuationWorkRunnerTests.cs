@@ -1,6 +1,7 @@
 using EmbodySense.Core.Application.HumanInput.Continuations;
 using EmbodySense.Core.Application.HumanInput.Continuations.Models;
 using EmbodySense.Core.Application.HumanInput.Policies.Models;
+using EmbodySense.Core.Application.HumanInput.Publication.Models;
 using EmbodySense.Core.Common.Loops.HumanInput.Policies;
 using EmbodySense.Core.Common.Loops.HumanInput.Policies.Models;
 using EmbodySense.Core.Startup.Loops.Execution.Sleep;
@@ -167,6 +168,7 @@ public sealed class HumanInputResponseContinuationWorkRunnerTests
                 new HumanInputResponseContinuationRecordingLocalWorkRunner(),
                 throwingSource,
                 HealthyPolicySource(),
+                new HumanInputResponseContinuationRecordingPublicationService(),
                 new HumanInputResponseContinuationRecordingWakePort(HumanInputResponseContinuationWakeStatus.Submitted),
                 4,
                 new HumanInputResponseContinuationFixedTimeProvider(_now))
@@ -198,6 +200,78 @@ public sealed class HumanInputResponseContinuationWorkRunnerTests
     }
 
     [Fact]
+    public async Task Request_publication_is_reconciled_before_the_continuation_wake()
+    {
+        var candidate = Candidate("publication-order");
+        var source = new HumanInputResponseContinuationRecordingCandidateSource(Page([candidate], "cursor-one"));
+        var publication = new HumanInputResponseContinuationRecordingPublicationService(HumanInputRequestPublicationStatus.Replayed);
+        var continuation = new HumanInputResponseContinuationRecordingWakePort(HumanInputResponseContinuationWakeStatus.Submitted);
+        var runner = new HumanInputResponseContinuationWorkRunner(
+            new HumanInputResponseContinuationRecordingLocalWorkRunner(),
+            source,
+            HealthyPolicySource(),
+            publication,
+            continuation,
+            4,
+            new HumanInputResponseContinuationFixedTimeProvider(_now));
+
+        var result = await runner.RunOnceAsync(GovernedLoopLocalWorkFamily.HumanInput);
+
+        Assert.Equal(GovernedLoopLocalWorkResultStatus.Completed, result?.Status);
+        Assert.Equal([new HumanInputRequestPublicationRequest(candidate.RunId, candidate.CheckpointId, candidate.CheckpointHash)], publication.Requests);
+        Assert.Equal([candidate], continuation.Candidates);
+    }
+
+    [Theory]
+    [InlineData(HumanInputRequestPublicationStatus.Unavailable, GovernedLoopLocalWorkResultStatus.Unavailable)]
+    [InlineData(HumanInputRequestPublicationStatus.Corrupt, GovernedLoopLocalWorkResultStatus.Corrupt)]
+    public async Task Unproved_request_publication_retains_the_candidate_without_waking(
+        HumanInputRequestPublicationStatus publicationStatus,
+        GovernedLoopLocalWorkResultStatus expectedStatus)
+    {
+        var candidate = Candidate("publication-retain");
+        var source = new HumanInputResponseContinuationRecordingCandidateSource(Page([candidate], "cursor-one"));
+        var publication = new HumanInputResponseContinuationRecordingPublicationService(publicationStatus);
+        var continuation = new HumanInputResponseContinuationRecordingWakePort(HumanInputResponseContinuationWakeStatus.Submitted);
+        var runner = new HumanInputResponseContinuationWorkRunner(
+            new HumanInputResponseContinuationRecordingLocalWorkRunner(),
+            source,
+            HealthyPolicySource(),
+            publication,
+            continuation,
+            4,
+            new HumanInputResponseContinuationFixedTimeProvider(_now));
+
+        var result = await runner.RunOnceAsync(GovernedLoopLocalWorkFamily.HumanInput);
+
+        Assert.Equal(expectedStatus, result?.Status);
+        Assert.Equal([new HumanInputRequestPublicationRequest(candidate.RunId, candidate.CheckpointId, candidate.CheckpointHash)], publication.Requests);
+        Assert.Empty(continuation.Candidates);
+    }
+
+    [Fact]
+    public async Task Stale_request_publication_dequeues_the_candidate_without_waking()
+    {
+        var candidate = Candidate("publication-stale");
+        var source = new HumanInputResponseContinuationRecordingCandidateSource(Page([candidate], "cursor-one"));
+        var publication = new HumanInputResponseContinuationRecordingPublicationService(HumanInputRequestPublicationStatus.Stale);
+        var continuation = new HumanInputResponseContinuationRecordingWakePort(HumanInputResponseContinuationWakeStatus.Submitted);
+        var runner = new HumanInputResponseContinuationWorkRunner(
+            new HumanInputResponseContinuationRecordingLocalWorkRunner(),
+            source,
+            HealthyPolicySource(),
+            publication,
+            continuation,
+            4,
+            new HumanInputResponseContinuationFixedTimeProvider(_now));
+
+        var result = await runner.RunOnceAsync(GovernedLoopLocalWorkFamily.HumanInput);
+
+        Assert.Equal(GovernedLoopLocalWorkResultStatus.Empty, result?.Status);
+        Assert.Empty(continuation.Candidates);
+    }
+
+    [Fact]
     public async Task Other_families_remain_owned_by_the_existing_runner()
     {
         var inner = new HumanInputResponseContinuationRecordingLocalWorkRunner();
@@ -205,6 +279,7 @@ public sealed class HumanInputResponseContinuationWorkRunnerTests
             inner,
             new HumanInputResponseContinuationRecordingCandidateSource(Page([], null)),
             HealthyPolicySource(),
+            new HumanInputResponseContinuationRecordingPublicationService(),
             new HumanInputResponseContinuationRecordingWakePort(HumanInputResponseContinuationWakeStatus.NoWork),
             4,
             new HumanInputResponseContinuationFixedTimeProvider(_now));
@@ -226,6 +301,7 @@ public sealed class HumanInputResponseContinuationWorkRunnerTests
             new HumanInputResponseContinuationRecordingLocalWorkRunner(),
             source,
             HealthyPolicySource(),
+            new HumanInputResponseContinuationRecordingPublicationService(),
             new HumanInputResponseContinuationRecordingWakePort(HumanInputResponseContinuationWakeStatus.Submitted),
             4,
             new HumanInputResponseContinuationThrowingTimeProvider());
@@ -233,6 +309,7 @@ public sealed class HumanInputResponseContinuationWorkRunnerTests
             new HumanInputResponseContinuationRecordingLocalWorkRunner(),
             source,
             HealthyPolicySource(),
+            new HumanInputResponseContinuationRecordingPublicationService(),
             new HumanInputResponseContinuationRecordingWakePort(HumanInputResponseContinuationWakeStatus.Submitted),
             4,
             new HumanInputResponseContinuationFixedTimeProvider(default));
@@ -262,6 +339,236 @@ public sealed class HumanInputResponseContinuationWorkRunnerTests
         var reference = Assert.Single(policySource.References);
         Assert.Equal("human-input-source-health", reference.PolicyId);
         Assert.Equal("revision-one", reference.RevisionId);
+    }
+
+    [Theory]
+    [InlineData(HumanInputRequestPublicationHealthStatus.Unavailable, GovernedLoopLocalWorkResultStatus.Unavailable)]
+    [InlineData(HumanInputRequestPublicationHealthStatus.Corrupt, GovernedLoopLocalWorkResultStatus.Corrupt)]
+    [InlineData(HumanInputRequestPublicationHealthStatus.Unknown, GovernedLoopLocalWorkResultStatus.Corrupt)]
+    public async Task Unhealthy_publication_ledger_clears_executable_before_policy_or_recovery_reads(
+        HumanInputRequestPublicationHealthStatus healthStatus,
+        GovernedLoopLocalWorkResultStatus expectedStatus)
+    {
+        var publication = new HumanInputResponseContinuationRecordingPublicationService { HealthStatus = healthStatus };
+        var policySource = HealthyPolicySource();
+        var recovery = new HumanInputResponseContinuationRecordingCandidateSource(Page([], null));
+        var runner = new HumanInputResponseContinuationWorkRunner(
+            new HumanInputResponseContinuationRecordingLocalWorkRunner(),
+            recovery,
+            policySource,
+            publication,
+            new HumanInputResponseContinuationRecordingWakePort(HumanInputResponseContinuationWakeStatus.NoWork),
+            4,
+            new HumanInputResponseContinuationFixedTimeProvider(_now));
+
+        var result = await runner.RunOnceAsync(GovernedLoopLocalWorkFamily.HumanInput);
+
+        Assert.Equal(expectedStatus, result?.Status);
+        Assert.False(runner.IsExecutable);
+        Assert.Equal(1, publication.HealthProbeCount);
+        Assert.Empty(policySource.References);
+        Assert.Empty(recovery.Cursors);
+    }
+
+    [Fact]
+    public async Task Throwing_publication_health_fails_closed_as_unavailable_without_downstream_dispatch()
+    {
+        var publication = new HumanInputResponseContinuationRecordingPublicationService
+        {
+            ProbeOverride = _ => Task.FromException<HumanInputRequestPublicationHealthResult>(new IOException("publication ledger unavailable"))
+        };
+        var policySource = HealthyPolicySource();
+        var recovery = new HumanInputResponseContinuationRecordingCandidateSource(Page([Candidate("one")], "cursor-one"));
+        var continuation = new HumanInputResponseContinuationRecordingWakePort(HumanInputResponseContinuationWakeStatus.Submitted);
+        var runner = Runner(recovery, continuation, policySource, publication);
+
+        var result = await runner.RunOnceAsync(GovernedLoopLocalWorkFamily.HumanInput);
+
+        Assert.Equal(GovernedLoopLocalWorkResultStatus.Unavailable, result?.Status);
+        Assert.Equal("human-input-request-publication-health-unavailable", result?.ReasonCode);
+        Assert.False(runner.IsExecutable);
+        Assert.Equal(1, publication.HealthProbeCount);
+        Assert.Equal(0, publication.PublishCount);
+        Assert.Empty(policySource.References);
+        Assert.Empty(recovery.Cursors);
+        Assert.Empty(publication.Requests);
+        Assert.Empty(continuation.Candidates);
+    }
+
+    [Fact]
+    public async Task Missing_or_invalid_publication_health_fails_closed_as_corrupt_without_downstream_dispatch()
+    {
+        var missingPublication = new HumanInputResponseContinuationRecordingPublicationService
+        {
+            ProbeOverride = _ => Task.FromResult<HumanInputRequestPublicationHealthResult>(null!)
+        };
+        var invalidPublication = new HumanInputResponseContinuationRecordingPublicationService
+        {
+            ProbeOverride = _ => Task.FromResult(new HumanInputRequestPublicationHealthResult((HumanInputRequestPublicationHealthStatus)99))
+        };
+        var missingPolicySource = HealthyPolicySource();
+        var invalidPolicySource = HealthyPolicySource();
+        var missingRecovery = new HumanInputResponseContinuationRecordingCandidateSource(Page([Candidate("missing")], "cursor-one"));
+        var invalidRecovery = new HumanInputResponseContinuationRecordingCandidateSource(Page([Candidate("invalid")], "cursor-one"));
+        var missingContinuation = new HumanInputResponseContinuationRecordingWakePort(HumanInputResponseContinuationWakeStatus.Submitted);
+        var invalidContinuation = new HumanInputResponseContinuationRecordingWakePort(HumanInputResponseContinuationWakeStatus.Submitted);
+
+        var missing = await Runner(missingRecovery, missingContinuation, missingPolicySource, missingPublication)
+            .RunOnceAsync(GovernedLoopLocalWorkFamily.HumanInput);
+        var invalid = await Runner(invalidRecovery, invalidContinuation, invalidPolicySource, invalidPublication)
+            .RunOnceAsync(GovernedLoopLocalWorkFamily.HumanInput);
+
+        Assert.All([missing, invalid], result =>
+        {
+            Assert.Equal(GovernedLoopLocalWorkResultStatus.Corrupt, result?.Status);
+            Assert.Equal("human-input-request-publication-health-corrupt", result?.ReasonCode);
+        });
+        Assert.All([missingPublication, invalidPublication], publication =>
+        {
+            Assert.Equal(1, publication.HealthProbeCount);
+            Assert.Equal(0, publication.PublishCount);
+            Assert.Empty(publication.Requests);
+        });
+        Assert.All([missingPolicySource, invalidPolicySource], source => Assert.Empty(source.References));
+        Assert.All([missingRecovery, invalidRecovery], source => Assert.Empty(source.Cursors));
+        Assert.All([missingContinuation, invalidContinuation], continuation => Assert.Empty(continuation.Candidates));
+    }
+
+    [Fact]
+    public async Task Throwing_publication_result_clears_prior_readiness_as_unavailable_without_waking()
+    {
+        var candidate = Candidate("throwing-publication");
+        var publication = new HumanInputResponseContinuationRecordingPublicationService();
+        var source = new HumanInputResponseContinuationRecordingCandidateSource(Page([], null), Page([candidate], "cursor-one"));
+        var continuation = new HumanInputResponseContinuationRecordingWakePort(HumanInputResponseContinuationWakeStatus.Submitted);
+        var runner = Runner(source, continuation, publication: publication);
+
+        Assert.Equal(GovernedLoopLocalWorkResultStatus.Empty, (await runner.RunOnceAsync(GovernedLoopLocalWorkFamily.HumanInput))?.Status);
+        Assert.True(runner.IsExecutable);
+        publication.PublishOverride = (_, _) => Task.FromException<HumanInputRequestPublicationResult>(new IOException("publication ledger unavailable"));
+
+        var result = await runner.RunOnceAsync(GovernedLoopLocalWorkFamily.HumanInput);
+
+        Assert.Equal(GovernedLoopLocalWorkResultStatus.Unavailable, result?.Status);
+        Assert.Equal("human-input-request-publication-unavailable", result?.ReasonCode);
+        Assert.False(runner.IsExecutable);
+        Assert.Equal(2, publication.HealthProbeCount);
+        Assert.Equal(1, publication.PublishCount);
+        Assert.Equal([new HumanInputRequestPublicationRequest(candidate.RunId, candidate.CheckpointId, candidate.CheckpointHash)], publication.Requests);
+        Assert.Empty(continuation.Candidates);
+    }
+
+    [Fact]
+    public async Task Missing_or_invalid_publication_result_clears_prior_readiness_as_corrupt_without_waking()
+    {
+        var missingCandidate = Candidate("missing-publication");
+        var invalidCandidate = Candidate("invalid-publication");
+        var missingPublication = new HumanInputResponseContinuationRecordingPublicationService();
+        var invalidPublication = new HumanInputResponseContinuationRecordingPublicationService();
+        var missingSource = new HumanInputResponseContinuationRecordingCandidateSource(Page([], null), Page([missingCandidate], "cursor-one"));
+        var invalidSource = new HumanInputResponseContinuationRecordingCandidateSource(Page([], null), Page([invalidCandidate], "cursor-one"));
+        var missingContinuation = new HumanInputResponseContinuationRecordingWakePort(HumanInputResponseContinuationWakeStatus.Submitted);
+        var invalidContinuation = new HumanInputResponseContinuationRecordingWakePort(HumanInputResponseContinuationWakeStatus.Submitted);
+        var missingRunner = Runner(missingSource, missingContinuation, publication: missingPublication);
+        var invalidRunner = Runner(invalidSource, invalidContinuation, publication: invalidPublication);
+
+        Assert.Equal(GovernedLoopLocalWorkResultStatus.Empty, (await missingRunner.RunOnceAsync(GovernedLoopLocalWorkFamily.HumanInput))?.Status);
+        Assert.Equal(GovernedLoopLocalWorkResultStatus.Empty, (await invalidRunner.RunOnceAsync(GovernedLoopLocalWorkFamily.HumanInput))?.Status);
+        Assert.True(missingRunner.IsExecutable);
+        Assert.True(invalidRunner.IsExecutable);
+        missingPublication.PublishOverride = (_, _) => Task.FromResult<HumanInputRequestPublicationResult>(null!);
+        invalidPublication.PublishOverride = (_, _) => Task.FromResult(new HumanInputRequestPublicationResult((HumanInputRequestPublicationStatus)99));
+
+        var missing = await missingRunner.RunOnceAsync(GovernedLoopLocalWorkFamily.HumanInput);
+        var invalid = await invalidRunner.RunOnceAsync(GovernedLoopLocalWorkFamily.HumanInput);
+
+        Assert.All([missing, invalid], result =>
+        {
+            Assert.Equal(GovernedLoopLocalWorkResultStatus.Corrupt, result?.Status);
+            Assert.Equal("human-input-request-publication-corrupt", result?.ReasonCode);
+        });
+        Assert.False(missingRunner.IsExecutable);
+        Assert.False(invalidRunner.IsExecutable);
+        Assert.All([missingPublication, invalidPublication], publication =>
+        {
+            Assert.Equal(2, publication.HealthProbeCount);
+            Assert.Equal(1, publication.PublishCount);
+        });
+        Assert.Equal([new HumanInputRequestPublicationRequest(missingCandidate.RunId, missingCandidate.CheckpointId, missingCandidate.CheckpointHash)], missingPublication.Requests);
+        Assert.Equal([new HumanInputRequestPublicationRequest(invalidCandidate.RunId, invalidCandidate.CheckpointId, invalidCandidate.CheckpointHash)], invalidPublication.Requests);
+        Assert.Empty(missingContinuation.Candidates);
+        Assert.Empty(invalidContinuation.Candidates);
+    }
+
+    [Fact]
+    public async Task Caller_cancellation_during_publication_health_probe_propagates_without_changing_prior_readiness()
+    {
+        var probeEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var publication = new HumanInputResponseContinuationRecordingPublicationService();
+        var policySource = HealthyPolicySource();
+        var source = new HumanInputResponseContinuationRecordingCandidateSource(Page([], null));
+        var continuation = new HumanInputResponseContinuationRecordingWakePort(HumanInputResponseContinuationWakeStatus.Submitted);
+        var runner = Runner(source, continuation, policySource, publication);
+
+        Assert.Equal(GovernedLoopLocalWorkResultStatus.Empty, (await runner.RunOnceAsync(GovernedLoopLocalWorkFamily.HumanInput))?.Status);
+        Assert.True(runner.IsExecutable);
+        publication.ProbeOverride = async cancellationToken =>
+        {
+            probeEntered.SetResult();
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            return new HumanInputRequestPublicationHealthResult(HumanInputRequestPublicationHealthStatus.Ready);
+        };
+        using var cancellation = new CancellationTokenSource();
+
+        var attempt = runner.RunOnceAsync(GovernedLoopLocalWorkFamily.HumanInput, cancellation.Token);
+        await probeEntered.Task;
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => attempt);
+
+        Assert.True(runner.IsExecutable);
+        Assert.Equal(2, publication.HealthProbeCount);
+        Assert.Equal(0, publication.PublishCount);
+        Assert.Single(policySource.References);
+        Assert.Single(source.Cursors);
+        Assert.Empty(publication.Requests);
+        Assert.Empty(continuation.Candidates);
+    }
+
+    [Fact]
+    public async Task Caller_cancellation_during_request_publication_propagates_without_changing_prior_readiness()
+    {
+        var publicationEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var candidate = Candidate("cancel-publication");
+        var publication = new HumanInputResponseContinuationRecordingPublicationService();
+        var policySource = HealthyPolicySource();
+        var source = new HumanInputResponseContinuationRecordingCandidateSource(Page([], null), Page([candidate], "cursor-one"));
+        var continuation = new HumanInputResponseContinuationRecordingWakePort(HumanInputResponseContinuationWakeStatus.Submitted);
+        var runner = Runner(source, continuation, policySource, publication);
+
+        Assert.Equal(GovernedLoopLocalWorkResultStatus.Empty, (await runner.RunOnceAsync(GovernedLoopLocalWorkFamily.HumanInput))?.Status);
+        Assert.True(runner.IsExecutable);
+        publication.PublishOverride = async (_, cancellationToken) =>
+        {
+            publicationEntered.SetResult();
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            return new HumanInputRequestPublicationResult(HumanInputRequestPublicationStatus.Published);
+        };
+        using var cancellation = new CancellationTokenSource();
+
+        var attempt = runner.RunOnceAsync(GovernedLoopLocalWorkFamily.HumanInput, cancellation.Token);
+        await publicationEntered.Task;
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => attempt);
+
+        Assert.True(runner.IsExecutable);
+        Assert.Equal(2, publication.HealthProbeCount);
+        Assert.Equal(1, publication.PublishCount);
+        Assert.Equal([new HumanInputRequestPublicationRequest(candidate.RunId, candidate.CheckpointId, candidate.CheckpointHash)], publication.Requests);
+        Assert.Equal(2, policySource.References.Count);
+        Assert.Equal([null, null], source.Cursors);
+        Assert.Empty(continuation.Candidates);
     }
 
     [Fact]
@@ -390,6 +697,7 @@ public sealed class HumanInputResponseContinuationWorkRunnerTests
             new HumanInputResponseContinuationRecordingLocalWorkRunner(),
             missing,
             HealthyPolicySource(),
+            new HumanInputResponseContinuationRecordingPublicationService(),
             new HumanInputResponseContinuationRecordingWakePort(HumanInputResponseContinuationWakeStatus.NoWork),
             4,
             new HumanInputResponseContinuationFixedTimeProvider(_now));
@@ -397,6 +705,7 @@ public sealed class HumanInputResponseContinuationWorkRunnerTests
             new HumanInputResponseContinuationRecordingLocalWorkRunner(),
             new HumanInputResponseContinuationThrowingCandidateSource(),
             HealthyPolicySource(),
+            new HumanInputResponseContinuationRecordingPublicationService(),
             new HumanInputResponseContinuationRecordingWakePort(HumanInputResponseContinuationWakeStatus.NoWork),
             4,
             new HumanInputResponseContinuationFixedTimeProvider(_now));
@@ -419,7 +728,7 @@ public sealed class HumanInputResponseContinuationWorkRunnerTests
     }
 
     private static HumanInputResponseContinuationCandidate Candidate(string suffix)
-        => new("run-" + suffix, "checkpoint-" + suffix);
+        => new("run-" + suffix, "checkpoint-" + suffix, new string('a', 64));
 
     private static HumanInputResponseContinuationRecoveryPage Page(
         IReadOnlyList<HumanInputResponseContinuationCandidate> candidates,
@@ -429,11 +738,13 @@ public sealed class HumanInputResponseContinuationWorkRunnerTests
     private static HumanInputResponseContinuationWorkRunner Runner(
         HumanInputResponseContinuationRecordingCandidateSource source,
         HumanInputResponseContinuationRecordingWakePort continuation,
-        HumanInputResponseContinuationSequencePolicySource? policySource = null)
+        HumanInputResponseContinuationSequencePolicySource? policySource = null,
+        HumanInputResponseContinuationRecordingPublicationService? publication = null)
         => new(
             new HumanInputResponseContinuationRecordingLocalWorkRunner(),
             source,
             policySource ?? HealthyPolicySource(),
+            publication ?? new HumanInputResponseContinuationRecordingPublicationService(),
             continuation,
             4,
             new HumanInputResponseContinuationFixedTimeProvider(_now));

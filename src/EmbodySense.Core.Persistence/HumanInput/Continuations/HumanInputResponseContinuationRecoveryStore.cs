@@ -165,7 +165,7 @@ public sealed class HumanInputResponseContinuationRecoveryStore : IHumanInputRes
             var checkpoint = checkpoints[index];
             if (IsCandidate(run, checkpoint))
             {
-                candidates.Add(new HumanInputResponseContinuationCandidate(run.Id, checkpoint.Binding.CheckpointId));
+                candidates.Add(new HumanInputResponseContinuationCandidate(run.Id, checkpoint.Binding.CheckpointId, checkpoint.CheckpointHash));
             }
         }
         if (candidates.Count > maximumCount
@@ -209,6 +209,10 @@ public sealed class HumanInputResponseContinuationRecoveryStore : IHumanInputRes
                 && run.Frontier?.Payload.Status == GovernedLoopFrontierStatus.Waiting
                 && checkpoint.Posture is GovernedLoopHumanInputWaitingCheckpointPosture.Pending or GovernedLoopHumanInputWaitingCheckpointPosture.AnsweredNotResumed
                 && activation is { Status: GovernedLoopNodeExecutionStatus.Waiting, Descriptor.Kind: GovernedLoopNodeKind.HumanInput })
+                || (run.Status == CustomLoopRunStatus.Running
+                    && run.Frontier?.Payload.Status == GovernedLoopFrontierStatus.Active
+                    && checkpoint.Posture == GovernedLoopHumanInputWaitingCheckpointPosture.Pending
+                    && activation is { Status: GovernedLoopNodeExecutionStatus.Waiting, Descriptor.Kind: GovernedLoopNodeKind.HumanInput })
                 || (run.Status == CustomLoopRunStatus.Running
                     && run.Frontier?.Payload.Status == GovernedLoopFrontierStatus.Active
                     && checkpoint.Posture is GovernedLoopHumanInputWaitingCheckpointPosture.Expired or GovernedLoopHumanInputWaitingCheckpointPosture.Rejected

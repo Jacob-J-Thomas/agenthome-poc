@@ -115,7 +115,7 @@ internal sealed class HumanInputResponseContinuationScenario
         var service = new HumanInputResponseContinuationService(runs, responses, sleepStore, currentPosture, contexts, ordered, time);
         var sleep = new GovernedLoopSleepService(sleepStore, currentPosture, service, service, time);
         service.BindSleep(sleep);
-        return new HumanInputResponseContinuationScenario(service, runs, responses, sleepStore, currentPosture, contexts, ordered, sleep, new HumanInputResponseContinuationCandidate(context.Run.Id, context.Checkpoint.Binding.CheckpointId));
+        return new HumanInputResponseContinuationScenario(service, runs, responses, sleepStore, currentPosture, contexts, ordered, sleep, new HumanInputResponseContinuationCandidate(context.Run.Id, context.Checkpoint.Binding.CheckpointId, context.Checkpoint.CheckpointHash));
     }
 
     private static GovernedLoopSleepCurrentPosture ExactPosture(HumanInputResponseContinuationWaitingContext context)
