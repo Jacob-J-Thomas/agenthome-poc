@@ -472,43 +472,7 @@ public sealed partial class AgentRuntimeFactoryTests
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
         var store = new GovernedLoopCoordinatorEvidenceStore(paths);
-        var acquired = await store.TryAcquireAsync(ExpiredPeerAcquisition());
-        var initial = Assert.IsType<GovernedLoopCoordinatorSnapshot>(acquired!.Snapshot);
-        var occurredAtUtc = initial.LatestHeartbeat.RecordedAtUtc.AddTicks(1);
-        var failure = GovernedLoopSleepContractHash.Apply(new GovernedLoopCoordinatorFailure(
-            GovernedLoopCoordinatorFailure.CurrentSchemaVersion,
-            1,
-            initial.Ownership,
-            GovernedLoopCoordinatorFailureKind.CorruptState,
-            "test-failed-coordinator",
-            occurredAtUtc,
-            string.Empty));
-        Assert.Equal(
-            GovernedLoopCoordinatorFailureMutationStatus.Appended,
-            (await store.AppendFailureAsync(new GovernedLoopCoordinatorFailureMutationRequest(
-                initial.Ownership,
-                initial.Ownership.ContentHash,
-                GovernedLoopCoordinatorPriorFailureExpectation.None,
-                0,
-                null,
-                failure)))!.Status);
-        var failedAtUtc = occurredAtUtc.AddTicks(1);
-        var failed = GovernedLoopSleepContractHash.Apply(initial.LatestLifecycle with
-        {
-            LifecycleVersion = initial.LatestLifecycle.LifecycleVersion + 1,
-            Status = GovernedLoopCoordinatorStatus.Failed,
-            UpdatedAtUtc = failedAtUtc,
-            TerminalAtUtc = failedAtUtc,
-            ContentHash = string.Empty
-        });
-        Assert.Equal(
-            GovernedLoopCoordinatorLifecycleMutationStatus.Appended,
-            (await store.AppendLifecycleAsync(new GovernedLoopCoordinatorLifecycleMutationRequest(
-                initial.Ownership,
-                initial.Ownership.ContentHash,
-                initial.LatestLifecycle.LifecycleVersion,
-                initial.LatestLifecycle.ContentHash,
-                failed)))!.Status);
+        var (initial, failure, failed) = await PrepareFailedCoordinatorAsync(store, "test-failed-coordinator");
 
         await using var runtime = await CreateRuntimeAsync(
             workspace,
@@ -530,6 +494,69 @@ public sealed partial class AgentRuntimeFactoryTests
         Assert.Equal(2, durable.Snapshot!.Ownership.OwnershipEpoch);
         Assert.Equal(GovernedLoopCoordinatorStatus.Running, durable.Snapshot.LatestLifecycle.Status);
         Assert.Equal(AgentRuntimeGovernedLoopBackgroundStopStatus.Stopped, (await runtime.StopGovernedLoopLocalBackgroundAsync()).Status);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Authority_provider_clone_orders_preserve_human_input_mutation_and_coordinator_repair(bool humanInputProviderFirst)
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var requestStore = new HumanInputRequestStore(paths, new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath));
+        var pending = CreateFreshHumanInputMutation(
+            workspace.RootPath,
+            "request-provider-composition",
+            "version-provider-composition",
+            "create-provider-composition",
+            HumanInputRequestStoreTestData.HashA);
+        Assert.Equal(HumanInputRequestLifecycleStoreCommitStatus.Committed, (await requestStore.CommitAsync(pending)).Status);
+        var coordinatorStore = new GovernedLoopCoordinatorEvidenceStore(paths);
+        _ = await PrepareFailedCoordinatorAsync(coordinatorStore, "provider-composition-failed-coordinator");
+
+        var humanInputAuthority = new HumanInputRuntimeFacadeTestAuthorityProvider();
+        var coordinatorRepairAuthority = new GovernedLoopCoordinatorRepairTestAuthorityProvider("authenticated-operator");
+        var executablePath = await CreateFakeCodexExecutableAsync(workspace);
+        var factory = AgentRuntimeFactory.ForFileCapabilityTrustRoot(
+            new RejectingApprovalPrompt(),
+            workspace.ServerStatePath,
+            CreateCompatibleRuntimeStatus(executablePath));
+        factory = humanInputProviderFirst
+            ? factory.WithHumanInputAuthorityProvider(humanInputAuthority)
+                .WithGovernedLoopCoordinatorRepairAuthorityProvider(coordinatorRepairAuthority)
+            : factory.WithGovernedLoopCoordinatorRepairAuthorityProvider(coordinatorRepairAuthority)
+                .WithHumanInputAuthorityProvider(humanInputAuthority);
+        await using var runtime = await factory.CreateAsync(
+            "test-model",
+            workspace.RootPath,
+            executablePath,
+            "read-only",
+            AgentRuntimeSurface.Web);
+        var posture = Assert.IsType<HumanInputRequestPosture>(
+            (await runtime.HumanInput.ReadAsync("request-provider-composition")).Request);
+        var response = await runtime.HumanInput.SubmitResponseAsync(new HumanInputResponseOperationInput(
+            "submit-provider-composition",
+            HumanInputResponseOperationKind.Submit,
+            posture.RequestId,
+            posture.LifecycleVersion,
+            posture.Status,
+            posture.CurrentRequest,
+            "response-provider-composition",
+            new HumanInputResponseValue(HumanInputResponseKind.Text, "private-provider-composition-response", null, null, null, null),
+            null));
+        var preview = await runtime.GovernedLoopCoordinatorRepair.PreviewAsync(
+            new GovernedLoopCoordinatorRepairPreviewRequest("local-background", "repair-provider-composition"));
+        var submitted = await runtime.GovernedLoopCoordinatorRepair.SubmitAsync(
+            new GovernedLoopCoordinatorRepairSubmitRequest(preview.Disposition!));
+
+        Assert.Equal(HumanInputOperationStatus.Committed, response.Status);
+        Assert.True(response.Request!.IsAnswered);
+        Assert.Equal(1, humanInputAuthority.ResponseAuthentications);
+        Assert.Equal(GovernedLoopCoordinatorRepairPreviewStatus.Ready, preview.Status);
+        Assert.Equal("authenticated-operator", preview.Disposition!.ActorId);
+        Assert.Equal(GovernedLoopCoordinatorRepairExecutionStatus.Repaired, submitted.Status);
+        Assert.Equal(GovernedLoopCoordinatorRepairSubmitStatus.Accepted, submitted.Submission.Status);
     }
 
     [Fact]
@@ -4633,6 +4660,50 @@ public sealed partial class AgentRuntimeFactoryTests
             ownership,
             lifecycle,
             heartbeat);
+    }
+
+    private static async Task<(GovernedLoopCoordinatorSnapshot Initial, GovernedLoopCoordinatorFailure Failure, GovernedLoopCoordinatorLifecycle Failed)> PrepareFailedCoordinatorAsync(
+        GovernedLoopCoordinatorEvidenceStore store,
+        string failureDescription)
+    {
+        var acquired = await store.TryAcquireAsync(ExpiredPeerAcquisition());
+        var initial = Assert.IsType<GovernedLoopCoordinatorSnapshot>(acquired!.Snapshot);
+        var occurredAtUtc = initial.LatestHeartbeat.RecordedAtUtc.AddTicks(1);
+        var failure = GovernedLoopSleepContractHash.Apply(new GovernedLoopCoordinatorFailure(
+            GovernedLoopCoordinatorFailure.CurrentSchemaVersion,
+            1,
+            initial.Ownership,
+            GovernedLoopCoordinatorFailureKind.CorruptState,
+            failureDescription,
+            occurredAtUtc,
+            string.Empty));
+        Assert.Equal(
+            GovernedLoopCoordinatorFailureMutationStatus.Appended,
+            (await store.AppendFailureAsync(new GovernedLoopCoordinatorFailureMutationRequest(
+                initial.Ownership,
+                initial.Ownership.ContentHash,
+                GovernedLoopCoordinatorPriorFailureExpectation.None,
+                0,
+                null,
+                failure)))!.Status);
+        var failedAtUtc = occurredAtUtc.AddTicks(1);
+        var failed = GovernedLoopSleepContractHash.Apply(initial.LatestLifecycle with
+        {
+            LifecycleVersion = initial.LatestLifecycle.LifecycleVersion + 1,
+            Status = GovernedLoopCoordinatorStatus.Failed,
+            UpdatedAtUtc = failedAtUtc,
+            TerminalAtUtc = failedAtUtc,
+            ContentHash = string.Empty
+        });
+        Assert.Equal(
+            GovernedLoopCoordinatorLifecycleMutationStatus.Appended,
+            (await store.AppendLifecycleAsync(new GovernedLoopCoordinatorLifecycleMutationRequest(
+                initial.Ownership,
+                initial.Ownership.ContentHash,
+                initial.LatestLifecycle.LifecycleVersion,
+                initial.LatestLifecycle.ContentHash,
+                failed)))!.Status);
+        return (initial, failure, failed);
     }
 
     private static async Task InstallModelProfileAsync(WorkspacePaths paths, string trustRootPath, CapabilityDescriptor descriptor)
