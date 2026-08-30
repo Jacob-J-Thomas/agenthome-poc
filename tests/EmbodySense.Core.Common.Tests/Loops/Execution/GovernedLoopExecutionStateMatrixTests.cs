@@ -2,7 +2,9 @@ using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Execution.Models;
 using EmbodySense.Core.Common.Loops.Execution.Wait;
 using EmbodySense.Core.Common.Loops.HumanInput;
+using EmbodySense.Core.Common.LocalWorkspace.Actions;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
+using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 
 namespace EmbodySense.Core.Common.Tests.Loops.Execution;
 
@@ -225,6 +227,22 @@ public sealed class GovernedLoopExecutionStateMatrixTests
         Assert.True(GovernedLoopExecutionStateMatrix.IsNodeEvidenceTransitionAllowed(running, retryReservation));
         Assert.False(GovernedLoopExecutionStateMatrix.IsNodeEvidenceTransitionAllowed(running, skippedRetryAttempt));
         Assert.False(GovernedLoopExecutionStateMatrix.IsNodeEvidenceTransitionAllowed(running, reusedAttemptOperation));
+    }
+
+    [Fact]
+    public void Review_blocked_recoverable_action_may_only_terminalize_as_failed()
+    {
+        var action = WorkspaceActionNodeDescriptors.Append;
+        var reviewBlocked = GovernedLoopNodeExecutionEvidence.CreateActivation(1, 1, 1, "action", action, ["incoming"], ["failure", "success"], GovernedLoopNodeExecutionStatus.ReviewBlocked, 1, "attempt-1", "parking", new string('a', 64));
+        var failed = GovernedLoopNodeExecutionEvidence.CreateActivation(1, 1, 1, "action", action, ["incoming"], ["failure", "success"], GovernedLoopNodeExecutionStatus.Failed, 1, "attempt-1", "rejected", new string('b', 64), controlOutcome: GovernedLoopControlCondition.Failure, selectedControlEdgeIds: ["failure"], skippedControlEdgeIds: ["success"]);
+        var completed = GovernedLoopNodeExecutionEvidence.CreateActivation(1, 1, 1, "action", action, ["incoming"], ["failure", "success"], GovernedLoopNodeExecutionStatus.Completed, 1, "attempt-1", "completed", new string('c', 64), controlOutcome: GovernedLoopControlCondition.Success, selectedControlEdgeIds: ["success"], skippedControlEdgeIds: ["failure"]);
+        var unrelatedReview = GovernedLoopNodeExecutionEvidence.CreateActivation(1, 1, 1, "inference", new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Inference, "inference", 1), ["incoming"], ["failure", "success"], GovernedLoopNodeExecutionStatus.ReviewBlocked, 1, "attempt-1", "parking", new string('a', 64));
+        var unrelatedFailed = GovernedLoopNodeExecutionEvidence.CreateActivation(1, 1, 1, "inference", new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.Inference, "inference", 1), ["incoming"], ["failure", "success"], GovernedLoopNodeExecutionStatus.Failed, 1, "attempt-1", "rejected", new string('b', 64), controlOutcome: GovernedLoopControlCondition.Failure, selectedControlEdgeIds: ["failure"], skippedControlEdgeIds: ["success"]);
+
+        Assert.True(GovernedLoopExecutionStateMatrix.IsNodeEvidenceTransitionAllowed(reviewBlocked, failed));
+        Assert.False(GovernedLoopExecutionStateMatrix.IsNodeEvidenceTransitionAllowed(reviewBlocked, completed));
+        Assert.False(GovernedLoopExecutionStateMatrix.IsNodeEvidenceTransitionAllowed(unrelatedReview, unrelatedFailed));
+        Assert.False(GovernedLoopExecutionStateMatrix.IsNodeEvidenceTransitionAllowed(failed, completed));
     }
 
     [Fact]

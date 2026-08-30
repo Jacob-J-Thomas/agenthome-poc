@@ -16,6 +16,8 @@ using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Execution.Models;
+using EmbodySense.Core.Common.Loops.Failures;
+using EmbodySense.Core.Common.Loops.Failures.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
@@ -231,7 +233,6 @@ public sealed class HumanReviewOrderedReleaseService : IHumanReviewContinuationR
         run = latestDecisionRun;
         if (!TryNow(run.UpdatedAtUtc, claim!.ClaimedAtUtc, claim.LeaseExpiresAtUtc, out now)) return Action(HumanReviewDecisionActionReleaseStatus.Unavailable);
         if (now >= decisionAction!.Wake!.ExpiresAtUtc || now >= review!.Request.Timing.ExpiresAtUtc) return Action(HumanReviewDecisionActionReleaseStatus.Invalid);
-
         return intent.Decision.Kind switch
         {
             HumanReviewDecisionKind.RequestInformation => await ParkForInformationAsync(run, review!, decisionAction!, claim, intent, context, now, cancellationToken).ConfigureAwait(false),
@@ -265,7 +266,11 @@ public sealed class HumanReviewOrderedReleaseService : IHumanReviewContinuationR
         var baseEvent = TerminalEvent(run, pruning.Value.Events.Count, activation, now, CustomLoopRunEventKind.NodeAttemptFailed, "The exact rejected Human Review decision failed its blocked activation without dispatching a dependent node.");
         var selectedEdges = context.Plan.ControlEdges.Where(edge => activation.OutgoingControlEdgeIds.Contains(edge.Id, StringComparer.Ordinal) && edge.Condition == GovernedLoopControlCondition.Failure).Select(edge => edge.Id).Order(StringComparer.Ordinal).ToArray();
         var skippedEdges = activation.OutgoingControlEdgeIds.Except(selectedEdges, StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
-        var terminalEvent = AttachEvidence(baseEvent, run.SequentialAdapterBinding!, activation, CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection, CustomLoopSequentialNodeDisposition.Rejected, GovernedLoopControlCondition.Failure, selectedEdges, skippedEdges);
+        var rejectionFailure = review.Request.Purpose == HumanReviewPurpose.PreDispatchEffect
+            ? CreateRejectionFailure(run, activation, now, baseEvent.EventId)
+            : null;
+        if (review.Request.Purpose == HumanReviewPurpose.PreDispatchEffect && rejectionFailure is null) return Action(HumanReviewDecisionActionReleaseStatus.Invalid);
+        var terminalEvent = AttachEvidence(baseEvent, run.SequentialAdapterBinding!, activation, CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection, CustomLoopSequentialNodeDisposition.Rejected, GovernedLoopControlCondition.Failure, selectedEdges, skippedEdges, rejectionFailure);
         var transition = review.Request.Purpose == HumanReviewPurpose.PreDispatchEffect
             ? GovernedLoopSequentialFrontierMachine.FailReviewBlockedRecoverableAction(run.Frontier, run.SequentialAdapterBinding, context.Plan, node, activation, activation.Attempt!.Value, activation.AttemptOperationId, terminalEvent.EventId, terminalEvent.SequentialNodeEvidence!.OutcomeArtifactHash, now, pruning.Value.References)
             : GovernedLoopSequentialFrontierMachine.FailReviewBlockedHumanReview(run.Frontier, run.SequentialAdapterBinding, context.Plan, node, activation, activation.Attempt!.Value, activation.AttemptOperationId, terminalEvent.EventId, terminalEvent.SequentialNodeEvidence!.OutcomeArtifactHash, now, pruning.Value.References);
@@ -383,10 +388,15 @@ public sealed class HumanReviewOrderedReleaseService : IHumanReviewContinuationR
                 || now >= requestExpiresAtUtc) return (null, false);
             if (latest.SequentialAdapterBinding is not { } binding
                 || !await HasCurrentAuthorityAsync(authorityRequest, binding, artifact, cancellationToken).ConfigureAwait(false)) return (null, false);
-            // Authority is the final volatile read for ordinary decisions. For a pre-dispatch effect, the exact
-            // not-started evidence is read last so neither proof can span the compare-exchange boundary.
+            // Authority and effect evidence are the final non-time volatile reads, so neither proof can span
+            // the compare-exchange boundary without the trusted-time fence below.
             if (effectAction is not null
                 && !await HasExactNotStartedEffectAsync(effectAction, authorityRequest, cancellationToken).ConfigureAwait(false)) return (null, false);
+            // Trusted time is the last volatile read. Recheck every expiry boundary after the final
+            // canonical authority/effect reads so a lease or request cannot expire before the CAS.
+            if (!TryNow(latest.UpdatedAtUtc, claimedAtUtc, leaseExpiresAtUtc, out var finalNow)
+                || finalNow >= wakeExpiresAtUtc
+                || finalNow >= requestExpiresAtUtc) return (null, false);
             var persisted = await _runs.UpdateAsync(candidate, current.LifecycleVersion, cancellationToken).ConfigureAwait(false);
             if (persisted.Status == CustomLoopRunStoreStatus.Updated && persisted.Run is not null && CustomLoopRunValidator.HasSameDurableVersion(candidate, persisted.Run)) return (persisted.Run, true);
         }
@@ -979,8 +989,60 @@ public sealed class HumanReviewOrderedReleaseService : IHumanReviewContinuationR
             null,
             null);
 
-    private static CustomLoopRunEvent AttachEvidence(CustomLoopRunEvent item, GovernedLoopSequentialAdapterBinding binding, GovernedLoopNodeExecutionEvidence activation, CustomLoopSequentialNodeEvidenceKind kind, CustomLoopSequentialNodeDisposition disposition, GovernedLoopControlCondition? controlOutcome, IReadOnlyList<string> selectedControlEdgeIds, IReadOnlyList<string> skippedControlEdgeIds)
+    private static GovernedLoopFailureEvidence? CreateRejectionFailure(CustomLoopRunRecord run, GovernedLoopNodeExecutionEvidence activation, DateTimeOffset now, string terminalEventId)
     {
+        if (run.SequentialAdapterBinding is not { } binding || activation.Attempt is not { } attempt || activation.OutcomeEvidenceId is not { } outcomeEvidenceId || activation.OutcomeEvidenceHash is not { } outcomeEvidenceHash)
+        {
+            return null;
+        }
+
+        var boundaries = run.Events
+            .Where(item => string.Equals(item.EventId, outcomeEvidenceId, StringComparison.Ordinal)
+                && item.SequentialNodeEvidence is { } evidence
+                && CustomLoopSequentialNodeEvidenceHash.Matches(evidence)
+                && CustomLoopSequentialOutcomeArtifactHash.Matches(item)
+                && string.Equals(evidence.OutcomeArtifactHash, outcomeEvidenceHash, StringComparison.Ordinal))
+            .Take(2)
+            .ToArray();
+        if (boundaries.Length != 1 || boundaries[0].SequentialNodeEvidence is not { } boundaryEvidence)
+        {
+            return null;
+        }
+
+        try
+        {
+            return GovernedLoopFailureEvidenceContract.Create(
+                Id("failure", terminalEventId),
+                binding.WorkspaceId,
+                binding.ExecutionBinding.RunId,
+                binding.ExecutionBinding.Revision,
+                binding.ExecutionBinding.ExecutionGeneration,
+                activation.ActivationOrdinal,
+                activation.VisitOrdinal,
+                activation.NodeId,
+                attempt,
+                GovernedLoopFailureClass.ReviewRejected,
+                "human-review-rejected",
+                GovernedLoopFailureSource.HumanReview,
+                GovernedLoopFailureEffectCertainty.DispatchProvedNotStarted,
+                GovernedLoopFailureAuthorityPosture.NotApplicable,
+                GovernedLoopFailureHumanPosture.ReviewRejected,
+                GovernedLoopFailureRetrySafety.NotRetryable,
+                GovernedLoopFailureSeverity.Critical,
+                930,
+                [new GovernedLoopFailureEvidenceReference(boundaries[0].EventId, boundaryEvidence.EvidenceHash)],
+                null,
+                now);
+        }
+        catch (Exception exception) when (exception is ArgumentException or InvalidOperationException)
+        {
+            return null;
+        }
+    }
+
+    private static CustomLoopRunEvent AttachEvidence(CustomLoopRunEvent item, GovernedLoopSequentialAdapterBinding binding, GovernedLoopNodeExecutionEvidence activation, CustomLoopSequentialNodeEvidenceKind kind, CustomLoopSequentialNodeDisposition disposition, GovernedLoopControlCondition? controlOutcome, IReadOnlyList<string> selectedControlEdgeIds, IReadOnlyList<string> skippedControlEdgeIds, GovernedLoopFailureEvidence? failureEvidence = null)
+    {
+        if (failureEvidence is not null) item = item with { FailureEvidence = failureEvidence };
         var evidence = CustomLoopSequentialNodeEvidenceHash.Apply(new CustomLoopSequentialNodeEvidence(
             CustomLoopSequentialNodeEvidence.CurrentSchemaVersion,
             kind,
@@ -1001,7 +1063,11 @@ public sealed class HumanReviewOrderedReleaseService : IHumanReviewContinuationR
             null,
             disposition,
             CustomLoopSequentialOutcomeArtifactHash.Compute(item),
-            string.Empty));
+            string.Empty)
+        {
+            FailureEvidenceId = item.FailureEvidence?.EvidenceId,
+            FailureEvidenceHash = item.FailureEvidence?.ContentHash,
+        });
         return item with { SequentialNodeEvidence = evidence };
     }
 

@@ -269,8 +269,12 @@ public static class GovernedLoopExecutionStateMatrix
                 && SameRoutingEvidence(current, next);
         }
 
+        // A pre-dispatch Action rejection has authenticated failure evidence and an authored Failure route;
+        // it may terminalize only as Failed, while Human Review retains its existing Completed/Failed edges.
         if (current.Status == GovernedLoopNodeExecutionStatus.ReviewBlocked
-            && next.Status is GovernedLoopNodeExecutionStatus.Completed or GovernedLoopNodeExecutionStatus.Failed)
+            && (next.Status is GovernedLoopNodeExecutionStatus.Completed or GovernedLoopNodeExecutionStatus.Failed)
+            && (current.Descriptor.Kind == GovernedLoopNodeKind.HumanReview
+                || (current.Descriptor.Kind == GovernedLoopNodeKind.Action && next.Status == GovernedLoopNodeExecutionStatus.Failed)))
         {
             return IsHumanReviewTerminalization(current, next);
         }
@@ -334,9 +338,11 @@ public static class GovernedLoopExecutionStateMatrix
     }
 
     private static bool IsHumanReviewTerminalization(GovernedLoopNodeExecutionEvidence current, GovernedLoopNodeExecutionEvidence next)
-        => current.Descriptor.Kind == GovernedLoopNodeKind.HumanReview
+        => ((current.Descriptor.Kind == GovernedLoopNodeKind.HumanReview
+                && (next.Status is GovernedLoopNodeExecutionStatus.Completed or GovernedLoopNodeExecutionStatus.Failed))
+            || (current.Descriptor.Kind == GovernedLoopNodeKind.Action && next.Status == GovernedLoopNodeExecutionStatus.Failed))
             && current.Status == GovernedLoopNodeExecutionStatus.ReviewBlocked
-            && next.Status is GovernedLoopNodeExecutionStatus.Completed or GovernedLoopNodeExecutionStatus.Failed
+            && (next.Status is GovernedLoopNodeExecutionStatus.Completed or GovernedLoopNodeExecutionStatus.Failed)
             && current.Attempt == next.Attempt
             && string.Equals(current.AttemptOperationId, next.AttemptOperationId, StringComparison.Ordinal)
             && current.OutcomeEvidenceId is not null

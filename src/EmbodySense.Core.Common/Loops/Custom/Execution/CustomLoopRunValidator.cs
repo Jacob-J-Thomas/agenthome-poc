@@ -2556,13 +2556,17 @@ public static class CustomLoopRunValidator
                     && evidence.Kind == CustomLoopSequentialNodeEvidenceKind.ReviewRequested
                     && evidence.Disposition == CustomLoopSequentialNodeDisposition.ReviewPending
                     && IsPreDispatchHumanReviewActionEvent(run, item);
+                var isPreDispatchReviewRejection = item.Kind == CustomLoopRunEventKind.NodeAttemptFailed
+                    && evidence.Kind == CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection
+                    && evidence.Disposition == CustomLoopSequentialNodeDisposition.Rejected
+                    && IsPreDispatchHumanReviewActionEvent(run, item);
                 var hasValidActionShape = item.Kind switch
                 {
                     CustomLoopRunEventKind.NodeAttemptStarted => item.TraceReservationUtf8Bytes == CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes,
                     CustomLoopRunEventKind.NodeAttemptCompleted => item.CanonicalOutput is not null && IsRecoverableActionResult(run, item, item.CanonicalOutput),
                     CustomLoopRunEventKind.NodeAttemptFailed => HasPriorSequentialDispatch(run.Events, eventIndex, evidence, CustomLoopRunEventKind.NodeAttemptStarted),
                     _ => false,
-                } || isPreDispatchReviewParking;
+                } || isPreDispatchReviewParking || isPreDispatchReviewRejection;
                 if (!string.Equals(evidence.NodeId, item.StepId, StringComparison.Ordinal)
                     || item.Iteration != (evidence.CycleIteration ?? 1)
                     || !hasValidActionShape)
@@ -2751,9 +2755,12 @@ public static class CustomLoopRunValidator
             || binding?.EffectAttempt is null
             || !HumanReviewContractHash.MatchesBinding(binding)
             || evidence is null
-            || item.Kind != CustomLoopRunEventKind.NodeOutcomeObserved
+            || item.Kind is not (CustomLoopRunEventKind.NodeOutcomeObserved or CustomLoopRunEventKind.NodeAttemptFailed)
             || item.CanonicalOutput is not null
-            || item.FailureEvidence is not null
+            || (item.Kind == CustomLoopRunEventKind.NodeOutcomeObserved && item.FailureEvidence is not null)
+            || (item.Kind == CustomLoopRunEventKind.NodeAttemptFailed && item.FailureEvidence is null)
+            || (item.Kind == CustomLoopRunEventKind.NodeOutcomeObserved && (evidence.Kind != CustomLoopSequentialNodeEvidenceKind.ReviewRequested || evidence.Disposition != CustomLoopSequentialNodeDisposition.ReviewPending))
+            || (item.Kind == CustomLoopRunEventKind.NodeAttemptFailed && (evidence.Kind != CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection || evidence.Disposition != CustomLoopSequentialNodeDisposition.Rejected))
             || !IsRecoverableActionEvent(run, item))
         {
             return false;

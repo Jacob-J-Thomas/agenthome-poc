@@ -318,7 +318,7 @@ public sealed partial class CustomLoopOrderedRunnerTests
             context.Plan,
             context.Artifact,
             AuditSchema.Actors.Web));
-        Assert.True(parked.Status == CustomLoopOrderedRunStatus.Paused, $"{parked.Status}: {parked.Detail}; validation={string.Join(" | ", store.ValidationFailures.Select(item => item.Code + ":" + item.Message))}");
+        Assert.Equal(CustomLoopOrderedRunStatus.Paused, parked.Status);
 
         var intent = await PrepareClaimedDecisionActionAsync(store, kind);
         var reentry = new HumanReviewOrderedReleaseTestRuntime((request, cancellationToken) => ConfirmHumanReviewHandoffAsync(store, request, cancellationToken));
@@ -392,6 +392,75 @@ public sealed partial class CustomLoopOrderedRunnerTests
         Assert.Null(store.Current.HumanReview?.DecisionActions.Single(action => action.Reservation.ReservationHash == intent.Reservation.ReservationHash).Completion);
     }
 
+    [Theory]
+    [InlineData("rollback")]
+    [InlineData("unavailable")]
+    [InlineData("wake-expiry")]
+    [InlineData("request-expiry")]
+    [InlineData("claim-lease-expiry")]
+    public async Task Release_final_clock_or_expiry_window_leaves_the_decision_run_unchanged(string finalWindow)
+    {
+        var context = await HumanReviewContextAsync();
+        var store = new FakeRunStore(context.Run);
+        var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+        var initialRuntime = new GovernedLoopSequentialOrderedRuntimeAdapter(
+            Runner(store, new QueueExecutor(), new RecordingPublisher(), humanReviewAdmissionService: new HumanReviewAdmissionService(store)),
+            evidence,
+            evidence);
+        var parked = await initialRuntime.RunAsync(new GovernedLoopSequentialOrderedRunRequest(
+            GovernedLoopSequentialOrderedRunRequest.CurrentSchemaVersion,
+            context.Anchor,
+            context.Plan,
+            context.Artifact,
+            AuditSchema.Actors.Web));
+        Assert.Equal(CustomLoopOrderedRunStatus.Paused, parked.Status);
+
+        var intent = await PrepareClaimedDecisionActionAsync(store, HumanReviewDecisionKind.RequestInformation);
+        var before = store.Current;
+        var review = Assert.IsType<HumanReviewRunState>(before.HumanReview);
+        var action = Assert.Single(review.DecisionActions, candidate => candidate.Reservation.ReservationHash == intent.Reservation.ReservationHash);
+        var claim = Assert.Single(action.Claims);
+        var finalValue = finalWindow switch
+        {
+            "rollback" => before.UpdatedAtUtc.AddTicks(-1),
+            "unavailable" => default,
+            "wake-expiry" => action.Wake!.ExpiresAtUtc,
+            "request-expiry" => review.Request.Timing.ExpiresAtUtc,
+            "claim-lease-expiry" => claim.LeaseExpiresAtUtc,
+            _ => throw new ArgumentOutOfRangeException(nameof(finalWindow)),
+        };
+        var clock = new FinalWindowTimeProvider(before.UpdatedAtUtc.AddTicks(1));
+        var authority = new RecordingAuthoritySource(HumanReviewContinuationAuthorityReadStatus.Current, HumanReviewContinuationAuthorityReadStatus.Current)
+        {
+            AfterRead = read =>
+            {
+                if (read == 2)
+                {
+                    clock.CurrentValue = finalValue;
+                }
+            },
+        };
+        var release = new HumanReviewOrderedReleaseService(
+            store,
+            new HumanReviewOrderedReleaseTestContextResolver(new GovernedLoopWaitOrderedContext(context.Anchor, context.Plan, context.Artifact)),
+            new HumanReviewOrderedReleaseTestRuntime(),
+            clock,
+            authority);
+        var beforeWrites = store.Writes.Count;
+
+        var result = await release.ReleaseAsync(intent);
+
+        Assert.Equal(HumanReviewDecisionActionReleaseStatus.Unavailable, result.Status);
+        Assert.Equal(2, authority.ReadCount);
+        Assert.Equal(4, clock.ReadCount);
+        Assert.Equal(beforeWrites, store.Writes.Count);
+        Assert.Equal(before.LifecycleVersion, store.Current.LifecycleVersion);
+        Assert.Equal(before.Events, store.Current.Events);
+        Assert.Equal(before.Frontier, store.Current.Frontier);
+        Assert.Equal(before.Status, store.Current.Status);
+        Assert.Null(store.Current.HumanReview?.DecisionActions.Single(candidate => candidate.Reservation.ReservationHash == intent.Reservation.ReservationHash).Completion);
+    }
+
     [Fact]
     public async Task Routed_reject_release_returns_unavailable_until_its_durable_ordered_handoff_is_observed_and_replay_retries_the_same_operation()
     {
@@ -408,7 +477,7 @@ public sealed partial class CustomLoopOrderedRunnerTests
             context.Plan,
             context.Artifact,
             AuditSchema.Actors.Web));
-        Assert.True(parked.Status == CustomLoopOrderedRunStatus.Paused, $"{parked.Status}: {parked.Detail}; validation={string.Join(" | ", store.ValidationFailures.Select(item => item.Code + ":" + item.Message))}");
+        Assert.Equal(CustomLoopOrderedRunStatus.Paused, parked.Status);
 
         var intent = await PrepareClaimedDecisionActionAsync(store, HumanReviewDecisionKind.Reject);
         var authority = new RecordingAuthoritySource(HumanReviewContinuationAuthorityReadStatus.Current, HumanReviewContinuationAuthorityReadStatus.Current);
@@ -534,7 +603,7 @@ public sealed partial class CustomLoopOrderedRunnerTests
     {
         var context = await SequentialContextAsync(
             Run(SequentialDefinition()),
-            artifactFactory: role => GovernedLoopSequentialApplicationTestFixture.WorkspaceActionArtifact(owningRole: role));
+            artifactFactory: WorkspaceActionFailureRouteArtifact);
         var store = new FakeRunStore(context.Run);
         var evidence = new SequentialEvidenceHarness(store, context.Evidence);
         var actuator = new PreDispatchApprovalWorkspaceActionExecutor();
@@ -562,8 +631,8 @@ public sealed partial class CustomLoopOrderedRunnerTests
 
         var result = await release.ReleaseAsync(intent);
 
-        Assert.Equal(kind == HumanReviewDecisionKind.Reject ? HumanReviewDecisionActionReleaseStatus.Invalid : HumanReviewDecisionActionReleaseStatus.Unavailable, result.Status);
-        Assert.Equal(kind == HumanReviewDecisionKind.Reject ? 1 : 2, authority.ReadCount);
+        Assert.Equal(HumanReviewDecisionActionReleaseStatus.Unavailable, result.Status);
+        Assert.Equal(2, authority.ReadCount);
         Assert.Equal(before.LifecycleVersion, store.Current.LifecycleVersion);
         Assert.Equal(before.Events, store.Current.Events);
         Assert.Equal(before.Frontier, store.Current.Frontier);
@@ -592,7 +661,7 @@ public sealed partial class CustomLoopOrderedRunnerTests
             context.Artifact,
             AuditSchema.Actors.Web));
 
-        Assert.True(parked.Status == CustomLoopOrderedRunStatus.Paused, $"{parked.Status}: {parked.Detail}; failure={store.Current.FailureCode}; writes={string.Join(" | ", store.Writes.Select(run => run.Status + "/" + run.Frontier?.Payload.Status + "/" + run.HumanReview?.Request.Purpose + "/" + run.Events[^1].Kind))}; validation={string.Join(" | ", store.ValidationFailures.Select(error => error.Code + ":" + error.Message))}");
+        Assert.Equal(CustomLoopOrderedRunStatus.Paused, parked.Status);
         Assert.Equal(HumanReviewPurpose.PreDispatchEffect, store.Current.HumanReview?.Request.Purpose);
         Assert.Equal(GovernedLoopFrontierStatus.ReviewBlocked, store.Current.Frontier?.Payload.Status);
         Assert.Single(actuator.Requests);
@@ -647,7 +716,7 @@ public sealed partial class CustomLoopOrderedRunnerTests
             effectCertainty);
 
         var first = await release.ReleaseAsync(action, completion);
-        Assert.True(actuator.Requests.Count == 2, $"first={first.Status}; actuator={actuator.ActuationCount}; requests={string.Join(",", actuator.Requests.Select(request => request.HumanReviewRelease is null ? "none" : "release"))}; status={store.Current.Status}; failure={store.Current.FailureCode}:{store.Current.FailureDetail}; frontier={store.Current.Frontier?.Payload.Status}; events={string.Join(",", store.Current.Events.Select(item => item.Kind + ":" + item.EventId))}; validation={string.Join(" | ", CustomLoopRunValidator.Validate(store.Current).Errors)}");
+        Assert.Equal(2, actuator.Requests.Count);
         var replay = await release.ReleaseAsync(action, completion);
         var directResume = await runtime.ResumeAsync(new GovernedLoopSequentialOrderedResumeRequest(
             GovernedLoopSequentialOrderedResumeRequest.CurrentSchemaVersion,
@@ -659,7 +728,8 @@ public sealed partial class CustomLoopOrderedRunnerTests
             AuditSchema.Actors.Web));
 
         Assert.Equal(2, authority.ReadCount);
-        Assert.True(first.Status == HumanReviewContinuationReleaseStatus.Completed, $"{first.Status}; authority={authority.ReadCount}; effect={effectEvidence.ReadCount}; certainty={effectCertainty.ReadCount}; lifecycle={store.Current.LifecycleVersion}; frontier={store.Current.Frontier?.Payload.Status}; actuator={actuator.ActuationCount}; requests={string.Join(",", actuator.Requests.Select(request => request.HumanReviewRelease is null ? "none" : "release"))}; events={string.Join(",", store.Current.Events.Select(item => item.Kind + ":" + item.EventId))}; resume={directResume.Status}:{directResume.Detail}; validation={string.Join(" | ", CustomLoopRunValidator.Validate(store.Current).Errors)}");
+        Assert.Equal(HumanReviewContinuationReleaseStatus.Completed, first.Status);
+        Assert.Equal(CustomLoopOrderedRunStatus.Completed, directResume.Status);
         Assert.Equal(first.Completion?.CompletionHash, replay.Completion?.CompletionHash);
         Assert.Equal(2, actuator.Requests.Count);
         Assert.Equal(1, actuator.ActuationCount);
@@ -678,8 +748,10 @@ public sealed partial class CustomLoopOrderedRunnerTests
             && completedEvidence is not null
             && completedEvidence.SelectedControlEdgeIds.Concat(completedEvidence.SkippedControlEdgeIds).Order(StringComparer.Ordinal)
                 .SequenceEqual(finalActivation.OutgoingControlEdgeIds, StringComparer.Ordinal);
-        Assert.True(store.Current.IsTerminal, $"status={store.Current.Status}; frontier={store.Current.Frontier?.Payload.Status}; failure={store.Current.FailureCode}:{store.Current.FailureDetail}; activationMatches={activationMatches}; routeMatches={routeMatches}; activation={finalActivation?.ActivationOrdinal}/{finalActivation?.PlanOrdinal}/{finalActivation?.NodeId}/[{finalActivation?.CycleId ?? "<null>"}]/{finalActivation?.CycleIteration?.ToString() ?? "<null>"}/{finalActivation?.VisitOrdinal}/{finalActivation?.Status}/{finalActivation?.Attempt}/{finalActivation?.AttemptOperationId}/{finalActivation?.OutcomeEvidenceId}/{finalActivation?.ControlOutcome}/{string.Join(",", finalActivation?.OutgoingControlEdgeIds ?? [])}/{string.Join(",", finalActivation?.SelectedControlEdgeIds ?? [])}/{string.Join(",", finalActivation?.SkippedControlEdgeIds ?? [])}; completed={completedEvidence?.Kind}/{completedEvidence?.Disposition}/{completedEvidence?.ActivationOrdinal}/{completedEvidence?.NodeId}/[{completedEvidence?.CycleId ?? "<null>"}]/{completedEvidence?.CycleIteration?.ToString() ?? "<null>"}/{completedEvidence?.VisitOrdinal}/{completedEvidence?.Attempt}/{completedEvidence?.OutcomeArtifactHash}/{completedEvidence?.ControlOutcome}/{string.Join(",", completedEvidence?.SelectedControlEdgeIds ?? [])}/{string.Join(",", completedEvidence?.SkippedControlEdgeIds ?? [])}; nodes={string.Join(";", store.Current.Frontier?.Payload.Nodes.Select(item => item.ActivationOrdinal + "/" + item.PlanOrdinal + "/" + item.NodeId + "/" + item.Status + "/" + item.Attempt + "/" + item.OutcomeEvidenceId + "/" + item.ControlOutcome + "/" + string.Join(",", item.OutgoingControlEdgeIds) + "/" + string.Join(",", item.SelectedControlEdgeIds) + "/" + string.Join(",", item.SkippedControlEdgeIds)) ?? [])}; events={string.Join(",", store.Current.Events.Select(item => item.Kind + ":" + item.EventId))}; validation={string.Join(" | ", store.ValidationFailures.Select(error => error.Code + ":" + error.Field + ":" + error.Message))}");
-        Assert.True(CustomLoopRunValidator.Validate(store.Current).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(store.Current).Errors));
+        Assert.True(activationMatches);
+        Assert.True(routeMatches);
+        Assert.True(store.Current.IsTerminal);
+        Assert.True(CustomLoopRunValidator.Validate(store.Current).IsValid);
     }
 
     private static async Task<HumanReviewDecisionActionIntent> PrepareClaimedDecisionActionAsync(FakeRunStore store, HumanReviewDecisionKind kind)
@@ -1070,4 +1142,33 @@ public sealed partial class CustomLoopOrderedRunnerTests
                 new GovernedLoopBindingDefinition("request-to-exit", GovernedLoopBindingKind.Data, "trigger", "request", "exit", "result"),
             ],
             authorityCeiling: GovernedLoopAuthorityCeiling.Create([GovernedLoopSequentialApplicationTestFixture.ConversationTurnCapabilityId]));
+
+    private static GovernedLoopGraphRevisionArtifact WorkspaceActionFailureRouteArtifact(ContextualRoleRevisionPin role)
+    {
+        var source = GovernedLoopSequentialApplicationTestFixture.WorkspaceActionArtifact(owningRole: role);
+        return GovernedLoopSequentialApplicationTestFixture.Artifact(
+            [
+                .. source.Graph.Nodes,
+                new GovernedLoopNodeDefinition(
+                    "fail",
+                    GovernedLoopSequentialNodeDescriptors.FailTerminal,
+                    [],
+                    GovernedLoopAuthorityCeiling.Create([]),
+                    new Dictionary<string, string>(StringComparer.Ordinal),
+                    null,
+                    null,
+                    null,
+                    null),
+            ],
+            [
+                .. source.Graph.ControlEdges,
+                new GovernedLoopControlEdgeDefinition("action-to-fail", "workspace-action", "fail", GovernedLoopControlCondition.Failure),
+            ],
+            ["exit", "fail"],
+            role,
+            source.Graph.Bindings,
+            source.Graph.ValueSchemas,
+            source.Graph.OutputContract,
+            source.Graph.AuthorityCeiling);
+    }
 }
