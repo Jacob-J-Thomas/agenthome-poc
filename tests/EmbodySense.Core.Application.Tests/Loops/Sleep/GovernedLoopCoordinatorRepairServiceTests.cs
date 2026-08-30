@@ -169,6 +169,57 @@ public sealed class GovernedLoopCoordinatorRepairServiceTests
         Assert.Equal(GovernedLoopCoordinatorRepairSubmitStatus.Unavailable, unavailable.Status);
     }
 
+    [Fact]
+    public async Task Preview_fails_closed_when_recording_clock_fails_after_valid_evidence()
+    {
+        var clock = new StubGovernedLoopSleepTimeProvider(_now) { ThrowOnCall = 2 };
+        var fixture = new RepairFixture(clock: clock);
+
+        var preview = await fixture.Service.PreviewAsync(new GovernedLoopCoordinatorRepairPreviewRequest("coordinator", "repair-operation"));
+
+        Assert.Equal(GovernedLoopCoordinatorRepairPreviewStatus.Unavailable, preview.Status);
+        Assert.Equal("coordinator-repair-clock-unavailable", preview.ReasonCode);
+        Assert.Null(preview.Disposition);
+        Assert.Empty(fixture.Repairs.Dispositions);
+    }
+
+    [Fact]
+    public async Task Submit_fails_closed_when_repair_ledger_read_or_append_is_unavailable_or_malformed()
+    {
+        var unavailableRead = new RepairFixture();
+        var unavailableReadPreview = await unavailableRead.Service.PreviewAsync(new GovernedLoopCoordinatorRepairPreviewRequest("coordinator", "repair-operation"));
+        unavailableRead.Repairs.ReadException = new IOException("repair ledger unavailable");
+        var unavailableReadResult = await unavailableRead.Service.SubmitAsync(new GovernedLoopCoordinatorRepairSubmitRequest(unavailableReadPreview.Disposition!));
+
+        var malformedRead = new RepairFixture();
+        var malformedReadPreview = await malformedRead.Service.PreviewAsync(new GovernedLoopCoordinatorRepairPreviewRequest("coordinator", "repair-operation"));
+        malformedRead.Repairs.ForcedReadResult = new GovernedLoopCoordinatorRepairReadResult(GovernedLoopCoordinatorRepairReadStatus.Found);
+        var malformedReadResult = await malformedRead.Service.SubmitAsync(new GovernedLoopCoordinatorRepairSubmitRequest(malformedReadPreview.Disposition!));
+
+        var unavailableAppend = new RepairFixture();
+        var unavailableAppendPreview = await unavailableAppend.Service.PreviewAsync(new GovernedLoopCoordinatorRepairPreviewRequest("coordinator", "repair-operation"));
+        unavailableAppend.Repairs.AppendException = new IOException("repair ledger unavailable");
+        var unavailableAppendResult = await unavailableAppend.Service.SubmitAsync(new GovernedLoopCoordinatorRepairSubmitRequest(unavailableAppendPreview.Disposition!));
+
+        var malformedAppend = new RepairFixture();
+        var malformedAppendPreview = await malformedAppend.Service.PreviewAsync(new GovernedLoopCoordinatorRepairPreviewRequest("coordinator", "repair-operation"));
+        malformedAppend.Repairs.ForcedResult = new GovernedLoopCoordinatorRepairMutationResult(GovernedLoopCoordinatorRepairMutationStatus.Appended);
+        var malformedAppendResult = await malformedAppend.Service.SubmitAsync(new GovernedLoopCoordinatorRepairSubmitRequest(malformedAppendPreview.Disposition!));
+
+        Assert.Equal(GovernedLoopCoordinatorRepairSubmitStatus.Unavailable, unavailableReadResult.Status);
+        Assert.Equal("coordinator-repair-ledger-unavailable", unavailableReadResult.ReasonCode);
+        Assert.Equal(GovernedLoopCoordinatorRepairSubmitStatus.Corrupt, malformedReadResult.Status);
+        Assert.Equal("coordinator-repair-ledger-corrupt", malformedReadResult.ReasonCode);
+        Assert.Equal(GovernedLoopCoordinatorRepairSubmitStatus.Unavailable, unavailableAppendResult.Status);
+        Assert.Equal("coordinator-repair-ledger-unavailable", unavailableAppendResult.ReasonCode);
+        Assert.Equal(GovernedLoopCoordinatorRepairSubmitStatus.Corrupt, malformedAppendResult.Status);
+        Assert.Equal("coordinator-repair-ledger-corrupt", malformedAppendResult.ReasonCode);
+        Assert.Empty(unavailableRead.Repairs.Dispositions);
+        Assert.Empty(malformedRead.Repairs.Dispositions);
+        Assert.Empty(unavailableAppend.Repairs.Dispositions);
+        Assert.Empty(malformedAppend.Repairs.Dispositions);
+    }
+
     private static GovernedLoopCoordinatorSnapshot FixtureSnapshot()
     {
         var ownership = GovernedLoopSleepContractHash.Apply(new GovernedLoopCoordinatorOwnership(1, "coordinator", "owner", 2, _now.AddMinutes(-2), string.Empty));
@@ -249,10 +300,26 @@ public sealed class GovernedLoopCoordinatorRepairServiceTests
     {
         internal List<GovernedLoopCoordinatorRepairDisposition> Dispositions { get; } = [];
 
+        internal Exception? AppendException { get; set; }
+
         internal GovernedLoopCoordinatorRepairMutationResult? ForcedResult { get; set; }
+
+        internal Exception? ReadException { get; set; }
+
+        internal GovernedLoopCoordinatorRepairReadResult? ForcedReadResult { get; set; }
 
         public Task<GovernedLoopCoordinatorRepairReadResult?> ReadAsync(string coordinatorId, string failedOwnershipHash, CancellationToken cancellationToken = default)
         {
+            if (ReadException is not null)
+            {
+                throw ReadException;
+            }
+
+            if (ForcedReadResult is not null)
+            {
+                return Task.FromResult<GovernedLoopCoordinatorRepairReadResult?>(ForcedReadResult);
+            }
+
             var disposition = Dispositions.SingleOrDefault(item => string.Equals(
                 item.FailedOwnership.ContentHash,
                 failedOwnershipHash,
@@ -264,6 +331,11 @@ public sealed class GovernedLoopCoordinatorRepairServiceTests
 
         public Task<GovernedLoopCoordinatorRepairMutationResult?> AppendAsync(GovernedLoopCoordinatorRepairDisposition disposition, CancellationToken cancellationToken = default)
         {
+            if (AppendException is not null)
+            {
+                throw AppendException;
+            }
+
             if (ForcedResult is not null)
             {
                 return Task.FromResult<GovernedLoopCoordinatorRepairMutationResult?>(ForcedResult);
