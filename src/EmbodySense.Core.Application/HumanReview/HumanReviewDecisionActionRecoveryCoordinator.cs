@@ -29,19 +29,76 @@ public sealed class HumanReviewDecisionActionRecoveryCoordinator
     /// <summary>Runs one bounded recovery pass without composing a worker, timer, queue, graph re-entry, or runtime facade.</summary>
     public async Task<HumanReviewDecisionActionRecoveryResult> RecoverAsync(HumanReviewDecisionActionRecoveryRequest request, CancellationToken cancellationToken = default)
     {
-        if (!Valid(request) || !TryNow(out var observedAtUtc)) return new(HumanReviewDecisionActionRecoveryStatus.Invalid, null, false, []);
-        HumanReviewDecisionActionRecoveryPage page;
-        try { page = await _store.ListCandidatesAsync(request.MaximumCount, request.ScanCursor, observedAtUtc, cancellationToken).ConfigureAwait(false); }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
-        catch { return new(HumanReviewDecisionActionRecoveryStatus.Unavailable, request.ScanCursor, false, []); }
-        if (page is null || page.Status != HumanReviewDecisionActionRecoveryPageStatus.Current || page.Candidates is null) return new(page?.Status == HumanReviewDecisionActionRecoveryPageStatus.Invalid ? HumanReviewDecisionActionRecoveryStatus.Invalid : HumanReviewDecisionActionRecoveryStatus.Unavailable, request.ScanCursor, false, []);
+        if (!Valid(request) || !TryNow(out var observedAtUtc)) return Result(HumanReviewDecisionActionRecoveryStatus.Invalid, null, false, [], []);
+        var initial = await ReadPageAsync(request, observedAtUtc, cancellationToken).ConfigureAwait(false);
+        if (initial.Page is null) return Result(initial.Status, request.ScanCursor, false, [], []);
+
+        var publicationItems = await ReconcileReservationsAsync(initial.Page.PublicationCandidates, cancellationToken).ConfigureAwait(false);
+        var page = initial.Page;
+        if (publicationItems.Count > 0)
+        {
+            var refreshed = await ReadPageAsync(request, observedAtUtc, cancellationToken).ConfigureAwait(false);
+            if (refreshed.Page is null) return Result(refreshed.Status, request.ScanCursor, false, [], publicationItems);
+            page = refreshed.Page;
+        }
+
         var items = new List<HumanReviewDecisionActionRecoveryItemResult>(page.Candidates.Count);
         foreach (var candidate in page.Candidates)
         {
             cancellationToken.ThrowIfCancellationRequested();
             items.Add(await RecoverCandidateAsync(candidate, request, observedAtUtc, cancellationToken).ConfigureAwait(false));
         }
-        return new(HumanReviewDecisionActionRecoveryStatus.Current, page.NextScanCursor, page.SourceTruncated, items);
+        return Result(HumanReviewDecisionActionRecoveryStatus.Current, page.NextScanCursor, page.SourceTruncated, items, publicationItems);
+    }
+
+    private async Task<(HumanReviewDecisionActionRecoveryStatus Status, HumanReviewDecisionActionRecoveryPage? Page)> ReadPageAsync(HumanReviewDecisionActionRecoveryRequest request, DateTimeOffset observedAtUtc, CancellationToken cancellationToken)
+    {
+        HumanReviewDecisionActionRecoveryPage? page;
+        try { page = await _store.ListCandidatesAsync(request.MaximumCount, request.ScanCursor, observedAtUtc, cancellationToken).ConfigureAwait(false); }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch { return (HumanReviewDecisionActionRecoveryStatus.Unavailable, null); }
+        if (page is null || page.Candidates is null || page.PublicationCandidates is null)
+        {
+            return (HumanReviewDecisionActionRecoveryStatus.Invalid, null);
+        }
+
+        return page.Status == HumanReviewDecisionActionRecoveryPageStatus.Current
+            ? (HumanReviewDecisionActionRecoveryStatus.Current, page)
+            : (page.Status == HumanReviewDecisionActionRecoveryPageStatus.Invalid ? HumanReviewDecisionActionRecoveryStatus.Invalid : HumanReviewDecisionActionRecoveryStatus.Unavailable, null);
+    }
+
+    private async Task<IReadOnlyList<HumanReviewDecisionActionPublicationRecoveryItemResult>> ReconcileReservationsAsync(IReadOnlyList<HumanReviewDecisionActionPublicationCandidate> candidates, CancellationToken cancellationToken)
+    {
+        var results = new List<HumanReviewDecisionActionPublicationRecoveryItemResult>(candidates.Count);
+        foreach (var candidate in candidates)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            results.Add(await ReconcileReservationAsync(candidate, cancellationToken).ConfigureAwait(false));
+        }
+
+        return results;
+    }
+
+    private async Task<HumanReviewDecisionActionPublicationRecoveryItemResult> ReconcileReservationAsync(HumanReviewDecisionActionPublicationCandidate candidate, CancellationToken cancellationToken)
+    {
+        if (!Valid(candidate) || !HumanReviewDecisionActionWakeFactory.TryCreate(candidate.Request, candidate.Action, out var wake))
+        {
+            return PublicationItem(candidate, HumanReviewDecisionActionPublicationRecoveryItemStatus.Invalid);
+        }
+
+        try
+        {
+            var result = await _store.PublishAsync(candidate.RunId, candidate.ExpectedLifecycleVersion, wake!, cancellationToken).ConfigureAwait(false);
+            return PublicationItem(candidate, result?.Status switch
+            {
+                HumanReviewDecisionActionStoreMutationStatus.Committed => HumanReviewDecisionActionPublicationRecoveryItemStatus.Published,
+                HumanReviewDecisionActionStoreMutationStatus.Replayed => HumanReviewDecisionActionPublicationRecoveryItemStatus.Replayed,
+                HumanReviewDecisionActionStoreMutationStatus.Invalid => HumanReviewDecisionActionPublicationRecoveryItemStatus.Invalid,
+                _ => HumanReviewDecisionActionPublicationRecoveryItemStatus.Parked,
+            });
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch { return PublicationItem(candidate, HumanReviewDecisionActionPublicationRecoveryItemStatus.Parked); }
     }
 
     private async Task<HumanReviewDecisionActionRecoveryItemResult> RecoverCandidateAsync(HumanReviewDecisionActionRecoveryCandidate candidate, HumanReviewDecisionActionRecoveryRequest request, DateTimeOffset observedAtUtc, CancellationToken cancellationToken)
@@ -156,6 +213,17 @@ public sealed class HumanReviewDecisionActionRecoveryCoordinator
     private bool TryNow(out DateTimeOffset value) { try { value = _clock.UtcNow; return Utc(value); } catch { value = default; return false; } }
     private static bool Valid(HumanReviewDecisionActionRecoveryRequest? value) => value is not null && value.MaximumCount is >= 1 and <= CustomLoopLimits.MaxRecentRunsPageSize && HumanReviewIdentifier.IsValid(value.WorkerId) && value.ClaimLease > TimeSpan.Zero && value.ClaimLease <= HumanReviewContractLimits.MaxContinuationClaimLease;
     private static bool Valid(HumanReviewDecisionActionRecoveryCandidate? value) => value is not null && CustomLoopArtifactIdentifier.IsValid(value.RunId) && value.ExpectedLifecycleVersion >= 1 && value.ExpectedGeneration >= 1 && value.Decision.Kind is HumanReviewDecisionKind.Reject or HumanReviewDecisionKind.Cancel or HumanReviewDecisionKind.RequestInformation && Utc(value.WakeExpiresAtUtc);
+    private static bool Valid(HumanReviewDecisionActionPublicationCandidate? value)
+        => value is not null
+            && CustomLoopArtifactIdentifier.IsValid(value.RunId)
+            && value.ExpectedLifecycleVersion >= 1
+            && value.Request is not null
+            && value.Action is not null
+            && value.Action.Wake is null
+            && value.Action.Claims.IsDefaultOrEmpty
+            && value.Action.Completion is null
+            && value.Action.Retirement is null
+            && HumanReviewDecisionActionContractValidator.ValidateState(value.Request, value.Action).IsValid;
     private static bool HasCurrentClaimAndWake(HumanReviewDecisionActionCandidate candidate, DateTimeOffset observedAtUtc)
         => candidate.Action.Wake is { } wake
             && candidate.Action.ExpectedGeneration == candidate.Claim.ExpectedGeneration
@@ -188,6 +256,8 @@ public sealed class HumanReviewDecisionActionRecoveryCoordinator
     private static HumanReviewDecisionActionReservationReference Reference(HumanReviewDecisionActionReservation value) => new(value.ReservationId, value.ReservationHash);
     private static HumanReviewDecisionActionWakeReference Reference(HumanReviewDecisionActionWake value) => new(value.WakeId, value.WakeHash);
     private static HumanReviewDecisionActionRecoveryItemResult Item(HumanReviewDecisionActionRecoveryCandidate candidate, HumanReviewDecisionActionRecoveryItemStatus status) => new(candidate, status);
+    private static HumanReviewDecisionActionPublicationRecoveryItemResult PublicationItem(HumanReviewDecisionActionPublicationCandidate candidate, HumanReviewDecisionActionPublicationRecoveryItemStatus status) => new(candidate, status);
+    private static HumanReviewDecisionActionRecoveryResult Result(HumanReviewDecisionActionRecoveryStatus status, string? nextScanCursor, bool sourceTruncated, IReadOnlyList<HumanReviewDecisionActionRecoveryItemResult> items, IReadOnlyList<HumanReviewDecisionActionPublicationRecoveryItemResult> publicationItems) => new(status, nextScanCursor, sourceTruncated, items) { PublicationItems = publicationItems };
     private static bool Utc(DateTimeOffset value) => value != default && value.Offset == TimeSpan.Zero;
     private static string Id(string prefix, string value) => prefix + "-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant()[..24];
 }

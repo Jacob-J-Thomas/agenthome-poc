@@ -109,15 +109,23 @@ public sealed class HumanReviewDecisionActionRunStore : IHumanReviewDecisionActi
         catch { return Page(HumanReviewDecisionActionRecoveryPageStatus.Unavailable); }
         if (source?.Items is null || source.Items.Count > maximumCount) return Page(HumanReviewDecisionActionRecoveryPageStatus.Invalid);
         var candidates = new List<HumanReviewDecisionActionRecoveryCandidate>();
+        var publicationCandidates = new List<HumanReviewDecisionActionPublicationCandidate>();
         foreach (var summary in source.Items)
         {
             if (summary is null || string.IsNullOrWhiteSpace(summary.Id)) return Page(HumanReviewDecisionActionRecoveryPageStatus.Invalid);
             var read = await ReadRunAsync(summary.Id, cancellationToken).ConfigureAwait(false);
             if (read.Failure == HumanReviewDecisionActionStoreMutationStatus.Invalid) return Page(HumanReviewDecisionActionRecoveryPageStatus.Invalid);
             if (read.Failure is not null) return Page(HumanReviewDecisionActionRecoveryPageStatus.Unavailable);
-            if (read.Run is { } run) candidates.AddRange(Candidates(run, observedAtUtc));
+            if (read.Run is { } run)
+            {
+                candidates.AddRange(Candidates(run, observedAtUtc));
+                publicationCandidates.AddRange(PublicationCandidates(run));
+            }
         }
-        return new HumanReviewDecisionActionRecoveryPage(HumanReviewDecisionActionRecoveryPageStatus.Current, candidates, source.ContinuationCursor ?? (source.Items.Count == 0 ? null : TailCursor(source.Items[^1])), source.ContinuationCursor is not null);
+        return new HumanReviewDecisionActionRecoveryPage(HumanReviewDecisionActionRecoveryPageStatus.Current, candidates, source.ContinuationCursor ?? (source.Items.Count == 0 ? null : TailCursor(source.Items[^1])), source.ContinuationCursor is not null)
+        {
+            PublicationCandidates = publicationCandidates,
+        };
     }
 
     /// <inheritdoc />
@@ -211,6 +219,32 @@ public sealed class HumanReviewDecisionActionRunStore : IHumanReviewDecisionActi
             var priorClaim = action.Claims.IsDefaultOrEmpty ? null : action.Claims[^1];
             if (priorClaim is not null && observedAtUtc <= priorClaim.LeaseExpiresAtUtc) continue;
             candidates.Add(new(run.Id, run.LifecycleVersion, new(review.Request.RequestId, review.Request.RequestHash), action.Reservation.Decision, Reference(action.Wake), action.ExpectedGeneration, action.Wake.ExpiresAtUtc, Reference(action.Reservation), priorClaim is null ? null : Reference(priorClaim)));
+        }
+
+        return candidates;
+    }
+
+    private static IEnumerable<HumanReviewDecisionActionPublicationCandidate> PublicationCandidates(CustomLoopRunRecord run)
+    {
+        if (!CustomLoopRunValidator.Validate(run).IsValid || run.IsTerminal || run.Status != CustomLoopRunStatus.Paused || run.Frontier?.Payload.Status != GovernedLoopFrontierStatus.ReviewBlocked || run.HumanReview is not { } review)
+        {
+            return [];
+        }
+
+        var candidates = new List<HumanReviewDecisionActionPublicationCandidate>();
+        foreach (var action in review.DecisionActions)
+        {
+            if (action is null
+                || action.Wake is not null
+                || !action.Claims.IsDefaultOrEmpty
+                || action.Completion is not null
+                || action.Retirement is not null
+                || !HumanReviewDecisionActionContractValidator.IsCurrentActionHead(review, action))
+            {
+                continue;
+            }
+
+            candidates.Add(new HumanReviewDecisionActionPublicationCandidate(run.Id, run.LifecycleVersion, review.Request, action));
         }
 
         return candidates;

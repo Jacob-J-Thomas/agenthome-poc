@@ -157,6 +157,58 @@ public sealed class HumanReviewDecisionActionRunStoreTests
         Assert.NotNull(Assert.Single(Assert.IsType<HumanReviewRunState>(durable.HumanReview).DecisionActions).Wake);
     }
 
+    [Theory]
+    [InlineData(HumanReviewDecisionKind.Reject)]
+    [InlineData(HumanReviewDecisionKind.Cancel)]
+    [InlineData(HumanReviewDecisionKind.RequestInformation)]
+    public async Task Separate_restart_process_recovers_each_durable_wake_less_reservation_to_its_one_deterministic_wake(HumanReviewDecisionKind kind)
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var admitted = await CustomLoopFrontierStoreTests.PersistHumanReviewAdmissionAsync(paths, "action-reservation-restart-" + kind.ToString().ToLowerInvariant());
+        using (var original = new CustomLoopRunStore(paths))
+        {
+            var decision = await new HumanReviewDecisionService(original, new HumanReviewDecisionStoreTestAuthorizer(), new HumanReviewDecisionStoreTestClock(admitted.UpdatedAtUtc.AddMinutes(1))).DecideAsync(new(admitted.Id, admitted.LifecycleVersion, "action-reservation-restart-decision-" + kind.ToString().ToLowerInvariant(), kind, kind == HumanReviewDecisionKind.RequestInformation ? "Need a bounded clarification." : null));
+            Assert.Equal(kind == HumanReviewDecisionKind.RequestInformation ? HumanReviewDecisionServiceStatus.InformationRequested : HumanReviewDecisionServiceStatus.Accepted, decision.Status);
+            var reserved = Assert.IsType<CustomLoopRunRecord>(await original.GetAsync(admitted.Id));
+            Assert.Null(Assert.Single(Assert.IsType<HumanReviewRunState>(reserved.HumanReview).DecisionActions).Wake);
+        }
+
+        await RunActionReservationRecoveryHostAsync(workspace, admitted.Id);
+
+        using var restarted = new CustomLoopRunStore(paths);
+        var durable = Assert.IsType<CustomLoopRunRecord>(await restarted.GetAsync(admitted.Id));
+        Assert.True(CustomLoopRunValidator.Validate(durable).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(durable).Errors));
+        var action = Assert.Single(Assert.IsType<HumanReviewRunState>(durable.HumanReview).DecisionActions);
+        var wake = Assert.IsType<HumanReviewDecisionActionWake>(action.Wake);
+        Assert.Equal(action.Reservation.ReservedAtUtc, wake.PublishedAtUtc);
+        Assert.Equal(action.Reservation.ReservationHash, wake.Reservation.ReservationHash);
+    }
+
+    [Fact]
+    public async Task Expired_wake_less_reservation_is_published_then_retired_fail_closed_within_the_same_bounded_recovery_pass()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var admitted = await CustomLoopFrontierStoreTests.PersistHumanReviewAdmissionAsync(paths, "action-reservation-expiry");
+        using var store = new CustomLoopRunStore(paths);
+        _ = await new HumanReviewDecisionService(store, new HumanReviewDecisionStoreTestAuthorizer(), new HumanReviewDecisionStoreTestClock(admitted.UpdatedAtUtc.AddMinutes(1))).DecideAsync(new(admitted.Id, admitted.LifecycleVersion, "action-reservation-expiry-decision", HumanReviewDecisionKind.Cancel, null));
+        var reserved = Assert.IsType<CustomLoopRunRecord>(await store.GetAsync(admitted.Id));
+        var request = Assert.IsType<HumanReviewRunState>(reserved.HumanReview).Request;
+        var recovery = new HumanReviewDecisionActionRecoveryCoordinator(new HumanReviewDecisionActionRunStore(store), new HumanReviewDecisionActionRecoveryUnavailableConsumer(), new HumanReviewDecisionActionRecoveryUnavailableReleasePort(), new HumanReviewDecisionStoreTestClock(request.Timing.ExpiresAtUtc));
+
+        var result = await recovery.RecoverAsync(new(1, null, "action-expiry-recovery", TimeSpan.FromMinutes(5)));
+
+        Assert.Equal(HumanReviewDecisionActionPublicationRecoveryItemStatus.Published, Assert.Single(result.PublicationItems).Status);
+        Assert.Equal(HumanReviewDecisionActionRecoveryItemStatus.Retired, Assert.Single(result.Items).Status);
+        var durable = Assert.IsType<CustomLoopRunRecord>(await store.GetAsync(admitted.Id));
+        var action = Assert.Single(Assert.IsType<HumanReviewRunState>(durable.HumanReview).DecisionActions);
+        Assert.NotNull(action.Wake);
+        Assert.Empty(action.Claims);
+        Assert.Equal(HumanReviewContinuationOutcome.Expired, action.Retirement?.Outcome);
+        Assert.Equal(HumanReviewDecisionActionRetirementReason.Expired, action.Retirement?.Reason);
+    }
+
     [Fact]
     public async Task Concurrent_nonapproval_action_publishers_converge_on_one_deterministic_wake_only()
     {
@@ -574,6 +626,28 @@ public sealed class HumanReviewDecisionActionRunStoreTests
         var errorText = await error;
         var outputText = await output;
         Assert.True(process.ExitCode != 0 && errorText.Contains("test host process crashed", StringComparison.OrdinalIgnoreCase), $"Expected the process-loss boundary crash; exit={process.ExitCode}; stdout={outputText}; stderr={errorText}");
+    }
+
+    private static async Task RunActionReservationRecoveryHostAsync(TestWorkspace workspace, string runId)
+    {
+        using var process = CancellationHostProcess.Start("human-review-decision-action-reservation-recovery", workspace.RootPath, runId);
+        var output = process.StandardOutput.ReadToEndAsync();
+        var error = process.StandardError.ReadToEndAsync();
+        try
+        {
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
+        }
+        finally
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync();
+            }
+        }
+
+        Assert.Equal(0, process.ExitCode);
+        Assert.True(string.IsNullOrWhiteSpace(await error), await output);
     }
 
     private static async Task RunActionTransitionProcessLossAsync(TestWorkspace workspace, string runId, string transition, CustomLoopRunPublicationBoundary boundary)

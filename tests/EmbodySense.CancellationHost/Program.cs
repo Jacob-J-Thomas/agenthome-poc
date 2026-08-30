@@ -81,6 +81,11 @@ if (args is ["human-review-decision-action-publication-process-loss", var humanR
     return await HumanReviewDecisionActionPublicationProcessLossHost.RunAsync(humanReviewDecisionActionPublicationWorkspaceRoot, humanReviewDecisionActionPublicationRunId, humanReviewDecisionActionPublicationBoundary);
 }
 
+if (args is ["human-review-decision-action-reservation-recovery", var humanReviewDecisionActionReservationRecoveryWorkspaceRoot, var humanReviewDecisionActionReservationRecoveryRunId])
+{
+    return await HumanReviewDecisionActionReservationRecoveryHost.RunAsync(humanReviewDecisionActionReservationRecoveryWorkspaceRoot, humanReviewDecisionActionReservationRecoveryRunId);
+}
+
 if (args is ["human-review-decision-action-transition-process-loss", var humanReviewDecisionActionTransitionWorkspaceRoot, var humanReviewDecisionActionTransitionRunId, var humanReviewDecisionActionTransition, var humanReviewDecisionActionTransitionBoundary])
 {
     return await HumanReviewDecisionActionTransitionProcessLossHost.RunAsync(humanReviewDecisionActionTransitionWorkspaceRoot, humanReviewDecisionActionTransitionRunId, humanReviewDecisionActionTransition, humanReviewDecisionActionTransitionBoundary);

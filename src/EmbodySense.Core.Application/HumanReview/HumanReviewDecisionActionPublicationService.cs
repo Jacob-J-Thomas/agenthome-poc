@@ -1,5 +1,3 @@
-using System.Security.Cryptography;
-using System.Text;
 using EmbodySense.Core.Application.HumanReview.Models;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Common.HumanReview;
@@ -100,13 +98,7 @@ public sealed class HumanReviewDecisionActionPublicationService : IHumanReviewDe
         {
             retained = FindAction(run, referenceValue);
             if (!CustomLoopRunValidator.Validate(run).IsValid || retained is null || run.HumanReview?.Request is not { } request || retained.Reservation.Decision.Kind is not (HumanReviewDecisionKind.Reject or HumanReviewDecisionKind.Cancel or HumanReviewDecisionKind.RequestInformation)) return false;
-            var wakeId = Id("action-wake", retained.Reservation.ReservationHash);
-            var provenance = HumanReviewContractHash.ApplyProvenance(new HumanReviewProvenance(HumanReviewProvenanceKind.Coordinator, "human-review-action-publisher", wakeId, retained.Reservation.ReservedAtUtc, string.Empty));
-            var wake = HumanReviewDecisionActionContractHash.ApplyWake(new HumanReviewDecisionActionWake(1, wakeId, retained.Reservation.Request, retained.Reservation.Decision, referenceValue, retained.BindingHash, retained.ExpectedGeneration, retained.Reservation.ReservedAtUtc, request.Timing.ExpiresAtUtc, provenance, string.Empty));
-            var candidate = HumanReviewDecisionActionContractHash.ApplyState(retained with { Wake = wake, StateHash = string.Empty });
-            if (retained.Wake is null && !HumanReviewDecisionActionStateTransitionValidator.ValidateTransition(request, retained, candidate).IsValid) return false;
-            expected = candidate;
-            return true;
+            return HumanReviewDecisionActionWakeFactory.TryCreate(request, retained, out expected);
         }
         catch { retained = null; expected = null; return false; }
     }
@@ -115,5 +107,4 @@ public sealed class HumanReviewDecisionActionPublicationService : IHumanReviewDe
     private static HumanReviewDecisionActionState? FindAction(CustomLoopRunRecord run, HumanReviewDecisionActionReservationReference referenceValue) => run.HumanReview?.DecisionActions.FirstOrDefault(value => value is not null && value.Reservation.ReservationId == referenceValue.ReservationId && value.Reservation.ReservationHash == referenceValue.ReservationHash);
     private static bool ExactWake(HumanReviewDecisionActionState retained, HumanReviewDecisionActionState expected) => retained.Wake is not null && expected.Wake is not null && HumanReviewDecisionActionContractHash.MatchesState(retained) && retained.Wake.WakeHash == expected.Wake.WakeHash;
     private static HumanReviewDecisionActionStoreMutationResult Result(HumanReviewDecisionActionStoreMutationStatus status) => new(status);
-    private static string Id(string prefix, string value) => prefix + "-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant()[..24];
 }

@@ -35,6 +35,32 @@ public sealed class HumanReviewDecisionActionRecoveryCoordinatorTests
     }
 
     [Fact]
+    public async Task Retained_wake_less_reservation_is_deterministically_published_before_the_refreshed_recovery_scan()
+    {
+        var fixture = await HumanReviewDecisionTestData.CreateAsync();
+        var decisionStore = new HumanReviewDecisionTestStore(fixture.Run);
+        _ = await new HumanReviewDecisionService(decisionStore, new HumanReviewDecisionTestAuthorizer(), new HumanReviewDecisionTestClock(fixture.Run.UpdatedAtUtc.AddMinutes(1))).DecideAsync(HumanReviewDecisionTestData.Command(fixture.Run, "action-recovery-publish", HumanReviewDecisionKind.Reject));
+        var reservedRun = Assert.IsType<CustomLoopRunRecord>(decisionStore.Run);
+        var reservedAction = Assert.Single(Assert.IsType<HumanReviewRunState>(reservedRun.HumanReview).DecisionActions);
+        var publication = new HumanReviewDecisionActionPublicationCandidate(reservedRun.Id, reservedRun.LifecycleVersion, fixture.Request, reservedAction);
+        var page = new HumanReviewDecisionActionRecoveryPage(HumanReviewDecisionActionRecoveryPageStatus.Current, [], null, false)
+        {
+            PublicationCandidates = [publication],
+        };
+        var store = new HumanReviewDecisionActionRecoveryTestStore(page, new(HumanReviewDecisionActionCandidateReadStatus.Current));
+        var coordinator = new HumanReviewDecisionActionRecoveryCoordinator(store, new HumanReviewDecisionActionRecoveryTestConsumer(new(HumanReviewContinuationConsumptionStatus.Invalid)), new HumanReviewDecisionActionRecoveryTestReleasePort(new(HumanReviewDecisionActionReleaseStatus.Unavailable)), new HumanReviewDecisionTestClock(fixture.Run.UpdatedAtUtc.AddMinutes(2)));
+
+        var result = await coordinator.RecoverAsync(new(1, null, "action-worker-one", TimeSpan.FromMinutes(5)));
+
+        var published = Assert.Single(result.PublicationItems);
+        Assert.Equal(HumanReviewDecisionActionPublicationRecoveryItemStatus.Published, published.Status);
+        Assert.Equal(publication, published.Candidate);
+        Assert.Equal(1, store.PublishCount);
+        Assert.Equal(2, store.ListCount);
+        Assert.Empty(result.Items);
+    }
+
+    [Fact]
     public async Task Exact_claim_reread_invokes_only_the_existing_nonapproval_decision_path_then_records_completion()
     {
         var fixture = await HumanReviewDecisionTestData.CreateAsync();

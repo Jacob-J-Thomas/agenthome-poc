@@ -8,6 +8,8 @@ internal sealed class HumanReviewDecisionActionRecoveryTestStore(
     HumanReviewDecisionActionRecoveryPage page,
     HumanReviewDecisionActionCandidateReadResult reread) : IHumanReviewDecisionActionRecoveryStore
 {
+    public int ListCount { get; private set; }
+    public int PublishCount { get; private set; }
     public int ClaimCount { get; private set; }
     public int ReadCount { get; private set; }
     public int CompleteCount { get; private set; }
@@ -19,8 +21,13 @@ internal sealed class HumanReviewDecisionActionRecoveryTestStore(
     public HumanReviewDecisionActionStoreMutationResult ClaimResult { get; set; } = new(HumanReviewDecisionActionStoreMutationStatus.Committed);
     public HumanReviewDecisionActionStoreMutationResult CompleteResult { get; set; } = new(HumanReviewDecisionActionStoreMutationStatus.Committed);
     public HumanReviewDecisionActionStoreMutationResult RetireResult { get; set; } = new(HumanReviewDecisionActionStoreMutationStatus.Committed);
+    public HumanReviewDecisionActionStoreMutationResult PublishResult { get; set; } = new(HumanReviewDecisionActionStoreMutationStatus.Committed);
 
-    public Task<HumanReviewDecisionActionRecoveryPage> ListCandidatesAsync(int maximumCount, string? scanCursor, DateTimeOffset observedAtUtc, CancellationToken cancellationToken = default) => Task.FromResult(page);
+    public Task<HumanReviewDecisionActionRecoveryPage> ListCandidatesAsync(int maximumCount, string? scanCursor, DateTimeOffset observedAtUtc, CancellationToken cancellationToken = default)
+    {
+        ListCount++;
+        return Task.FromResult(page);
+    }
 
     public Task<HumanReviewDecisionActionCandidateReadResult> ReadAsync(HumanReviewDecisionActionCandidateQuery query, CancellationToken cancellationToken = default)
     {
@@ -52,7 +59,11 @@ internal sealed class HumanReviewDecisionActionRecoveryTestStore(
         return Task.FromResult(RetireResult);
     }
 
-    public Task<HumanReviewDecisionActionStoreMutationResult> PublishAsync(string runId, int expectedLifecycleVersion, HumanReviewDecisionActionState action, CancellationToken cancellationToken = default) => Task.FromResult(new HumanReviewDecisionActionStoreMutationResult(HumanReviewDecisionActionStoreMutationStatus.Invalid));
+    public Task<HumanReviewDecisionActionStoreMutationResult> PublishAsync(string runId, int expectedLifecycleVersion, HumanReviewDecisionActionState action, CancellationToken cancellationToken = default)
+    {
+        PublishCount++;
+        return Task.FromResult(PublishResult);
+    }
 
     private bool _actionHeadAdvanced;
 }
