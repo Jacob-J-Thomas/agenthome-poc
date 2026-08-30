@@ -71,6 +71,21 @@ if (args is ["human-review-continuation-transition-process-loss", var humanRevie
     return await HumanReviewContinuationTransitionProcessLossHost.RunAsync(humanReviewContinuationTransitionWorkspaceRoot, humanReviewContinuationTransitionRunId, humanReviewContinuationTransition, humanReviewContinuationTransitionBoundary);
 }
 
+if (args is ["human-review-decision-action-claim-race", var humanReviewDecisionActionWorkspaceRoot, var humanReviewDecisionActionRunId, var humanReviewDecisionActionIdentity, var humanReviewDecisionActionReadyPath, var humanReviewDecisionActionReleasePath, var humanReviewDecisionActionResultPath])
+{
+    return await HumanReviewDecisionActionClaimRaceHost.RunAsync(humanReviewDecisionActionWorkspaceRoot, humanReviewDecisionActionRunId, humanReviewDecisionActionIdentity, humanReviewDecisionActionReadyPath, humanReviewDecisionActionReleasePath, humanReviewDecisionActionResultPath);
+}
+
+if (args is ["human-review-decision-action-publication-process-loss", var humanReviewDecisionActionPublicationWorkspaceRoot, var humanReviewDecisionActionPublicationRunId, var humanReviewDecisionActionPublicationBoundary])
+{
+    return await HumanReviewDecisionActionPublicationProcessLossHost.RunAsync(humanReviewDecisionActionPublicationWorkspaceRoot, humanReviewDecisionActionPublicationRunId, humanReviewDecisionActionPublicationBoundary);
+}
+
+if (args is ["human-review-decision-action-transition-process-loss", var humanReviewDecisionActionTransitionWorkspaceRoot, var humanReviewDecisionActionTransitionRunId, var humanReviewDecisionActionTransition, var humanReviewDecisionActionTransitionBoundary])
+{
+    return await HumanReviewDecisionActionTransitionProcessLossHost.RunAsync(humanReviewDecisionActionTransitionWorkspaceRoot, humanReviewDecisionActionTransitionRunId, humanReviewDecisionActionTransition, humanReviewDecisionActionTransitionBoundary);
+}
+
 if (args is ["codex-runtime-probe", var probeConfigurationPath, .. var probeArguments])
 {
     return await CodexRuntimeProbeHost.RunAsync(probeConfigurationPath, probeArguments);

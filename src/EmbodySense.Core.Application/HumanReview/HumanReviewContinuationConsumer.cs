@@ -15,7 +15,7 @@ namespace EmbodySense.Core.Application.HumanReview;
 
 /// <summary>Consumes detached canonical Human Review candidates into fail-closed declared paths without persisting, leasing, resuming, or dispatching work.</summary>
 /// <remarks>Approval remains consent only. Every release intent requires exact current run, frontier, graph, authority, nondecreasing trusted UTC observations, and—when applicable—effect-certainty evidence. The later durable worker owns compare-exchange, callback execution, and completion or retirement artifact construction.</remarks>
-public sealed class HumanReviewContinuationConsumer : IHumanReviewContinuationConsumer
+public sealed class HumanReviewContinuationConsumer : IHumanReviewContinuationConsumer, IHumanReviewDecisionActionConsumer
 {
     private readonly IHumanReviewContinuationAuthoritySource _authority;
     private readonly IHumanReviewCurrentEffectAttemptEvidenceSource _effectEvidence;
@@ -58,6 +58,24 @@ public sealed class HumanReviewContinuationConsumer : IHumanReviewContinuationCo
             HumanReviewDecisionKind.Approve => await ConsumeApprovalAsync(context, candidate, cancellationToken).ConfigureAwait(false),
             _ => Invalid(),
         };
+    }
+
+    /// <inheritdoc />
+    public Task<HumanReviewContinuationConsumptionResult> ConsumeDecisionActionAsync(HumanReviewContinuationCandidate candidate, HumanReviewDecisionReference decision, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (decision is null || decision.Kind is not (HumanReviewDecisionKind.Reject or HumanReviewDecisionKind.Cancel or HumanReviewDecisionKind.RequestInformation) || !TryCaptureContext(candidate, decision, out var context))
+        {
+            return Task.FromResult(Invalid());
+        }
+
+        return Task.FromResult(PrepareDecisionPath(context!, decision.Kind switch
+        {
+            HumanReviewDecisionKind.Reject => HumanReviewContinuationAction.FailRejected,
+            HumanReviewDecisionKind.Cancel => HumanReviewContinuationAction.Cancel,
+            HumanReviewDecisionKind.RequestInformation => HumanReviewContinuationAction.ParkForInformation,
+            _ => HumanReviewContinuationAction.None,
+        }, cancellationToken));
     }
 
     private async Task<HumanReviewContinuationConsumptionResult> ConsumeApprovalAsync(CanonicalContext context, HumanReviewContinuationCandidate candidate, CancellationToken cancellationToken)
@@ -244,6 +262,9 @@ public sealed class HumanReviewContinuationConsumer : IHumanReviewContinuationCo
     }
 
     private static bool TryCaptureContext(HumanReviewContinuationCandidate candidate, out CanonicalContext? context)
+        => TryCaptureContext(candidate, null, out context);
+
+    private static bool TryCaptureContext(HumanReviewContinuationCandidate candidate, HumanReviewDecisionReference? exactDecision, out CanonicalContext? context)
     {
         context = null;
         try
@@ -254,7 +275,7 @@ public sealed class HumanReviewContinuationConsumer : IHumanReviewContinuationCo
                 || run.SequentialAdapterBinding is not { } adapterBinding || !GovernedLoopSequentialContractValidator.Validate(adapterBinding).IsValid
                 || candidate.GraphArtifact is not { } graphArtifact || !MatchesGraph(adapterBinding, graphArtifact)
                 || !HumanReviewContractSnapshot.TryCaptureRequest(review.Request, out var request, out _) || request is null
-                || !TryGetAcceptedDecision(review, request, out var decision) || decision is null
+                || !TryGetAcceptedDecision(review, request, exactDecision, out var decision) || decision is null
                 || !MatchesBinding(run, request, graphArtifact, adapterBinding))
             {
                 return false;
@@ -303,21 +324,29 @@ public sealed class HumanReviewContinuationConsumer : IHumanReviewContinuationCo
         }
     }
 
-    private static bool TryGetAcceptedDecision(HumanReviewRunState review, HumanReviewRequest request, out HumanReviewDecision? decision)
+    private static bool TryGetAcceptedDecision(HumanReviewRunState review, HumanReviewRequest request, HumanReviewDecisionReference? expected, out HumanReviewDecision? decision)
     {
         decision = null;
-        var candidate = review.AcceptedTerminalDecision;
-        if (candidate is null && review.Lifecycle.Status == HumanReviewLifecycleStatus.AwaitingInformation)
+        var candidate = expected is null ? review.AcceptedTerminalDecision : review.AcceptedDecisions.LastOrDefault(value => SameDecisionReference(expected, value));
+        if (expected is null && candidate is null && review.Lifecycle.Status == HumanReviewLifecycleStatus.AwaitingInformation)
         {
             candidate = review.AcceptedDecisions.LastOrDefault(value => value?.Kind == HumanReviewDecisionKind.RequestInformation);
         }
 
         return candidate is not null
+            && (expected is null || SameDecisionReference(expected, candidate))
             && HumanReviewContractValidator.ValidateDecision(request, candidate).IsValid
             && Equals(candidate.Request, new HumanReviewRequestReference(request.RequestId, request.RequestHash))
             && HumanReviewContractSnapshot.TryCaptureDecision(request, candidate, out decision, out _)
             && decision is not null;
     }
+
+    private static bool SameDecisionReference(HumanReviewDecisionReference expected, HumanReviewDecision? actual)
+        => actual is not null
+            && string.Equals(expected.DecisionId, actual.DecisionId, StringComparison.Ordinal)
+            && string.Equals(expected.DecisionOperationId, actual.DecisionOperationId, StringComparison.Ordinal)
+            && expected.Kind == actual.Kind
+            && string.Equals(expected.DecisionHash, actual.DecisionHash, StringComparison.Ordinal);
 
     private static HumanReviewContinuationReservation? TryCaptureReservation(HumanReviewRequest request, HumanReviewContinuationReservation? reservation)
     {

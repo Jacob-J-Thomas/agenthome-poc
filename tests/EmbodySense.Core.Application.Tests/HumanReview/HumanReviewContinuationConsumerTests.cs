@@ -287,6 +287,33 @@ public sealed class HumanReviewContinuationConsumerTests
         Assert.Equal(0, effectCertainty.ReadCount);
     }
 
+    [Theory]
+    [InlineData(HumanReviewDecisionKind.Reject, HumanReviewContinuationAction.FailRejected)]
+    [InlineData(HumanReviewDecisionKind.Cancel, HumanReviewContinuationAction.Cancel)]
+    [InlineData(HumanReviewDecisionKind.RequestInformation, HumanReviewContinuationAction.ParkForInformation)]
+    public async Task Exact_nonapproval_action_consumption_uses_only_the_supplied_accepted_decision_without_approval_or_effect_reads(HumanReviewDecisionKind decisionKind, HumanReviewContinuationAction expectedAction)
+    {
+        var candidate = await DecisionCandidateAsync(decisionKind);
+        var review = Assert.IsType<EmbodySense.Core.Common.Loops.Models.Custom.Execution.HumanReviewRunState>(candidate.Run.HumanReview);
+        var decision = Assert.Single(review.AcceptedDecisions);
+        var reference = new HumanReviewDecisionReference(decision.DecisionId, decision.DecisionOperationId, decision.Kind, decision.DecisionHash);
+        var authority = new RecordingAuthoritySource(HumanReviewContinuationAuthorityReadStatus.Current);
+        var effectEvidence = new RecordingEffectEvidenceSource();
+        var effectCertainty = new RecordingEffectCertaintySource();
+        var consumer = Consumer(authority, effectEvidence, effectCertainty, candidate.Run.UpdatedAtUtc.AddSeconds(1));
+
+        var result = await consumer.ConsumeDecisionActionAsync(candidate, reference);
+
+        Assert.Equal(HumanReviewContinuationConsumptionStatus.DecisionPathPrepared, result.Status);
+        Assert.Equal(expectedAction, result.Action?.Action);
+        Assert.Equal(reference, result.Action?.Decision);
+        Assert.Null(result.Completion);
+        Assert.Null(result.Retirement);
+        Assert.Equal(0, authority.ReadCount);
+        Assert.Equal(0, effectEvidence.ReadCount);
+        Assert.Equal(0, effectCertainty.ReadCount);
+    }
+
     [Fact]
     public async Task Missing_or_mismatched_claim_fails_closed_without_any_port_callback()
     {

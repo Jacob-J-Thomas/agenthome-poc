@@ -408,6 +408,35 @@ public sealed class HumanReviewDecisionService : IHumanReviewDecisionService
                 });
             }
 
+            HumanReviewDecisionActionState? action = null;
+            if (decision is { Kind: HumanReviewDecisionKind.Reject or HumanReviewDecisionKind.Cancel or HumanReviewDecisionKind.RequestInformation }
+                && current.SequentialAdapterBinding is { } adapter)
+            {
+                var actionReservation = HumanReviewDecisionActionContractHash.ApplyReservation(new HumanReviewDecisionActionReservation(
+                    HumanReviewDecisionActionReservation.CurrentSchemaVersion,
+                    Id("action-reservation", decision.DecisionHash),
+                    requestReference,
+                    decisionReference!,
+                    atUtc,
+                    ServerProvenance(correlationId, atUtc),
+                    string.Empty));
+                action = HumanReviewDecisionActionContractHash.ApplyState(new HumanReviewDecisionActionState(
+                    HumanReviewDecisionActionState.CurrentSchemaVersion,
+                    actionReservation,
+                    state.Request.Binding.BindingHash,
+                    adapter.ExecutionBinding.ExecutionGeneration,
+                    checked(current.LifecycleVersion + 1),
+                    null,
+                    ImmutableArray<HumanReviewDecisionActionClaim>.Empty,
+                    null,
+                    null,
+                    string.Empty));
+            }
+            else if (decision is { Kind: HumanReviewDecisionKind.Reject or HumanReviewDecisionKind.Cancel or HumanReviewDecisionKind.RequestInformation })
+            {
+                return false;
+            }
+
             var terminal = decision is { Kind: not HumanReviewDecisionKind.RequestInformation } ? decision : state.AcceptedTerminalDecision;
             var nextState = state with
             {
@@ -417,6 +446,7 @@ public sealed class HumanReviewDecisionService : IHumanReviewDecisionService
                 AcceptedDecisions = decision is null ? state.AcceptedDecisions : [.. state.AcceptedDecisions, decision],
                 AcceptedTerminalDecision = terminal,
                 ContinuationReservation = reservation,
+                DecisionActions = action is null ? state.DecisionActions : [.. state.DecisionActions, action],
                 Evidence = reservationEvidence is null ? [.. state.Evidence, evidence] : [.. state.Evidence, evidence, reservationEvidence]
             };
             var operationEvent = CreateOperationEvent(current, evidence, receipt);

@@ -98,6 +98,15 @@ public sealed class HumanReviewDecisionServiceTests
         Assert.Equal(HumanReviewLifecycleStatus.AwaitingInformation, persisted.HumanReview?.Lifecycle.Status);
         Assert.Null(persisted.HumanReview?.AcceptedTerminalDecision);
         Assert.Null(persisted.HumanReview?.ContinuationReservation);
+        var action = Assert.Single(Assert.IsType<HumanReviewRunState>(persisted.HumanReview).DecisionActions);
+        Assert.Equal(HumanReviewDecisionKind.RequestInformation, action.Reservation.Decision.Kind);
+        Assert.Equal(persisted.HumanReview.Request.RequestHash, action.Reservation.Request.RequestHash);
+        Assert.Equal(persisted.LifecycleVersion, action.ReservedLifecycleVersion);
+        Assert.Null(action.Wake);
+        Assert.Empty(action.Claims);
+        Assert.Null(action.Completion);
+        Assert.Null(action.Retirement);
+        Assert.True(HumanReviewDecisionActionContractHash.MatchesState(action));
         Assert.Equal(CustomLoopRunStatus.Paused, persisted.Status);
         Assert.Equal(GovernedLoopFrontierStatus.ReviewBlocked, persisted.Frontier?.Payload.Status);
         Assert.True(CustomLoopRunValidator.Validate(persisted).IsValid);
@@ -106,7 +115,7 @@ public sealed class HumanReviewDecisionServiceTests
     [Theory]
     [InlineData(HumanReviewDecisionKind.Reject, HumanReviewLifecycleStatus.Rejected)]
     [InlineData(HumanReviewDecisionKind.Cancel, HumanReviewLifecycleStatus.Cancelled)]
-    public async Task Reject_and_cancel_record_terminal_outcomes_without_reservation(HumanReviewDecisionKind kind, HumanReviewLifecycleStatus lifecycle)
+    public async Task Reject_and_cancel_record_terminal_outcomes_with_exact_nonapproval_action_reservations(HumanReviewDecisionKind kind, HumanReviewLifecycleStatus lifecycle)
     {
         var fixture = await HumanReviewDecisionTestData.CreateAsync();
         var store = new HumanReviewDecisionTestStore(fixture.Run);
@@ -114,10 +123,21 @@ public sealed class HumanReviewDecisionServiceTests
         var result = await Service(store, new HumanReviewDecisionTestAuthorizer(), fixture.Run.UpdatedAtUtc.AddMinutes(1)).DecideAsync(HumanReviewDecisionTestData.Command(fixture.Run, "terminal-" + kind.ToString().ToLowerInvariant(), kind));
 
         Assert.Equal(HumanReviewDecisionServiceStatus.Accepted, result.Status);
-        Assert.Equal(lifecycle, store.Run?.HumanReview?.Lifecycle.Status);
-        Assert.Equal(kind, store.Run?.HumanReview?.AcceptedTerminalDecision?.Kind);
-        Assert.Null(store.Run?.HumanReview?.ContinuationReservation);
-        Assert.True(CustomLoopRunValidator.Validate(Assert.IsType<CustomLoopRunRecord>(store.Run)).IsValid);
+        var persisted = Assert.IsType<CustomLoopRunRecord>(store.Run);
+        var review = Assert.IsType<HumanReviewRunState>(persisted.HumanReview);
+        Assert.Equal(lifecycle, review.Lifecycle.Status);
+        Assert.Equal(kind, review.AcceptedTerminalDecision?.Kind);
+        Assert.Null(review.ContinuationReservation);
+        var action = Assert.Single(review.DecisionActions);
+        Assert.Equal(kind, action.Reservation.Decision.Kind);
+        Assert.Equal(review.Request.RequestHash, action.Reservation.Request.RequestHash);
+        Assert.Equal(persisted.LifecycleVersion, action.ReservedLifecycleVersion);
+        Assert.Null(action.Wake);
+        Assert.Empty(action.Claims);
+        Assert.Null(action.Completion);
+        Assert.Null(action.Retirement);
+        Assert.True(HumanReviewDecisionActionContractHash.MatchesState(action));
+        Assert.True(CustomLoopRunValidator.Validate(persisted).IsValid);
     }
 
     [Fact]
