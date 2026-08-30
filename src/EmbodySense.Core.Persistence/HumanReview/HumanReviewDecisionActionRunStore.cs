@@ -46,7 +46,7 @@ public sealed class HumanReviewDecisionActionRunStore : IHumanReviewDecisionActi
         if (read.Run is not { } current) return Result(HumanReviewDecisionActionStoreMutationStatus.NotFound);
         if (!TryAction(current, runId, new HumanReviewDecisionActionReservationReference(action.Reservation.ReservationId, action.Reservation.ReservationHash), out var review, out var index, out var retained)) return Result(HumanReviewDecisionActionStoreMutationStatus.Invalid);
         if (retained.Wake is not null) return SameAction(retained, action) ? Result(HumanReviewDecisionActionStoreMutationStatus.Replayed) : Result(HumanReviewDecisionActionStoreMutationStatus.Conflict);
-        if (current.LifecycleVersion != expectedLifecycleVersion || !HumanReviewDecisionActionStateTransitionValidator.ValidateTransition(review.Request, retained, action).IsValid) return Result(HumanReviewDecisionActionStoreMutationStatus.Conflict);
+        if (!HumanReviewDecisionActionContractValidator.IsCurrentActionHead(review, retained) || current.LifecycleVersion != expectedLifecycleVersion || !HumanReviewDecisionActionStateTransitionValidator.ValidateTransition(review.Request, retained, action).IsValid) return Result(HumanReviewDecisionActionStoreMutationStatus.Conflict);
         return await UpdateAsync(current, review, index, action, action.Wake!.PublishedAtUtc, cancellationToken).ConfigureAwait(false);
     }
 
@@ -58,10 +58,10 @@ public sealed class HumanReviewDecisionActionRunStore : IHumanReviewDecisionActi
         if (read.Failure is { } failure) return Result(failure);
         if (read.Run is not { } current) return Result(HumanReviewDecisionActionStoreMutationStatus.NotFound);
         if (!TryAction(current, intent.Candidate.RunId, intent.Candidate.Reservation, out var review, out var index, out var retained) || retained.Wake is null) return Result(HumanReviewDecisionActionStoreMutationStatus.Conflict);
-        if (retained.Completion is not null || retained.Retirement is not null || !Matches(retained, intent.Candidate) || current.LifecycleVersion != intent.Candidate.ExpectedLifecycleVersion) return Result(HumanReviewDecisionActionStoreMutationStatus.Conflict);
-        var active = retained.Claims.IsDefaultOrEmpty ? null : retained.Claims[^1];
-        if (active is not null && active.ClaimId == intent.Claim.ClaimId) return active.ClaimHash == intent.Claim.ClaimHash ? Result(HumanReviewDecisionActionStoreMutationStatus.Replayed) : Result(HumanReviewDecisionActionStoreMutationStatus.Conflict);
+        if (TryReplayClaim(current, retained, intent, out var replayed)) return Result(replayed ? HumanReviewDecisionActionStoreMutationStatus.Replayed : HumanReviewDecisionActionStoreMutationStatus.Conflict);
+        if (retained.Completion is not null || retained.Retirement is not null || !HumanReviewDecisionActionContractValidator.IsCurrentActionHead(review, retained) || !Matches(retained, intent.Candidate) || current.LifecycleVersion != intent.Candidate.ExpectedLifecycleVersion) return Result(HumanReviewDecisionActionStoreMutationStatus.Conflict);
         if (retained.Claims.Any(claim => claim.ClaimId == intent.Claim.ClaimId)) return Result(HumanReviewDecisionActionStoreMutationStatus.Conflict);
+        if (retained.Claims.Length >= HumanReviewContractLimits.MaxContinuationClaims) return Result(HumanReviewDecisionActionStoreMutationStatus.LimitExceeded);
         var successor = HumanReviewDecisionActionContractHash.ApplyState(retained with { Claims = [.. retained.Claims, intent.Claim], StateHash = string.Empty });
         if (!HumanReviewDecisionActionStateTransitionValidator.ValidateTransition(review.Request, retained, successor).IsValid) return Result(HumanReviewDecisionActionStoreMutationStatus.Invalid);
         return await UpdateAsync(current, review, index, successor, intent.Claim.ClaimedAtUtc, cancellationToken).ConfigureAwait(false);
@@ -76,7 +76,7 @@ public sealed class HumanReviewDecisionActionRunStore : IHumanReviewDecisionActi
         if (read.Run is not { } current) return Result(HumanReviewDecisionActionStoreMutationStatus.NotFound);
         if (!TryAction(current, intent.RunId, intent.Reservation, out var review, out var index, out var retained) || retained.Wake is null) return Result(HumanReviewDecisionActionStoreMutationStatus.Conflict);
         if (retained.Completion is not null) return retained.Completion.CompletionHash == completion.CompletionHash ? Result(HumanReviewDecisionActionStoreMutationStatus.Replayed) : Result(HumanReviewDecisionActionStoreMutationStatus.Conflict);
-        if (current.LifecycleVersion != intent.ExpectedLifecycleVersion || retained.Retirement is not null || retained.Claims.IsDefaultOrEmpty || !Matches(intent, retained, completion)) return Result(HumanReviewDecisionActionStoreMutationStatus.Conflict);
+        if (current.LifecycleVersion != intent.ExpectedLifecycleVersion || retained.Retirement is not null || !HumanReviewDecisionActionContractValidator.IsCurrentActionHead(review, retained) || retained.Claims.IsDefaultOrEmpty || !Matches(intent, retained, completion)) return Result(HumanReviewDecisionActionStoreMutationStatus.Conflict);
         var successor = HumanReviewDecisionActionContractHash.ApplyState(retained with { Completion = completion, StateHash = string.Empty });
         if (!HumanReviewDecisionActionStateTransitionValidator.ValidateTransition(review.Request, retained, successor).IsValid) return Result(HumanReviewDecisionActionStoreMutationStatus.Invalid);
         return await UpdateAsync(current, review, index, successor, completion.CompletedAtUtc, cancellationToken).ConfigureAwait(false);
@@ -90,8 +90,8 @@ public sealed class HumanReviewDecisionActionRunStore : IHumanReviewDecisionActi
         if (read.Failure is { } failure) return Result(failure);
         if (read.Run is not { } current) return Result(HumanReviewDecisionActionStoreMutationStatus.NotFound);
         if (!TryAction(current, intent.RunId, intent.Reservation, out var review, out var index, out var retained) || retained.Wake is null) return Result(HumanReviewDecisionActionStoreMutationStatus.Conflict);
-        if (retained.Retirement is not null) return retained.Retirement.RetirementHash == retirement.RetirementHash ? Result(HumanReviewDecisionActionStoreMutationStatus.Replayed) : Result(HumanReviewDecisionActionStoreMutationStatus.Conflict);
-        if (current.LifecycleVersion != intent.ExpectedLifecycleVersion || retained.Completion is not null || !Matches(intent, retained, retirement)) return Result(HumanReviewDecisionActionStoreMutationStatus.Conflict);
+        if (retained.Retirement is not null) return retained.Retirement.RetirementHash == retirement.RetirementHash && Matches(intent, retained, retirement) ? Result(HumanReviewDecisionActionStoreMutationStatus.Replayed) : Result(HumanReviewDecisionActionStoreMutationStatus.Conflict);
+        if (current.LifecycleVersion != intent.ExpectedLifecycleVersion || retained.Completion is not null || !HumanReviewDecisionActionContractValidator.IsCurrentActionHead(review, retained) || !Matches(intent, retained, retirement)) return Result(HumanReviewDecisionActionStoreMutationStatus.Conflict);
         var successor = HumanReviewDecisionActionContractHash.ApplyState(retained with { Retirement = retirement, StateHash = string.Empty });
         if (!HumanReviewDecisionActionStateTransitionValidator.ValidateTransition(review.Request, retained, successor).IsValid) return Result(HumanReviewDecisionActionStoreMutationStatus.Invalid);
         return await UpdateAsync(current, review, index, successor, retirement.RetiredAtUtc, cancellationToken).ConfigureAwait(false);
@@ -128,7 +128,7 @@ public sealed class HumanReviewDecisionActionRunStore : IHumanReviewDecisionActi
         if (read.Failure == HumanReviewDecisionActionStoreMutationStatus.Invalid) return new(HumanReviewDecisionActionCandidateReadStatus.Corrupt);
         if (read.Failure is not null) return new(HumanReviewDecisionActionCandidateReadStatus.Unavailable);
         if (read.Run is null) return new(HumanReviewDecisionActionCandidateReadStatus.Missing);
-        if (!TryAction(read.Run, query.RunId, query.Reservation, out _, out _, out var action) || action.Wake is null || action.Claims.IsDefaultOrEmpty || !Equals(query.Decision, action.Reservation.Decision) || !Equals(query.Wake, Reference(action.Wake)) || !Equals(query.Claim, Reference(action.Claims[^1])) || query.ExpectedGeneration != action.ExpectedGeneration) return new(HumanReviewDecisionActionCandidateReadStatus.Stale);
+        if (!TryAction(read.Run, query.RunId, query.Reservation, out var review, out _, out var action) || !HumanReviewDecisionActionContractValidator.IsCurrentActionHead(review, action) || action.Wake is null || action.Claims.IsDefaultOrEmpty || action.Completion is not null || action.Retirement is not null || !Equals(query.Request, action.Reservation.Request) || !Equals(query.Decision, action.Reservation.Decision) || !Equals(query.Wake, Reference(action.Wake)) || !Equals(query.Claim, Reference(action.Claims[^1])) || query.ExpectedGeneration != action.ExpectedGeneration) return new(HumanReviewDecisionActionCandidateReadStatus.Stale);
         if (read.Run.SequentialAdapterBinding is not { } binding) return new(HumanReviewDecisionActionCandidateReadStatus.Corrupt);
         if (_graphs is null) return new(HumanReviewDecisionActionCandidateReadStatus.Unavailable);
         try
@@ -207,7 +207,7 @@ public sealed class HumanReviewDecisionActionRunStore : IHumanReviewDecisionActi
         var candidates = new List<HumanReviewDecisionActionRecoveryCandidate>();
         foreach (var action in review.DecisionActions)
         {
-            if (action is null || action.Wake is null || action.Completion is not null || action.Retirement is not null) continue;
+            if (action is null || action.Wake is null || action.Completion is not null || action.Retirement is not null || !HumanReviewDecisionActionContractValidator.IsCurrentActionHead(review, action)) continue;
             var priorClaim = action.Claims.IsDefaultOrEmpty ? null : action.Claims[^1];
             if (priorClaim is not null && observedAtUtc <= priorClaim.LeaseExpiresAtUtc) continue;
             candidates.Add(new(run.Id, run.LifecycleVersion, new(review.Request.RequestId, review.Request.RequestHash), action.Reservation.Decision, Reference(action.Wake), action.ExpectedGeneration, action.Wake.ExpiresAtUtc, Reference(action.Reservation), priorClaim is null ? null : Reference(priorClaim)));
@@ -223,9 +223,53 @@ public sealed class HumanReviewDecisionActionRunStore : IHumanReviewDecisionActi
     private static bool Valid(HumanReviewDecisionActionWakeReference? value) => value is not null && HumanReviewIdentifier.IsValid(value.WakeId) && HumanReviewContractHash.IsSha256(value.WakeHash);
     private static bool Valid(HumanReviewDecisionActionClaimReference? value) => value is not null && HumanReviewIdentifier.IsValid(value.ClaimId) && HumanReviewContractHash.IsSha256(value.ClaimHash);
     private static bool Valid(HumanReviewDecisionActionReservationReference? value) => value is not null && HumanReviewIdentifier.IsValid(value.ReservationId) && HumanReviewContractHash.IsSha256(value.ReservationHash);
-    private static bool Matches(HumanReviewDecisionActionState action, HumanReviewDecisionActionRecoveryCandidate candidate) => action.Wake is not null && action.Wake.WakeHash == candidate.Wake.WakeHash && action.ExpectedGeneration == candidate.ExpectedGeneration && action.Wake.ExpiresAtUtc == candidate.WakeExpiresAtUtc && Equals(action.Reservation.Decision, candidate.Decision) && (candidate.PriorClaim is null ? action.Claims.IsDefaultOrEmpty : !action.Claims.IsDefaultOrEmpty && Equals(Reference(action.Claims[^1]), candidate.PriorClaim));
+    private static bool Matches(HumanReviewDecisionActionState action, HumanReviewDecisionActionRecoveryCandidate candidate) => MatchesCandidate(action, candidate) && (candidate.PriorClaim is null ? action.Claims.IsDefaultOrEmpty : !action.Claims.IsDefaultOrEmpty && Equals(Reference(action.Claims[^1]), candidate.PriorClaim));
+    private static bool MatchesCandidate(HumanReviewDecisionActionState action, HumanReviewDecisionActionRecoveryCandidate candidate) => action.Wake is not null && action.Wake.WakeHash == candidate.Wake.WakeHash && action.ExpectedGeneration == candidate.ExpectedGeneration && action.Wake.ExpiresAtUtc == candidate.WakeExpiresAtUtc && Equals(action.Reservation.Request, candidate.Request) && Equals(action.Reservation.Decision, candidate.Decision);
     private static bool Matches(HumanReviewDecisionActionCompletionIntent intent, HumanReviewDecisionActionState action, HumanReviewDecisionActionCompletion completion) => intent.ExpectedGeneration == action.ExpectedGeneration && Equals(intent.Wake, Reference(action.Wake!)) && Equals(intent.Claim, Reference(action.Claims[^1])) && Equals(intent.Reservation, Reference(action.Reservation)) && Equals(intent.Wake, completion.Wake) && Equals(intent.Claim, completion.Claim) && Equals(intent.Reservation, completion.Reservation) && completion.ExpectedGeneration == intent.ExpectedGeneration;
-    private static bool Matches(HumanReviewDecisionActionRetirementIntent intent, HumanReviewDecisionActionState action, HumanReviewDecisionActionRetirement retirement) => intent.ExpectedGeneration == action.ExpectedGeneration && Equals(intent.Wake, Reference(action.Wake!)) && Equals(intent.Reservation, Reference(action.Reservation)) && Equals(intent.Wake, retirement.Wake) && Equals(intent.Reservation, retirement.Reservation) && retirement.ExpectedGeneration == intent.ExpectedGeneration && (intent.Claim is null ? intent.Outcome == HumanReviewContinuationOutcome.Expired && action.Claims.IsDefaultOrEmpty : !action.Claims.IsDefaultOrEmpty && Equals(intent.Claim, Reference(action.Claims[^1])) && retirement.RetiredAtUtc < action.Claims[^1].LeaseExpiresAtUtc);
+    private static bool Matches(HumanReviewDecisionActionRetirementIntent intent, HumanReviewDecisionActionState action, HumanReviewDecisionActionRetirement retirement)
+    {
+        if (intent.ExpectedGeneration != action.ExpectedGeneration || !Equals(intent.Wake, Reference(action.Wake!)) || !Equals(intent.Reservation, Reference(action.Reservation)) || !Equals(intent.Wake, retirement.Wake) || !Equals(intent.Reservation, retirement.Reservation) || retirement.ExpectedGeneration != intent.ExpectedGeneration || retirement.Outcome != intent.Outcome || retirement.Reason != intent.Reason)
+        {
+            return false;
+        }
+
+        if (intent.Claim is null)
+        {
+            return intent.Outcome == HumanReviewContinuationOutcome.Expired && intent.Reason == HumanReviewDecisionActionRetirementReason.Expired && action.Claims.IsDefaultOrEmpty;
+        }
+
+        if (action.Claims.IsDefaultOrEmpty || !Equals(intent.Claim, Reference(action.Claims[^1])))
+        {
+            return false;
+        }
+
+        var active = action.Claims[^1];
+        return intent.Reason == HumanReviewDecisionActionRetirementReason.ClaimLimitExceeded
+            ? intent.Outcome == HumanReviewContinuationOutcome.Blocked && action.Claims.Length == HumanReviewContractLimits.MaxContinuationClaims && retirement.RetiredAtUtc > active.LeaseExpiresAtUtc
+            : intent.Outcome == HumanReviewContinuationOutcome.Expired
+                ? retirement.RetiredAtUtc >= action.Wake!.ExpiresAtUtc
+                : retirement.RetiredAtUtc >= active.ClaimedAtUtc && retirement.RetiredAtUtc < active.LeaseExpiresAtUtc;
+    }
+    private static bool TryReplayClaim(CustomLoopRunRecord current, HumanReviewDecisionActionState action, HumanReviewDecisionActionClaimIntent intent, out bool replayed)
+    {
+        replayed = false;
+        var match = action.Claims.Select((claim, index) => new { Claim = claim, Index = index }).SingleOrDefault(value => value.Claim.ClaimId == intent.Claim.ClaimId);
+        if (match is null)
+        {
+            return false;
+        }
+
+        if (match.Claim.ClaimHash != intent.Claim.ClaimHash)
+        {
+            return true;
+        }
+
+        var predecessor = match.Index == 0 ? null : Reference(action.Claims[match.Index - 1]);
+        replayed = MatchesCandidate(action, intent.Candidate)
+            && Equals(intent.Candidate.PriorClaim, predecessor)
+            && current.LifecycleVersion > intent.Candidate.ExpectedLifecycleVersion;
+        return true;
+    }
     private static bool SameAction(HumanReviewDecisionActionState expected, HumanReviewDecisionActionState actual) => expected.StateHash == actual.StateHash || Descends(expected, actual);
     private static bool Descends(HumanReviewDecisionActionState expected, HumanReviewDecisionActionState actual) => expected.Reservation.ReservationHash == actual.Reservation.ReservationHash && (expected.Wake is null || actual.Wake?.WakeHash == expected.Wake.WakeHash) && expected.Claims.Length <= actual.Claims.Length && expected.Claims.Select((claim, index) => claim.ClaimHash == actual.Claims[index].ClaimHash).All(value => value) && (expected.Completion is null || actual.Completion?.CompletionHash == expected.Completion.CompletionHash) && (expected.Retirement is null || actual.Retirement?.RetirementHash == expected.Retirement.RetirementHash);
     private static HumanReviewDecisionActionReservationReference Reference(HumanReviewDecisionActionReservation value) => new(value.ReservationId, value.ReservationHash);

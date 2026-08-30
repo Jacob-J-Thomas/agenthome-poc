@@ -1,4 +1,5 @@
 using EmbodySense.Core.Common.HumanReview.Models;
+using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 
 namespace EmbodySense.Core.Common.HumanReview;
 
@@ -26,7 +27,7 @@ public static class HumanReviewDecisionActionContractValidator
         if (!string.Equals(state.BindingHash, request.Binding.BindingHash, StringComparison.Ordinal)) Add(errors, "action_binding_mismatch", "$.bindingHash", "Action state must retain the reviewed immutable binding hash.");
         Generation(state.ExpectedGeneration, "$.expectedGeneration", errors);
         if (state.ReservedLifecycleVersion < 1) Add(errors, "action_lifecycle_version_invalid", "$.reservedLifecycleVersion", "Action reservation must retain a positive whole-run lifecycle version.");
-        if (state.Claims.IsDefault) Add(errors, "action_claims_required", "$.claims", "Action claim history must be defined even when empty.");
+        if (state.Claims.IsDefault || state.Claims.Length > HumanReviewContractLimits.MaxContinuationClaims) Add(errors, "action_claim_count_invalid", "$.claims", "Action claim history must be defined and bounded.");
         if (state.Completion is not null && state.Retirement is not null) Add(errors, "action_terminal_conflict", "$", "An action chain may retain completion or retirement, never both.");
 
         if (state.Wake is null)
@@ -78,6 +79,8 @@ public static class HumanReviewDecisionActionContractValidator
 
     private static void Claims(HumanReviewDecisionActionState state, List<HumanReviewContractValidationError> errors)
     {
+        var claimIds = new HashSet<string>(StringComparer.Ordinal);
+        var claimHashes = new HashSet<string>(StringComparer.Ordinal);
         for (var index = 0; index < state.Claims.Length; index++)
         {
             var claim = state.Claims[index];
@@ -85,6 +88,7 @@ public static class HumanReviewDecisionActionContractValidator
             if (claim is null) { Add(errors, "action_claim_required", path, "A non-null action claim is required."); continue; }
             Schema(claim.SchemaVersion, path + ".schemaVersion", errors);
             Identifier(claim.ClaimId, path + ".claimId", errors);
+            if (!claimIds.Add(claim.ClaimId)) Add(errors, "action_claim_id_duplicate", path + ".claimId", "Action claim identities must be unique.");
             WakeReference(state.Wake!, claim.Wake, path + ".wake", errors);
             ReservationReference(state.Reservation, claim.Reservation, path + ".reservation", errors);
             Generation(claim.ExpectedGeneration, path + ".expectedGeneration", errors);
@@ -94,6 +98,7 @@ public static class HumanReviewDecisionActionContractValidator
             if (index > 0 && claim.ClaimedAtUtc <= state.Claims[index - 1].LeaseExpiresAtUtc) Add(errors, "action_claim_takeover_early", path + ".claimedAtUtc", "A later claim can take over only after strict expiry of the prior claim.");
             Provenance(claim.Provenance, claim.ClaimedAtUtc, HumanReviewProvenanceKind.Coordinator, path + ".provenance", errors);
             Hash(claim.ClaimHash, path + ".claimHash", errors);
+            if (!claimHashes.Add(claim.ClaimHash)) Add(errors, "action_claim_hash_duplicate", path + ".claimHash", "Action claim hashes must be unique.");
             if (!HumanReviewDecisionActionContractHash.MatchesClaim(claim)) Add(errors, "action_claim_hash_mismatch", path + ".claimHash", "Claim must carry its exact canonical hash.");
         }
     }
@@ -132,6 +137,7 @@ public static class HumanReviewDecisionActionContractValidator
         Generation(value.ExpectedGeneration, Path + ".expectedGeneration", errors);
         if (value.ExpectedGeneration != state.ExpectedGeneration) Add(errors, "action_retirement_generation_mismatch", Path + ".expectedGeneration", "Retirement must retain the exact action generation.");
         if (!Enum.IsDefined(value.Outcome) || value.Outcome is HumanReviewContinuationOutcome.Unknown or HumanReviewContinuationOutcome.Completed) Add(errors, "action_retirement_outcome_invalid", Path + ".outcome", "Retirement must retain a closed non-completion outcome.");
+        if (!ExpectedRetirement(value.Outcome, value.Reason)) Add(errors, "action_retirement_reason_invalid", Path + ".reason", "Retirement reason must exactly match its closed non-completion outcome.");
         if (!Utc(value.RetiredAtUtc) || value.RetiredAtUtc < state.Wake!.PublishedAtUtc || value.Outcome == HumanReviewContinuationOutcome.Expired && value.RetiredAtUtc < state.Wake.ExpiresAtUtc) Add(errors, "action_retirement_time_invalid", Path + ".retiredAtUtc", "Retirement must occur at trusted UTC and expiry cannot predate wake expiry.");
         Evidence(value.Evidence, Path + ".evidence", errors);
         Provenance(value.Provenance, value.RetiredAtUtc, HumanReviewProvenanceKind.Coordinator, Path + ".provenance", errors);
@@ -139,7 +145,33 @@ public static class HumanReviewDecisionActionContractValidator
         if (!HumanReviewDecisionActionContractHash.MatchesRetirement(value)) Add(errors, "action_retirement_hash_mismatch", Path + ".retirementHash", "Retirement must carry its exact canonical hash.");
     }
 
+    /// <summary>Gets whether an action still binds the exact current Human Review lifecycle and accepted-decision head.</summary>
+    /// <remarks>This check deliberately does not make a terminal action eligible; callers must separately require their operation's nonterminal predecessor.</remarks>
+    public static bool IsCurrentActionHead(HumanReviewRunState? review, HumanReviewDecisionActionState? action)
+    {
+        try
+        {
+            if (review?.Request is null || review.Lifecycle is null || action is null || review.AcceptedDecisions.IsDefaultOrEmpty || !ValidateState(review.Request, action).IsValid)
+            {
+                return false;
+            }
+
+            var expected = action.Reservation.Decision;
+            return SameDecision(expected, review.AcceptedDecisions[^1])
+                && SameDecision(expected, review.Lifecycle.LastDecision)
+                && review.Lifecycle.Status == LifecycleStatus(expected.Kind);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private static bool ExpectedDisposition(HumanReviewDecisionKind kind, HumanReviewDecisionActionDisposition disposition) => (kind, disposition) switch { (HumanReviewDecisionKind.Reject, HumanReviewDecisionActionDisposition.Rejected) => true, (HumanReviewDecisionKind.Cancel, HumanReviewDecisionActionDisposition.Cancelled) => true, (HumanReviewDecisionKind.RequestInformation, HumanReviewDecisionActionDisposition.InformationParked) => true, _ => false };
+    private static bool ExpectedRetirement(HumanReviewContinuationOutcome outcome, HumanReviewDecisionActionRetirementReason reason) => (outcome, reason) switch { (HumanReviewContinuationOutcome.Expired, HumanReviewDecisionActionRetirementReason.Expired) => true, (HumanReviewContinuationOutcome.Blocked, HumanReviewDecisionActionRetirementReason.Invalid) => true, (HumanReviewContinuationOutcome.Blocked, HumanReviewDecisionActionRetirementReason.ReleaseInvalid) => true, (HumanReviewContinuationOutcome.Blocked, HumanReviewDecisionActionRetirementReason.ClaimLimitExceeded) => true, _ => false };
+    private static HumanReviewLifecycleStatus LifecycleStatus(HumanReviewDecisionKind kind) => kind switch { HumanReviewDecisionKind.Reject => HumanReviewLifecycleStatus.Rejected, HumanReviewDecisionKind.Cancel => HumanReviewLifecycleStatus.Cancelled, HumanReviewDecisionKind.RequestInformation => HumanReviewLifecycleStatus.AwaitingInformation, _ => HumanReviewLifecycleStatus.Unknown };
+    private static bool SameDecision(HumanReviewDecisionReference expected, HumanReviewDecision? value) => value is not null && SameDecision(expected, new HumanReviewDecisionReference(value.DecisionId, value.DecisionOperationId, value.Kind, value.DecisionHash));
+    private static bool SameDecision(HumanReviewDecisionReference expected, HumanReviewDecisionReference? value) => value is not null && expected.DecisionId == value.DecisionId && expected.DecisionOperationId == value.DecisionOperationId && expected.Kind == value.Kind && expected.DecisionHash == value.DecisionHash;
     private static void Request(HumanReviewRequest request, HumanReviewRequestReference? value, string path, List<HumanReviewContractValidationError> errors) { if (value is null || value.RequestId != request.RequestId || value.RequestHash != request.RequestHash) Add(errors, "action_request_mismatch", path, "Action artifact must reference the exact immutable request."); }
     private static void Decision(HumanReviewDecisionReference? value, string path, List<HumanReviewContractValidationError> errors) { if (value is null || !HumanReviewIdentifier.IsValid(value.DecisionId) || !HumanReviewIdentifier.IsValid(value.DecisionOperationId) || !HumanReviewContractHash.IsSha256(value.DecisionHash) || value.Kind is not (HumanReviewDecisionKind.Reject or HumanReviewDecisionKind.Cancel or HumanReviewDecisionKind.RequestInformation)) Add(errors, "action_decision_invalid", path, "Action reservation may reference only one canonical accepted non-approval decision."); }
     private static void ReservationReference(HumanReviewDecisionActionReservation reservation, HumanReviewDecisionActionReservationReference? value, string path, List<HumanReviewContractValidationError> errors) { if (value is null || value.ReservationId != reservation.ReservationId || value.ReservationHash != reservation.ReservationHash) Add(errors, "action_reservation_reference_mismatch", path, "Action artifact must reference the exact reservation."); }

@@ -52,6 +52,33 @@ public sealed class HumanReviewDecisionActionContractTests
         Assert.False(HumanReviewDecisionActionStateTransitionValidator.ValidateTransition(request, initial, wrongGeneration).IsValid);
     }
 
+    [Fact]
+    public void Action_retirement_persists_its_reason_and_claim_history_rejects_duplicate_identity_or_hash()
+    {
+        var request = HumanReviewTestData.Request();
+        var reservation = Reservation(request, HumanReviewDecisionKind.Reject);
+        var initial = HumanReviewDecisionActionContractHash.ApplyState(new(1, reservation, request.Binding.BindingHash, 1, 2, null, ImmutableArray<HumanReviewDecisionActionClaim>.Empty, null, null, string.Empty));
+        var wake = HumanReviewDecisionActionContractHash.ApplyWake(new(1, "action-wake-three", new(request.RequestId, request.RequestHash), reservation.Decision, new(reservation.ReservationId, reservation.ReservationHash), request.Binding.BindingHash, 1, reservation.ReservedAtUtc, request.Timing.ExpiresAtUtc, Provenance("action-wake-three", reservation.ReservedAtUtc), string.Empty));
+        var published = HumanReviewDecisionActionContractHash.ApplyState(initial with { Wake = wake, StateHash = string.Empty });
+        var firstAtUtc = wake.PublishedAtUtc.AddMinutes(1);
+        var first = HumanReviewDecisionActionContractHash.ApplyClaim(new(1, "action-claim-four", new(wake.WakeId, wake.WakeHash), new(reservation.ReservationId, reservation.ReservationHash), 1, "action-worker-four", firstAtUtc, firstAtUtc.AddMinutes(5), Provenance("action-claim-four", firstAtUtc), string.Empty));
+        var secondAtUtc = first.LeaseExpiresAtUtc.AddTicks(1);
+        var second = HumanReviewDecisionActionContractHash.ApplyClaim(first with { ClaimId = "action-claim-five", WorkerId = "action-worker-five", ClaimedAtUtc = secondAtUtc, LeaseExpiresAtUtc = secondAtUtc.AddMinutes(5), Provenance = Provenance("action-claim-five", secondAtUtc), ClaimHash = string.Empty });
+        var claimed = HumanReviewDecisionActionContractHash.ApplyState(published with { Claims = [first, second], StateHash = string.Empty });
+        var retirementAtUtc = secondAtUtc.AddSeconds(1);
+        var retirement = HumanReviewDecisionActionContractHash.ApplyRetirement(new(1, "action-retirement-one", new(wake.WakeId, wake.WakeHash), new(reservation.ReservationId, reservation.ReservationHash), 1, HumanReviewContinuationOutcome.Blocked, HumanReviewDecisionActionRetirementReason.Invalid, retirementAtUtc, ImmutableArray<HumanReviewRedactedPreview>.Empty, Provenance("action-retirement-one", retirementAtUtc), string.Empty));
+        var retired = HumanReviewDecisionActionContractHash.ApplyState(claimed with { Retirement = retirement, StateHash = string.Empty });
+        var wrongReason = HumanReviewDecisionActionContractHash.ApplyRetirement(retirement with { Outcome = HumanReviewContinuationOutcome.Expired, Reason = HumanReviewDecisionActionRetirementReason.Invalid, RetirementHash = string.Empty });
+        var duplicateId = HumanReviewDecisionActionContractHash.ApplyClaim(second with { ClaimId = first.ClaimId, WorkerId = "action-worker-six", ClaimedAtUtc = second.LeaseExpiresAtUtc.AddTicks(1), LeaseExpiresAtUtc = second.LeaseExpiresAtUtc.AddMinutes(1), Provenance = Provenance("action-claim-six", second.LeaseExpiresAtUtc.AddTicks(1)), ClaimHash = string.Empty });
+        var duplicateHash = second with { ClaimId = "action-claim-seven", ClaimHash = first.ClaimHash };
+
+        Assert.True(HumanReviewDecisionActionContractValidator.ValidateState(request, retired).IsValid);
+        Assert.True(HumanReviewDecisionActionContractHash.MatchesRetirement(retirement));
+        Assert.Contains(HumanReviewDecisionActionContractValidator.ValidateState(request, HumanReviewDecisionActionContractHash.ApplyState(claimed with { Retirement = wrongReason, StateHash = string.Empty })).Errors, error => error.Code == "action_retirement_reason_invalid");
+        Assert.Contains(HumanReviewDecisionActionContractValidator.ValidateState(request, HumanReviewDecisionActionContractHash.ApplyState(published with { Claims = [first, duplicateId], StateHash = string.Empty })).Errors, error => error.Code == "action_claim_id_duplicate");
+        Assert.Contains(HumanReviewDecisionActionContractValidator.ValidateState(request, published with { Claims = [first, duplicateHash] }).Errors, error => error.Code == "action_claim_hash_duplicate");
+    }
+
     private static HumanReviewDecisionActionReservation Reservation(HumanReviewRequest request, HumanReviewDecisionKind kind)
     {
         var reservedAtUtc = request.Timing.CreatedAtUtc.AddMinutes(1);

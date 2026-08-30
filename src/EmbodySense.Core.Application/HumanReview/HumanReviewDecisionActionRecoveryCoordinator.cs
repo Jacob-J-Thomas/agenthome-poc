@@ -47,13 +47,14 @@ public sealed class HumanReviewDecisionActionRecoveryCoordinator
     private async Task<HumanReviewDecisionActionRecoveryItemResult> RecoverCandidateAsync(HumanReviewDecisionActionRecoveryCandidate candidate, HumanReviewDecisionActionRecoveryRequest request, DateTimeOffset observedAtUtc, CancellationToken cancellationToken)
     {
         if (!Valid(candidate)) return Item(candidate, HumanReviewDecisionActionRecoveryItemStatus.Invalid);
-        if (observedAtUtc >= candidate.WakeExpiresAtUtc) return await RetireAsync(candidate, null, candidate.ExpectedLifecycleVersion, HumanReviewContinuationOutcome.Expired, HumanReviewDecisionActionRetirementReason.Expired, observedAtUtc, cancellationToken).ConfigureAwait(false);
+        if (observedAtUtc >= candidate.WakeExpiresAtUtc) return await RetireAsync(candidate, candidate.PriorClaim, candidate.ExpectedLifecycleVersion, HumanReviewContinuationOutcome.Expired, HumanReviewDecisionActionRetirementReason.Expired, cancellationToken).ConfigureAwait(false);
         if (!TryNow(out var claimedAtUtc) || !TryCreateClaim(candidate, request, claimedAtUtc, out var claim)) return Item(candidate, HumanReviewDecisionActionRecoveryItemStatus.Parked);
         HumanReviewDecisionActionStoreMutationResult claimed;
         try { claimed = await _store.ClaimAsync(new(candidate, claim!), cancellationToken).ConfigureAwait(false); }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch { return Item(candidate, HumanReviewDecisionActionRecoveryItemStatus.Parked); }
         if (claimed is null) return Item(candidate, HumanReviewDecisionActionRecoveryItemStatus.Parked);
+        if (claimed.Status == HumanReviewDecisionActionStoreMutationStatus.LimitExceeded) return await RetireAsync(candidate, candidate.PriorClaim, candidate.ExpectedLifecycleVersion, HumanReviewContinuationOutcome.Blocked, HumanReviewDecisionActionRetirementReason.ClaimLimitExceeded, cancellationToken).ConfigureAwait(false);
         if (claimed.Status is not (HumanReviewDecisionActionStoreMutationStatus.Committed or HumanReviewDecisionActionStoreMutationStatus.Replayed)) return Item(candidate, claimed.Status is HumanReviewDecisionActionStoreMutationStatus.Conflict or HumanReviewDecisionActionStoreMutationStatus.NotFound ? HumanReviewDecisionActionRecoveryItemStatus.ClaimConflict : claimed.Status == HumanReviewDecisionActionStoreMutationStatus.Invalid ? HumanReviewDecisionActionRecoveryItemStatus.Invalid : HumanReviewDecisionActionRecoveryItemStatus.Parked);
 
         HumanReviewDecisionActionCandidateReadResult reread;
@@ -67,17 +68,25 @@ public sealed class HumanReviewDecisionActionRecoveryCoordinator
         try { consumed = await _consumer.ConsumeDecisionActionAsync(reread.Candidate.ConsumerCandidate, candidate.Decision, cancellationToken).ConfigureAwait(false); }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch { return Item(candidate, HumanReviewDecisionActionRecoveryItemStatus.Parked); }
-        if (consumed is null || consumed.Status == HumanReviewContinuationConsumptionStatus.Invalid) return await RetireAsync(candidate, reread.Candidate, reread.Candidate.ConsumerCandidate.Run.LifecycleVersion, HumanReviewContinuationOutcome.Blocked, HumanReviewDecisionActionRetirementReason.Invalid, claimedAtUtc, cancellationToken).ConfigureAwait(false);
+        if (consumed is null || consumed.Status == HumanReviewContinuationConsumptionStatus.Invalid) return await RetireAsync(candidate, Reference(reread.Candidate.Claim), reread.Candidate.ConsumerCandidate.Run.LifecycleVersion, HumanReviewContinuationOutcome.Blocked, HumanReviewDecisionActionRetirementReason.Invalid, cancellationToken).ConfigureAwait(false);
         if (consumed.Status != HumanReviewContinuationConsumptionStatus.DecisionPathPrepared || consumed.Action is null || !TryCreateActionIntent(reread.Candidate, consumed.Action, out var action)) return consumed.Status == HumanReviewContinuationConsumptionStatus.Unavailable
             ? Item(candidate, HumanReviewDecisionActionRecoveryItemStatus.Parked)
-            : await RetireAsync(candidate, reread.Candidate, reread.Candidate.ConsumerCandidate.Run.LifecycleVersion, HumanReviewContinuationOutcome.Blocked, HumanReviewDecisionActionRetirementReason.Invalid, claimedAtUtc, cancellationToken).ConfigureAwait(false);
+            : await RetireAsync(candidate, Reference(reread.Candidate.Claim), reread.Candidate.ConsumerCandidate.Run.LifecycleVersion, HumanReviewContinuationOutcome.Blocked, HumanReviewDecisionActionRetirementReason.Invalid, cancellationToken).ConfigureAwait(false);
+
+        if (!TryNow(out var releaseAtUtc)) return Item(candidate, HumanReviewDecisionActionRecoveryItemStatus.Parked);
+        if (!HasCurrentClaimAndWake(reread.Candidate, releaseAtUtc))
+        {
+            return releaseAtUtc >= reread.Candidate.Action.Wake!.ExpiresAtUtc
+                ? await RetireAsync(candidate, Reference(reread.Candidate.Claim), reread.Candidate.ConsumerCandidate.Run.LifecycleVersion, HumanReviewContinuationOutcome.Expired, HumanReviewDecisionActionRetirementReason.Expired, cancellationToken).ConfigureAwait(false)
+                : Item(candidate, HumanReviewDecisionActionRecoveryItemStatus.StaleAfterClaim);
+        }
 
         HumanReviewDecisionActionReleaseResult released;
         try { released = await _release.ReleaseAsync(action!, cancellationToken).ConfigureAwait(false); }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch { return Item(candidate, HumanReviewDecisionActionRecoveryItemStatus.Parked); }
         if (released is null || released.Status == HumanReviewDecisionActionReleaseStatus.Unavailable) return Item(candidate, HumanReviewDecisionActionRecoveryItemStatus.Parked);
-        if (released.Status != HumanReviewDecisionActionReleaseStatus.Completed || released.Completion is null) return await RetireAsync(candidate, reread.Candidate, reread.Candidate.ConsumerCandidate.Run.LifecycleVersion, HumanReviewContinuationOutcome.Blocked, HumanReviewDecisionActionRetirementReason.ReleaseInvalid, claimedAtUtc, cancellationToken).ConfigureAwait(false);
+        if (released.Status != HumanReviewDecisionActionReleaseStatus.Completed || released.Completion is null) return await RetireAsync(candidate, Reference(reread.Candidate.Claim), reread.Candidate.ConsumerCandidate.Run.LifecycleVersion, HumanReviewContinuationOutcome.Blocked, HumanReviewDecisionActionRetirementReason.ReleaseInvalid, cancellationToken).ConfigureAwait(false);
         var complete = new HumanReviewDecisionActionCompletionIntent(action!.RunId, action.ExpectedLifecycleVersion, action.Wake, action.Claim, action.Reservation, action.ExpectedGeneration);
         try
         {
@@ -88,12 +97,12 @@ public sealed class HumanReviewDecisionActionRecoveryCoordinator
         catch { return Item(candidate, HumanReviewDecisionActionRecoveryItemStatus.Parked); }
     }
 
-    private async Task<HumanReviewDecisionActionRecoveryItemResult> RetireAsync(HumanReviewDecisionActionRecoveryCandidate candidate, HumanReviewDecisionActionCandidate? claimed, int expectedLifecycleVersion, HumanReviewContinuationOutcome outcome, HumanReviewDecisionActionRetirementReason reason, DateTimeOffset retiredAtUtc, CancellationToken cancellationToken)
+    private async Task<HumanReviewDecisionActionRecoveryItemResult> RetireAsync(HumanReviewDecisionActionRecoveryCandidate candidate, HumanReviewDecisionActionClaimReference? claim, int expectedLifecycleVersion, HumanReviewContinuationOutcome outcome, HumanReviewDecisionActionRetirementReason reason, CancellationToken cancellationToken)
     {
-        if (!TryCreateRetirement(candidate, outcome, retiredAtUtc, out var retirement)) return Item(candidate, HumanReviewDecisionActionRecoveryItemStatus.Invalid);
+        if (!TryNow(out var retiredAtUtc) || !TryCreateRetirement(candidate, outcome, reason, retiredAtUtc, out var retirement)) return Item(candidate, HumanReviewDecisionActionRecoveryItemStatus.Parked);
         try
         {
-            var result = await _store.RetireAsync(new(candidate.RunId, expectedLifecycleVersion, candidate.Wake, claimed is null ? null : Reference(claimed.Claim), candidate.Reservation, candidate.ExpectedGeneration, outcome, reason), retirement!, cancellationToken).ConfigureAwait(false);
+            var result = await _store.RetireAsync(new(candidate.RunId, expectedLifecycleVersion, candidate.Wake, claim, candidate.Reservation, candidate.ExpectedGeneration, outcome, reason), retirement!, cancellationToken).ConfigureAwait(false);
             return Item(candidate, result?.Status is HumanReviewDecisionActionStoreMutationStatus.Committed or HumanReviewDecisionActionStoreMutationStatus.Replayed ? HumanReviewDecisionActionRecoveryItemStatus.Retired : result?.Status == HumanReviewDecisionActionStoreMutationStatus.Invalid ? HumanReviewDecisionActionRecoveryItemStatus.Invalid : HumanReviewDecisionActionRecoveryItemStatus.Parked);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
@@ -112,24 +121,37 @@ public sealed class HumanReviewDecisionActionRecoveryCoordinator
     private static bool TryCreateClaim(HumanReviewDecisionActionRecoveryCandidate candidate, HumanReviewDecisionActionRecoveryRequest request, DateTimeOffset claimedAtUtc, out HumanReviewDecisionActionClaim? claim)
     {
         claim = null;
-        var expiresAtUtc = claimedAtUtc + request.ClaimLease;
-        if (!Utc(claimedAtUtc) || claimedAtUtc >= candidate.WakeExpiresAtUtc || expiresAtUtc <= claimedAtUtc || expiresAtUtc > candidate.WakeExpiresAtUtc) return false;
+        var requestedExpiresAtUtc = claimedAtUtc + request.ClaimLease;
+        var expiresAtUtc = requestedExpiresAtUtc <= candidate.WakeExpiresAtUtc ? requestedExpiresAtUtc : candidate.WakeExpiresAtUtc;
+        if (!Utc(claimedAtUtc) || claimedAtUtc >= candidate.WakeExpiresAtUtc || expiresAtUtc <= claimedAtUtc) return false;
         var claimId = Id("action-claim", candidate.Reservation.ReservationHash + "|" + request.WorkerId + "|" + claimedAtUtc.UtcTicks);
         claim = HumanReviewDecisionActionContractHash.ApplyClaim(new(1, claimId, candidate.Wake, candidate.Reservation, candidate.ExpectedGeneration, request.WorkerId, claimedAtUtc, expiresAtUtc, Provenance("human-review-action-recovery", claimId, claimedAtUtc), string.Empty));
         return true;
     }
 
-    private static bool TryCreateRetirement(HumanReviewDecisionActionRecoveryCandidate candidate, HumanReviewContinuationOutcome outcome, DateTimeOffset retiredAtUtc, out HumanReviewDecisionActionRetirement? retirement)
+    private static bool TryCreateRetirement(HumanReviewDecisionActionRecoveryCandidate candidate, HumanReviewContinuationOutcome outcome, HumanReviewDecisionActionRetirementReason reason, DateTimeOffset retiredAtUtc, out HumanReviewDecisionActionRetirement? retirement)
     {
         retirement = null;
-        var id = Id("action-retirement", candidate.Reservation.ReservationHash + "|" + candidate.ExpectedGeneration + "|" + (int)outcome);
-        retirement = HumanReviewDecisionActionContractHash.ApplyRetirement(new(1, id, candidate.Wake, candidate.Reservation, candidate.ExpectedGeneration, outcome, retiredAtUtc, ImmutableArray<HumanReviewRedactedPreview>.Empty, Provenance("human-review-action-recovery", id, retiredAtUtc), string.Empty));
+        var id = Id("action-retirement", candidate.Reservation.ReservationHash + "|" + candidate.ExpectedGeneration + "|" + (int)outcome + "|" + (int)reason);
+        retirement = HumanReviewDecisionActionContractHash.ApplyRetirement(new(1, id, candidate.Wake, candidate.Reservation, candidate.ExpectedGeneration, outcome, reason, retiredAtUtc, ImmutableArray<HumanReviewRedactedPreview>.Empty, Provenance("human-review-action-recovery", id, retiredAtUtc), string.Empty));
         return true;
     }
 
     private bool TryNow(out DateTimeOffset value) { try { value = _clock.UtcNow; return Utc(value); } catch { value = default; return false; } }
     private static bool Valid(HumanReviewDecisionActionRecoveryRequest? value) => value is not null && value.MaximumCount is >= 1 and <= CustomLoopLimits.MaxRecentRunsPageSize && HumanReviewIdentifier.IsValid(value.WorkerId) && value.ClaimLease > TimeSpan.Zero && value.ClaimLease <= HumanReviewContractLimits.MaxContinuationClaimLease;
     private static bool Valid(HumanReviewDecisionActionRecoveryCandidate? value) => value is not null && CustomLoopArtifactIdentifier.IsValid(value.RunId) && value.ExpectedLifecycleVersion >= 1 && value.ExpectedGeneration >= 1 && value.Decision.Kind is HumanReviewDecisionKind.Reject or HumanReviewDecisionKind.Cancel or HumanReviewDecisionKind.RequestInformation && Utc(value.WakeExpiresAtUtc);
+    private static bool HasCurrentClaimAndWake(HumanReviewDecisionActionCandidate candidate, DateTimeOffset observedAtUtc)
+        => candidate.Action.Wake is { } wake
+            && candidate.Action.ExpectedGeneration == candidate.Claim.ExpectedGeneration
+            && Equals(Reference(wake), candidate.Claim.Wake)
+            && Equals(Reference(candidate.Action.Reservation), candidate.Claim.Reservation)
+            && candidate.Action.Claims is { Length: > 0 }
+            && Equals(Reference(candidate.Action.Claims[^1]), Reference(candidate.Claim))
+            && Utc(observedAtUtc)
+            && observedAtUtc >= wake.PublishedAtUtc
+            && observedAtUtc < wake.ExpiresAtUtc
+            && observedAtUtc >= candidate.Claim.ClaimedAtUtc
+            && observedAtUtc < candidate.Claim.LeaseExpiresAtUtc;
     private static HumanReviewContinuationAction ExpectedAction(HumanReviewDecisionKind kind) => kind switch { HumanReviewDecisionKind.Reject => HumanReviewContinuationAction.FailRejected, HumanReviewDecisionKind.Cancel => HumanReviewContinuationAction.Cancel, HumanReviewDecisionKind.RequestInformation => HumanReviewContinuationAction.ParkForInformation, _ => HumanReviewContinuationAction.None };
     private static HumanReviewProvenance Provenance(string source, string correlation, DateTimeOffset atUtc) => HumanReviewContractHash.ApplyProvenance(new(HumanReviewProvenanceKind.Coordinator, source, correlation, atUtc, string.Empty));
     private static HumanReviewDecisionActionClaimReference Reference(HumanReviewDecisionActionClaim value) => new(value.ClaimId, value.ClaimHash);

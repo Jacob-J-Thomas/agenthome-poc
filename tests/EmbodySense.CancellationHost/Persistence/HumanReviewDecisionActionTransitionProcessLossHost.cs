@@ -60,7 +60,7 @@ internal static class HumanReviewDecisionActionTransitionProcessLossHost
     private static HumanReviewDecisionActionRetirement Retirement(HumanReviewDecisionActionState action, HumanReviewDecisionActionClaim claim)
     {
         var retiredAtUtc = claim.ClaimedAtUtc.AddSeconds(1);
-        return HumanReviewDecisionActionContractHash.ApplyRetirement(new(1, "retirement-process-loss", new(action.Wake!.WakeId, action.Wake.WakeHash), new(action.Reservation.ReservationId, action.Reservation.ReservationHash), action.ExpectedGeneration, HumanReviewContinuationOutcome.Blocked, retiredAtUtc, ImmutableArray<HumanReviewRedactedPreview>.Empty, Provenance("retirement-process-loss", retiredAtUtc), string.Empty));
+        return HumanReviewDecisionActionContractHash.ApplyRetirement(new(1, "retirement-process-loss", new(action.Wake!.WakeId, action.Wake.WakeHash), new(action.Reservation.ReservationId, action.Reservation.ReservationHash), action.ExpectedGeneration, HumanReviewContinuationOutcome.Blocked, HumanReviewDecisionActionRetirementReason.Invalid, retiredAtUtc, ImmutableArray<HumanReviewRedactedPreview>.Empty, Provenance("retirement-process-loss", retiredAtUtc), string.Empty));
     }
 
     private static HumanReviewDecisionActionDisposition Disposition(HumanReviewDecisionKind kind) => kind switch

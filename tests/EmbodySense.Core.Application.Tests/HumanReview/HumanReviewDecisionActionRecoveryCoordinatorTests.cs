@@ -72,6 +72,61 @@ public sealed class HumanReviewDecisionActionRecoveryCoordinatorTests
         Assert.Equal(new HumanReviewDecisionActionReservationReference(action.Reservation.ReservationId, action.Reservation.ReservationHash), store.LastClaim?.Claim.Reservation);
         Assert.Equal(currentRun.LifecycleVersion, store.LastCompletion?.ExpectedLifecycleVersion);
         Assert.Equal(action.ExpectedGeneration, store.LastCompletion?.ExpectedGeneration);
+        var replay = await coordinator.RecoverAsync(new(1, null, "action-worker-two", TimeSpan.FromMinutes(5)));
+        Assert.Equal(HumanReviewDecisionActionRecoveryItemStatus.Completed, Assert.Single(replay.Items).Status);
+        Assert.Equal(2, release.Count);
+        Assert.Equal(1, release.IdempotentOperationCount);
+        Assert.Single(release.ActionOperationIds);
+    }
+
+    [Fact]
+    public async Task Claim_lease_is_clipped_to_the_exact_wake_expiry()
+    {
+        var candidate = Candidate(_now.AddMinutes(3));
+        var store = new HumanReviewDecisionActionRecoveryTestStore(new(HumanReviewDecisionActionRecoveryPageStatus.Current, [candidate], null, false), new(HumanReviewDecisionActionCandidateReadStatus.Stale))
+        {
+            ClaimResult = new(HumanReviewDecisionActionStoreMutationStatus.Conflict)
+        };
+        var coordinator = new HumanReviewDecisionActionRecoveryCoordinator(store, new HumanReviewDecisionActionRecoveryTestConsumer(new(HumanReviewContinuationConsumptionStatus.Invalid)), new HumanReviewDecisionActionRecoveryTestReleasePort(new(HumanReviewDecisionActionReleaseStatus.Unavailable)), new HumanReviewDecisionTestClock(_now, _now));
+
+        var result = await coordinator.RecoverAsync(new(1, null, "action-worker-one", TimeSpan.FromMinutes(5)));
+
+        Assert.Equal(HumanReviewDecisionActionRecoveryItemStatus.ClaimConflict, Assert.Single(result.Items).Status);
+        Assert.Equal(candidate.WakeExpiresAtUtc, store.LastClaim?.Claim.LeaseExpiresAtUtc);
+    }
+
+    [Fact]
+    public async Task Claim_limit_result_requires_fail_closed_blocked_retirement_with_the_exact_prior_claim()
+    {
+        var prior = new HumanReviewDecisionActionClaimReference("action-prior-claim", Hash('e'));
+        var candidate = Candidate(_now.AddMinutes(10)) with { PriorClaim = prior };
+        var store = new HumanReviewDecisionActionRecoveryTestStore(new(HumanReviewDecisionActionRecoveryPageStatus.Current, [candidate], null, false), new(HumanReviewDecisionActionCandidateReadStatus.Stale))
+        {
+            ClaimResult = new(HumanReviewDecisionActionStoreMutationStatus.LimitExceeded)
+        };
+        var coordinator = new HumanReviewDecisionActionRecoveryCoordinator(store, new HumanReviewDecisionActionRecoveryTestConsumer(new(HumanReviewContinuationConsumptionStatus.Invalid)), new HumanReviewDecisionActionRecoveryTestReleasePort(new(HumanReviewDecisionActionReleaseStatus.Unavailable)), new HumanReviewDecisionTestClock(_now, _now, _now));
+
+        var result = await coordinator.RecoverAsync(new(1, null, "action-worker-one", TimeSpan.FromMinutes(5)));
+
+        Assert.Equal(HumanReviewDecisionActionRecoveryItemStatus.Retired, Assert.Single(result.Items).Status);
+        Assert.Equal(HumanReviewContinuationOutcome.Blocked, store.LastRetirement?.Outcome);
+        Assert.Equal(HumanReviewDecisionActionRetirementReason.ClaimLimitExceeded, store.LastRetirement?.Reason);
+        Assert.Equal(prior, store.LastRetirement?.Claim);
+    }
+
+    [Fact]
+    public async Task Trusted_clock_fence_prevents_release_after_the_exact_claim_expires()
+    {
+        var fixture = await CreateClaimedRecoveryFixtureAsync();
+        var store = fixture.Store;
+        var release = fixture.Release;
+        var coordinator = new HumanReviewDecisionActionRecoveryCoordinator(store, fixture.Consumer, release, new HumanReviewDecisionTestClock(fixture.Wake.PublishedAtUtc.AddMinutes(1), fixture.Wake.PublishedAtUtc.AddMinutes(1), fixture.Claim.LeaseExpiresAtUtc));
+
+        var result = await coordinator.RecoverAsync(new(1, null, "action-worker-two", TimeSpan.FromMinutes(5)));
+
+        Assert.Equal(HumanReviewDecisionActionRecoveryItemStatus.StaleAfterClaim, Assert.Single(result.Items).Status);
+        Assert.Equal(0, release.Count);
+        Assert.Equal(0, store.CompleteCount);
     }
 
     private static HumanReviewDecisionActionRecoveryCandidate Candidate(DateTimeOffset expiresAtUtc)
@@ -79,6 +134,27 @@ public sealed class HumanReviewDecisionActionRecoveryCoordinatorTests
 
     private static HumanReviewDecisionActionRecoveryCandidate Candidate(DateTimeOffset expiresAtUtc, CustomLoopRunRecord run, HumanReviewDecisionActionState action, HumanReviewDecisionActionClaimReference? priorClaim)
         => new(run.Id, run.LifecycleVersion - 1, action.Reservation.Request, action.Reservation.Decision, new(action.Wake!.WakeId, action.Wake.WakeHash), action.ExpectedGeneration, expiresAtUtc, new(action.Reservation.ReservationId, action.Reservation.ReservationHash), priorClaim);
+
+    private static async Task<ClaimedRecoveryFixture> CreateClaimedRecoveryFixtureAsync()
+    {
+        var fixture = await HumanReviewDecisionTestData.CreateAsync();
+        var decisionStore = new HumanReviewDecisionTestStore(fixture.Run);
+        _ = await new HumanReviewDecisionService(decisionStore, new HumanReviewDecisionTestAuthorizer(), new HumanReviewDecisionTestClock(fixture.Run.UpdatedAtUtc.AddMinutes(1))).DecideAsync(HumanReviewDecisionTestData.Command(fixture.Run, "action-fence-reject", HumanReviewDecisionKind.Reject));
+        var reservedRun = Assert.IsType<CustomLoopRunRecord>(decisionStore.Run);
+        var reservedAction = Assert.Single(Assert.IsType<HumanReviewRunState>(reservedRun.HumanReview).DecisionActions);
+        var wake = Wake(reservedAction, fixture.Request);
+        var claim = Claim(reservedAction, wake);
+        var action = HumanReviewDecisionActionContractHash.ApplyState(reservedAction with { Wake = wake, Claims = [claim], StateHash = string.Empty });
+        var currentRun = reservedRun with { LifecycleVersion = reservedRun.LifecycleVersion + 1 };
+        var current = new HumanReviewDecisionActionCandidate(new HumanReviewContinuationCandidate(currentRun, null, null, null), action, claim);
+        var candidate = Candidate(wake.ExpiresAtUtc, currentRun, action, null);
+        var sourceAction = new HumanReviewContinuationActionIntent(HumanReviewContinuationAction.FailRejected, currentRun.Id, currentRun.LifecycleVersion, action.Reservation.Request, action.Reservation.Decision, null, null, null, null, null, null);
+        var consumer = new HumanReviewDecisionActionRecoveryTestConsumer(new(HumanReviewContinuationConsumptionStatus.DecisionPathPrepared, sourceAction));
+        var completion = Completion(action, claim);
+        var release = new HumanReviewDecisionActionRecoveryTestReleasePort(new(HumanReviewDecisionActionReleaseStatus.Completed, completion));
+        var store = new HumanReviewDecisionActionRecoveryTestStore(new(HumanReviewDecisionActionRecoveryPageStatus.Current, [candidate], null, false), new(HumanReviewDecisionActionCandidateReadStatus.Current, current));
+        return new ClaimedRecoveryFixture(store, consumer, release, wake, claim);
+    }
 
     private static HumanReviewDecisionActionWake Wake(HumanReviewDecisionActionState action, HumanReviewRequest request)
         => HumanReviewDecisionActionContractHash.ApplyWake(new(1, "action-recovery-wake", action.Reservation.Request, action.Reservation.Decision, new(action.Reservation.ReservationId, action.Reservation.ReservationHash), action.BindingHash, action.ExpectedGeneration, action.Reservation.ReservedAtUtc, request.Timing.ExpiresAtUtc, Provenance("action-recovery-wake", action.Reservation.ReservedAtUtc), string.Empty));
@@ -97,4 +173,6 @@ public sealed class HumanReviewDecisionActionRecoveryCoordinatorTests
 
     private static HumanReviewProvenance Provenance(string correlationId, DateTimeOffset observedAtUtc) => HumanReviewContractHash.ApplyProvenance(new(HumanReviewProvenanceKind.Coordinator, "action-recovery", correlationId, observedAtUtc, string.Empty));
     private static string Hash(char character) => new(character, HumanReviewContractLimits.Sha256HexCharacters);
+
+    private sealed record ClaimedRecoveryFixture(HumanReviewDecisionActionRecoveryTestStore Store, HumanReviewDecisionActionRecoveryTestConsumer Consumer, HumanReviewDecisionActionRecoveryTestReleasePort Release, HumanReviewDecisionActionWake Wake, HumanReviewDecisionActionClaim Claim);
 }

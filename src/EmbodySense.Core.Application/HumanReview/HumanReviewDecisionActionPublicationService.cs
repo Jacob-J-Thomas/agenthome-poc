@@ -40,14 +40,15 @@ public sealed class HumanReviewDecisionActionPublicationService : IHumanReviewDe
             {
                 return Result(read.Status);
             }
-            if (!TryBuild(read.Run, command.Reservation, out var expected))
+            if (!TryBuild(read.Run, command.Reservation, out var retained, out var expected))
             {
                 return Result(HumanReviewDecisionActionStoreMutationStatus.Invalid);
             }
-            if (FindAction(read.Run, command.Reservation) is { } retained && retained.Wake is not null)
+            if (retained!.Wake is not null)
             {
                 return ExactWake(retained, expected!) ? Result(HumanReviewDecisionActionStoreMutationStatus.Replayed) : Result(HumanReviewDecisionActionStoreMutationStatus.Conflict);
             }
+            if (!CanPublishFresh(read.Run, retained)) return Result(HumanReviewDecisionActionStoreMutationStatus.Conflict);
 
             try
             {
@@ -79,9 +80,8 @@ public sealed class HumanReviewDecisionActionPublicationService : IHumanReviewDe
     private async Task<HumanReviewDecisionActionStoreMutationResult?> ReconcileAsync(HumanReviewDecisionActionPublicationCommand command)
     {
         var read = await ReadAsync(command.RunId, CancellationToken.None).ConfigureAwait(false);
-        if (read.Status != HumanReviewDecisionActionStoreMutationStatus.Committed || read.Run is null || !TryBuild(read.Run, command.Reservation, out var expected)) return null;
-        var retained = FindAction(read.Run, command.Reservation);
-        return retained?.Wake is null ? null : ExactWake(retained, expected!) ? Result(HumanReviewDecisionActionStoreMutationStatus.Replayed) : Result(HumanReviewDecisionActionStoreMutationStatus.Conflict);
+        if (read.Status != HumanReviewDecisionActionStoreMutationStatus.Committed || read.Run is null || !TryBuild(read.Run, command.Reservation, out var retained, out var expected)) return null;
+        return retained!.Wake is null ? null : ExactWake(retained, expected!) ? Result(HumanReviewDecisionActionStoreMutationStatus.Replayed) : Result(HumanReviewDecisionActionStoreMutationStatus.Conflict);
     }
 
     private async Task<(HumanReviewDecisionActionStoreMutationStatus Status, CustomLoopRunRecord? Run)> ReadAsync(string runId, CancellationToken cancellationToken)
@@ -92,13 +92,14 @@ public sealed class HumanReviewDecisionActionPublicationService : IHumanReviewDe
         catch { return (HumanReviewDecisionActionStoreMutationStatus.Unavailable, null); }
     }
 
-    private static bool TryBuild(CustomLoopRunRecord run, HumanReviewDecisionActionReservationReference referenceValue, out HumanReviewDecisionActionState? expected)
+    private static bool TryBuild(CustomLoopRunRecord run, HumanReviewDecisionActionReservationReference referenceValue, out HumanReviewDecisionActionState? retained, out HumanReviewDecisionActionState? expected)
     {
+        retained = null;
         expected = null;
         try
         {
-            var retained = FindAction(run, referenceValue);
-            if (!CustomLoopRunValidator.Validate(run).IsValid || retained is null || retained.Completion is not null || retained.Retirement is not null || !retained.Claims.IsDefaultOrEmpty || run.HumanReview?.Request is not { } request || retained.Reservation.Decision.Kind is not (HumanReviewDecisionKind.Reject or HumanReviewDecisionKind.Cancel or HumanReviewDecisionKind.RequestInformation)) return false;
+            retained = FindAction(run, referenceValue);
+            if (!CustomLoopRunValidator.Validate(run).IsValid || retained is null || run.HumanReview?.Request is not { } request || retained.Reservation.Decision.Kind is not (HumanReviewDecisionKind.Reject or HumanReviewDecisionKind.Cancel or HumanReviewDecisionKind.RequestInformation)) return false;
             var wakeId = Id("action-wake", retained.Reservation.ReservationHash);
             var provenance = HumanReviewContractHash.ApplyProvenance(new HumanReviewProvenance(HumanReviewProvenanceKind.Coordinator, "human-review-action-publisher", wakeId, retained.Reservation.ReservedAtUtc, string.Empty));
             var wake = HumanReviewDecisionActionContractHash.ApplyWake(new HumanReviewDecisionActionWake(1, wakeId, retained.Reservation.Request, retained.Reservation.Decision, referenceValue, retained.BindingHash, retained.ExpectedGeneration, retained.Reservation.ReservedAtUtc, request.Timing.ExpiresAtUtc, provenance, string.Empty));
@@ -107,9 +108,10 @@ public sealed class HumanReviewDecisionActionPublicationService : IHumanReviewDe
             expected = candidate;
             return true;
         }
-        catch { return false; }
+        catch { retained = null; expected = null; return false; }
     }
 
+    private static bool CanPublishFresh(CustomLoopRunRecord run, HumanReviewDecisionActionState retained) => retained.Wake is null && retained.Claims.IsDefaultOrEmpty && retained.Completion is null && retained.Retirement is null && HumanReviewDecisionActionContractValidator.IsCurrentActionHead(run.HumanReview, retained);
     private static HumanReviewDecisionActionState? FindAction(CustomLoopRunRecord run, HumanReviewDecisionActionReservationReference referenceValue) => run.HumanReview?.DecisionActions.FirstOrDefault(value => value is not null && value.Reservation.ReservationId == referenceValue.ReservationId && value.Reservation.ReservationHash == referenceValue.ReservationHash);
     private static bool ExactWake(HumanReviewDecisionActionState retained, HumanReviewDecisionActionState expected) => retained.Wake is not null && expected.Wake is not null && HumanReviewDecisionActionContractHash.MatchesState(retained) && retained.Wake.WakeHash == expected.Wake.WakeHash;
     private static HumanReviewDecisionActionStoreMutationResult Result(HumanReviewDecisionActionStoreMutationStatus status) => new(status);

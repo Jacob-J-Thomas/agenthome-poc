@@ -315,6 +315,34 @@ public sealed class HumanReviewContinuationConsumerTests
     }
 
     [Fact]
+    public async Task Exact_nonapproval_action_consumption_rejects_a_superseded_action_head_without_any_port_callback()
+    {
+        var initial = await HumanReviewDecisionTestData.CreateAsync();
+        var store = new HumanReviewDecisionTestStore(initial.Run);
+        var service = new HumanReviewDecisionService(store, new HumanReviewDecisionTestAuthorizer(), new HumanReviewDecisionTestClock(initial.Run.UpdatedAtUtc.AddMinutes(1), initial.Run.UpdatedAtUtc.AddMinutes(2)));
+        Assert.Equal(HumanReviewDecisionServiceStatus.InformationRequested, (await service.DecideAsync(HumanReviewDecisionTestData.Command(initial.Run, "stale-action-information", HumanReviewDecisionKind.RequestInformation, "Need a bounded clarification."))).Status);
+        var informationRun = Assert.IsType<CustomLoopRunRecord>(store.Run);
+        Assert.Equal(HumanReviewDecisionServiceStatus.Accepted, (await service.DecideAsync(HumanReviewDecisionTestData.Command(informationRun, "stale-action-reject", HumanReviewDecisionKind.Reject))).Status);
+        var currentRun = Assert.IsType<CustomLoopRunRecord>(store.Run);
+        var review = Assert.IsType<EmbodySense.Core.Common.Loops.Models.Custom.Execution.HumanReviewRunState>(currentRun.HumanReview);
+        var superseded = review.AcceptedDecisions[0];
+        var reference = new HumanReviewDecisionReference(superseded.DecisionId, superseded.DecisionOperationId, superseded.Kind, superseded.DecisionHash);
+        var context = await GovernedLoopSequentialRunMaterializerTests.ContextAsync();
+        var authority = new RecordingAuthoritySource(HumanReviewContinuationAuthorityReadStatus.Current);
+        var effectEvidence = new RecordingEffectEvidenceSource();
+        var effectCertainty = new RecordingEffectCertaintySource();
+        var consumer = Consumer(authority, effectEvidence, effectCertainty, currentRun.UpdatedAtUtc.AddSeconds(1));
+
+        var result = await consumer.ConsumeDecisionActionAsync(new(currentRun, context.Artifact, null, null), reference);
+
+        Assert.Equal(HumanReviewContinuationConsumptionStatus.Invalid, result.Status);
+        Assert.Null(result.Action);
+        Assert.Equal(0, authority.ReadCount);
+        Assert.Equal(0, effectEvidence.ReadCount);
+        Assert.Equal(0, effectCertainty.ReadCount);
+    }
+
+    [Fact]
     public async Task Missing_or_mismatched_claim_fails_closed_without_any_port_callback()
     {
         var fixture = await ApprovedCandidateAsync();

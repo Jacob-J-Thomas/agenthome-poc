@@ -276,6 +276,7 @@ public sealed class HumanReviewContinuationConsumer : IHumanReviewContinuationCo
                 || candidate.GraphArtifact is not { } graphArtifact || !MatchesGraph(adapterBinding, graphArtifact)
                 || !HumanReviewContractSnapshot.TryCaptureRequest(review.Request, out var request, out _) || request is null
                 || !TryGetAcceptedDecision(review, request, exactDecision, out var decision) || decision is null
+                || exactDecision is not null && !HasCurrentDecisionActionHead(review, exactDecision)
                 || !MatchesBinding(run, request, graphArtifact, adapterBinding))
             {
                 return false;
@@ -347,6 +348,19 @@ public sealed class HumanReviewContinuationConsumer : IHumanReviewContinuationCo
             && string.Equals(expected.DecisionOperationId, actual.DecisionOperationId, StringComparison.Ordinal)
             && expected.Kind == actual.Kind
             && string.Equals(expected.DecisionHash, actual.DecisionHash, StringComparison.Ordinal);
+
+    private static bool HasCurrentDecisionActionHead(HumanReviewRunState review, HumanReviewDecisionReference exactDecision)
+    {
+        try
+        {
+            var matches = review.DecisionActions.Where(action => action is not null && action.Reservation.Decision.DecisionId == exactDecision.DecisionId && action.Reservation.Decision.DecisionOperationId == exactDecision.DecisionOperationId && action.Reservation.Decision.Kind == exactDecision.Kind && action.Reservation.Decision.DecisionHash == exactDecision.DecisionHash).Take(2).ToArray();
+            return matches.Length == 1 && HumanReviewDecisionActionContractValidator.IsCurrentActionHead(review, matches[0]);
+        }
+        catch
+        {
+            return false;
+        }
+    }
 
     private static HumanReviewContinuationReservation? TryCaptureReservation(HumanReviewRequest request, HumanReviewContinuationReservation? reservation)
     {

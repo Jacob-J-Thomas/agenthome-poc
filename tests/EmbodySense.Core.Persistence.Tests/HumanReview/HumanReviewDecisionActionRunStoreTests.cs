@@ -45,10 +45,12 @@ public sealed class HumanReviewDecisionActionRunStoreTests
         Assert.Equal(HumanReviewDecisionActionStoreMutationStatus.Committed, claimed.Status);
         var afterClaim = Assert.IsType<CustomLoopRunRecord>(await store.GetAsync(published.Id));
         var claimedAction = Assert.Single(Assert.IsType<HumanReviewRunState>(afterClaim.HumanReview).DecisionActions);
+        Assert.Equal(HumanReviewDecisionActionStoreMutationStatus.Replayed, (await actions.ClaimAsync(new(candidate, claim))).Status);
         Assert.Empty((await actions.ListCandidatesAsync(1, null, claim.LeaseExpiresAtUtc)).Candidates);
         var takeoverPage = await actions.ListCandidatesAsync(1, null, claim.LeaseExpiresAtUtc.AddTicks(1));
         Assert.Equal(new HumanReviewDecisionActionClaimReference(claim.ClaimId, claim.ClaimHash), Assert.Single(takeoverPage.Candidates).PriorClaim);
         var prior = new HumanReviewDecisionActionClaimReference(claim.ClaimId, claim.ClaimHash);
+        Assert.Equal(HumanReviewDecisionActionStoreMutationStatus.Conflict, (await actions.ClaimAsync(new(candidate with { PriorClaim = prior }, claim))).Status);
         var early = Claim(claimedAction, claim.LeaseExpiresAtUtc, "action-early-" + kind.ToString().ToLowerInvariant());
         var takeoverCandidate = candidate with { ExpectedLifecycleVersion = afterClaim.LifecycleVersion, PriorClaim = prior };
         Assert.Equal(HumanReviewDecisionActionStoreMutationStatus.Invalid, (await actions.ClaimAsync(new(takeoverCandidate, early))).Status);
@@ -67,6 +69,8 @@ public sealed class HumanReviewDecisionActionRunStoreTests
         Assert.Equal(HumanReviewDecisionActionStoreMutationStatus.Replayed, (await actions.CompleteAsync(intent, completion)).Status);
         var durable = Assert.IsType<CustomLoopRunRecord>(await store.GetAsync(afterTakeover.Id));
         Assert.Equal(completion.CompletionHash, Assert.Single(Assert.IsType<HumanReviewRunState>(durable.HumanReview).DecisionActions).Completion?.CompletionHash);
+        Assert.Equal(HumanReviewDecisionActionStoreMutationStatus.Replayed, (await publisher.PublishAsync(new(durable.Id, new(takenOverAction.Reservation.ReservationId, takenOverAction.Reservation.ReservationHash)))).Status);
+        Assert.Equal(HumanReviewDecisionActionCandidateReadStatus.Stale, (await actions.ReadAsync(new(durable.Id, new(takenOverAction.Reservation.Request.RequestId, takenOverAction.Reservation.Request.RequestHash), takenOverAction.Reservation.Decision, new(wake.WakeId, wake.WakeHash), new(successor.ClaimId, successor.ClaimHash), new(takenOverAction.Reservation.ReservationId, takenOverAction.Reservation.ReservationHash), takenOverAction.ExpectedGeneration))).Status);
     }
 
     [Fact]
@@ -93,6 +97,36 @@ public sealed class HumanReviewDecisionActionRunStoreTests
         Assert.Equal(1, results.Count(result => result.Status == HumanReviewDecisionActionStoreMutationStatus.Conflict));
         var stale = candidate with { ExpectedGeneration = candidate.ExpectedGeneration + 1 };
         Assert.Equal(HumanReviewDecisionActionStoreMutationStatus.Invalid, (await actions.ClaimAsync(new(stale, Claim(retained, wake.PublishedAtUtc.AddMinutes(2), "action-race-claim-three")))).Status);
+    }
+
+    [Fact]
+    public async Task Superseded_action_head_is_not_freshly_claimable_discoverable_or_readable()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var admitted = await CustomLoopFrontierStoreTests.PersistHumanReviewAdmissionAsync(paths, "action-superseded-head");
+        using var store = new CustomLoopRunStore(paths);
+        var decision = new HumanReviewDecisionService(store, new HumanReviewDecisionStoreTestAuthorizer(), new HumanReviewDecisionStoreTestClock(admitted.UpdatedAtUtc.AddMinutes(1)));
+        Assert.Equal(HumanReviewDecisionServiceStatus.InformationRequested, (await decision.DecideAsync(new(admitted.Id, admitted.LifecycleVersion, "action-superseded-information", HumanReviewDecisionKind.RequestInformation, "Need a bounded clarification."))).Status);
+        var information = Assert.IsType<CustomLoopRunRecord>(await store.GetAsync(admitted.Id));
+        var informationAction = Assert.Single(Assert.IsType<HumanReviewRunState>(information.HumanReview).DecisionActions);
+        var actions = new HumanReviewDecisionActionRunStore(store);
+        var publisher = new HumanReviewDecisionActionPublicationService(store, actions);
+        var informationReservation = new HumanReviewDecisionActionReservationReference(informationAction.Reservation.ReservationId, informationAction.Reservation.ReservationHash);
+        Assert.Equal(HumanReviewDecisionActionStoreMutationStatus.Committed, (await publisher.PublishAsync(new(information.Id, informationReservation))).Status);
+        var publishedInformation = Assert.IsType<CustomLoopRunRecord>(await store.GetAsync(information.Id));
+        var rejection = new HumanReviewDecisionService(store, new HumanReviewDecisionStoreTestAuthorizer(), new HumanReviewDecisionStoreTestClock(admitted.UpdatedAtUtc.AddMinutes(2)));
+        Assert.Equal(HumanReviewDecisionServiceStatus.Accepted, (await rejection.DecideAsync(new(publishedInformation.Id, publishedInformation.LifecycleVersion, "action-superseded-reject", HumanReviewDecisionKind.Reject, null))).Status);
+        var current = Assert.IsType<CustomLoopRunRecord>(await store.GetAsync(admitted.Id));
+        var oldAction = Assert.IsType<HumanReviewRunState>(current.HumanReview).DecisionActions[0];
+        var oldWake = Assert.IsType<HumanReviewDecisionActionWake>(oldAction.Wake);
+        var oldCandidate = Candidate(current, oldAction, null);
+        var oldClaim = Claim(oldAction, oldWake.PublishedAtUtc.AddMinutes(1), "action-superseded-claim");
+
+        Assert.Equal(HumanReviewDecisionActionStoreMutationStatus.Replayed, (await publisher.PublishAsync(new(current.Id, informationReservation))).Status);
+        Assert.Equal(HumanReviewDecisionActionStoreMutationStatus.Conflict, (await actions.ClaimAsync(new(oldCandidate, oldClaim))).Status);
+        Assert.Empty((await actions.ListCandidatesAsync(10, null, oldWake.PublishedAtUtc.AddMinutes(1))).Candidates);
+        Assert.Equal(HumanReviewDecisionActionCandidateReadStatus.Stale, (await actions.ReadAsync(new(current.Id, oldAction.Reservation.Request, oldAction.Reservation.Decision, new(oldWake.WakeId, oldWake.WakeHash), new(oldClaim.ClaimId, oldClaim.ClaimHash), informationReservation, oldAction.ExpectedGeneration))).Status);
     }
 
     [Theory]
@@ -380,7 +414,7 @@ public sealed class HumanReviewDecisionActionRunStoreTests
         var published = Assert.IsType<CustomLoopRunRecord>(await store.GetAsync(reserved.Id));
         var action = Assert.Single(Assert.IsType<HumanReviewRunState>(published.HumanReview).DecisionActions);
         var wake = Assert.IsType<HumanReviewDecisionActionWake>(action.Wake);
-        var retirement = HumanReviewDecisionActionContractHash.ApplyRetirement(new(1, "action-expired-retirement-one", new(wake.WakeId, wake.WakeHash), reservation, action.ExpectedGeneration, HumanReviewContinuationOutcome.Expired, wake.ExpiresAtUtc, ImmutableArray<HumanReviewRedactedPreview>.Empty, Provenance("action-expired-retirement-one", wake.ExpiresAtUtc), string.Empty));
+        var retirement = HumanReviewDecisionActionContractHash.ApplyRetirement(new(1, "action-expired-retirement-one", new(wake.WakeId, wake.WakeHash), reservation, action.ExpectedGeneration, HumanReviewContinuationOutcome.Expired, HumanReviewDecisionActionRetirementReason.Expired, wake.ExpiresAtUtc, ImmutableArray<HumanReviewRedactedPreview>.Empty, Provenance("action-expired-retirement-one", wake.ExpiresAtUtc), string.Empty));
         var intent = new HumanReviewDecisionActionRetirementIntent(published.Id, published.LifecycleVersion, new(wake.WakeId, wake.WakeHash), null, reservation, action.ExpectedGeneration, HumanReviewContinuationOutcome.Expired, HumanReviewDecisionActionRetirementReason.Expired);
 
         Assert.Equal(HumanReviewDecisionActionStoreMutationStatus.Committed, (await actions.RetireAsync(intent, retirement)).Status);
@@ -388,6 +422,69 @@ public sealed class HumanReviewDecisionActionRunStoreTests
         var retired = Assert.Single(Assert.IsType<HumanReviewRunState>(Assert.IsType<CustomLoopRunRecord>(await store.GetAsync(published.Id)).HumanReview).DecisionActions);
         Assert.Equal(retirement.RetirementHash, retired.Retirement?.RetirementHash);
         Assert.Null(retired.Completion);
+    }
+
+    [Fact]
+    public async Task Expired_claimed_action_and_exhausted_claim_history_retire_fail_closed_with_exact_reason_binding()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var admitted = await CustomLoopFrontierStoreTests.PersistHumanReviewAdmissionAsync(paths, "action-claimed-expired-retirement");
+        using var store = new CustomLoopRunStore(paths);
+        _ = await new HumanReviewDecisionService(store, new HumanReviewDecisionStoreTestAuthorizer(), new HumanReviewDecisionStoreTestClock(admitted.UpdatedAtUtc.AddMinutes(1))).DecideAsync(new(admitted.Id, admitted.LifecycleVersion, "action-claimed-expired-decision", HumanReviewDecisionKind.Reject, null));
+        var reserved = Assert.IsType<CustomLoopRunRecord>(await store.GetAsync(admitted.Id));
+        var initial = Assert.Single(Assert.IsType<HumanReviewRunState>(reserved.HumanReview).DecisionActions);
+        var actions = new HumanReviewDecisionActionRunStore(store);
+        var reservation = new HumanReviewDecisionActionReservationReference(initial.Reservation.ReservationId, initial.Reservation.ReservationHash);
+        Assert.Equal(HumanReviewDecisionActionStoreMutationStatus.Committed, (await new HumanReviewDecisionActionPublicationService(store, actions).PublishAsync(new(reserved.Id, reservation))).Status);
+        var published = Assert.IsType<CustomLoopRunRecord>(await store.GetAsync(reserved.Id));
+        var action = Assert.Single(Assert.IsType<HumanReviewRunState>(published.HumanReview).DecisionActions);
+        var claim = Claim(action, action.Wake!.PublishedAtUtc.AddMinutes(1), "action-claimed-expired-claim");
+        Assert.Equal(HumanReviewDecisionActionStoreMutationStatus.Committed, (await actions.ClaimAsync(new(Candidate(published, action, null), claim))).Status);
+        var claimed = Assert.IsType<CustomLoopRunRecord>(await store.GetAsync(published.Id));
+        action = Assert.Single(Assert.IsType<HumanReviewRunState>(claimed.HumanReview).DecisionActions);
+        var expiration = action.Wake!.ExpiresAtUtc;
+        var expired = HumanReviewDecisionActionContractHash.ApplyRetirement(new(1, "action-claimed-expired-retirement", new(action.Wake.WakeId, action.Wake.WakeHash), reservation, action.ExpectedGeneration, HumanReviewContinuationOutcome.Expired, HumanReviewDecisionActionRetirementReason.Expired, expiration, ImmutableArray<HumanReviewRedactedPreview>.Empty, Provenance("action-claimed-expired-retirement", expiration), string.Empty));
+        var intent = new HumanReviewDecisionActionRetirementIntent(claimed.Id, claimed.LifecycleVersion, new(action.Wake.WakeId, action.Wake.WakeHash), new(claim.ClaimId, claim.ClaimHash), reservation, action.ExpectedGeneration, HumanReviewContinuationOutcome.Expired, HumanReviewDecisionActionRetirementReason.Expired);
+
+        Assert.Equal(HumanReviewDecisionActionStoreMutationStatus.Committed, (await actions.RetireAsync(intent, expired)).Status);
+        Assert.Equal(HumanReviewDecisionActionStoreMutationStatus.Conflict, (await actions.RetireAsync(intent with { Outcome = HumanReviewContinuationOutcome.Blocked, Reason = HumanReviewDecisionActionRetirementReason.Invalid }, expired)).Status);
+
+        using var capWorkspace = new TestWorkspace();
+        var capPaths = new WorkspacePaths(capWorkspace.RootPath);
+        var capAdmitted = await CustomLoopFrontierStoreTests.PersistHumanReviewAdmissionAsync(capPaths, "action-claim-limit-retirement");
+        using var capStore = new CustomLoopRunStore(capPaths);
+        var capActions = new HumanReviewDecisionActionRunStore(capStore);
+        _ = await new HumanReviewDecisionService(capStore, new HumanReviewDecisionStoreTestAuthorizer(), new HumanReviewDecisionStoreTestClock(capAdmitted.UpdatedAtUtc.AddMinutes(1))).DecideAsync(new(capAdmitted.Id, capAdmitted.LifecycleVersion, "action-claim-limit-decision", HumanReviewDecisionKind.Cancel, null));
+        var capReserved = Assert.IsType<CustomLoopRunRecord>(await capStore.GetAsync(capAdmitted.Id));
+        var capInitial = Assert.Single(Assert.IsType<HumanReviewRunState>(capReserved.HumanReview).DecisionActions);
+        var capReservation = new HumanReviewDecisionActionReservationReference(capInitial.Reservation.ReservationId, capInitial.Reservation.ReservationHash);
+        Assert.Equal(HumanReviewDecisionActionStoreMutationStatus.Committed, (await new HumanReviewDecisionActionPublicationService(capStore, capActions).PublishAsync(new(capReserved.Id, capReservation))).Status);
+        var capCurrent = Assert.IsType<CustomLoopRunRecord>(await capStore.GetAsync(capReserved.Id));
+        var capAction = Assert.Single(Assert.IsType<HumanReviewRunState>(capCurrent.HumanReview).DecisionActions);
+        HumanReviewDecisionActionClaim? latest = null;
+        for (var index = 0; index < HumanReviewContractLimits.MaxContinuationClaims; index++)
+        {
+            var claimedAtUtc = latest is null ? capAction.Wake!.PublishedAtUtc.AddMinutes(1) : latest.LeaseExpiresAtUtc.AddTicks(1);
+            var next = Claim(capAction, claimedAtUtc, "action-claim-limit-" + index, TimeSpan.FromMinutes(1));
+            var prior = latest is null ? null : new HumanReviewDecisionActionClaimReference(latest.ClaimId, latest.ClaimHash);
+            Assert.Equal(HumanReviewDecisionActionStoreMutationStatus.Committed, (await capActions.ClaimAsync(new(Candidate(capCurrent, capAction, prior), next))).Status);
+            capCurrent = Assert.IsType<CustomLoopRunRecord>(await capStore.GetAsync(capCurrent.Id));
+            capAction = Assert.Single(Assert.IsType<HumanReviewRunState>(capCurrent.HumanReview).DecisionActions);
+            latest = next;
+        }
+
+        var capPrior = new HumanReviewDecisionActionClaimReference(latest!.ClaimId, latest.ClaimHash);
+        var capCandidate = Candidate(capCurrent, capAction, capPrior);
+        var overflow = Claim(capAction, latest.LeaseExpiresAtUtc.AddTicks(1), "action-claim-limit-overflow", TimeSpan.FromMinutes(1));
+        Assert.Equal(HumanReviewDecisionActionStoreMutationStatus.LimitExceeded, (await capActions.ClaimAsync(new(capCandidate, overflow))).Status);
+        var retiredAtUtc = latest.LeaseExpiresAtUtc.AddTicks(1);
+        var exhausted = HumanReviewDecisionActionContractHash.ApplyRetirement(new(1, "action-claim-limit-retirement", new(capAction.Wake!.WakeId, capAction.Wake.WakeHash), capReservation, capAction.ExpectedGeneration, HumanReviewContinuationOutcome.Blocked, HumanReviewDecisionActionRetirementReason.ClaimLimitExceeded, retiredAtUtc, ImmutableArray<HumanReviewRedactedPreview>.Empty, Provenance("action-claim-limit-retirement", retiredAtUtc), string.Empty));
+        var exhaustedIntent = new HumanReviewDecisionActionRetirementIntent(capCurrent.Id, capCurrent.LifecycleVersion, new(capAction.Wake.WakeId, capAction.Wake.WakeHash), capPrior, capReservation, capAction.ExpectedGeneration, HumanReviewContinuationOutcome.Blocked, HumanReviewDecisionActionRetirementReason.ClaimLimitExceeded);
+
+        Assert.Equal(HumanReviewDecisionActionStoreMutationStatus.Committed, (await capActions.RetireAsync(exhaustedIntent, exhausted)).Status);
+        var exhaustedRun = Assert.IsType<CustomLoopRunRecord>(await capStore.GetAsync(capCurrent.Id));
+        Assert.Equal(HumanReviewDecisionActionRetirementReason.ClaimLimitExceeded, Assert.Single(Assert.IsType<HumanReviewRunState>(exhaustedRun.HumanReview).DecisionActions).Retirement?.Reason);
     }
 
     [Fact]
@@ -527,8 +624,8 @@ public sealed class HumanReviewDecisionActionRunStoreTests
     private static HumanReviewDecisionActionRecoveryCandidate Candidate(CustomLoopRunRecord run, HumanReviewDecisionActionState action, HumanReviewDecisionActionClaimReference? priorClaim)
         => new(run.Id, run.LifecycleVersion, new(run.HumanReview!.Request.RequestId, run.HumanReview.Request.RequestHash), action.Reservation.Decision, new(action.Wake!.WakeId, action.Wake.WakeHash), action.ExpectedGeneration, action.Wake.ExpiresAtUtc, new(action.Reservation.ReservationId, action.Reservation.ReservationHash), priorClaim);
 
-    private static HumanReviewDecisionActionClaim Claim(HumanReviewDecisionActionState action, DateTimeOffset claimedAtUtc, string claimId)
-        => HumanReviewDecisionActionContractHash.ApplyClaim(new(1, claimId, new(action.Wake!.WakeId, action.Wake.WakeHash), new(action.Reservation.ReservationId, action.Reservation.ReservationHash), action.ExpectedGeneration, "worker-" + claimId, claimedAtUtc, claimedAtUtc.AddMinutes(5), Provenance(claimId, claimedAtUtc), string.Empty));
+    private static HumanReviewDecisionActionClaim Claim(HumanReviewDecisionActionState action, DateTimeOffset claimedAtUtc, string claimId, TimeSpan? lease = null)
+        => HumanReviewDecisionActionContractHash.ApplyClaim(new(1, claimId, new(action.Wake!.WakeId, action.Wake.WakeHash), new(action.Reservation.ReservationId, action.Reservation.ReservationHash), action.ExpectedGeneration, "worker-" + claimId, claimedAtUtc, claimedAtUtc.Add(lease ?? TimeSpan.FromMinutes(5)), Provenance(claimId, claimedAtUtc), string.Empty));
 
     private static HumanReviewDecisionActionCompletion Completion(HumanReviewDecisionActionState action, HumanReviewDecisionActionClaim claim, HumanReviewDecisionActionDisposition disposition, DateTimeOffset completedAtUtc, string? completionId = null)
     {
@@ -537,7 +634,7 @@ public sealed class HumanReviewDecisionActionRunStoreTests
     }
 
     private static HumanReviewDecisionActionRetirement Retirement(HumanReviewDecisionActionState action, HumanReviewDecisionActionClaim claim, HumanReviewContinuationOutcome outcome, DateTimeOffset retiredAtUtc, string retirementId)
-        => HumanReviewDecisionActionContractHash.ApplyRetirement(new(1, retirementId, new(action.Wake!.WakeId, action.Wake.WakeHash), new(action.Reservation.ReservationId, action.Reservation.ReservationHash), action.ExpectedGeneration, outcome, retiredAtUtc, ImmutableArray<HumanReviewRedactedPreview>.Empty, Provenance(retirementId, retiredAtUtc), string.Empty));
+        => HumanReviewDecisionActionContractHash.ApplyRetirement(new(1, retirementId, new(action.Wake!.WakeId, action.Wake.WakeHash), new(action.Reservation.ReservationId, action.Reservation.ReservationHash), action.ExpectedGeneration, outcome, HumanReviewDecisionActionRetirementReason.Invalid, retiredAtUtc, ImmutableArray<HumanReviewRedactedPreview>.Empty, Provenance(retirementId, retiredAtUtc), string.Empty));
 
     private static HumanReviewProvenance Provenance(string correlationId, DateTimeOffset observedAtUtc) => HumanReviewContractHash.ApplyProvenance(new(HumanReviewProvenanceKind.Coordinator, "human-review-action-store", correlationId, observedAtUtc, string.Empty));
     private static string Hash(char value) => new(value, HumanReviewContractLimits.Sha256HexCharacters);
