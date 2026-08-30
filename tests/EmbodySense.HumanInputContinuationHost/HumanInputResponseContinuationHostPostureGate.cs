@@ -2,6 +2,8 @@ namespace EmbodySense.HumanInputContinuationHost;
 
 internal sealed class HumanInputResponseContinuationHostPostureGate
 {
+    private static readonly TimeSpan _releaseTimeout = TimeSpan.FromSeconds(30);
+
     private readonly string _readyPath;
     private readonly string _releasePath;
 
@@ -55,6 +57,9 @@ internal sealed class HumanInputResponseContinuationHostPostureGate
             released.Set();
         }
 
-        released.Wait();
+        if (!released.Wait(_releaseTimeout))
+        {
+            throw new TimeoutException($"The Human Input continuation posture release marker `{_releasePath}` was not published.");
+        }
     }
 }
