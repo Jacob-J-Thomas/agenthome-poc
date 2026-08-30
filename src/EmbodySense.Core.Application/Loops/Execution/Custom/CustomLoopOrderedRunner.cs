@@ -2689,6 +2689,10 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 actor,
                 cancellationToken).ConfigureAwait(false);
         }
+        if (result.Status == GovernedLoopWorkspaceActionExecutionStatus.OperationInProgress)
+        {
+            return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.Conflict, run, result.Detail));
+        }
         if (result.Status == GovernedLoopWorkspaceActionExecutionStatus.Completed
             && result.CanonicalOutput is { } output
             && WorkspaceActionResultContract.TryParse(output, out _))
@@ -6600,6 +6604,14 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             && GovernedLoopSequentialNodeDescriptors.IsWait(node.Descriptor)
             && advance?.Terminal is not null
             && stoppedPureRun is { Status: CustomLoopRunStatus.Cancelled or CustomLoopRunStatus.Failed or CustomLoopRunStatus.NeedsReview }
+            && FindSequentialNodeEvidence(stoppedPureRun, node, activation, attempt) is null)
+        {
+            return advance;
+        }
+
+        if (handler.WasInvoked
+            && advance?.Terminal is { Status: CustomLoopOrderedRunStatus.Conflict }
+            && stoppedPureRun is not null
             && FindSequentialNodeEvidence(stoppedPureRun, node, activation, attempt) is null)
         {
             return advance;

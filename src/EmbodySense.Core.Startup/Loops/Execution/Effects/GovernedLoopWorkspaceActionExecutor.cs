@@ -91,6 +91,11 @@ public sealed class GovernedLoopWorkspaceActionExecutor : IGovernedLoopWorkspace
                         null,
                         "The exact prepared workspace Action effect is durably parked for governed Human Review.",
                         result.Attempt),
+                GovernedLoopEffectAttemptExecutionStatus.OperationInProgress
+                    => new GovernedLoopWorkspaceActionExecutionResult(
+                        GovernedLoopWorkspaceActionExecutionStatus.OperationInProgress,
+                        null,
+                        "Another executor owns the exact workspace Action effect attempt."),
                 _ => Review($"The workspace Action requires reconciliation with posture `{result.Status}`."),
             };
         }

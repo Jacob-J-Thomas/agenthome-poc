@@ -6,6 +6,8 @@ using EmbodySense.Core.Application.Loops.Wait;
 using EmbodySense.Core.Application.Loops.Wait.Models;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Revisions.Models;
+using EmbodySense.Core.Common.Loops.Sequential.Models;
 using EmbodySense.Tests.Support;
 
 namespace EmbodySense.CancellationHost.Persistence;
@@ -17,11 +19,17 @@ internal sealed class HumanReviewOrderedReleaseProcessContextResolver : IGoverne
         cancellationToken.ThrowIfCancellationRequested();
         var binding = run.SequentialAdapterBinding;
         var invocation = run.SequentialInvocationSnapshot;
-        var artifact = HumanReviewOrderedReleaseGraphFixture.Artifact();
+        if (binding is null || invocation is null)
+        {
+            return Task.FromResult<GovernedLoopWaitOrderedContext?>(null);
+        }
+        var artifact = ResolveArtifact(binding);
+        if (artifact is null)
+        {
+            return Task.FromResult<GovernedLoopWaitOrderedContext?>(null);
+        }
         var plan = GovernedLoopSequentialPlanBuilder.Build(artifact);
-        if (binding is null
-            || invocation is null
-            || plan.Plan is null
+        if (plan.Plan is null
             || !string.Equals(binding.GraphArtifactHash, artifact.ArtifactHash, StringComparison.Ordinal)
             || !string.Equals(binding.GraphLayoutHash, artifact.LayoutHash, StringComparison.Ordinal))
         {
@@ -44,4 +52,9 @@ internal sealed class HumanReviewOrderedReleaseProcessContextResolver : IGoverne
 
     public Task<CustomLoopOrderedRunResult> ResumeAsync(GovernedLoopWaitOrderedResumeRequest request, CancellationToken cancellationToken = default)
         => Task.FromResult(new CustomLoopOrderedRunResult(CustomLoopOrderedRunStatus.InvalidState, null, "The process verifier proves release persistence without owning production ordered re-entry."));
+
+    private static GovernedLoopGraphRevisionArtifact? ResolveArtifact(GovernedLoopSequentialAdapterBinding binding)
+        => new[] { HumanReviewOrderedReleaseGraphFixture.Artifact(), HumanReviewOrderedReleaseGraphFixture.PreDispatchEffectArtifact() }
+            .SingleOrDefault(candidate => string.Equals(candidate.ArtifactHash, binding.GraphArtifactHash, StringComparison.Ordinal)
+                && string.Equals(candidate.LayoutHash, binding.GraphLayoutHash, StringComparison.Ordinal));
 }

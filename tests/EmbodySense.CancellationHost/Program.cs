@@ -112,6 +112,36 @@ if (args is ["human-review-ordered-release-race", var humanReviewOrderedReleaseR
     return await HumanReviewOrderedReleaseProcessHost.RunRaceAsync(humanReviewOrderedReleaseRaceWorkspaceRoot, humanReviewOrderedReleaseRaceRunId, humanReviewOrderedReleaseRaceReadyPath, humanReviewOrderedReleaseRaceReleasePath, humanReviewOrderedReleaseRaceResultPath);
 }
 
+if (args is ["human-review-ordered-effect-park", var humanReviewOrderedEffectParkWorkspaceRoot, var humanReviewOrderedEffectParkRunId, var humanReviewOrderedEffectParkMarkerPath, var humanReviewOrderedEffectParkResultPath])
+{
+    return await HumanReviewOrderedReleaseProcessHost.ParkEffectAsync(humanReviewOrderedEffectParkWorkspaceRoot, humanReviewOrderedEffectParkRunId, humanReviewOrderedEffectParkMarkerPath, humanReviewOrderedEffectParkResultPath);
+}
+
+if (args is ["human-review-ordered-effect", var humanReviewOrderedEffectWorkspaceRoot, var humanReviewOrderedEffectRunId, var humanReviewOrderedEffectMarkerPath, var humanReviewOrderedEffectResultPath])
+{
+    return await HumanReviewOrderedReleaseProcessHost.RunEffectAsync(humanReviewOrderedEffectWorkspaceRoot, humanReviewOrderedEffectRunId, humanReviewOrderedEffectMarkerPath, humanReviewOrderedEffectResultPath);
+}
+
+if (args is ["human-review-ordered-effect-response-loss", var humanReviewOrderedEffectLossWorkspaceRoot, var humanReviewOrderedEffectLossRunId, var humanReviewOrderedEffectLossMarkerPath])
+{
+    return await HumanReviewOrderedReleaseProcessHost.RunEffectResponseLossAsync(humanReviewOrderedEffectLossWorkspaceRoot, humanReviewOrderedEffectLossRunId, humanReviewOrderedEffectLossMarkerPath);
+}
+
+if (args is ["human-review-ordered-effect-process-loss", var humanReviewOrderedEffectProcessLossWorkspaceRoot, var humanReviewOrderedEffectProcessLossRunId, var humanReviewOrderedEffectProcessLossMarkerPath, var humanReviewOrderedEffectProcessLossBoundary])
+{
+    return await HumanReviewOrderedReleaseProcessHost.RunEffectProcessLossAsync(humanReviewOrderedEffectProcessLossWorkspaceRoot, humanReviewOrderedEffectProcessLossRunId, humanReviewOrderedEffectProcessLossMarkerPath, humanReviewOrderedEffectProcessLossBoundary);
+}
+
+if (args is ["human-review-ordered-effect-race", var humanReviewOrderedEffectRaceWorkspaceRoot, var humanReviewOrderedEffectRaceRunId, var humanReviewOrderedEffectRaceMarkerPath, var humanReviewOrderedEffectRaceReadyPath, var humanReviewOrderedEffectRaceReleasePath, var humanReviewOrderedEffectRaceResultPath])
+{
+    return await HumanReviewOrderedReleaseProcessHost.RunEffectRaceAsync(humanReviewOrderedEffectRaceWorkspaceRoot, humanReviewOrderedEffectRaceRunId, humanReviewOrderedEffectRaceMarkerPath, humanReviewOrderedEffectRaceReadyPath, humanReviewOrderedEffectRaceReleasePath, humanReviewOrderedEffectRaceResultPath);
+}
+
+if (args is ["human-review-ordered-effect-owner-barrier", var humanReviewOrderedEffectOwnerWorkspaceRoot, var humanReviewOrderedEffectOwnerRunId, var humanReviewOrderedEffectOwnerMarkerPath, var humanReviewOrderedEffectOwnerReadyPath, var humanReviewOrderedEffectOwnerReleasePath, var humanReviewOrderedEffectOwnerResultPath])
+{
+    return await HumanReviewOrderedReleaseProcessHost.RunEffectOwnerBarrierAsync(humanReviewOrderedEffectOwnerWorkspaceRoot, humanReviewOrderedEffectOwnerRunId, humanReviewOrderedEffectOwnerMarkerPath, humanReviewOrderedEffectOwnerReadyPath, humanReviewOrderedEffectOwnerReleasePath, humanReviewOrderedEffectOwnerResultPath);
+}
+
 if (args is ["codex-runtime-probe", var probeConfigurationPath, .. var probeArguments])
 {
     return await CodexRuntimeProbeHost.RunAsync(probeConfigurationPath, probeArguments);

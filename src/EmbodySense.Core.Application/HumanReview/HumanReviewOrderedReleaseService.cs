@@ -146,6 +146,7 @@ public sealed class HumanReviewOrderedReleaseService : IHumanReviewContinuationR
         var persisted = await PersistAsync(run, candidate, currentReview.Request, context.Artifact, null, currentReview.Request.Timing.ExpiresAtUtc, state.Wake.ExpiresAtUtc, activeClaim.ClaimedAtUtc, activeClaim.LeaseExpiresAtUtc, cancellationToken).ConfigureAwait(false);
         if (persisted.Run is null) return Continuation(HumanReviewContinuationReleaseStatus.Unavailable);
         if (!TryContinuationReplay(persisted.Run, action, out var retainedCompletion) || retainedCompletion is null) return Continuation(HumanReviewContinuationReleaseStatus.Invalid);
+        if (!persisted.Committed && IsOrderedHandoffPending(persisted.Run, action.ReleaseReceipt.ReleaseOperationId)) return Continuation(HumanReviewContinuationReleaseStatus.Unavailable);
         return await CompleteContinuationHandoffAsync(persisted.Run, context, action.ReleaseReceipt.ReleaseOperationId, retainedCompletion, cancellationToken).ConfigureAwait(false);
     }
 
@@ -196,6 +197,7 @@ public sealed class HumanReviewOrderedReleaseService : IHumanReviewContinuationR
         var persisted = await PersistAsync(run, candidate, review.Request, context.Artifact, action, review.Request.Timing.ExpiresAtUtc, state.Wake.ExpiresAtUtc, claim.ClaimedAtUtc, claim.LeaseExpiresAtUtc, cancellationToken).ConfigureAwait(false);
         if (persisted.Run is null) return Continuation(HumanReviewContinuationReleaseStatus.Unavailable);
         if (!TryContinuationReplay(persisted.Run, action, out var retainedCompletion) || retainedCompletion is null) return Continuation(HumanReviewContinuationReleaseStatus.Invalid);
+        if (!persisted.Committed && IsOrderedHandoffPending(persisted.Run, action.ReleaseReceipt.ReleaseOperationId)) return Continuation(HumanReviewContinuationReleaseStatus.Unavailable);
         return await CompleteContinuationHandoffAsync(persisted.Run, context, action.ReleaseReceipt.ReleaseOperationId, retainedCompletion, cancellationToken).ConfigureAwait(false);
     }
 

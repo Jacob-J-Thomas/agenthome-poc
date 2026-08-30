@@ -4425,6 +4425,7 @@ public sealed class CustomLoopRunStore :
             CustomLoopSequentialNodeEvidenceKind.CompletedOutcome => GovernedLoopSequentialNodeEvidenceKind.CompletedOutcome,
             CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection => GovernedLoopSequentialNodeEvidenceKind.DefinitiveRejection,
             CustomLoopSequentialNodeEvidenceKind.AmbiguityAttention => GovernedLoopSequentialNodeEvidenceKind.AmbiguityAttention,
+            CustomLoopSequentialNodeEvidenceKind.ReviewRequested => GovernedLoopSequentialNodeEvidenceKind.ReviewRequested,
             _ => throw new FormatException("Dispatch-start evidence cannot satisfy a terminal sequential-node receipt lookup."),
         };
         var disposition = evidence.Disposition switch
@@ -4432,6 +4433,7 @@ public sealed class CustomLoopRunStore :
             CustomLoopSequentialNodeDisposition.Completed => GovernedLoopSequentialNodeHandlerResultStatus.Completed,
             CustomLoopSequentialNodeDisposition.Rejected => GovernedLoopSequentialNodeHandlerResultStatus.Rejected,
             CustomLoopSequentialNodeDisposition.NeedsReview => GovernedLoopSequentialNodeHandlerResultStatus.NeedsReview,
+            CustomLoopSequentialNodeDisposition.ReviewPending => GovernedLoopSequentialNodeHandlerResultStatus.ReviewPending,
             _ => throw new FormatException("Terminal sequential-node evidence has no terminal disposition."),
         };
         return new GovernedLoopSequentialNodeEvidenceReceipt(
@@ -4518,6 +4520,7 @@ public sealed class CustomLoopRunStore :
             GovernedLoopSequentialNodeHandlerResultStatus.Completed => GovernedLoopSequentialNodeEvidenceKind.CompletedOutcome,
             GovernedLoopSequentialNodeHandlerResultStatus.Rejected => GovernedLoopSequentialNodeEvidenceKind.DefinitiveRejection,
             GovernedLoopSequentialNodeHandlerResultStatus.NeedsReview => GovernedLoopSequentialNodeEvidenceKind.AmbiguityAttention,
+            GovernedLoopSequentialNodeHandlerResultStatus.ReviewPending => GovernedLoopSequentialNodeEvidenceKind.ReviewRequested,
             _ => GovernedLoopSequentialNodeEvidenceKind.Unknown,
         };
 

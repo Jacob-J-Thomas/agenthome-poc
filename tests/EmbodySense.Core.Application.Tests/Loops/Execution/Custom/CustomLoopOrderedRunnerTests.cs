@@ -259,6 +259,37 @@ public sealed partial class CustomLoopOrderedRunnerTests
     }
 
     [Fact]
+    public async Task Canonical_workspace_action_owned_by_another_executor_returns_conflict_without_terminal_evidence()
+    {
+        var context = await SequentialContextAsync(
+            Run(SequentialDefinition()),
+            artifactFactory: role => GovernedLoopSequentialApplicationTestFixture.WorkspaceActionArtifact(owningRole: role));
+        var store = new FakeRunStore(context.Run);
+        var inference = new QueueExecutor(Result("bounded provider output"));
+        var action = new QueueWorkspaceActionExecutor(new GovernedLoopWorkspaceActionExecutionResult(
+            GovernedLoopWorkspaceActionExecutionStatus.OperationInProgress,
+            null,
+            "Another executor owns the exact workspace Action effect attempt."));
+        var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+        var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(Runner(store, inference, workspaceActionExecutor: action), evidence, evidence);
+
+        var result = await adapter.RunAsync(new GovernedLoopSequentialOrderedRunRequest(
+            1,
+            context.Anchor,
+            context.Plan,
+            context.Artifact,
+            AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Conflict, result.Status);
+        Assert.Equal(CustomLoopRunStatus.Running, result.Run?.Status);
+        Assert.Null(result.Run?.FailureCode);
+        Assert.Single(action.Requests);
+        Assert.Single(result.Run!.Events, IsWorkspaceActionStart);
+        Assert.DoesNotContain(result.Run.Events, item => item.SequentialNodeEvidence is { NodeId: "workspace-action", Kind: not CustomLoopSequentialNodeEvidenceKind.DispatchStarted });
+        Assert.Empty(store.ValidationFailures);
+    }
+
+    [Fact]
     public async Task Canonical_workspace_action_completion_response_loss_reads_back_the_exact_durable_outcome_without_redispatch()
     {
         var context = await SequentialContextAsync(

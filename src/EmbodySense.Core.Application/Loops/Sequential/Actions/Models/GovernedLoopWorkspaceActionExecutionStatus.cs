@@ -17,4 +17,7 @@ public enum GovernedLoopWorkspaceActionExecutionStatus
 
     /// <summary>The effect or its durable evidence is ambiguous and requires review.</summary>
     NeedsReview = 4,
+
+    /// <summary>Another executor owns the exact effect attempt, so this invocation must stop without adding outcome evidence.</summary>
+    OperationInProgress = 5,
 }

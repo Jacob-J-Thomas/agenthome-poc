@@ -131,6 +131,48 @@ public sealed class GovernedWorkspaceActionFactoryTests
         Assert.Equal("replacement", File.ReadAllText(workspace.File("shared", "note.txt")));
     }
 
+    [Theory]
+    [InlineData(GovernedLoopEffectAttemptExecutionStatus.OperationInProgress, GovernedLoopWorkspaceActionExecutionStatus.OperationInProgress)]
+    [InlineData(GovernedLoopEffectAttemptExecutionStatus.ReconciliationRequired, GovernedLoopWorkspaceActionExecutionStatus.NeedsReview)]
+    public async Task Graph_projection_preserves_exact_effect_ownership_contention_without_weakening_ambiguous_postures(
+        GovernedLoopEffectAttemptExecutionStatus effectStatus,
+        GovernedLoopWorkspaceActionExecutionStatus expectedStatus)
+    {
+        var fixture = WorkspaceToolAuthorityTestFixture.CreateAction();
+        var facade = new GovernedLoopEffectAttemptFacade(
+            new UnusedCatalog(),
+            new CapturingEffectService(effectStatus));
+        var executor = new GovernedLoopWorkspaceActionExecutor(facade);
+        var node = fixture.Plan.Nodes.Single(candidate => string.Equals(candidate.NodeId, WorkspaceToolAuthorityTestFixture.NodeId, StringComparison.Ordinal));
+        var activation = GovernedLoopNodeExecutionEvidence.CreateActivation(
+            node.Ordinal,
+            node.Ordinal,
+            1,
+            node.NodeId,
+            node.Descriptor,
+            node.IncomingControlEdgeIds,
+            node.OutgoingControlEdgeIds,
+            GovernedLoopNodeExecutionStatus.Running,
+            WorkspaceToolAuthorityTestFixture.NodeAttempt,
+            WorkspaceToolAuthorityTestFixture.ServerCorrelationId);
+        var request = new GovernedLoopWorkspaceActionExecutionRequest(
+            new GovernedLoopSequentialNodeDispatchRequest(
+                GovernedLoopSequentialNodeDispatchRequest.CurrentSchemaVersion,
+                fixture.Anchor,
+                fixture.Plan,
+                node,
+                activation,
+                WorkspaceToolAuthorityTestFixture.NodeAttempt),
+            fixture.Artifact,
+            WorkspaceToolAuthorityTestFixture.ServerCorrelationId,
+            fixture.ActionInputJson);
+
+        var result = await executor.ExecuteAsync(request);
+
+        Assert.Equal(expectedStatus, result.Status);
+        Assert.Null(result.CanonicalOutput);
+    }
+
     [Fact]
     public async Task Tool_projection_emits_one_stable_local_reversible_effect_request_with_canonical_input()
     {
@@ -245,7 +287,7 @@ public sealed class GovernedWorkspaceActionFactoryTests
             [new WorkspaceActionContentSegment(WorkspaceActionContentSegmentKind.LiteralUtf8, value, null)]);
     }
 
-    private sealed class CapturingEffectService : IGovernedLoopEffectAttemptService
+    private sealed class CapturingEffectService(GovernedLoopEffectAttemptExecutionStatus status = GovernedLoopEffectAttemptExecutionStatus.DispatchNotStarted) : IGovernedLoopEffectAttemptService
     {
         public GovernedLoopEffectAttemptRequest? Request { get; private set; }
 
@@ -256,7 +298,7 @@ public sealed class GovernedWorkspaceActionFactoryTests
             cancellationToken.ThrowIfCancellationRequested();
             Request = request;
             return Task.FromResult(new GovernedLoopEffectAttemptExecutionResult(
-                GovernedLoopEffectAttemptExecutionStatus.DispatchNotStarted,
+                status,
                 null,
                 "test stop"));
         }
