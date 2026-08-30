@@ -1,6 +1,8 @@
 using System.Collections.Immutable;
+using System.Globalization;
 using System.Text.Json;
 using EmbodySense.Core.Common.HumanInput;
+using EmbodySense.Core.Common.HumanInput.Lifecycle;
 using EmbodySense.Core.Common.HumanInput.Lifecycle.Models;
 using EmbodySense.Core.Common.HumanInput.Models;
 using EmbodySense.Core.Common.HumanInput.Responses.Models;
@@ -105,54 +107,32 @@ internal sealed class HumanInputConversationCommandAdapter
 
     private async Task<AgentRuntimeTurnResult> SubmitAsync(string remainder, CancellationToken cancellationToken)
     {
-        if (!TryReadResponseTerms(ref remainder, out var requestId, out var operationId, out var responseId))
+        if (!TryReadResponseTerms(ref remainder, out var terms))
         {
-            return AgentRuntimeTurnResult.CommandOutput("Usage: /human-input submit <request-id> <operation-id> <response-id> <response-json>");
+            return AgentRuntimeTurnResult.CommandOutput(SubmitUsage);
         }
 
         if (!TryParsePayload(remainder, out var value, out var explanation))
         {
-            return AgentRuntimeTurnResult.CommandOutput($"Human Input operation `{operationId}` is invalid. Response data was not recorded.");
+            return AgentRuntimeTurnResult.CommandOutput($"Human Input operation `{terms!.OperationId}` is invalid. Response data was not recorded.");
         }
 
-        if (!_operations.TryGet(
-                operationId,
-                HumanInputResponseOperationKind.Submit,
-                requestId,
-                responseId,
-                value,
-                explanation,
-                out var input))
+        var candidate = CreateInput(terms!, HumanInputResponseOperationKind.Submit, value, explanation);
+        if (!_operations.TryAcquire(candidate, out var input) || input is null)
         {
-            return AgentRuntimeTurnResult.CommandOutput($"Human Input operation `{operationId}` conflicts with previously retained response intent.");
+            return AgentRuntimeTurnResult.CommandOutput($"Human Input operation `{terms!.OperationId}` conflicts with previously retained response intent or the bounded retry cache has no evictable terminal entry.");
         }
 
-        if (input is null)
+        HumanInputOperationResult? result = null;
+        try
         {
-            var read = await _humanInput.ReadAsync(requestId, cancellationToken).ConfigureAwait(false);
-            if (read.Status != HumanInputRequestPostureReadStatus.Ready || read.Request is null)
-            {
-                return AgentRuntimeTurnResult.CommandOutput($"Human Input operation `{operationId}` could not read request `{requestId}`: {Format(read.Status)}.");
-            }
-
-            var candidate = new HumanInputResponseOperationInput(
-                operationId,
-                HumanInputResponseOperationKind.Submit,
-                requestId,
-                read.Request.LifecycleVersion,
-                read.Request.Status,
-                read.Request.CurrentRequest,
-                responseId,
-                value,
-                explanation);
-            if (!_operations.TryAdd(candidate, out input) || input is null)
-            {
-                return AgentRuntimeTurnResult.CommandOutput($"Human Input operation `{operationId}` could not retain exact response intent.");
-            }
+            result = await _humanInput.SubmitResponseAsync(input, cancellationToken).ConfigureAwait(false);
+            return AgentRuntimeTurnResult.CommandOutput(FormatOperation(result));
         }
-
-        var result = await _humanInput.SubmitResponseAsync(input, cancellationToken).ConfigureAwait(false);
-        return AgentRuntimeTurnResult.CommandOutput(FormatOperation(result));
+        finally
+        {
+            _operations.Release(input.OperationId, result?.Status);
+        }
     }
 
     private async Task<AgentRuntimeTurnResult> TargetResponseAsync(
@@ -160,53 +140,76 @@ internal sealed class HumanInputConversationCommandAdapter
         HumanInputResponseOperationKind kind,
         CancellationToken cancellationToken)
     {
-        if (!TryReadResponseTerms(ref remainder, out var requestId, out var operationId, out var responseId) || !string.IsNullOrWhiteSpace(remainder))
+        if (!TryReadResponseTerms(ref remainder, out var terms) || !string.IsNullOrWhiteSpace(remainder))
         {
-            return AgentRuntimeTurnResult.CommandOutput($"Usage: /human-input {kind.ToString().ToLowerInvariant()} <request-id> <operation-id> <response-id>");
+            return AgentRuntimeTurnResult.CommandOutput(TargetUsage(kind));
         }
 
-        if (!_operations.TryGet(operationId, kind, requestId, responseId, null, null, out var input))
+        var candidate = CreateInput(terms!, kind, null, null);
+        if (!_operations.TryAcquire(candidate, out var input) || input is null)
         {
-            return AgentRuntimeTurnResult.CommandOutput($"Human Input operation `{operationId}` conflicts with previously retained response intent.");
+            return AgentRuntimeTurnResult.CommandOutput($"Human Input operation `{terms!.OperationId}` conflicts with previously retained response intent or the bounded retry cache has no evictable terminal entry.");
         }
 
-        if (input is null)
+        HumanInputOperationResult? result = null;
+        try
         {
-            var read = await _humanInput.ReadAsync(requestId, cancellationToken).ConfigureAwait(false);
-            if (read.Status != HumanInputRequestPostureReadStatus.Ready || read.Request is null)
-            {
-                return AgentRuntimeTurnResult.CommandOutput($"Human Input operation `{operationId}` could not read request `{requestId}`: {Format(read.Status)}.");
-            }
-
-            var candidate = new HumanInputResponseOperationInput(
-                operationId,
-                kind,
-                requestId,
-                read.Request.LifecycleVersion,
-                read.Request.Status,
-                read.Request.CurrentRequest,
-                responseId,
-                null,
-                null);
-            if (!_operations.TryAdd(candidate, out input) || input is null)
-            {
-                return AgentRuntimeTurnResult.CommandOutput($"Human Input operation `{operationId}` could not retain exact response intent.");
-            }
+            result = await _humanInput.SubmitResponseAsync(input, cancellationToken).ConfigureAwait(false);
+            return AgentRuntimeTurnResult.CommandOutput(FormatOperation(result));
         }
-
-        var result = await _humanInput.SubmitResponseAsync(input, cancellationToken).ConfigureAwait(false);
-        return AgentRuntimeTurnResult.CommandOutput(FormatOperation(result));
+        finally
+        {
+            _operations.Release(input.OperationId, result?.Status);
+        }
     }
 
-    private static bool TryReadResponseTerms(ref string remainder, out string requestId, out string operationId, out string responseId)
+    private static bool TryReadResponseTerms(ref string remainder, out ResponseTerms? terms)
     {
-        requestId = ReadToken(ref remainder) ?? string.Empty;
-        operationId = ReadToken(ref remainder) ?? string.Empty;
-        responseId = ReadToken(ref remainder) ?? string.Empty;
-        return HumanInputIdentifier.IsValid(requestId)
-            && HumanInputIdentifier.IsValid(operationId)
-            && HumanInputIdentifier.IsValid(responseId);
+        terms = null;
+        var requestId = ReadToken(ref remainder) ?? string.Empty;
+        var lifecycleVersionToken = ReadToken(ref remainder) ?? string.Empty;
+        var lifecycleStatusToken = ReadToken(ref remainder) ?? string.Empty;
+        var requestVersionId = ReadToken(ref remainder) ?? string.Empty;
+        var requestHash = ReadToken(ref remainder) ?? string.Empty;
+        var operationId = ReadToken(ref remainder) ?? string.Empty;
+        var responseId = ReadToken(ref remainder) ?? string.Empty;
+        if (!HumanInputIdentifier.IsValid(requestId)
+            || !long.TryParse(lifecycleVersionToken, NumberStyles.None, CultureInfo.InvariantCulture, out var lifecycleVersion)
+            || lifecycleVersion is < 1 or > HumanInputRequestLifecycleContractLimits.MaxLifecycleVersion
+            || !Enum.TryParse<HumanInputRequestLifecycleStatus>(lifecycleStatusToken, true, out var lifecycleStatus)
+            || !Enum.IsDefined(lifecycleStatus)
+            || lifecycleStatus == HumanInputRequestLifecycleStatus.Unknown
+            || !string.Equals(lifecycleStatusToken, lifecycleStatus.ToString(), StringComparison.OrdinalIgnoreCase)
+            || !HumanInputIdentifier.IsValid(requestVersionId)
+            || !IsRequestHash(requestHash)
+            || !HumanInputIdentifier.IsValid(operationId)
+            || !HumanInputIdentifier.IsValid(responseId))
+        {
+            return false;
+        }
+
+        terms = new ResponseTerms(requestId, lifecycleVersion, lifecycleStatus, requestVersionId, requestHash, operationId, responseId);
+        return true;
     }
+
+    private static bool IsRequestHash(string value)
+        => value.Length == HumanInputLimits.Sha256HexCharacters && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
+
+    private static HumanInputResponseOperationInput CreateInput(
+        ResponseTerms terms,
+        HumanInputResponseOperationKind kind,
+        HumanInputResponseValue? value,
+        string? explanation)
+        => new(
+            terms.OperationId,
+            kind,
+            terms.RequestId,
+            terms.ExpectedLifecycleVersion,
+            terms.ExpectedLifecycleStatus,
+            new HumanInputRequestReference(HumanInputRequestReference.CurrentSchemaVersion, terms.RequestId, terms.RequestVersionId, terms.RequestHash),
+            terms.ResponseId,
+            value,
+            explanation);
 
     private static bool TryGetRemainder(string? input, out string remainder)
     {
@@ -467,14 +470,17 @@ internal sealed class HumanInputConversationCommandAdapter
         {
             $"Human Input request `{request.RequestId}`",
             $"Status: {request.Status} (lifecycle version {request.LifecycleVersion})",
-            $"Request version: {request.Presentation.RequestVersionId}",
-            $"Response schema: {request.Presentation.ResponseSchema.Kind}",
+            $"Request identity: schema {request.CurrentRequest.SchemaVersion}; version `{request.Presentation.RequestVersionId}`; hash `{request.Presentation.RequestHash}`",
+            $"Mutation terms: {request.RequestId} {request.LifecycleVersion.ToString(CultureInfo.InvariantCulture)} {request.Status.ToString().ToLowerInvariant()} {request.Presentation.RequestVersionId} {request.Presentation.RequestHash}",
             $"Privacy: {request.Presentation.PrivacyClass}",
             $"Response policy: {request.Presentation.ResponsePolicyKind}",
+            $"Required response count: {request.Presentation.RequiredResponseCount?.ToString(CultureInfo.InvariantCulture) ?? "not applicable"}",
             $"Response window: {request.Presentation.Timing.RequestedAtUtc:O} through {request.Presentation.Timing.ExpiresAtUtc:O}",
-            $"Prompt: {request.Presentation.Prompt}",
+            $"Purpose: {FormatDisplayText(request.Presentation.Purpose)}",
+            $"Prompt: {FormatDisplayText(request.Presentation.Prompt)}",
             $"Responses: {request.ActiveResponseCount} active, {request.WithdrawnResponseCount} withdrawn, {request.AcceptedResponseCount} accepted"
         };
+        AddResponseSchema(lines, request.Presentation.ResponseSchema);
         if (request.SupersedesRequestId is not null)
         {
             lines.Add($"Supersedes: {request.SupersedesRequestId}");
@@ -488,6 +494,46 @@ internal sealed class HumanInputConversationCommandAdapter
         return string.Join(Environment.NewLine, lines);
     }
 
+    private static void AddResponseSchema(List<string> lines, HumanInputResponseSchema schema)
+    {
+        switch (schema.Kind)
+        {
+            case HumanInputResponseKind.Text:
+                lines.Add($"Response schema: Text; maximum characters: {schema.MaxTextCharacters?.ToString(CultureInfo.InvariantCulture) ?? "unavailable"}");
+                break;
+            case HumanInputResponseKind.Choice:
+                lines.Add($"Response schema: Choice; choices: {schema.Choices?.Length.ToString(CultureInfo.InvariantCulture) ?? "0"}");
+                foreach (var choice in schema.Choices ?? [])
+                {
+                    lines.Add($"Choice `{choice.ChoiceId}`: {FormatDisplayText(choice.DisplayText)}");
+                }
+                break;
+            case HumanInputResponseKind.Confirmation:
+                lines.Add("Response schema: Confirmation; value: true or false");
+                break;
+            case HumanInputResponseKind.Structured:
+                lines.Add($"Response schema: Structured; fields: {schema.StructuredFields?.Length.ToString(CultureInfo.InvariantCulture) ?? "0"}");
+                foreach (var field in schema.StructuredFields ?? [])
+                {
+                    var maximum = field.MaxTextCharacters?.ToString(CultureInfo.InvariantCulture) ?? "not applicable";
+                    lines.Add($"Field `{field.FieldId}`: {field.Kind}; required: {(field.Required ? "yes" : "no")}; maximum characters: {maximum}");
+                    foreach (var choice in field.Choices ?? [])
+                    {
+                        lines.Add($"Field `{field.FieldId}` choice `{choice.ChoiceId}`: {FormatDisplayText(choice.DisplayText)}");
+                    }
+                }
+                break;
+            case HumanInputResponseKind.Reference:
+                lines.Add($"Response schema: Reference; kind: {schema.ReferencePolicy?.Kind.ToString() ?? "unavailable"}; maximum characters: {schema.ReferencePolicy?.MaxReferenceCharacters.ToString(CultureInfo.InvariantCulture) ?? "unavailable"}");
+                break;
+            default:
+                lines.Add("Response schema: unavailable");
+                break;
+        }
+    }
+
+    private static string FormatDisplayText(string value) => JsonSerializer.Serialize(value);
+
     private static string FormatSummary(HumanInputRequestPosture request)
         => $"- `{request.RequestId}`: {request.Status}; version {request.LifecycleVersion}; {request.Presentation.ResponseSchema.Kind}; expires {request.Presentation.Timing.ExpiresAtUtc:O}";
 
@@ -498,10 +544,24 @@ internal sealed class HumanInputConversationCommandAdapter
         Human Input commands:
         /human-input list [opaque-cursor]
         /human-input inspect <request-id>
-        /human-input submit <request-id> <operation-id> <response-id> <response-json>
-        /human-input withdraw <request-id> <operation-id> <response-id>
-        /human-input select <request-id> <operation-id> <response-id>
+        /human-input submit <request-id> <lifecycle-version> <lifecycle-status> <request-version-id> <request-hash> <operation-id> <response-id> <response-json>
+        /human-input withdraw <request-id> <lifecycle-version> <lifecycle-status> <request-version-id> <request-hash> <operation-id> <response-id>
+        /human-input select <request-id> <lifecycle-version> <lifecycle-status> <request-version-id> <request-hash> <operation-id> <response-id>
 
-        Response JSON is a private, untrusted payload and is not added to the conversation transcript. The runtime retains exact submitted intent only for this interactive session, so supply the same operation id and exact payload to retry an outcome-unknown operation. Example shape: {"value":{"kind":"text","text":"..."},"explanation":"optional"}.
+        Inspect immediately before acting and copy its exact mutation terms. Response JSON is a private, untrusted payload and is not added to the conversation transcript. The runtime retains exact submitted intent only for this interactive session, so supply the same operation id, inspected terms, and exact payload to retry an outcome-unknown operation. Example shape: {"value":{"kind":"text","text":"..."},"explanation":"optional"}.
         """;
+
+    private const string SubmitUsage = "Usage: /human-input submit <request-id> <lifecycle-version> <lifecycle-status> <request-version-id> <request-hash> <operation-id> <response-id> <response-json>";
+
+    private static string TargetUsage(HumanInputResponseOperationKind kind)
+        => $"Usage: /human-input {kind.ToString().ToLowerInvariant()} <request-id> <lifecycle-version> <lifecycle-status> <request-version-id> <request-hash> <operation-id> <response-id>";
+
+    private sealed record ResponseTerms(
+        string RequestId,
+        long ExpectedLifecycleVersion,
+        HumanInputRequestLifecycleStatus ExpectedLifecycleStatus,
+        string RequestVersionId,
+        string RequestHash,
+        string OperationId,
+        string ResponseId);
 }

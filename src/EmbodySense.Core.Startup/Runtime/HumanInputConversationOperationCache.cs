@@ -12,72 +12,74 @@ namespace EmbodySense.Core.Startup.Runtime;
 internal sealed class HumanInputConversationOperationCache
 {
     private const int MaximumOperations = 256;
-    private readonly Dictionary<string, HumanInputResponseOperationInput> _operations = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, HumanInputConversationOperationCacheEntry> _operations = new(StringComparer.Ordinal);
+    private long _nextSequence;
 
-    internal bool TryGet(
-        string operationId,
-        HumanInputResponseOperationKind kind,
-        string requestId,
-        string? responseId,
-        HumanInputResponseValue? value,
-        string? explanation,
-        out HumanInputResponseOperationInput? input)
-    {
-        lock (_operations)
-        {
-            if (!_operations.TryGetValue(operationId, out var retained))
-            {
-                input = null;
-                return true;
-            }
-
-            if (!MatchesIntent(retained, kind, requestId, responseId, value, explanation))
-            {
-                input = null;
-                return false;
-            }
-
-            input = Capture(retained);
-            return true;
-        }
-    }
-
-    internal bool TryAdd(HumanInputResponseOperationInput input, out HumanInputResponseOperationInput? retained)
+    internal bool TryAcquire(HumanInputResponseOperationInput input, out HumanInputResponseOperationInput? retained)
     {
         ArgumentNullException.ThrowIfNull(input);
         lock (_operations)
         {
             if (_operations.TryGetValue(input.OperationId, out var existing))
             {
-                retained = Capture(existing);
-                return MatchesIntent(existing, input.Kind, input.RequestId, input.ResponseId, input.Value, input.Explanation);
+                if (!MatchesIntent(existing.Input, input))
+                {
+                    retained = null;
+                    return false;
+                }
+
+                existing.Acquire();
+                retained = Capture(existing.Input);
+                return true;
             }
 
-            if (_operations.Count >= MaximumOperations)
+            if (_operations.Count >= MaximumOperations && !TryEvictOldestTerminal())
             {
                 retained = null;
                 return false;
             }
 
             retained = Capture(input);
-            _operations.Add(input.OperationId, retained);
+            _operations.Add(input.OperationId, new HumanInputConversationOperationCacheEntry(retained, _nextSequence++));
             retained = Capture(retained);
             return true;
         }
     }
 
-    private static bool MatchesIntent(
-        HumanInputResponseOperationInput input,
-        HumanInputResponseOperationKind kind,
-        string requestId,
-        string? responseId,
-        HumanInputResponseValue? value,
-        string? explanation)
-        => input.Kind == kind
-            && string.Equals(input.RequestId, requestId, StringComparison.Ordinal)
-            && string.Equals(input.ResponseId, responseId, StringComparison.Ordinal)
-            && ValueEquals(input.Value, value)
-            && string.Equals(input.Explanation, explanation, StringComparison.Ordinal);
+    internal void Release(string operationId, HumanInputOperationStatus? status)
+    {
+        lock (_operations)
+        {
+            if (!_operations.TryGetValue(operationId, out var entry))
+            {
+                return;
+            }
+
+            entry.Release(IsTerminal(status));
+        }
+    }
+
+    private bool TryEvictOldestTerminal()
+    {
+        var candidate = _operations
+            .Where(pair => pair.Value.IsEvictable)
+            .OrderBy(pair => pair.Value.Sequence)
+            .FirstOrDefault();
+        return candidate.Value is not null && _operations.Remove(candidate.Key);
+    }
+
+    private static bool IsTerminal(HumanInputOperationStatus? status)
+        => status is not null and not HumanInputOperationStatus.Unknown and not HumanInputOperationStatus.Unavailable and not HumanInputOperationStatus.Ambiguous;
+
+    private static bool MatchesIntent(HumanInputResponseOperationInput left, HumanInputResponseOperationInput right)
+        => left.Kind == right.Kind
+            && string.Equals(left.RequestId, right.RequestId, StringComparison.Ordinal)
+            && left.ExpectedLifecycleVersion == right.ExpectedLifecycleVersion
+            && left.ExpectedLifecycleStatus == right.ExpectedLifecycleStatus
+            && Equals(left.ExpectedRequest, right.ExpectedRequest)
+            && string.Equals(left.ResponseId, right.ResponseId, StringComparison.Ordinal)
+            && ValueEquals(left.Value, right.Value)
+            && string.Equals(left.Explanation, right.Explanation, StringComparison.Ordinal);
 
     private static bool ValueEquals(HumanInputResponseValue? left, HumanInputResponseValue? right)
     {
