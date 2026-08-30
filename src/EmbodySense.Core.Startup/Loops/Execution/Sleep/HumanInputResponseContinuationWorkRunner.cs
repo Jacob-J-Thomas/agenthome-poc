@@ -19,7 +19,7 @@ namespace EmbodySense.Core.Startup.Loops.Execution.Sleep;
 /// one-shot call; that service remains responsible for durable attachment, generic wake ownership, ordered advancement,
 /// idempotency, and retirement.
 /// </remarks>
-public sealed class HumanInputResponseContinuationWorkRunner : IGovernedLoopLocalWorkRunner
+public sealed class HumanInputResponseContinuationWorkRunner : IGovernedLoopLocalWorkRunner, IGovernedLoopLocalWorkReadinessProbe
 {
     private static readonly HumanInputPolicyReference _policySourceHealthProbeReference = new("human-input-source-health", "revision-one");
     private readonly IHumanInputResponseContinuationWakePort _continuation;
@@ -80,6 +80,50 @@ public sealed class HumanInputResponseContinuationWorkRunner : IGovernedLoopLoca
         }
 
         return await RunHumanInputAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public async Task<GovernedLoopLocalWorkResult?> ProbeReadinessAsync(
+        GovernedLoopLocalWorkFamily family,
+        CancellationToken cancellationToken = default)
+    {
+        if (family != GovernedLoopLocalWorkFamily.HumanInput)
+        {
+            return _inner is IGovernedLoopLocalWorkReadinessProbe inner
+                ? await inner.ProbeReadinessAsync(family, cancellationToken).ConfigureAwait(false)
+                : Result(GovernedLoopLocalWorkResultStatus.Unavailable, "work-readiness-probe-unavailable");
+        }
+
+        var publication = await ProbePublicationAsync(cancellationToken).ConfigureAwait(false);
+        if (publication is not null)
+        {
+            return publication;
+        }
+        var policy = await ProbePolicySourceAsync(cancellationToken).ConfigureAwait(false);
+        if (policy is not null)
+        {
+            return policy;
+        }
+        if (!TryGetUtcNow(out var observedAtUtc, out var clockFailure))
+        {
+            return clockFailure;
+        }
+
+        try
+        {
+            var page = await _source.ListCandidatesAsync(1, null, observedAtUtc, cancellationToken).ConfigureAwait(false);
+            return IsValidPage(page)
+                ? Result(GovernedLoopLocalWorkResultStatus.Empty, "human-input-readiness-ready")
+                : Result(GovernedLoopLocalWorkResultStatus.Corrupt, "human-input-readiness-corrupt");
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return Result(GovernedLoopLocalWorkResultStatus.Unavailable, "human-input-readiness-unavailable");
+        }
     }
 
     private async Task<GovernedLoopLocalWorkResult?> RunHumanInputAsync(CancellationToken cancellationToken)

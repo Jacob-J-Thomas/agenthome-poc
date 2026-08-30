@@ -21,7 +21,7 @@ namespace EmbodySense.Core.Startup.Loops.Execution.Sleep;
 /// page-bound backlog remains drainable, while every call selects at most one candidate and waits for the subsystem-owned
 /// one-shot boundary to report its truthful durable outcome.
 /// </remarks>
-public sealed class GovernedLoopLocalWorkRunner : IGovernedLoopLocalWorkRunner
+public sealed class GovernedLoopLocalWorkRunner : IGovernedLoopLocalWorkRunner, IGovernedLoopLocalWorkReadinessProbe
 {
     private readonly IGovernedLoopBackgroundWorkSource _backgroundWork;
     private readonly SemaphoreSlim _candidateGate = new(1, 1);
@@ -95,6 +95,95 @@ public sealed class GovernedLoopLocalWorkRunner : IGovernedLoopLocalWorkRunner
             GovernedLoopLocalWorkFamily.Wake => await RunWakeAsync(observedAtUtc, cancellationToken).ConfigureAwait(false),
             _ => Result(GovernedLoopLocalWorkResultStatus.Corrupt, "work-family-corrupt")
         };
+    }
+
+    /// <inheritdoc />
+    public async Task<GovernedLoopLocalWorkResult?> ProbeReadinessAsync(
+        GovernedLoopLocalWorkFamily family,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!TryGetUtcNow(out var observedAtUtc, out var clockFailure))
+        {
+            return clockFailure;
+        }
+
+        return family switch
+        {
+            GovernedLoopLocalWorkFamily.Schedule => await ProbeScheduleAsync(observedAtUtc, cancellationToken).ConfigureAwait(false),
+            GovernedLoopLocalWorkFamily.Trigger => await ProbeTriggerAsync(observedAtUtc, cancellationToken).ConfigureAwait(false),
+            GovernedLoopLocalWorkFamily.Wake => await ProbeWakeAsync(observedAtUtc, cancellationToken).ConfigureAwait(false),
+            _ => Result(GovernedLoopLocalWorkResultStatus.Corrupt, "work-family-corrupt")
+        };
+    }
+
+    private async Task<GovernedLoopLocalWorkResult> ProbeScheduleAsync(DateTimeOffset observedAtUtc, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var source = await _backgroundWork.ReadAsync(GovernedLoopBackgroundWorkFamily.Schedule, observedAtUtc, 1, cancellationToken).ConfigureAwait(false);
+            return source is null || !Enum.IsDefined(source.ScheduleStatus)
+                ? Result(GovernedLoopLocalWorkResultStatus.Corrupt, "schedule-readiness-corrupt")
+                : ClassifyBackgroundStatus(source.ScheduleStatus);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return Result(GovernedLoopLocalWorkResultStatus.Unavailable, "schedule-readiness-unavailable");
+        }
+    }
+
+    private async Task<GovernedLoopLocalWorkResult> ProbeTriggerAsync(DateTimeOffset observedAtUtc, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var snapshot = await _oneShot.ReadTriggerQueueAsync(observedAtUtc, cancellationToken).ConfigureAwait(false);
+            return !IsValidTriggerSnapshot(snapshot)
+                ? Result(GovernedLoopLocalWorkResultStatus.Corrupt, "trigger-readiness-corrupt")
+                : snapshot!.PersistenceBackpressured
+                    ? Result(GovernedLoopLocalWorkResultStatus.Backpressured, "trigger-readiness-backpressured")
+                    : Result(GovernedLoopLocalWorkResultStatus.Empty, "trigger-readiness-ready");
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return Result(GovernedLoopLocalWorkResultStatus.Unavailable, "trigger-readiness-unavailable");
+        }
+    }
+
+    private async Task<GovernedLoopLocalWorkResult> ProbeWakeAsync(DateTimeOffset observedAtUtc, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var source = await _backgroundWork.ReadAsync(GovernedLoopBackgroundWorkFamily.Wake, observedAtUtc, 1, cancellationToken).ConfigureAwait(false);
+            if (source is null || !Enum.IsDefined(source.WakeStatus) || !Enum.IsDefined(source.WakeReconciliationStatus))
+            {
+                return Result(GovernedLoopLocalWorkResultStatus.Corrupt, "wake-readiness-corrupt");
+            }
+
+            var wake = ClassifyBackgroundStatus(source.WakeStatus);
+            var reconciliation = ClassifyBackgroundStatus(source.WakeReconciliationStatus);
+            return wake.Status is GovernedLoopLocalWorkResultStatus.Completed or GovernedLoopLocalWorkResultStatus.Empty
+                && reconciliation.Status is GovernedLoopLocalWorkResultStatus.Completed or GovernedLoopLocalWorkResultStatus.Empty
+                ? Result(GovernedLoopLocalWorkResultStatus.Empty, "wake-readiness-ready")
+                : wake.Status is not (GovernedLoopLocalWorkResultStatus.Completed or GovernedLoopLocalWorkResultStatus.Empty)
+                    ? wake
+                    : reconciliation;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return Result(GovernedLoopLocalWorkResultStatus.Unavailable, "wake-readiness-unavailable");
+        }
     }
 
     private async Task<GovernedLoopLocalWorkResult> RunScheduleAsync(

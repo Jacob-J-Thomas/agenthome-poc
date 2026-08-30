@@ -1,5 +1,6 @@
 using EmbodySense.Core.Application.Loops.Sleep;
 using EmbodySense.Core.Application.Loops.Sleep.Models;
+using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Execution.Sleep;
 using EmbodySense.Core.Common.Loops.Execution.Sleep.Models;
@@ -29,11 +30,13 @@ public sealed class GovernedLoopLocalCoordinator : IAsyncDisposable
 
     private readonly SemaphoreSlim _evidenceGate = new(1, 1);
     private readonly IGovernedLoopLocalCoordinatorBoundaryObserver? _boundaryObserver;
+    private readonly IGovernedLoopCoordinatorRepairDependencyPort? _repairDependencies;
     private readonly IGovernedLoopCoordinatorEvidencePort _evidence;
     private readonly GovernedLoopLocalCoordinatorOptions _options;
     private readonly SemaphoreSlim _operationGate = new(1, 1);
     private readonly TimeProvider _timeProvider;
     private readonly IGovernedLoopLocalWorkRunner _work;
+    private readonly string? _workspaceId;
     private int _disposed;
     private string? _confirmedTerminalOwnershipHash;
     private GovernedLoopCoordinatorSnapshot? _lastSnapshot;
@@ -45,18 +48,30 @@ public sealed class GovernedLoopLocalCoordinator : IAsyncDisposable
     /// <param name="options">The bounded coordinator identity, lease, cadence, and fairness policy.</param>
     /// <param name="timeProvider">An optional trusted UTC clock.</param>
     /// <param name="boundaryObserver">An optional non-authoritative safe-boundary timing observer.</param>
+    /// <param name="repairDependencies">An optional current all-family repair-readiness probe required before a retained repair can reacquire ownership.</param>
+    /// <param name="workspaceId">The canonical workspace identity paired with <paramref name="repairDependencies"/>.</param>
     public GovernedLoopLocalCoordinator(
         IGovernedLoopCoordinatorEvidencePort evidence,
         IGovernedLoopLocalWorkRunner work,
         GovernedLoopLocalCoordinatorOptions options,
         TimeProvider? timeProvider = null,
-        IGovernedLoopLocalCoordinatorBoundaryObserver? boundaryObserver = null)
+        IGovernedLoopLocalCoordinatorBoundaryObserver? boundaryObserver = null,
+        IGovernedLoopCoordinatorRepairDependencyPort? repairDependencies = null,
+        string? workspaceId = null)
     {
         _evidence = evidence ?? throw new ArgumentNullException(nameof(evidence));
         _work = work ?? throw new ArgumentNullException(nameof(work));
         _options = ValidateOptions(options);
         _timeProvider = timeProvider ?? TimeProvider.System;
         _boundaryObserver = boundaryObserver;
+        if ((repairDependencies is null) != (workspaceId is null)
+            || workspaceId is not null && !ContextualRoleWorkspaceId.IsValid(workspaceId))
+        {
+            throw new ArgumentException("Coordinator repair readiness requires one canonical workspace identity and probe.");
+        }
+
+        _repairDependencies = repairDependencies;
+        _workspaceId = workspaceId;
     }
 
     /// <summary>Acquires fenced ownership and starts the browser-independent background lifetime.</summary>
@@ -102,21 +117,30 @@ public sealed class GovernedLoopLocalCoordinator : IAsyncDisposable
                         : GovernedLoopLocalCoordinatorStartStatus.Unavailable);
             }
 
-            GovernedLoopLocalCoordinatorStartResult? blocked = null;
-            if (!TryGetUtcNow(out var acquiredAtUtc)
-                || !TryCreateAcquisition(read, acquiredAtUtc, out var request, out blocked))
+            if (!TryGetUtcNow(out var acquiredAtUtc))
             {
-                return blocked ?? new GovernedLoopLocalCoordinatorStartResult(GovernedLoopLocalCoordinatorStartStatus.Corrupt);
+                return new GovernedLoopLocalCoordinatorStartResult(GovernedLoopLocalCoordinatorStartStatus.Corrupt);
             }
 
-            var acquisition = await AcquireAsync(request!, cancellationToken).ConfigureAwait(false);
+            var preparation = await TryCreateAcquisitionAsync(read, acquiredAtUtc, cancellationToken).ConfigureAwait(false);
+            if (!preparation.Succeeded)
+            {
+                return preparation.Blocked ?? new GovernedLoopLocalCoordinatorStartResult(GovernedLoopLocalCoordinatorStartStatus.Corrupt);
+            }
+
+            var request = preparation.Request!;
+            var repairAcquisition = preparation.RepairAcquisition;
+
+            var acquisition = repairAcquisition is null
+                ? await AcquireAsync(request, cancellationToken).ConfigureAwait(false)
+                : await AcquireAfterRepairAsync(repairAcquisition, cancellationToken).ConfigureAwait(false);
             if (acquisition.Status is not (GovernedLoopCoordinatorAcquisitionStatus.Acquired or GovernedLoopCoordinatorAcquisitionStatus.Duplicate))
             {
                 _lastSnapshot = acquisition.Snapshot;
                 return new GovernedLoopLocalCoordinatorStartResult(Map(acquisition.Status), acquisition.Snapshot);
             }
 
-            if (!IsExactAcquisition(acquisition.Snapshot, request!))
+            if (!IsExactAcquisition(acquisition.Snapshot, request))
             {
                 return new GovernedLoopLocalCoordinatorStartResult(GovernedLoopLocalCoordinatorStartStatus.Corrupt);
             }
@@ -895,6 +919,52 @@ public sealed class GovernedLoopLocalCoordinator : IAsyncDisposable
             : null;
     }
 
+    private async Task<GovernedLoopCoordinatorAcquisitionResult> AcquireAfterRepairAsync(
+        GovernedLoopCoordinatorRepairAcquisitionRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (_evidence is not IGovernedLoopCoordinatorRepairPort repairs)
+        {
+            return new GovernedLoopCoordinatorAcquisitionResult(GovernedLoopCoordinatorAcquisitionStatus.Unavailable);
+        }
+
+        GovernedLoopCoordinatorAcquisitionResult? result;
+        try
+        {
+            result = await repairs.TryAcquireAfterRepairAsync(request, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            var reconciled = await ReconcileAcquisitionAsync(request.Acquisition).ConfigureAwait(false);
+            if (reconciled is not null)
+            {
+                return reconciled;
+            }
+
+            throw;
+        }
+        catch (Exception)
+        {
+            var reconciled = await ReconcileAcquisitionAsync(request.Acquisition).ConfigureAwait(false);
+            return reconciled ?? new GovernedLoopCoordinatorAcquisitionResult(GovernedLoopCoordinatorAcquisitionStatus.Unavailable);
+        }
+
+        if (!GovernedLoopCoordinatorEvidenceContract.IsValid(result))
+        {
+            return new GovernedLoopCoordinatorAcquisitionResult(GovernedLoopCoordinatorAcquisitionStatus.Corrupt);
+        }
+        if (result!.Status == GovernedLoopCoordinatorAcquisitionStatus.Unavailable)
+        {
+            var reconciled = await ReconcileAcquisitionAsync(request.Acquisition).ConfigureAwait(false);
+            if (reconciled is not null)
+            {
+                return reconciled;
+            }
+        }
+
+        return result;
+    }
+
     private async Task<GovernedLoopCoordinatorHeartbeatMutationResult?> ReconcileHeartbeatAsync(
         GovernedLoopCoordinatorHeartbeatMutationRequest request)
     {
@@ -929,21 +999,58 @@ public sealed class GovernedLoopLocalCoordinator : IAsyncDisposable
             : null;
     }
 
-    private bool TryCreateAcquisition(
+    private async Task<GovernedLoopLocalCoordinatorAcquisitionPreparation> TryCreateAcquisitionAsync(
         GovernedLoopCoordinatorReadResult read,
         DateTimeOffset acquiredAtUtc,
-        out GovernedLoopCoordinatorAcquisitionRequest? request,
-        out GovernedLoopLocalCoordinatorStartResult? blocked)
+        CancellationToken cancellationToken)
     {
-        request = null;
-        blocked = null;
+        GovernedLoopCoordinatorAcquisitionRequest? request = null;
+        GovernedLoopCoordinatorRepairAcquisitionRequest? repairAcquisition = null;
+        GovernedLoopLocalCoordinatorStartResult? blocked = null;
         var current = read.Snapshot;
+        GovernedLoopCoordinatorRepairDisposition? repair = null;
         if (current?.LatestLifecycle.Status == GovernedLoopCoordinatorStatus.Failed)
         {
-            blocked = new GovernedLoopLocalCoordinatorStartResult(
-                GovernedLoopLocalCoordinatorStartStatus.Failed,
-                current);
-            return false;
+            if (_evidence is not IGovernedLoopCoordinatorRepairPort repairs)
+            {
+                blocked = new GovernedLoopLocalCoordinatorStartResult(GovernedLoopLocalCoordinatorStartStatus.Failed, current);
+                return new(false, null, null, blocked);
+            }
+
+            GovernedLoopCoordinatorRepairReadResult? repaired;
+            try
+            {
+                repaired = await repairs.ReadAsync(current.Ownership.CoordinatorId, current.Ownership.ContentHash, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch
+            {
+                blocked = new GovernedLoopLocalCoordinatorStartResult(GovernedLoopLocalCoordinatorStartStatus.Unavailable, current);
+                return new(false, null, null, blocked);
+            }
+
+            if (repaired is null
+                || !Enum.IsDefined(repaired.Status)
+                || repaired.Status != GovernedLoopCoordinatorRepairReadStatus.Found
+                || !GovernedLoopSleepContractValidator.Validate(repaired.Disposition).IsValid)
+            {
+                blocked = new GovernedLoopLocalCoordinatorStartResult(
+                    repaired?.Status == GovernedLoopCoordinatorRepairReadStatus.Unavailable
+                        ? GovernedLoopLocalCoordinatorStartStatus.Unavailable
+                        : GovernedLoopLocalCoordinatorStartStatus.Failed,
+                    current);
+                return new(false, null, null, blocked);
+            }
+
+            repair = repaired.Disposition;
+            if (!await DependenciesRemainReadyAsync(current.Ownership.CoordinatorId, cancellationToken).ConfigureAwait(false))
+            {
+                blocked = new GovernedLoopLocalCoordinatorStartResult(GovernedLoopLocalCoordinatorStartStatus.Unavailable, current);
+                return new(false, null, null, blocked);
+            }
         }
 
         var terminalSameOwnerRestart = current is not null
@@ -957,13 +1064,13 @@ public sealed class GovernedLoopLocalCoordinator : IAsyncDisposable
             blocked = new GovernedLoopLocalCoordinatorStartResult(
                 GovernedLoopLocalCoordinatorStartStatus.OwnedByLivePeer,
                 current);
-            return false;
+            return new(false, null, null, blocked);
         }
 
         if (current?.Ownership.OwnershipEpoch >= GovernedLoopSleepContractLimits.MaxVersion
             || !TryAdd(acquiredAtUtc, _options.OwnershipLeaseDuration, out var leaseExpiresAtUtc))
         {
-            return false;
+            return new(false, null, null, blocked);
         }
 
         var ownership = GovernedLoopSleepContractHash.Apply(new GovernedLoopCoordinatorOwnership(
@@ -1009,11 +1116,44 @@ public sealed class GovernedLoopLocalCoordinator : IAsyncDisposable
             : GovernedLoopSleepContractValidator.ValidateHandoff(current.Ownership, current.LatestHeartbeat, ownership).IsValid);
         if (!GovernedLoopCoordinatorEvidenceContract.IsValid(request) || !transitionIsValid)
         {
-            request = null;
+            return new(false, null, null, blocked);
+        }
+
+        if (repair is not null)
+        {
+            repairAcquisition = new GovernedLoopCoordinatorRepairAcquisitionRequest(repair, request);
+            if (!GovernedLoopCoordinatorEvidenceContract.IsValid(repairAcquisition))
+            {
+                return new(false, null, null, blocked);
+            }
+        }
+
+        return new(true, request, repairAcquisition, null);
+    }
+
+    private async Task<bool> DependenciesRemainReadyAsync(string coordinatorId, CancellationToken cancellationToken)
+    {
+        if (_repairDependencies is null || _workspaceId is null)
+        {
             return false;
         }
 
-        return true;
+        try
+        {
+            var readiness = await _repairDependencies.ReadAsync(_workspaceId, coordinatorId, cancellationToken).ConfigureAwait(false);
+            return GovernedLoopSleepContractValidator.Validate(readiness).IsValid
+                && string.Equals(readiness!.WorkspaceId, _workspaceId, StringComparison.Ordinal)
+                && string.Equals(readiness.CoordinatorId, coordinatorId, StringComparison.Ordinal)
+                && GovernedLoopCoordinatorRepairReadinessContract.IsReady(readiness);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private async Task<GovernedLoopLocalCoordinatorStartResult?> InspectUncompletedTerminalSessionAsync()

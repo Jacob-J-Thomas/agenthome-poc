@@ -8,4 +8,5 @@ internal sealed record GovernedLoopCoordinatorEvidenceStoreEntry(
     IReadOnlyList<GovernedLoopCoordinatorLifecycle> Lifecycles,
     IReadOnlyList<GovernedLoopCoordinatorHeartbeatRetirement> HeartbeatRetirements,
     IReadOnlyList<GovernedLoopCoordinatorHeartbeat> Heartbeats,
-    IReadOnlyList<GovernedLoopCoordinatorFailure> Failures);
+    IReadOnlyList<GovernedLoopCoordinatorFailure> Failures,
+    IReadOnlyList<GovernedLoopCoordinatorRepairDisposition> Repairs);

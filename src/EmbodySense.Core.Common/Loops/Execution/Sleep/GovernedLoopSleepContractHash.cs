@@ -241,6 +241,69 @@ public static class GovernedLoopSleepContractHash
             && IsCanonical(failure.ContentHash)
             && FixedEquals(failure.ContentHash, () => Compute(failure));
 
+    /// <summary>Computes the canonical coordinator-repair readiness hash, excluding only its content-hash field.</summary>
+    public static string Compute(GovernedLoopCoordinatorRepairReadiness readiness)
+    {
+        ArgumentNullException.ThrowIfNull(readiness);
+        RequireCoordinatorRepairReadinessBounds(readiness, includeContentHash: false, nameof(readiness));
+        var canonical = Start("governed-loop-coordinator-repair-readiness-v1");
+        Append(canonical, readiness.SchemaVersion);
+        Append(canonical, readiness.WorkspaceId);
+        Append(canonical, readiness.CoordinatorId);
+        Append(canonical, readiness.ScheduleReady);
+        Append(canonical, readiness.TriggerReady);
+        Append(canonical, readiness.WakeReady);
+        Append(canonical, readiness.HumanInputReady);
+        Append(canonical, readiness.EvaluatedAtUtc);
+        return Digest(canonical);
+    }
+
+    /// <summary>Returns coordinator-repair readiness carrying its canonical content hash.</summary>
+    public static GovernedLoopCoordinatorRepairReadiness Apply(GovernedLoopCoordinatorRepairReadiness readiness)
+    {
+        ArgumentNullException.ThrowIfNull(readiness);
+        return readiness with { ContentHash = Compute(readiness) };
+    }
+
+    /// <summary>Gets whether coordinator-repair readiness retains its exact canonical content hash.</summary>
+    public static bool Matches(GovernedLoopCoordinatorRepairReadiness? readiness)
+        => readiness is not null
+            && IsCanonical(readiness.ContentHash)
+            && FixedEquals(readiness.ContentHash, () => Compute(readiness));
+
+    /// <summary>Computes the canonical coordinator-repair disposition hash, excluding only its content-hash field.</summary>
+    public static string Compute(GovernedLoopCoordinatorRepairDisposition disposition)
+    {
+        ArgumentNullException.ThrowIfNull(disposition);
+        RequireCoordinatorRepairDispositionBounds(disposition, includeContentHash: false, nameof(disposition));
+        var canonical = Start("governed-loop-coordinator-repair-disposition-v1");
+        Append(canonical, disposition.SchemaVersion);
+        Append(canonical, disposition.WorkspaceId);
+        Append(canonical, disposition.CoordinatorId);
+        Append(canonical, disposition.OperationId);
+        Append(canonical, disposition.ActorId);
+        AppendOwnership(canonical, disposition.FailedOwnership, includeHash: true);
+        Append(canonical, disposition.TerminalLifecycleHash);
+        Append(canonical, disposition.LatestHeartbeatHash);
+        Append(canonical, disposition.LatestFailureHash);
+        Append(canonical, disposition.DependencyReadiness.ContentHash);
+        Append(canonical, disposition.RecordedAtUtc);
+        return Digest(canonical);
+    }
+
+    /// <summary>Returns a coordinator-repair disposition carrying its canonical content hash.</summary>
+    public static GovernedLoopCoordinatorRepairDisposition Apply(GovernedLoopCoordinatorRepairDisposition disposition)
+    {
+        ArgumentNullException.ThrowIfNull(disposition);
+        return disposition with { ContentHash = Compute(disposition) };
+    }
+
+    /// <summary>Gets whether a coordinator-repair disposition retains its exact canonical content hash.</summary>
+    public static bool Matches(GovernedLoopCoordinatorRepairDisposition? disposition)
+        => disposition is not null
+            && IsCanonical(disposition.ContentHash)
+            && FixedEquals(disposition.ContentHash, () => Compute(disposition));
+
     private static void AppendBinding(StringBuilder canonical, GovernedLoopSleepBinding binding)
     {
         Append(canonical, binding.Execution.SchemaVersion);
@@ -361,6 +424,41 @@ public static class GovernedLoopSleepContractHash
         }
     }
 
+    private static void RequireCoordinatorRepairReadinessBounds(
+        GovernedLoopCoordinatorRepairReadiness readiness,
+        bool includeContentHash,
+        string parameterName)
+    {
+        RequireBounded(readiness.WorkspaceId, GovernedLoopSleepContractLimits.MaxIdentifierCharacters, parameterName);
+        RequireBounded(readiness.CoordinatorId, GovernedLoopSleepContractLimits.MaxIdentifierCharacters, parameterName);
+        if (includeContentHash)
+        {
+            RequireBounded(readiness.ContentHash, GovernedLoopSleepContractLimits.Sha256HexCharacters, parameterName);
+        }
+    }
+
+    private static void RequireCoordinatorRepairDispositionBounds(
+        GovernedLoopCoordinatorRepairDisposition disposition,
+        bool includeContentHash,
+        string parameterName)
+    {
+        ArgumentNullException.ThrowIfNull(disposition.FailedOwnership, parameterName);
+        ArgumentNullException.ThrowIfNull(disposition.DependencyReadiness, parameterName);
+        RequireBounded(disposition.WorkspaceId, GovernedLoopSleepContractLimits.MaxIdentifierCharacters, parameterName);
+        RequireBounded(disposition.CoordinatorId, GovernedLoopSleepContractLimits.MaxIdentifierCharacters, parameterName);
+        RequireBounded(disposition.OperationId, GovernedLoopSleepContractLimits.MaxIdentifierCharacters, parameterName);
+        RequireBounded(disposition.ActorId, GovernedLoopSleepContractLimits.MaxIdentifierCharacters, parameterName);
+        RequireOwnershipBounds(disposition.FailedOwnership, includeContentHash: true, parameterName);
+        RequireBounded(disposition.TerminalLifecycleHash, GovernedLoopSleepContractLimits.Sha256HexCharacters, parameterName);
+        RequireBounded(disposition.LatestHeartbeatHash, GovernedLoopSleepContractLimits.Sha256HexCharacters, parameterName);
+        RequireBounded(disposition.LatestFailureHash, GovernedLoopSleepContractLimits.Sha256HexCharacters, parameterName);
+        RequireCoordinatorRepairReadinessBounds(disposition.DependencyReadiness, includeContentHash: true, parameterName);
+        if (includeContentHash)
+        {
+            RequireBounded(disposition.ContentHash, GovernedLoopSleepContractLimits.Sha256HexCharacters, parameterName);
+        }
+    }
+
     private static void RequireBounded(string? value, int maximumCharacters, string parameterName)
     {
         if (value?.Length > maximumCharacters)
@@ -424,6 +522,9 @@ public static class GovernedLoopSleepContractHash
 
     private static void Append(StringBuilder canonical, int value)
         => Append(canonical, value.ToString(CultureInfo.InvariantCulture));
+
+    private static void Append(StringBuilder canonical, bool value)
+        => Append(canonical, value ? "1" : "0");
 
     private static void Append(StringBuilder canonical, long value)
         => Append(canonical, value.ToString(CultureInfo.InvariantCulture));

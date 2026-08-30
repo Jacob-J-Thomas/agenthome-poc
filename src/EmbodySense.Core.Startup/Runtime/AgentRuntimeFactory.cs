@@ -968,7 +968,7 @@ public sealed class AgentRuntimeFactory
                     1,
                     GovernedLoopLocalWorkRunnerOptions.MaximumCandidateReadLimit),
                 operationalClock);
-            governedBackgroundRuntimeHost.BindBackgroundWork(new HumanInputResponseContinuationWorkRunner(
+            var repairableBackgroundWork = new HumanInputResponseContinuationWorkRunner(
                 localBackgroundWork,
                 humanInputRecovery,
                 humanInputPolicyStore,
@@ -976,7 +976,18 @@ public sealed class AgentRuntimeFactory
                 humanInputContinuation,
                 CustomLoopLimits.MaxRecentRunsPageSize,
                 operationalClock,
-                humanInputReadiness));
+                humanInputReadiness);
+            var coordinatorRepairDependencies = new GovernedLoopCoordinatorRepairDependencyProbe(repairableBackgroundWork, operationalClock);
+            governedBackgroundRuntimeHost.BindBackgroundWork(repairableBackgroundWork, coordinatorRepairDependencies, workspaceId);
+            var coordinatorRepair = new GovernedLoopCoordinatorRepairFacade(
+                new GovernedLoopCoordinatorRepairService(
+                    workspaceId,
+                    operationalAuthority,
+                    coordinatorEvidenceStore,
+                    coordinatorEvidenceStore,
+                    coordinatorRepairDependencies,
+                    operationalClock),
+                governedBackgroundRuntimeHost);
             var runtime = new AgentRuntime(
                 paths,
                 runtimeSurface,
@@ -1000,6 +1011,7 @@ public sealed class AgentRuntimeFactory
                 codexRuntimeStatus,
                 triggerAuthorizer,
                 governedBackgroundRuntimeHost,
+                coordinatorRepair,
                 governedSleep);
             customRunStore = null;
             return runtime;

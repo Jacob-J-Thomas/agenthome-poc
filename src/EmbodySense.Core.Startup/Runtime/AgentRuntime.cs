@@ -66,6 +66,7 @@ public sealed class AgentRuntime : IAsyncDisposable
     private readonly DefaultConversationTurnReviewService _defaultConversationReviews;
     private readonly ITriggerWorkerCurrentEvidenceAuthorizer _triggerWorkerCurrentEvidenceAuthorizer;
     private readonly GovernedLoopBackgroundRuntimeHost _governedBackgroundRuntimeHost;
+    private readonly GovernedLoopCoordinatorRepairFacade _governedLoopCoordinatorRepair;
     private readonly GovernedLoopSleepService? _governedSleep;
     private TaskCompletionSource<bool>? _disposeCompletion;
     private int _disposed;
@@ -93,6 +94,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         CodexRuntimeStatus codexRuntimeStatus,
         ITriggerWorkerCurrentEvidenceAuthorizer triggerWorkerCurrentEvidenceAuthorizer,
         GovernedLoopBackgroundRuntimeHost governedBackgroundRuntimeHost,
+        GovernedLoopCoordinatorRepairFacade governedLoopCoordinatorRepair,
         GovernedLoopSleepService? governedSleep = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
@@ -114,6 +116,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(defaultConversationReviews);
         ArgumentNullException.ThrowIfNull(triggerWorkerCurrentEvidenceAuthorizer);
         ArgumentNullException.ThrowIfNull(governedBackgroundRuntimeHost);
+        ArgumentNullException.ThrowIfNull(governedLoopCoordinatorRepair);
         ArgumentNullException.ThrowIfNull(codexRuntimeStatus);
 
         Paths = paths;
@@ -137,6 +140,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         _defaultConversationReviews = defaultConversationReviews;
         _triggerWorkerCurrentEvidenceAuthorizer = triggerWorkerCurrentEvidenceAuthorizer;
         _governedBackgroundRuntimeHost = governedBackgroundRuntimeHost;
+        _governedLoopCoordinatorRepair = governedLoopCoordinatorRepair;
         _governedSleep = governedSleep;
         _commandService = new RuntimeCommandService(conversationMemory, startupContext);
         CodexRuntimeStatus = codexRuntimeStatus;
@@ -180,6 +184,9 @@ public sealed class AgentRuntime : IAsyncDisposable
 
     /// <summary>Gets the bounded surface-neutral Human Input posture and operation facade over this runtime's canonical ledger.</summary>
     public HumanInputRuntimeFacade HumanInput => _humanInput;
+
+    /// <summary>Gets the surface-neutral preview and submit facade for governed recovery of a durably failed local coordinator.</summary>
+    public GovernedLoopCoordinatorRepairFacade GovernedLoopCoordinatorRepair => _governedLoopCoordinatorRepair;
 
     internal IConversationMemoryStore ConversationMemory { get; }
 
