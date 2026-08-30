@@ -8,14 +8,22 @@ namespace EmbodySense.Core.Startup.Tests.Loops.Execution.Sleep;
 internal sealed class RepairableCoordinatorEvidencePort : IGovernedLoopCoordinatorEvidencePort, IGovernedLoopCoordinatorRepairPort
 {
     private readonly Lock _gate = new();
+    private readonly TaskCompletionSource _failedLifecyclePersisted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource _failedLifecycleRelease = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly RecordingCoordinatorEvidencePort _inner = new();
     private readonly List<GovernedLoopCoordinatorRepairDisposition> _repairs = [];
 
     internal int RepairAcquisitionCalls { get; private set; }
 
+    internal bool BlockFailedLifecycleAfterCommit { get; set; }
+
+    internal Task FailedLifecyclePersisted => _failedLifecyclePersisted.Task;
+
     internal List<GovernedLoopCoordinatorFailure> Failures => _inner.Failures;
 
     internal GovernedLoopCoordinatorSnapshot? Snapshot => _inner.Snapshot;
+
+    internal void ReleaseFailedLifecycle() => _failedLifecycleRelease.TrySetResult();
 
     public Task<GovernedLoopCoordinatorReadResult?> ReadAsync(string coordinatorId, CancellationToken cancellationToken = default)
         => _inner.ReadAsync(coordinatorId, cancellationToken);
@@ -30,10 +38,22 @@ internal sealed class RepairableCoordinatorEvidencePort : IGovernedLoopCoordinat
         CancellationToken cancellationToken = default)
         => _inner.RenewHeartbeatAsync(request, cancellationToken);
 
-    public Task<GovernedLoopCoordinatorLifecycleMutationResult?> AppendLifecycleAsync(
+    public async Task<GovernedLoopCoordinatorLifecycleMutationResult?> AppendLifecycleAsync(
         GovernedLoopCoordinatorLifecycleMutationRequest request,
         CancellationToken cancellationToken = default)
-        => _inner.AppendLifecycleAsync(request, cancellationToken);
+    {
+        var result = await _inner.AppendLifecycleAsync(request, cancellationToken).ConfigureAwait(false);
+        if (BlockFailedLifecycleAfterCommit
+            && request.ProposedLifecycle.Status == GovernedLoopCoordinatorStatus.Failed
+            && result?.Status is GovernedLoopCoordinatorLifecycleMutationStatus.Appended
+                or GovernedLoopCoordinatorLifecycleMutationStatus.Duplicate)
+        {
+            _failedLifecyclePersisted.TrySetResult();
+            await _failedLifecycleRelease.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        return result;
+    }
 
     public Task<GovernedLoopCoordinatorFailureMutationResult?> AppendFailureAsync(
         GovernedLoopCoordinatorFailureMutationRequest request,

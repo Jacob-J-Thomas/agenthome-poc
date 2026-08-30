@@ -83,7 +83,7 @@ public sealed class GovernedLoopLocalCoordinator : IAsyncDisposable
     public async Task<GovernedLoopLocalCoordinatorStartResult> StartAsync(CancellationToken cancellationToken = default)
         => await StartCoreAsync(continueAfterCompletedFailure: false, cancellationToken).ConfigureAwait(false);
 
-    /// <summary>Reaps one completed failed local session before attempting an exact retained-repair acquisition.</summary>
+    /// <summary>Waits for and reaps one durably failed local session before attempting an exact retained-repair acquisition.</summary>
     public async Task<GovernedLoopLocalCoordinatorStartResult> StartAfterRepairAsync(CancellationToken cancellationToken = default)
         => await StartCoreAsync(continueAfterCompletedFailure: true, cancellationToken).ConfigureAwait(false);
 
@@ -95,12 +95,18 @@ public sealed class GovernedLoopLocalCoordinator : IAsyncDisposable
         await _operationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            if (_session is not null)
+            var existingSession = _session;
+            if (existingSession is not null)
             {
                 var retainedTerminal = await InspectUncompletedTerminalSessionAsync().ConfigureAwait(false);
                 if (retainedTerminal is not null)
                 {
-                    return retainedTerminal;
+                    if (!continueAfterCompletedFailure || retainedTerminal.Status != GovernedLoopLocalCoordinatorStartStatus.Failed)
+                    {
+                        return retainedTerminal;
+                    }
+
+                    await existingSession.Completion.WaitAsync(cancellationToken).ConfigureAwait(false);
                 }
 
                 var completed = await ReapCompletedSessionAsync().ConfigureAwait(false);
