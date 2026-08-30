@@ -24,12 +24,36 @@ internal static class HumanInputResponseContinuationHost
 
     internal static async Task<int> RunAsync(string[] arguments)
     {
-        if (arguments is not [var workspaceRoot, var runId, var checkpointId, var checkpointHash, var utcTicksText, var crashPlane, var crashBoundaryText, var crashOrdinalText, var readyPath, var releasePath, var resultPath]
-            || !long.TryParse(utcTicksText, out var utcTicks)
-            || !int.TryParse(crashOrdinalText, out var crashOrdinal)
+        if (arguments.Length is not (11 or 14)
+            || !long.TryParse(arguments[4], out var utcTicks)
+            || !int.TryParse(arguments[7], out var crashOrdinal)
             || crashOrdinal < 1)
         {
             return 2;
+        }
+
+        var workspaceRoot = arguments[0];
+        var runId = arguments[1];
+        var checkpointId = arguments[2];
+        var checkpointHash = arguments[3];
+        var crashPlane = arguments[5];
+        var crashBoundaryText = arguments[6];
+        var readyPath = arguments[8];
+        var releasePath = arguments[9];
+        var resultPath = arguments[10];
+        var postureGateReadOrdinal = 0;
+        var postureGateReadyPath = "-";
+        var postureGateReleasePath = "-";
+        if (arguments.Length == 14
+            && (!int.TryParse(arguments[11], out postureGateReadOrdinal)
+                || postureGateReadOrdinal < 0))
+        {
+            return 2;
+        }
+        if (arguments.Length == 14)
+        {
+            postureGateReadyPath = arguments[12];
+            postureGateReleasePath = arguments[13];
         }
 
         var now = new DateTimeOffset(utcTicks, TimeSpan.Zero);
@@ -42,7 +66,12 @@ internal static class HumanInputResponseContinuationHost
         {
             DurableBoundaryObserver = crash.ObserveSleep
         });
-        var posture = new HumanInputResponseContinuationHostCurrentPosturePort(runs, clock);
+        var posture = new HumanInputResponseContinuationHostCurrentPosturePort(
+            runs,
+            clock,
+            postureGateReadOrdinal,
+            postureGateReadyPath,
+            postureGateReleasePath);
         var contexts = new HumanInputResponseContinuationHostContextPort();
         var authorityUsage = new GovernedLoopEffectAuthorityEvidenceStore(paths);
         var completionTransaction = new HumanInputResponseContinuationHostCompletionTransaction();
@@ -76,8 +105,8 @@ internal static class HumanInputResponseContinuationHost
         await File.WriteAllTextAsync(
             resultPath + ".diagnostic",
             result.Wake is { } wake
-                ? $"status={wake.Status}; disposition={wake.Evidence?.Disposition}; reference={wake.Evidence?.DispositionEvidenceReference}; invoked={wake.ContinuationInvoked}; {OrderedDiagnostic(orderedRuntime.LastResult, completionTransaction.LastFailureDetail)}"
-                : $"wake=<none>; {OrderedDiagnostic(orderedRuntime.LastResult, completionTransaction.LastFailureDetail)}").ConfigureAwait(false);
+                ? $"status={wake.Status}; disposition={wake.Evidence?.Disposition}; reference={wake.Evidence?.DispositionEvidenceReference}; invoked={wake.ContinuationInvoked}; {OrderedDiagnostic(orderedRuntime.LastResult, completionTransaction.LastFailureDetail)}; {PostureDiagnostic(posture)}"
+                : $"wake=<none>; {OrderedDiagnostic(orderedRuntime.LastResult, completionTransaction.LastFailureDetail)}; {PostureDiagnostic(posture)}").ConfigureAwait(false);
         return result.Status is HumanInputResponseContinuationWakeStatus.Submitted or HumanInputResponseContinuationWakeStatus.Replayed or HumanInputResponseContinuationWakeStatus.Retired ? 0 : 3;
     }
 
@@ -85,6 +114,9 @@ internal static class HumanInputResponseContinuationHost
         => result is null
             ? $"ordered=<none>; completionFailure={completionFailure}"
             : $"ordered={result.Status}; orderedDetail={result.Detail}; completionFailure={completionFailure}";
+
+    private static string PostureDiagnostic(HumanInputResponseContinuationHostCurrentPosturePort posture)
+        => $"expectedPostureHash={posture.ExpectedPostureHash}; observedPostureHash={posture.ObservedPostureHash}; expectedLifecycleVersion={posture.ExpectedLifecycleVersion}; observedLifecycleVersion={posture.ObservedLifecycleVersion}";
 
     private static void SignalReadyAndWaitForRelease(string readyPath, string releasePath)
     {

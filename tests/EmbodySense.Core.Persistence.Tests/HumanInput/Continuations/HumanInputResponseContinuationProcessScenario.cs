@@ -60,7 +60,16 @@ internal sealed class HumanInputResponseContinuationProcessScenario : IAsyncDisp
 
     internal string Path(string name) => System.IO.Path.Combine(_workspace.RootPath, name);
 
-    internal Process Start(string crashPlane, string crashBoundary, int crashOrdinal, string resultName, string readyPath = "-", string releasePath = "-")
+    internal Process Start(
+        string crashPlane,
+        string crashBoundary,
+        int crashOrdinal,
+        string resultName,
+        string readyPath = "-",
+        string releasePath = "-",
+        int postureGateReadOrdinal = 0,
+        string postureGateReadyPath = "-",
+        string postureGateReleasePath = "-")
         => HumanInputContinuationHostProcess.Start(
             "wake",
             _workspace.RootPath,
@@ -73,7 +82,10 @@ internal sealed class HumanInputResponseContinuationProcessScenario : IAsyncDisp
             crashOrdinal.ToString(System.Globalization.CultureInfo.InvariantCulture),
             readyPath,
             releasePath,
-            Path(resultName + ".result"));
+            Path(resultName + ".result"),
+            postureGateReadOrdinal.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            postureGateReadyPath,
+            postureGateReleasePath);
 
     internal async Task<string> RunAsync(string resultName)
     {

@@ -431,6 +431,61 @@ public sealed class HumanInputResponseContinuationServiceTests
     }
 
     [Fact]
+    public async Task Continue_reconciles_exact_competing_terminal_progress_after_current_posture_drift()
+    {
+        var scenario = await HumanInputResponseContinuationScenario.CreateAsync(advanceOrderedReentry: true);
+        var prepared = await PrepareAnsweredContinuationAsync(scenario);
+        var competingPosture = new StubGovernedLoopSleepCurrentPosturePort { Result = scenario.CurrentPosture.Result };
+        var competingOrdered = new HumanInputResponseContinuationRecordingOrderedRuntime(scenario.Runs, advancesCanonicalRun: false);
+        var competing = new HumanInputResponseContinuationService(
+            scenario.Runs,
+            scenario.Responses,
+            scenario.SleepStore,
+            competingPosture,
+            scenario.Contexts,
+            competingOrdered,
+            new HumanInputResponseContinuationFixedTimeProvider(GovernedLoopSleepApplicationTestFixture.Now));
+        var stalePosture = scenario.CurrentPosture.Result! with
+        {
+            Posture = scenario.CurrentPosture.Result!.Posture! with { PostureHash = GovernedLoopSleepApplicationTestFixture.Hash('d') },
+        };
+        scenario.CurrentPosture.BeforeReadAsync = async _ =>
+        {
+            scenario.CurrentPosture.BeforeReadAsync = null;
+            var terminalized = await competing.ContinueAsync(prepared.Request);
+            Assert.Equal(GovernedLoopWakeContinuationStatus.Ambiguous, terminalized?.Status);
+            scenario.CurrentPosture.Result = stalePosture;
+        };
+
+        var result = await scenario.Service.ContinueAsync(prepared.Request);
+
+        Assert.Equal(GovernedLoopWakeContinuationStatus.Committed, result?.Status);
+        Assert.Equal(GovernedLoopHumanInputWaitingCheckpointPosture.Terminal, Assert.Single(scenario.Runs.Current.HumanInputWaitingCheckpoints).Posture);
+        Assert.Equal(1, competingOrdered.ResumeHumanInputCount);
+        Assert.Equal(1, scenario.Ordered.ResumeHumanInputCount);
+        Assert.True(CustomLoopRunValidator.Validate(scenario.Runs.Current).IsValid);
+    }
+
+    [Fact]
+    public async Task Continue_fails_closed_after_non_exact_current_posture_drift()
+    {
+        var scenario = await HumanInputResponseContinuationScenario.CreateAsync();
+        var prepared = await PrepareAnsweredContinuationAsync(scenario);
+        scenario.CurrentPosture.Result = scenario.CurrentPosture.Result! with
+        {
+            Posture = scenario.CurrentPosture.Result!.Posture! with { PostureHash = GovernedLoopSleepApplicationTestFixture.Hash('d') },
+        };
+
+        var result = await scenario.Service.ContinueAsync(prepared.Request);
+
+        Assert.Equal(GovernedLoopWakeContinuationStatus.Conflict, result?.Status);
+        Assert.Equal("human-input-posture-stale", result?.EvidenceReference);
+        Assert.Equal(2, scenario.Runs.GetCount);
+        Assert.Equal(GovernedLoopHumanInputWaitingCheckpointPosture.AnsweredNotResumed, Assert.Single(scenario.Runs.Current.HumanInputWaitingCheckpoints).Posture);
+        Assert.Equal(0, scenario.Ordered.ResumeHumanInputCount);
+    }
+
+    [Fact]
     public async Task Wake_stops_after_the_selected_checkpoint_reread_becomes_unavailable()
     {
         var scenario = await HumanInputResponseContinuationScenario.CreateAsync();

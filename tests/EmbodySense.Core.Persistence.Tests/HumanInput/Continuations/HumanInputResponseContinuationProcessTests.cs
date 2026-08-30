@@ -83,6 +83,49 @@ public sealed class HumanInputResponseContinuationProcessTests
     }
 
     [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Two_os_process_workers_reconcile_exact_terminal_progress_after_posture_drift_in_either_worker_order(bool firstWorkerWaitsAtPosture)
+    {
+        await using var scenario = await HumanInputResponseContinuationProcessScenario.CreateAsync();
+        var waitingWorker = firstWorkerWaitsAtPosture ? "first" : "second";
+        var winningWorker = firstWorkerWaitsAtPosture ? "second" : "first";
+        var postureReady = scenario.Path(waitingWorker + ".posture.ready");
+        var postureRelease = scenario.Path(waitingWorker + ".posture.release");
+        using var waiting = scenario.Start(
+            "none",
+            "none",
+            1,
+            waitingWorker,
+            postureGateReadOrdinal: 3,
+            postureGateReadyPath: postureReady,
+            postureGateReleasePath: postureRelease);
+        await WaitForMarkerAsync(postureReady);
+
+        using var winning = scenario.Start("none", "none", 1, winningWorker);
+        await AssertExitsAsync(winning, 0, scenario.Path(winningWorker + ".result"));
+        await File.WriteAllTextAsync(postureRelease, "continuation-posture-release");
+        await AssertExitsAsync(waiting, 0, scenario.Path(waitingWorker + ".result"));
+
+        var results = new[]
+        {
+            await File.ReadAllTextAsync(scenario.Path("first.result")),
+            await File.ReadAllTextAsync(scenario.Path("second.result")),
+        };
+        var diagnostic = string.Join(
+            " | ",
+            await File.ReadAllTextAsync(scenario.Path("first.result.diagnostic")),
+            await File.ReadAllTextAsync(scenario.Path("second.result.diagnostic")));
+
+        Assert.All(results, result => Assert.True(result is "Submitted" or "Replayed"));
+        Assert.Contains("expectedPostureHash=", diagnostic, StringComparison.Ordinal);
+        Assert.Contains("observedPostureHash=", diagnostic, StringComparison.Ordinal);
+        Assert.Contains("expectedLifecycleVersion=", diagnostic, StringComparison.Ordinal);
+        Assert.Contains("observedLifecycleVersion=", diagnostic, StringComparison.Ordinal);
+        AssertCompletedAcceptedResponse(await scenario.ReadRunAsync(), await scenario.ReadAuditEvidenceAsync(), diagnostic);
+    }
+
+    [Theory]
     [InlineData(HumanInputRequestLifecycleOperationKind.Expire, GovernedLoopHumanInputWaitingCheckpointPosture.Expired)]
     [InlineData(HumanInputRequestLifecycleOperationKind.Reject, GovernedLoopHumanInputWaitingCheckpointPosture.Rejected)]
     public async Task Process_terminal_no_response_retires_the_checkpoint_without_a_generic_wake(
@@ -185,6 +228,42 @@ public sealed class HumanInputResponseContinuationProcessTests
             }
 
             await Task.Delay(10);
+        }
+    }
+
+    private static async Task WaitForMarkerAsync(string path)
+    {
+        if (File.Exists(path))
+        {
+            return;
+        }
+
+        var directory = Path.GetDirectoryName(path);
+        if (string.IsNullOrWhiteSpace(directory))
+        {
+            throw new DirectoryNotFoundException("The Human Input continuation marker has no directory.");
+        }
+
+        using var watcher = new FileSystemWatcher(directory, Path.GetFileName(path));
+        var markerPublished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        FileSystemEventHandler onCreated = (_, _) => markerPublished.TrySetResult();
+        RenamedEventHandler onRenamed = (_, _) => markerPublished.TrySetResult();
+        watcher.Created += onCreated;
+        watcher.Changed += onCreated;
+        watcher.Renamed += onRenamed;
+        watcher.EnableRaisingEvents = true;
+        if (File.Exists(path))
+        {
+            return;
+        }
+
+        try
+        {
+            await markerPublished.Task.WaitAsync(TimeSpan.FromSeconds(30)).ConfigureAwait(false);
+        }
+        catch (TimeoutException exception)
+        {
+            throw new TimeoutException($"The Human Input continuation marker `{path}` was not published.", exception);
         }
     }
 

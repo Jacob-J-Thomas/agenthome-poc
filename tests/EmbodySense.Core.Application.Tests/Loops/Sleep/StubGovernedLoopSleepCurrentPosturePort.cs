@@ -14,18 +14,24 @@ internal sealed class StubGovernedLoopSleepCurrentPosturePort : IGovernedLoopSle
 
     internal GovernedLoopExecutionBinding? LastBinding { get; private set; }
 
-    public Task<GovernedLoopSleepCurrentPostureReadResult?> ReadAsync(
+    internal Func<int, Task>? BeforeReadAsync { get; set; }
+
+    public async Task<GovernedLoopSleepCurrentPostureReadResult?> ReadAsync(
         GovernedLoopExecutionBinding binding,
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         ReadCount++;
         LastBinding = binding;
+        if (BeforeReadAsync is not null)
+        {
+            await BeforeReadAsync(ReadCount).ConfigureAwait(false);
+        }
         if (Exception is not null)
         {
             throw Exception;
         }
 
-        return Task.FromResult(Result);
+        return Result;
     }
 }

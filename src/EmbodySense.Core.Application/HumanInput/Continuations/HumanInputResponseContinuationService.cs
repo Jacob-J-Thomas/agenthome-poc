@@ -322,9 +322,9 @@ public sealed class HumanInputResponseContinuationService : IHumanInputResponseC
             return Continuation(GovernedLoopWakeContinuationStatus.Conflict, "human-input-cancel-requested");
         }
 
-        if (TryTerminalReceipt(checkpoint!, request, out var terminalEvidenceHash))
+        if (TryExactTerminalReceipt(run, request, out var terminalReplayCheckpoint, out var terminalEvidenceHash))
         {
-            return await ResumeAcceptedIfRequiredAsync(run, checkpoint!, request, terminalEvidenceHash!, cancellationToken).ConfigureAwait(false);
+            return await ResumeAcceptedIfRequiredAsync(run, terminalReplayCheckpoint!, request, terminalEvidenceHash!, cancellationToken).ConfigureAwait(false);
         }
         if (reconcileOnly)
         {
@@ -346,7 +346,7 @@ public sealed class HumanInputResponseContinuationService : IHumanInputResponseC
         }
         if (posture != HumanInputResponseContinuationPostureStatus.Exact)
         {
-            return Continuation(GovernedLoopWakeContinuationStatus.Conflict, "human-input-posture-stale");
+            return await ReconcilePostureConflictAsync(request, cancellationToken).ConfigureAwait(false);
         }
 
         GovernedLoopWaitOrderedContext? context;
@@ -437,17 +437,47 @@ public sealed class HumanInputResponseContinuationService : IHumanInputResponseC
             return Continuation(GovernedLoopWakeContinuationStatus.NotCommitted, "human-input-terminal-cas-notfound");
         }
 
+        if (terminalUpdate.Status is HumanInputResponseContinuationRunUpdateStatus.Reconciled or HumanInputResponseContinuationRunUpdateStatus.Conflict)
+        {
+            // #696: the bounded canonical reread may replay only this wake's exact terminal receipt; cancellation remains a refusal boundary.
+            return await ResumeExactTerminalReceiptAsync(terminalUpdate.Run, request, cancellationToken).ConfigureAwait(false);
+        }
+
         var persisted = terminalUpdate.Run;
         if (persisted is null)
         {
             return Continuation(GovernedLoopWakeContinuationStatus.Conflict, "human-input-terminal-cas-conflict");
         }
-        if (!TryFindCheckpointForWake(persisted, request.Checkpoint, out var persistedCheckpoint, out _)
-            || !TryTerminalReceipt(persistedCheckpoint!, request, out terminalEvidenceHash))
+        if (!TryExactTerminalReceipt(persisted, request, out var persistedCheckpoint, out terminalEvidenceHash))
         {
             return Continuation(GovernedLoopWakeContinuationStatus.Conflict, "human-input-terminal-cas-conflict");
         }
         return await ResumeAcceptedIfRequiredAsync(persisted, persistedCheckpoint!, request, terminalEvidenceHash!, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<GovernedLoopWakeContinuationResult> ReconcilePostureConflictAsync(
+        GovernedLoopWakeContinuationRequest request,
+        CancellationToken cancellationToken)
+    {
+        var reread = await ReadRunAsync(request.Checkpoint.Binding.Execution.RunId, cancellationToken).ConfigureAwait(false);
+        return reread.Status == HumanInputResponseContinuationRunReadStatus.Found
+            ? await ResumeExactTerminalReceiptAsync(reread.Run, request, cancellationToken).ConfigureAwait(false)
+            : Continuation(GovernedLoopWakeContinuationStatus.Conflict, "human-input-posture-stale");
+    }
+
+    private async Task<GovernedLoopWakeContinuationResult> ResumeExactTerminalReceiptAsync(
+        CustomLoopRunRecord? run,
+        GovernedLoopWakeContinuationRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (run?.Status == CustomLoopRunStatus.CancelRequested)
+        {
+            return Continuation(GovernedLoopWakeContinuationStatus.Conflict, "human-input-cancel-requested");
+        }
+
+        return run is not null && TryExactTerminalReceipt(run, request, out var checkpoint, out var terminalEvidenceHash)
+            ? await ResumeAcceptedIfRequiredAsync(run, checkpoint!, request, terminalEvidenceHash!, cancellationToken).ConfigureAwait(false)
+            : Continuation(GovernedLoopWakeContinuationStatus.Conflict, "human-input-posture-stale");
     }
 
     private async Task<GovernedLoopWakeContinuationResult> ResumeAcceptedIfRequiredAsync(
@@ -1936,6 +1966,20 @@ public sealed class HumanInputResponseContinuationService : IHumanInputResponseC
 
         evidenceHash = terminal.EvidenceHash;
         return IsHash(evidenceHash);
+    }
+
+    private static bool TryExactTerminalReceipt(
+        CustomLoopRunRecord run,
+        GovernedLoopWakeContinuationRequest request,
+        out GovernedLoopHumanInputWaitingCheckpoint? checkpoint,
+        out string? evidenceHash)
+    {
+        checkpoint = null;
+        evidenceHash = null;
+        return TryFindCheckpointForWake(run, request.Checkpoint, out checkpoint, out _)
+            && TrySelectionReference(checkpoint!, out var selection)
+            && string.Equals(selection!.SelectionHash, request.Identity.AuthenticationEvidenceHash, StringComparison.Ordinal)
+            && TryTerminalReceipt(checkpoint!, request, out evidenceHash);
     }
 
     private static bool TryExactNoResponseLifecycle(
