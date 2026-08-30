@@ -14,6 +14,7 @@ namespace EmbodySense.Core.Persistence.Tests.HumanInput.Publication;
 
 internal sealed class HumanInputRequestPublicationProcessScenario : IAsyncDisposable
 {
+    private const string CancellationOperationId = "human-input-process-cancellation";
     private readonly HumanInputContinuationRecoveryContext _context;
     private readonly DateTimeOffset _now;
     private readonly TestWorkspace _workspace;
@@ -76,6 +77,18 @@ internal sealed class HumanInputRequestPublicationProcessScenario : IAsyncDispos
             "1",
             Path(resultName + ".result"));
 
+    internal Process StartCancellation(string crashBoundary, string resultName)
+        => HumanInputContinuationHostProcess.Start(
+            "cancellation",
+            _workspace.RootPath,
+            _context.Run.Id,
+            _context.Run.LifecycleVersion.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            _now.UtcTicks.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            Path("publication-grant.json"),
+            crashBoundary,
+            CancellationOperationId,
+            Path(resultName + ".result"));
+
     internal async Task<string> RunAsync(string resultName)
     {
         using var process = Start("none", resultName);
@@ -87,10 +100,35 @@ internal sealed class HumanInputRequestPublicationProcessScenario : IAsyncDispos
         return result;
     }
 
+    internal async Task<string> RunCancellationAsync(string resultName)
+    {
+        using var process = StartCancellation("none", resultName);
+        await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
+        var standardError = await process.StandardError.ReadToEndAsync();
+        var resultPath = Path(resultName + ".result");
+        var result = File.Exists(resultPath) ? await File.ReadAllTextAsync(resultPath).ConfigureAwait(false) : "<result-not-written>";
+        Assert.True(process.ExitCode == 0, $"Expected successful cancellation host exit. result: {result}; stderr: {standardError}");
+        return result;
+    }
+
     internal async Task<HumanInputRequestLifecycleStoreReadResult> ReadRequestAsync()
     {
         var store = new HumanInputRequestStore(new EmbodySense.Core.Common.Workspace.WorkspacePaths(_workspace.RootPath));
         return await store.ReadAsync(_context.Checkpoint.Request.RequestId).ConfigureAwait(false);
+    }
+
+    internal async Task<CustomLoopRunRecord?> ReadRunAsync()
+    {
+        using var store = new CustomLoopRunStore(new EmbodySense.Core.Common.Workspace.WorkspacePaths(_workspace.RootPath), new HumanInputContinuationTestClock(_now));
+        return await store.GetAsync(_context.Run.Id).ConfigureAwait(false);
+    }
+
+    internal async Task<CustomLoopControlOperation?> ReadCancellationOperationAsync()
+    {
+        var store = new CustomLoopControlOperationStore(
+            new EmbodySense.Core.Common.Workspace.WorkspacePaths(_workspace.RootPath),
+            timeProvider: new HumanInputContinuationTestClock(_now));
+        return await store.GetAsync(CancellationOperationId).ConfigureAwait(false);
     }
 
     internal string Path(string name) => System.IO.Path.Combine(_workspace.RootPath, name);

@@ -416,7 +416,40 @@ public sealed class AgentRuntimeFactory
             var auditLog = new AuditLog(paths);
             var actor = ResolveActor(runtimeSurface);
             customRunStore = _customLoopRunStoreProvider?.Borrow(paths) ?? new CustomLoopRunStore(paths);
-            var recovery = new CustomLoopRecoveryService(customRunStore, auditLog);
+            _capabilityTrustProvider.RequireDisjointWorkspace(paths.RootPath);
+            var capabilityAuthority = new CapabilityAuthorityTransaction(paths);
+            var workspaceId = CapabilityWorkspaceScopeId.Create(paths.RootPath);
+            var operationalClock = TimeProvider.System;
+            var customControlOperations = new CustomLoopControlOperationStore(paths, auditLog);
+            var governedRevisionStore = new GovernedLoopRevisionLifecycleStore(paths, _capabilityTrustProvider, authorityTransaction: capabilityAuthority);
+            var governedGraphStore = new GovernedLoopGraphRevisionStore(paths, governedRevisionStore, _capabilityTrustProvider, authorityTransaction: capabilityAuthority);
+            var governedPublicationSource = new GovernedLoopPublishedRevisionSource(governedRevisionStore, capabilityAuthority);
+            var governedBindingSource = new GovernedLoopGrantBindingSource(governedPublicationSource, governedGraphStore, capabilityAuthority);
+            var governedRoleStore = new ContextualRoleRevisionStore(paths, workspaceId, authorityTransaction: capabilityAuthority);
+            var governedRoleSource = new AuthorityGrantRoleSource(
+                workspaceId,
+                governedRoleStore,
+                governedRoleStore,
+                new WorkspaceContextualRoleInstructionSourceProbe(paths),
+                capabilityAuthority);
+            var governedAuthorityStore = new AuthorityProfileStore(paths, _capabilityTrustProvider, authorityTransaction: capabilityAuthority);
+            var governedGrantResolver = new AuthorityGrantResolver(
+                governedAuthorityStore,
+                new AuthorityGrantProfileSource(governedAuthorityStore),
+                governedRoleSource,
+                governedPublicationSource,
+                governedBindingSource,
+                capabilityAuthority);
+            var humanInputResponses = new HumanInputRequestStore(paths, _capabilityTrustProvider, authorityTransaction: capabilityAuthority);
+            var humanInputCancellationConvergence = new CustomLoopHumanInputCancellationConvergenceService(
+                customRunStore,
+                customControlOperations,
+                humanInputResponses,
+                governedGrantResolver,
+                capabilityAuthority,
+                workspaceId,
+                operationalClock);
+            var recovery = new CustomLoopRecoveryService(customRunStore, auditLog, humanInputCancellationConvergence: humanInputCancellationConvergence);
             var recoveryOperationId = "recovery-" + Guid.NewGuid().ToString("N");
             var recoveryOwnership = customExecutionGate.TryAcquire(recoveryOperationId, new string('0', CustomLoopLimits.Sha256HexCharacters));
             if (recoveryOwnership.Status is not (CustomLoopExecutionLeaseStatus.Acquired or CustomLoopExecutionLeaseStatus.WorkspaceBusy or CustomLoopExecutionLeaseStatus.WorkspaceHostUnavailable))
@@ -460,7 +493,6 @@ public sealed class AgentRuntimeFactory
                 customExecutionGate.RelinquishWorkspaceHost();
             }
 
-            var capabilityAuthority = new CapabilityAuthorityTransaction(paths);
             var workspaceClient = new LocalWorkspaceClient(paths);
             var loopDefinitionStore = new LoopDefinitionStore(paths, capabilityAuthority);
             var defaultLoop = await loopDefinitionStore.LoadAsync(BuiltInLoopIds.DefaultConversation, cancellationToken) ?? LoopDefinition.CreateDefaultConversation();
@@ -531,7 +563,6 @@ public sealed class AgentRuntimeFactory
             var customInvocationOperations = new CustomLoopInvocationOperationStore(paths);
             var customInvocationReceiptRetention = new CustomLoopInvocationReceiptRetentionService(customInvocationOperations, auditLog);
             var customInvocationReceiptWriter = new CustomLoopInvocationReceiptWriter(customInvocationOperations, customInvocationReceiptRetention);
-            var customControlOperations = new CustomLoopControlOperationStore(paths, auditLog);
             var customToolAuthority = new CustomLoopToolAuthorityProvider(loopDefinitionStore);
             var customToolEvidence = new CustomLoopRunToolEvidenceSink(customRunStore);
             var customAdmission = new CustomLoopAdmissionService(customDefinitionStore, customRunStore, auditLog, customToolAuthority, capabilityAdmission);
@@ -555,32 +586,10 @@ public sealed class AgentRuntimeFactory
                 attemptCancellationBroker: customExecutionGate,
                 capabilityAdmissionService: capabilityAdmission,
                 failureClassifier: failureClassifier);
-            _capabilityTrustProvider.RequireDisjointWorkspace(paths.RootPath);
-            var workspaceId = CapabilityWorkspaceScopeId.Create(paths.RootPath);
             var triggerWorkspaceId = workspaceId["workspace-sha256:".Length..];
-            var operationalClock = TimeProvider.System;
             var triggerQueueStore = new TriggerQueueStore(paths, TriggerQueueQuota.Runtime, timeProvider: operationalClock);
             var scheduleStore = new ScheduleStore(paths);
             var coordinatorEvidenceStore = new GovernedLoopCoordinatorEvidenceStore(paths);
-            var governedRevisionStore = new GovernedLoopRevisionLifecycleStore(paths, _capabilityTrustProvider, authorityTransaction: capabilityAuthority);
-            var governedGraphStore = new GovernedLoopGraphRevisionStore(paths, governedRevisionStore, _capabilityTrustProvider, authorityTransaction: capabilityAuthority);
-            var governedPublicationSource = new GovernedLoopPublishedRevisionSource(governedRevisionStore, capabilityAuthority);
-            var governedBindingSource = new GovernedLoopGrantBindingSource(governedPublicationSource, governedGraphStore, capabilityAuthority);
-            var governedRoleStore = new ContextualRoleRevisionStore(paths, workspaceId, authorityTransaction: capabilityAuthority);
-            var governedRoleSource = new AuthorityGrantRoleSource(
-                workspaceId,
-                governedRoleStore,
-                governedRoleStore,
-                new WorkspaceContextualRoleInstructionSourceProbe(paths),
-                capabilityAuthority);
-            var governedAuthorityStore = new AuthorityProfileStore(paths, _capabilityTrustProvider, authorityTransaction: capabilityAuthority);
-            var governedGrantResolver = new AuthorityGrantResolver(
-                governedAuthorityStore,
-                new AuthorityGrantProfileSource(governedAuthorityStore),
-                governedRoleSource,
-                governedPublicationSource,
-                governedBindingSource,
-                capabilityAuthority);
             var governedEffectAuthorityEvidence = new GovernedLoopEffectAuthorityEvidenceStore(
                 paths,
                 _capabilityTrustProvider,
@@ -660,7 +669,6 @@ public sealed class AgentRuntimeFactory
             var governedWaitContinuationRelay = new GovernedLoopWaitContinuationRelay();
             var humanInputPolicyStore = new HumanInputPolicyFileStore(paths);
             var humanInputPolicyResolutionService = new HumanInputPolicyResolutionService(humanInputPolicyStore);
-            var humanInputResponses = new HumanInputRequestStore(paths, _capabilityTrustProvider, authorityTransaction: capabilityAuthority);
             var humanInputPublication = new HumanInputRequestPublicationService(
                 customRunStore,
                 humanInputResponses,
@@ -702,7 +710,8 @@ public sealed class AgentRuntimeFactory
                 failureClassifier: failureClassifier,
                 humanInputPolicyResolutionService: humanInputPolicyResolutionService,
                 humanInputBindingSource: humanInputBindingSource,
-                humanInputRequestPublicationService: humanInputPublication);
+                humanInputRequestPublicationService: humanInputPublication,
+                humanInputCancellationConvergence: humanInputCancellationConvergence);
             var governedAdmissionStore = new GovernedLoopAdmissionStore(paths, _capabilityTrustProvider, authorityTransaction: capabilityAuthority);
             var governedAdmission = new GovernedLoopAdmissionService(
                 workspaceId,
@@ -800,7 +809,18 @@ public sealed class AgentRuntimeFactory
             var lifecycleCancellationSignal = new CustomLoopExecutionCancellationSignalGroup(
                 legacyRunner,
                 governedRunner);
-            var customLifecycle = new CustomLoopLifecycleService(customRunStore, customControlOperations, originAwareResumeExecutor, legacyInferenceExecutor, lifecycleCancellationSignal, auditLog, customExecutionGate, receiptRetention: customControlOperations, surface: runtimeSurface.SurfaceId.Id);
+            var customLifecycle = new CustomLoopLifecycleService(
+                customRunStore,
+                customControlOperations,
+                originAwareResumeExecutor,
+                legacyInferenceExecutor,
+                lifecycleCancellationSignal,
+                auditLog,
+                customExecutionGate,
+                receiptRetention: customControlOperations,
+                surface: runtimeSurface.SurfaceId.Id,
+                cancellationAuthorityTransaction: capabilityAuthority,
+                humanInputCancellationConvergence: humanInputCancellationConvergence);
             var operationalAuthority = new GovernedLoopLocalOperationalControlAuthority(
                 workspaceId,
                 actor,

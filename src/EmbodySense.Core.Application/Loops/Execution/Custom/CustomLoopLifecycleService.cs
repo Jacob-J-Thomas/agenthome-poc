@@ -6,6 +6,7 @@ using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Loops.ReceiptRetention;
 using EmbodySense.Core.Application.Loops.ReceiptRetention.Models;
+using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Application.Loops.Sequential;
 using EmbodySense.Core.Application.Loops.Sequential.Models;
 using EmbodySense.Core.Common.Governance.Audit;
@@ -41,6 +42,8 @@ public sealed class CustomLoopLifecycleService : ICustomLoopLifecycleControlPort
     private readonly ICustomLoopWorkspaceExecutionGate _executionGate;
     private readonly TimeProvider _timeProvider;
     private readonly ICustomLoopReceiptRetentionPort? _receiptRetention;
+    private readonly ICapabilityAuthorityTransaction? _cancellationAuthorityTransaction;
+    private readonly ICustomLoopHumanInputCancellationConvergence? _humanInputCancellationConvergence;
     private readonly string _surface;
 
     /// <summary>
@@ -56,6 +59,8 @@ public sealed class CustomLoopLifecycleService : ICustomLoopLifecycleControlPort
     /// <param name="timeProvider">The time provider.</param>
     /// <param name="receiptRetention">The optional governed lifecycle-control receipt retention port.</param>
     /// <param name="surface">The canonical runtime surface attributed to retention cleanup.</param>
+    /// <param name="cancellationAuthorityTransaction">The shared workspace authority fence used to serialize Human Input publication and cancellation, when Human Input convergence is composed.</param>
+    /// <param name="humanInputCancellationConvergence">The canonical Human Input cancellation convergence service, or null for runtimes that do not compose Human Input.</param>
     public CustomLoopLifecycleService(
         ICustomLoopRunStore runStore,
         ICustomLoopControlOperationStore operationStore,
@@ -66,7 +71,9 @@ public sealed class CustomLoopLifecycleService : ICustomLoopLifecycleControlPort
         ICustomLoopWorkspaceExecutionGate executionGate,
         TimeProvider? timeProvider = null,
         ICustomLoopReceiptRetentionPort? receiptRetention = null,
-        string? surface = null)
+        string? surface = null,
+        ICapabilityAuthorityTransaction? cancellationAuthorityTransaction = null,
+        ICustomLoopHumanInputCancellationConvergence? humanInputCancellationConvergence = null)
     {
         _runStore = runStore ?? throw new ArgumentNullException(nameof(runStore));
         _operationStore = operationStore ?? throw new ArgumentNullException(nameof(operationStore));
@@ -77,6 +84,12 @@ public sealed class CustomLoopLifecycleService : ICustomLoopLifecycleControlPort
         _executionGate = executionGate ?? throw new ArgumentNullException(nameof(executionGate));
         _timeProvider = timeProvider ?? TimeProvider.System;
         _receiptRetention = receiptRetention;
+        _cancellationAuthorityTransaction = cancellationAuthorityTransaction;
+        _humanInputCancellationConvergence = humanInputCancellationConvergence;
+        if (_humanInputCancellationConvergence is not null && _cancellationAuthorityTransaction is null)
+        {
+            throw new ArgumentException("Human Input cancellation convergence requires the shared workspace authority transaction.", nameof(cancellationAuthorityTransaction));
+        }
         _surface = surface ?? "runtime";
         if (!CustomLoopArtifactIdentifier.IsValid(_surface))
         {
@@ -310,9 +323,7 @@ public sealed class CustomLoopLifecycleService : ICustomLoopLifecycleControlPort
         {
             if (run.ExecutionClock.ActiveSinceUtc is null)
             {
-                var cancelled = await PersistTransitionAsync(run, CustomLoopRunStatus.Cancelled, operation.Actor, operation.OperationId, "The safely stopped cancellation request was completed without provider dispatch.");
-                var cancelledOutcome = cancelled.Run is null ? cancelled.Status : cancelled.AuditRecorded ? CustomLoopControlStatus.Cancelled : CustomLoopControlStatus.AuditWarning;
-                return await CompleteAsync(operation, cancelledOutcome, cancelled.Run ?? cancelled.CurrentRun, cancelled.AuditRecorded, cancelled.Detail);
+                return await CompleteCancellationAsync(operation, run, "The safely stopped cancellation request was completed without provider dispatch.");
             }
 
             var signal = await TryCancelActiveAttemptAsync(run.Id, operation.OperationId);
@@ -326,7 +337,7 @@ public sealed class CustomLoopLifecycleService : ICustomLoopLifecycleControlPort
 
         if (run.Status is CustomLoopRunStatus.Running or CustomLoopRunStatus.PauseRequested)
         {
-            var requested = await PersistTransitionAsync(run, CustomLoopRunStatus.CancelRequested, operation.Actor, operation.OperationId, "Cancellation was requested; any open provider attempt is being cancelled and no later attempt may start.");
+            var requested = await PersistCancellationRequestedAsync(run, operation, "Cancellation was requested; any open provider attempt is being cancelled and no later attempt may start.");
             if (requested.Run is null)
             {
                 return await CompleteAuditedOutcomeAsync(operation, requested.Status, requested.CurrentRun, requested.Detail);
@@ -351,6 +362,17 @@ public sealed class CustomLoopLifecycleService : ICustomLoopLifecycleControlPort
 
         if (run.Status == CustomLoopRunStatus.Waiting)
         {
+            if (RequiresHumanInputCancellationConvergence(run))
+            {
+                var requested = await PersistCancellationRequestedAsync(run, operation, "Cancellation was requested before retiring every canonical Human Input request lifecycle.");
+                if (requested.Run is null)
+                {
+                    return await CompleteAuditedOutcomeAsync(operation, requested.Status, requested.CurrentRun, requested.Detail);
+                }
+
+                return await CompleteCancellationAsync(operation, requested.Run, "The durably sleeping run cancellation is awaiting canonical Human Input request convergence.");
+            }
+
             var cancelled = await PersistTransitionAsync(run, CustomLoopRunStatus.Cancelled, operation.Actor, operation.OperationId, "The durably sleeping run was cancelled atomically without provider dispatch or wake continuation.");
             var outcome = cancelled.Run is null ? cancelled.Status : cancelled.AuditRecorded ? CustomLoopControlStatus.Cancelled : CustomLoopControlStatus.AuditWarning;
             return await CompleteAsync(operation, outcome, cancelled.Run ?? cancelled.CurrentRun, cancelled.AuditRecorded, cancelled.Detail);
@@ -364,6 +386,17 @@ public sealed class CustomLoopLifecycleService : ICustomLoopLifecycleControlPort
                 var parked = await PersistTransitionAsync(run, CustomLoopRunStatus.NeedsReview, operation.Actor, operation.OperationId, Detail);
                 var parkedOutcome = parked.Run is null ? parked.Status : CustomLoopControlStatus.NeedsReview;
                 return await CompleteAsync(operation, parkedOutcome, parked.Run ?? parked.CurrentRun, parked.AuditRecorded, parked.Detail);
+            }
+
+            if (RequiresHumanInputCancellationConvergence(run))
+            {
+                var requested = await PersistCancellationRequestedAsync(run, operation, "Cancellation was requested before retiring every canonical Human Input request lifecycle.");
+                if (requested.Run is null)
+                {
+                    return await CompleteAuditedOutcomeAsync(operation, requested.Status, requested.CurrentRun, requested.Detail);
+                }
+
+                return await CompleteCancellationAsync(operation, requested.Run, "The safely paused run cancellation is awaiting canonical Human Input request convergence.");
             }
 
             var cancelled = await PersistTransitionAsync(run, CustomLoopRunStatus.Cancelled, operation.Actor, operation.OperationId, "The safely paused run was cancelled atomically without provider dispatch.");
@@ -582,9 +615,7 @@ public sealed class CustomLoopLifecycleService : ICustomLoopLifecycleControlPort
         {
             if (run.ExecutionClock.ActiveSinceUtc is null)
             {
-                var cancelled = await PersistTransitionAsync(run, CustomLoopRunStatus.Cancelled, operation.Actor, NewEventId("cancel-recovery"), "Pending cancellation recovery proved that no provider attempt was active and completed cancellation without dispatch.");
-                var cancelledOutcome = cancelled.Run is null ? cancelled.Status : cancelled.AuditRecorded ? CustomLoopControlStatus.Cancelled : CustomLoopControlStatus.AuditWarning;
-                return await CompleteAsync(operation, cancelledOutcome, cancelled.Run ?? cancelled.CurrentRun, cancelled.AuditRecorded, cancelled.Detail);
+                return await CompleteCancellationAsync(operation, run, "Pending cancellation recovery proved that no provider attempt was active and completed cancellation without dispatch.");
             }
 
             var signal = await TryCancelActiveAttemptAsync(run.Id, operation.OperationId);
@@ -610,6 +641,15 @@ public sealed class CustomLoopLifecycleService : ICustomLoopLifecycleControlPort
         var current = await TryLoadAsync(resumedRun.Id, IntegrityToken()) ?? resumedRun;
         if (exception is OperationCanceledException && current.Status == CustomLoopRunStatus.CancelRequested)
         {
+            if (RequiresHumanInputCancellationConvergence(current))
+            {
+                return Result(
+                    CustomLoopControlStatus.Failed,
+                    current,
+                    operation.OperationId,
+                    "The ordered resume executor observed a durable cancellation request that retains canonical Human Input checkpoints. It will remain CancelRequested until the retained cancellation control receipt replays shared-fence Human Input convergence.");
+            }
+
             const string CancellationDetail = "The ordered resume executor observed the durable cancellation request and stopped its active attempt; cancellation was completed without another provider dispatch.";
             var cancelled = await PersistTransitionAsync(current, CustomLoopRunStatus.Cancelled, operation.Actor, NewEventId("resume-cancelled"), CancellationDetail);
             var cancelledRun = cancelled.Run ?? cancelled.CurrentRun ?? current;
@@ -664,6 +704,73 @@ public sealed class CustomLoopLifecycleService : ICustomLoopLifecycleControlPort
             return new CancellationSignalAttempt(false, $"The cancellation request is durable, but routing to the active-attempt owner failed: {SafeExceptionClass(exception)}. The control receipt remains pending so the same operation can retry the signal.");
         }
     }
+
+    private async Task<CustomLoopControlResult> CompleteCancellationAsync(
+        CustomLoopControlOperation operation,
+        CustomLoopRunRecord run,
+        string detail)
+    {
+        if (RequiresHumanInputCancellationConvergence(run))
+        {
+            if (_humanInputCancellationConvergence is null)
+            {
+                return Result(CustomLoopControlStatus.Failed, run, operation.OperationId, "The CancelRequested run retains canonical Human Input checkpoints, but this runtime did not compose the required cancellation convergence service. The parent receipt remains pending for exact recovery.");
+            }
+
+            CustomLoopHumanInputCancellationConvergenceResult convergence;
+            try
+            {
+                convergence = await _humanInputCancellationConvergence.ConvergeAsync(run, operation.OperationId, IntegrityToken());
+            }
+            catch (Exception exception)
+            {
+                return Result(CustomLoopControlStatus.Failed, run, operation.OperationId, $"Human Input cancellation convergence could not complete safely: {SafeExceptionClass(exception)}. The parent receipt remains pending for exact recovery.");
+            }
+
+            if (convergence.Status is not (CustomLoopHumanInputCancellationConvergenceStatus.Converged or CustomLoopHumanInputCancellationConvergenceStatus.NotApplicable)
+                || convergence.Run is null)
+            {
+                return Result(CustomLoopControlStatus.Failed, convergence.Run ?? run, operation.OperationId, convergence.Detail);
+            }
+
+            run = convergence.Run;
+            detail = $"{detail} {convergence.Detail}";
+        }
+
+        var cancelled = await PersistTransitionAsync(run, CustomLoopRunStatus.Cancelled, operation.Actor, NewEventId("cancel-converged"), detail);
+        var outcome = cancelled.Run is null ? cancelled.Status : cancelled.AuditRecorded ? CustomLoopControlStatus.Cancelled : CustomLoopControlStatus.AuditWarning;
+        return await CompleteAsync(operation, outcome, cancelled.Run ?? cancelled.CurrentRun, cancelled.AuditRecorded, cancelled.Detail);
+    }
+
+    private async Task<TransitionResult> PersistCancellationRequestedAsync(
+        CustomLoopRunRecord run,
+        CustomLoopControlOperation operation,
+        string detail)
+    {
+        if (!RequiresHumanInputCancellationConvergence(run))
+        {
+            return await PersistTransitionAsync(run, CustomLoopRunStatus.CancelRequested, operation.Actor, operation.OperationId, detail);
+        }
+
+        if (_cancellationAuthorityTransaction is null)
+        {
+            return new TransitionResult(null, run, CustomLoopControlStatus.Failed, false, "Human Input cancellation convergence requires the shared workspace authority transaction before retaining CancelRequested.");
+        }
+
+        try
+        {
+            return await _cancellationAuthorityTransaction.ExecuteAsync(
+                _ => PersistTransitionAsync(run, CustomLoopRunStatus.CancelRequested, operation.Actor, operation.OperationId, detail),
+                IntegrityToken()).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            return new TransitionResult(null, run, CustomLoopControlStatus.Failed, false, $"The shared cancellation/publication authority fence could not retain CancelRequested: {SafeExceptionClass(exception)}.");
+        }
+    }
+
+    private static bool RequiresHumanInputCancellationConvergence(CustomLoopRunRecord run)
+        => run.HumanInputWaitingCheckpoints.Count != 0;
 
     private async Task<TransitionResult> PersistTransitionAsync(CustomLoopRunRecord current, CustomLoopRunStatus status, string actor, string eventId, string detail)
     {
