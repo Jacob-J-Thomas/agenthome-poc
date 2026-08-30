@@ -124,7 +124,7 @@ public sealed class GovernedLoopLocalWorkRunner : IGovernedLoopLocalWorkRunner, 
             var source = await _backgroundWork.ReadAsync(GovernedLoopBackgroundWorkFamily.Schedule, observedAtUtc, 1, cancellationToken).ConfigureAwait(false);
             return source is null || !Enum.IsDefined(source.ScheduleStatus)
                 ? Result(GovernedLoopLocalWorkResultStatus.Corrupt, "schedule-readiness-corrupt")
-                : ClassifyBackgroundStatus(source.ScheduleStatus);
+                : ClassifyBackgroundReadinessStatus(source.ScheduleStatus);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -167,8 +167,8 @@ public sealed class GovernedLoopLocalWorkRunner : IGovernedLoopLocalWorkRunner, 
                 return Result(GovernedLoopLocalWorkResultStatus.Corrupt, "wake-readiness-corrupt");
             }
 
-            var wake = ClassifyBackgroundStatus(source.WakeStatus);
-            var reconciliation = ClassifyBackgroundStatus(source.WakeReconciliationStatus);
+            var wake = ClassifyBackgroundReadinessStatus(source.WakeStatus);
+            var reconciliation = ClassifyBackgroundReadinessStatus(source.WakeReconciliationStatus);
             return wake.Status is GovernedLoopLocalWorkResultStatus.Completed or GovernedLoopLocalWorkResultStatus.Empty
                 && reconciliation.Status is GovernedLoopLocalWorkResultStatus.Completed or GovernedLoopLocalWorkResultStatus.Empty
                 ? Result(GovernedLoopLocalWorkResultStatus.Empty, "wake-readiness-ready")
@@ -548,6 +548,18 @@ public sealed class GovernedLoopLocalWorkRunner : IGovernedLoopLocalWorkRunner, 
             GovernedLoopBackgroundWorkReadStatus.Corrupt
                 => Result(GovernedLoopLocalWorkResultStatus.Corrupt, "background-candidates-corrupt"),
             _ => Result(GovernedLoopLocalWorkResultStatus.Unavailable, "background-candidates-unavailable")
+        };
+
+    private GovernedLoopLocalWorkResult ClassifyBackgroundReadinessStatus(GovernedLoopBackgroundWorkReadStatus status)
+        => status switch
+        {
+            GovernedLoopBackgroundWorkReadStatus.Found or GovernedLoopBackgroundWorkReadStatus.Empty
+                => Result(GovernedLoopLocalWorkResultStatus.Empty, "background-readiness-ready"),
+            GovernedLoopBackgroundWorkReadStatus.Backpressured
+                => Result(GovernedLoopLocalWorkResultStatus.Backpressured, "background-readiness-backpressured"),
+            GovernedLoopBackgroundWorkReadStatus.Corrupt
+                => Result(GovernedLoopLocalWorkResultStatus.Corrupt, "background-readiness-corrupt"),
+            _ => Result(GovernedLoopLocalWorkResultStatus.Unavailable, "background-readiness-unavailable")
         };
 
     private static GovernedLoopBackgroundWorkReadStatus CombineWakeStatuses(

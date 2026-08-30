@@ -78,6 +78,29 @@ public sealed class GovernedLoopCoordinatorRepairServiceTests
     }
 
     [Fact]
+    public async Task Submit_replays_retained_repair_without_requiring_current_failed_evidence_or_dependency_readiness()
+    {
+        var fixture = new RepairFixture();
+        var preview = await fixture.Service.PreviewAsync(new GovernedLoopCoordinatorRepairPreviewRequest("coordinator", "repair-operation"));
+        var accepted = await fixture.Service.SubmitAsync(new GovernedLoopCoordinatorRepairSubmitRequest(preview.Disposition!));
+        fixture.Evidence.Exception = new IOException("the repaired generation is no longer current");
+        fixture.Dependencies.Exception = new IOException("current readiness cannot alter a retained outcome");
+
+        var replayed = await fixture.Service.SubmitAsync(new GovernedLoopCoordinatorRepairSubmitRequest(preview.Disposition!));
+        var changed = GovernedLoopSleepContractHash.Apply(preview.Disposition! with
+        {
+            OperationId = "changed-operation",
+            ContentHash = string.Empty
+        });
+        var conflict = await fixture.Service.SubmitAsync(new GovernedLoopCoordinatorRepairSubmitRequest(changed));
+
+        Assert.Equal(GovernedLoopCoordinatorRepairSubmitStatus.Accepted, accepted.Status);
+        Assert.Equal(GovernedLoopCoordinatorRepairSubmitStatus.Replayed, replayed.Status);
+        Assert.Equal(GovernedLoopCoordinatorRepairSubmitStatus.Conflict, conflict.Status);
+        Assert.Single(fixture.Repairs.Dispositions);
+    }
+
+    [Fact]
     public async Task Preview_rejects_malformed_caller_held_operation_without_reading_authority()
     {
         var fixture = new RepairFixture();
@@ -229,7 +252,15 @@ public sealed class GovernedLoopCoordinatorRepairServiceTests
         internal GovernedLoopCoordinatorRepairMutationResult? ForcedResult { get; set; }
 
         public Task<GovernedLoopCoordinatorRepairReadResult?> ReadAsync(string coordinatorId, string failedOwnershipHash, CancellationToken cancellationToken = default)
-            => Task.FromResult<GovernedLoopCoordinatorRepairReadResult?>(new GovernedLoopCoordinatorRepairReadResult(GovernedLoopCoordinatorRepairReadStatus.NotFound));
+        {
+            var disposition = Dispositions.SingleOrDefault(item => string.Equals(
+                item.FailedOwnership.ContentHash,
+                failedOwnershipHash,
+                StringComparison.Ordinal));
+            return Task.FromResult<GovernedLoopCoordinatorRepairReadResult?>(disposition is null
+                ? new GovernedLoopCoordinatorRepairReadResult(GovernedLoopCoordinatorRepairReadStatus.NotFound)
+                : new GovernedLoopCoordinatorRepairReadResult(GovernedLoopCoordinatorRepairReadStatus.Found, disposition));
+        }
 
         public Task<GovernedLoopCoordinatorRepairMutationResult?> AppendAsync(GovernedLoopCoordinatorRepairDisposition disposition, CancellationToken cancellationToken = default)
         {

@@ -127,6 +127,12 @@ public sealed class GovernedLoopCoordinatorRepairService : IGovernedLoopCoordina
             return Submit(GovernedLoopCoordinatorRepairSubmitStatus.Unauthorized, disposition.OperationId, null, "coordinator-repair-actor-changed");
         }
 
+        var retained = await ReadRetainedRepairAsync(disposition, cancellationToken).ConfigureAwait(false);
+        if (retained is not null)
+        {
+            return retained;
+        }
+
         var evidence = await ReadEvidenceAsync(disposition.CoordinatorId, cancellationToken).ConfigureAwait(false);
         if (evidence.Status != GovernedLoopCoordinatorRepairPreviewStatus.Ready)
         {
@@ -169,6 +175,43 @@ public sealed class GovernedLoopCoordinatorRepairService : IGovernedLoopCoordina
             GovernedLoopCoordinatorRepairMutationStatus.Corrupt => Submit(GovernedLoopCoordinatorRepairSubmitStatus.Corrupt, disposition.OperationId, null, "coordinator-repair-ledger-corrupt"),
             _ => Submit(GovernedLoopCoordinatorRepairSubmitStatus.Unavailable, disposition.OperationId, null, "coordinator-repair-ledger-unavailable")
         };
+    }
+
+    private async Task<GovernedLoopCoordinatorRepairSubmitResult?> ReadRetainedRepairAsync(GovernedLoopCoordinatorRepairDisposition disposition, CancellationToken cancellationToken)
+    {
+        GovernedLoopCoordinatorRepairReadResult? read;
+        try
+        {
+            read = await _repairs.ReadAsync(disposition.CoordinatorId, disposition.FailedOwnership.ContentHash, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return Submit(GovernedLoopCoordinatorRepairSubmitStatus.Unavailable, disposition.OperationId, null, "coordinator-repair-ledger-unavailable");
+        }
+
+        if (read is null || !Enum.IsDefined(read.Status))
+        {
+            return Submit(GovernedLoopCoordinatorRepairSubmitStatus.Corrupt, disposition.OperationId, null, "coordinator-repair-ledger-corrupt");
+        }
+        if (read.Status == GovernedLoopCoordinatorRepairReadStatus.NotFound && read.Disposition is null)
+        {
+            return null;
+        }
+        if (read.Status == GovernedLoopCoordinatorRepairReadStatus.Found
+            && GovernedLoopSleepContractValidator.Validate(read.Disposition).IsValid)
+        {
+            return read.Disposition == disposition
+                ? Submit(GovernedLoopCoordinatorRepairSubmitStatus.Replayed, disposition.OperationId, read.Disposition, "coordinator-repair-replayed")
+                : Submit(GovernedLoopCoordinatorRepairSubmitStatus.Conflict, disposition.OperationId, null, "coordinator-repair-ledger-conflict");
+        }
+
+        return read.Status == GovernedLoopCoordinatorRepairReadStatus.Unavailable && read.Disposition is null
+            ? Submit(GovernedLoopCoordinatorRepairSubmitStatus.Unavailable, disposition.OperationId, null, "coordinator-repair-ledger-unavailable")
+            : Submit(GovernedLoopCoordinatorRepairSubmitStatus.Corrupt, disposition.OperationId, null, "coordinator-repair-ledger-corrupt");
     }
 
     private async Task<ReadResult<GovernedLoopOperationalControlAuthority>> ReadAuthorityAsync(CancellationToken cancellationToken)

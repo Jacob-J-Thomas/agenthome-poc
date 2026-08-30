@@ -889,6 +889,25 @@ public sealed class GovernedLoopLocalWorkRunnerTests
         Assert.Equal(0, source.Calls);
     }
 
+    [Fact]
+    public async Task Readiness_probe_accepts_healthy_pending_schedule_and_wake_work_without_actuating_it()
+    {
+        Assert.True(ScheduleId.TryParse("schedule-1", out var scheduleId));
+        var wake = new GovernedLoopWakeRequest(new string('a', 64), new string('b', 64));
+        var source = Source(
+            GovernedLoopBackgroundWorkReadStatus.Found,
+            [scheduleId!],
+            [wake]);
+        var runner = Runner(source);
+
+        var schedule = await runner.ProbeReadinessAsync(GovernedLoopLocalWorkFamily.Schedule);
+        var wakeResult = await runner.ProbeReadinessAsync(GovernedLoopLocalWorkFamily.Wake);
+
+        Assert.Equal(GovernedLoopLocalWorkResultStatus.Empty, schedule!.Status);
+        Assert.Equal(GovernedLoopLocalWorkResultStatus.Empty, wakeResult!.Status);
+        Assert.Equal(2, source.Calls);
+    }
+
     private static GovernedLoopLocalWorkRunner Runner(
         ScriptedBackgroundWorkSource? source = null,
         Func<ScheduleId, CancellationToken, Task<ScheduleEvaluationResult>>? evaluateSchedule = null,
