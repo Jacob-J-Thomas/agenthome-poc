@@ -6,8 +6,9 @@ $script:VerificationRequiredGateMaximumCpuBoundWorkers = 1
 $script:VerificationRequiredGateMinimumTimeoutHeadroomSeconds = 120
 $script:VerificationRequiredGateDefaultTestTimeoutSeconds = 600
 $script:VerificationRequiredGateExtendedTestTimeoutSeconds = 720
+$script:VerificationRequiredGatePersistenceTestTimeoutSeconds = 840
+$script:VerificationRequiredGatePersistenceTestName = "tests-EmbodySense.Core.Persistence.Tests-all"
 $script:VerificationRequiredGateExtendedTimeoutNames = @(
-    "tests-EmbodySense.Core.Persistence.Tests-all"
     "tests-EmbodySense.Core.Startup.Tests-remainder"
 )
 $script:VerificationSolutionWatchdogDeadlineSeconds = 1500
@@ -15,8 +16,8 @@ $script:VerificationRequiredGateScheduleProfiles = @(
     # One VSTest process per assembly lets the test runner schedule isolated classes itself and
     # removes repeated deployment, discovery, instrumentation, and report-write overhead.
     # https://github.com/Jacob-J-Thomas/agenthome-poc/issues/422: reserve the complete four-core runner for the two dominant assemblies so a third process cannot starve both coverage lanes.
-    # https://github.com/Jacob-J-Thomas/agenthome-poc/issues/610: the measured Windows all-Persistence lane reached 600.239 seconds at 7,850 cases.
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-all"; EstimatedDurationSeconds = 600; TimeoutSeconds = 720; Weight = 6; ResourceClass = "ProcessHeavy" }
+    # https://github.com/Jacob-J-Thomas/agenthome-poc/issues/610: run 33278142400 selected the complete 2,403-test Persistence lane but timed out at 720.134/720 and 720.089/720; run 33275739423 passed at 718.865 seconds.
+    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-all"; EstimatedDurationSeconds = 720; TimeoutSeconds = 840; Weight = 6; ResourceClass = "ProcessHeavy" }
     # https://github.com/Jacob-J-Thomas/agenthome-poc/issues/610: retain more than 180 seconds above the 538.106-second Startup remainder measurement.
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Startup.Tests-remainder"; EstimatedDurationSeconds = 560; TimeoutSeconds = 720; Weight = 6; ResourceClass = "ProcessHeavy" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Startup.Tests-nested-process"; EstimatedDurationSeconds = 180; TimeoutSeconds = 600; Weight = 12; ResourceClass = "ProcessHeavy" }
@@ -176,7 +177,15 @@ function Get-VerificationRequiredGateScheduleProfile {
         throw "Required verification gate '$Name' must retain at least $script:VerificationRequiredGateMinimumTimeoutHeadroomSeconds seconds of timeout headroom above its checked-in duration estimate."
     }
     if ($profile.Name.StartsWith("tests-", [StringComparison]::Ordinal)) {
-        $maximumTimeoutSeconds = if ($script:VerificationRequiredGateExtendedTimeoutNames -ccontains $profile.Name) { $script:VerificationRequiredGateExtendedTestTimeoutSeconds } else { $script:VerificationRequiredGateDefaultTestTimeoutSeconds }
+        $maximumTimeoutSeconds = if ($profile.Name -ceq $script:VerificationRequiredGatePersistenceTestName) {
+            $script:VerificationRequiredGatePersistenceTestTimeoutSeconds
+        }
+        elseif ($script:VerificationRequiredGateExtendedTimeoutNames -ccontains $profile.Name) {
+            $script:VerificationRequiredGateExtendedTestTimeoutSeconds
+        }
+        else {
+            $script:VerificationRequiredGateDefaultTestTimeoutSeconds
+        }
         if ($profile.TimeoutSeconds -gt $maximumTimeoutSeconds) {
             throw "Required verification gate '$Name' exceeds its checked-in bounded child-timeout policy of $maximumTimeoutSeconds seconds."
         }
