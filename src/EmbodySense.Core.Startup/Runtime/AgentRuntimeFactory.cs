@@ -101,6 +101,7 @@ public sealed class AgentRuntimeFactory
     private readonly ICapabilityCatalogTrustProvider _capabilityTrustProvider;
     private readonly IAgentRuntimeAuthenticatedWakeVerifier? _authenticatedWakeVerifier;
     private readonly IAgentRuntimeHumanInputAuthorityProvider? _humanInputAuthorityProvider;
+    private readonly IAgentRuntimeGovernedLoopCoordinatorRepairAuthorityProvider? _governedLoopCoordinatorRepairAuthorityProvider;
     private readonly IGovernedModelPrimaryExecutionBoundaryObserver? _governedModelExecutionObserver;
     private readonly IGovernedLoopLocalCoordinatorBoundaryObserver? _governedLoopLocalCoordinatorBoundaryObserver;
     private readonly IReadOnlyList<ModelProfileRuntimeProvider> _additionalModelProfileProviders;
@@ -188,7 +189,8 @@ public sealed class AgentRuntimeFactory
             _humanInputAuthorityProvider,
             _commandActionRuntimeProvider,
             _customLoopRunStoreProvider,
-            _governedLoopLocalCoordinatorBoundaryObserver);
+            _governedLoopLocalCoordinatorBoundaryObserver,
+            _governedLoopCoordinatorRepairAuthorityProvider);
     }
 
     /// <summary>Returns an equivalent factory that composes one explicit server-owned Human Input authority provider.</summary>
@@ -209,7 +211,31 @@ public sealed class AgentRuntimeFactory
             provider,
             _commandActionRuntimeProvider,
             _customLoopRunStoreProvider,
-            _governedLoopLocalCoordinatorBoundaryObserver);
+            _governedLoopLocalCoordinatorBoundaryObserver,
+            _governedLoopCoordinatorRepairAuthorityProvider);
+    }
+
+    /// <summary>Returns an equivalent factory with authenticated current-operator authority for coordinator repair.</summary>
+    /// <remarks>Without this provider, coordinator repair preview and submission fail closed as unavailable.</remarks>
+    /// <param name="provider">The request-scoped authenticated interface boundary used only for coordinator repair.</param>
+    /// <returns>A factory preserving existing runtime composition with the supplied coordinator repair authority boundary.</returns>
+    public AgentRuntimeFactory WithGovernedLoopCoordinatorRepairAuthorityProvider(
+        IAgentRuntimeGovernedLoopCoordinatorRepairAuthorityProvider provider)
+    {
+        ArgumentNullException.ThrowIfNull(provider);
+        return new AgentRuntimeFactory(
+            _approvalPrompt,
+            _conversationPublicationObserver,
+            _codexRuntimeStatus,
+            _capabilityTrustProvider,
+            _governedModelExecutionObserver,
+            _additionalModelProfileProviders,
+            _authenticatedWakeVerifier,
+            _humanInputAuthorityProvider,
+            _commandActionRuntimeProvider,
+            _customLoopRunStoreProvider,
+            _governedLoopLocalCoordinatorBoundaryObserver,
+            provider);
     }
 
     /// <summary>Returns an equivalent factory with one explicit server-owned structured command Action provider.</summary>
@@ -229,7 +255,8 @@ public sealed class AgentRuntimeFactory
             _humanInputAuthorityProvider,
             provider,
             _customLoopRunStoreProvider,
-            _governedLoopLocalCoordinatorBoundaryObserver);
+            _governedLoopLocalCoordinatorBoundaryObserver,
+            _governedLoopCoordinatorRepairAuthorityProvider);
     }
 
     /// <summary>
@@ -251,7 +278,8 @@ public sealed class AgentRuntimeFactory
             _humanInputAuthorityProvider,
             _commandActionRuntimeProvider,
             provider,
-            _governedLoopLocalCoordinatorBoundaryObserver);
+            _governedLoopLocalCoordinatorBoundaryObserver,
+            _governedLoopCoordinatorRepairAuthorityProvider);
     }
 
     /// <summary>Returns an equivalent factory with one diagnostic observer for local coordinator heartbeat boundaries.</summary>
@@ -273,7 +301,8 @@ public sealed class AgentRuntimeFactory
             _humanInputAuthorityProvider,
             _commandActionRuntimeProvider,
             _customLoopRunStoreProvider,
-            observer);
+            observer,
+            _governedLoopCoordinatorRepairAuthorityProvider);
     }
 
     internal AgentRuntimeFactory(
@@ -287,7 +316,8 @@ public sealed class AgentRuntimeFactory
         IAgentRuntimeHumanInputAuthorityProvider? humanInputAuthorityProvider = null,
         CommandActionRuntimeProvider? commandActionRuntimeProvider = null,
         CustomLoopRunStoreProvider? customLoopRunStoreProvider = null,
-        IGovernedLoopLocalCoordinatorBoundaryObserver? governedLoopLocalCoordinatorBoundaryObserver = null)
+        IGovernedLoopLocalCoordinatorBoundaryObserver? governedLoopLocalCoordinatorBoundaryObserver = null,
+        IAgentRuntimeGovernedLoopCoordinatorRepairAuthorityProvider? governedLoopCoordinatorRepairAuthorityProvider = null)
     {
         ArgumentNullException.ThrowIfNull(approvalPrompt);
         if (codexRuntimeStatus is not null && codexRuntimeStatus.Compatibility != CodexRuntimeCompatibility.Compatible)
@@ -306,6 +336,7 @@ public sealed class AgentRuntimeFactory
         _capabilityTrustProvider = capabilityTrustProvider ?? FileCapabilityCatalogTrustProvider.CreateDefault();
         _authenticatedWakeVerifier = authenticatedWakeVerifier;
         _humanInputAuthorityProvider = humanInputAuthorityProvider;
+        _governedLoopCoordinatorRepairAuthorityProvider = governedLoopCoordinatorRepairAuthorityProvider;
         _governedModelExecutionObserver = governedModelExecutionObserver;
         _governedLoopLocalCoordinatorBoundaryObserver = governedLoopLocalCoordinatorBoundaryObserver;
         var additionalProviders = (additionalModelProfileProviders ?? [])
@@ -982,7 +1013,11 @@ public sealed class AgentRuntimeFactory
             var coordinatorRepair = new GovernedLoopCoordinatorRepairFacade(
                 new GovernedLoopCoordinatorRepairService(
                     workspaceId,
-                    operationalAuthority,
+                    new AgentRuntimeGovernedLoopCoordinatorRepairAuthorityAdapter(
+                        workspaceId,
+                        runtimeSurface.Id,
+                        _governedLoopCoordinatorRepairAuthorityProvider,
+                        operationalClock),
                     coordinatorEvidenceStore,
                     coordinatorEvidenceStore,
                     coordinatorRepairDependencies,

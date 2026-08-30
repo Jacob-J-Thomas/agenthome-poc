@@ -81,7 +81,8 @@ public static class GovernedLoopCoordinatorEvidenceContract
             && string.Equals(request.Acquisition.ProposedOwnership.CoordinatorId, request.Repair.CoordinatorId, StringComparison.Ordinal)
             && string.Equals(request.Acquisition.ExpectedOwnershipHash, request.Repair.FailedOwnership.ContentHash, StringComparison.Ordinal)
             && string.Equals(request.Acquisition.ExpectedHeartbeatHash, request.Repair.LatestHeartbeatHash, StringComparison.Ordinal)
-            && request.Acquisition.ProposedOwnership.OwnershipEpoch == request.Repair.FailedOwnership.OwnershipEpoch + 1;
+            && request.Acquisition.ProposedOwnership.OwnershipEpoch == request.Repair.FailedOwnership.OwnershipEpoch + 1
+            && request.Acquisition.ProposedOwnership.AcquiredAtUtc >= request.Repair.RecordedAtUtc;
 
     /// <summary>Gets whether one heartbeat request is an exact fenced contiguous successor.</summary>
     public static bool IsValid(GovernedLoopCoordinatorHeartbeatMutationRequest? request)

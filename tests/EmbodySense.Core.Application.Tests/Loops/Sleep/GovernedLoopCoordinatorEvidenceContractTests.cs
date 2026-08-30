@@ -117,6 +117,57 @@ public sealed class GovernedLoopCoordinatorEvidenceContractTests
     }
 
     [Fact]
+    public void Repair_acquisition_cannot_precede_the_authorizing_repair_disposition()
+    {
+        var failed = Ownership();
+        var failedHeartbeat = Heartbeat(failed, 1);
+        var recordedAtUtc = failedHeartbeat.LeaseExpiresAtUtc.AddMinutes(1);
+        var readiness = GovernedLoopSleepContractHash.Apply(new GovernedLoopCoordinatorRepairReadiness(
+            GovernedLoopCoordinatorRepairReadiness.CurrentSchemaVersion,
+            "workspace-sha256:" + new string('a', 64),
+            failed.CoordinatorId,
+            true,
+            true,
+            true,
+            true,
+            recordedAtUtc,
+            string.Empty));
+        var repair = GovernedLoopSleepContractHash.Apply(new GovernedLoopCoordinatorRepairDisposition(
+            GovernedLoopCoordinatorRepairDisposition.CurrentSchemaVersion,
+            readiness.WorkspaceId,
+            failed.CoordinatorId,
+            "repair-operation",
+            "operator-1",
+            failed,
+            new string('a', 64),
+            failedHeartbeat.ContentHash,
+            new string('b', 64),
+            readiness,
+            recordedAtUtc,
+            string.Empty));
+        var successor = Ownership(epoch: 2, ownerId: "owner-2", acquiredAtUtc: recordedAtUtc.AddTicks(-1));
+        var acquisition = new GovernedLoopCoordinatorAcquisitionRequest(
+            GovernedLoopCoordinatorPriorEvidenceExpectation.Existing,
+            failed.ContentHash,
+            failedHeartbeat.ContentHash,
+            successor,
+            Lifecycle(successor, 1, GovernedLoopCoordinatorStatus.Starting, successor.AcquiredAtUtc),
+            Heartbeat(successor, 1, successor.AcquiredAtUtc));
+
+        Assert.False(GovernedLoopCoordinatorEvidenceContract.IsValid(new GovernedLoopCoordinatorRepairAcquisitionRequest(repair, acquisition)));
+
+        var causalSuccessor = Ownership(epoch: 2, ownerId: "owner-2", acquiredAtUtc: recordedAtUtc);
+        var causalAcquisition = new GovernedLoopCoordinatorAcquisitionRequest(
+            acquisition.PriorEvidenceExpectation,
+            acquisition.ExpectedOwnershipHash,
+            acquisition.ExpectedHeartbeatHash,
+            causalSuccessor,
+            Lifecycle(causalSuccessor, 1, GovernedLoopCoordinatorStatus.Starting, causalSuccessor.AcquiredAtUtc),
+            Heartbeat(causalSuccessor, 1, causalSuccessor.AcquiredAtUtc));
+        Assert.True(GovernedLoopCoordinatorEvidenceContract.IsValid(new GovernedLoopCoordinatorRepairAcquisitionRequest(repair, causalAcquisition)));
+    }
+
+    [Fact]
     public void Terminal_same_owner_restart_requires_a_durable_stopped_predecessor_without_weakening_handoff_validation()
     {
         var initial = Ownership();

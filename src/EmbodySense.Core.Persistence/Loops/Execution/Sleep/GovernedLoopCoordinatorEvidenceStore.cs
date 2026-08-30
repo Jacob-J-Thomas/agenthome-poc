@@ -217,6 +217,10 @@ public sealed class GovernedLoopCoordinatorEvidenceStore : IGovernedLoopCoordina
             {
                 return Acquisition(GovernedLoopCoordinatorAcquisitionStatus.Conflict, Snapshot(entry));
             }
+            if (acquisition.ProposedOwnership.AcquiredAtUtc < request.Repair.RecordedAtUtc)
+            {
+                return Acquisition(GovernedLoopCoordinatorAcquisitionStatus.Corrupt);
+            }
 
             var currentOwnership = entry.Ownerships[^1];
             var currentHeartbeat = LatestHeartbeat(entry, currentOwnership);

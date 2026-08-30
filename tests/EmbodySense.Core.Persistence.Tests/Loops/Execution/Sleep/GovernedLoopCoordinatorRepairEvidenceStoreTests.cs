@@ -112,6 +112,34 @@ public sealed class GovernedLoopCoordinatorRepairEvidenceStoreTests
     }
 
     [Fact]
+    public async Task Fenced_takeover_rejects_successor_ownership_recorded_before_its_repair_authority()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new GovernedLoopCoordinatorEvidenceStore(paths);
+        var failed = await CreateFailedSnapshotAsync(store);
+        var repair = Repair(failed, failed.LatestHeartbeat.LeaseExpiresAtUtc);
+        Assert.Equal(GovernedLoopCoordinatorRepairMutationStatus.Appended, (await store.AppendAsync(repair))!.Status);
+        var successor = GovernedLoopSleepContractTestFixture.Ownership(
+            ownerId: "process-owner-2",
+            ownershipEpoch: failed.Ownership.OwnershipEpoch + 1,
+            acquiredAtUtc: repair.RecordedAtUtc.AddTicks(-1));
+        var acquisition = new GovernedLoopCoordinatorAcquisitionRequest(
+            GovernedLoopCoordinatorPriorEvidenceExpectation.Existing,
+            failed.Ownership.ContentHash,
+            failed.LatestHeartbeat.ContentHash,
+            successor,
+            GovernedLoopSleepContractTestFixture.Lifecycle(GovernedLoopCoordinatorStatus.Starting, ownership: successor, updatedAtUtc: successor.AcquiredAtUtc),
+            GovernedLoopSleepContractTestFixture.Heartbeat(ownership: successor, recordedAtUtc: successor.AcquiredAtUtc, leaseExpiresAtUtc: successor.AcquiredAtUtc.AddMinutes(1)));
+
+        var result = await store.TryAcquireAfterRepairAsync(new GovernedLoopCoordinatorRepairAcquisitionRequest(repair, acquisition));
+        var retained = await store.ReadAsync(failed.Ownership.CoordinatorId);
+
+        Assert.Equal(GovernedLoopCoordinatorAcquisitionStatus.Corrupt, result!.Status);
+        Assert.Equal(failed.Ownership, retained!.Snapshot!.Ownership);
+    }
+
+    [Fact]
     public async Task Published_repair_acquisition_response_loss_reconciles_to_one_exact_successor()
     {
         using var workspace = new TestWorkspace();
