@@ -875,6 +875,9 @@ public sealed class GovernedLoopLocalWorkRunnerTests
         var invalidFamily = Runner(source);
         var throwingClock = new SteppingCoordinatorTimeProvider(_now, TimeSpan.Zero) { ThrowOnNext = true };
         var unavailableClock = Runner(source, timeProvider: throwingClock);
+        var unavailableReadinessClock = Runner(
+            source,
+            timeProvider: new SteppingCoordinatorTimeProvider(_now, TimeSpan.Zero) { ThrowOnNext = true });
         var corruptClock = Runner(
             source,
             timeProvider: new SteppingCoordinatorTimeProvider(_now.ToOffset(TimeSpan.FromHours(1)), TimeSpan.Zero));
@@ -882,10 +885,14 @@ public sealed class GovernedLoopLocalWorkRunnerTests
         var familyResult = await invalidFamily.RunOnceAsync((GovernedLoopLocalWorkFamily)999);
         var clockResult = await unavailableClock.RunOnceAsync(GovernedLoopLocalWorkFamily.Schedule);
         var corruptClockResult = await corruptClock.RunOnceAsync(GovernedLoopLocalWorkFamily.Schedule);
+        var readinessFamilyResult = await invalidFamily.ProbeReadinessAsync((GovernedLoopLocalWorkFamily)999);
+        var readinessClockResult = await unavailableReadinessClock.ProbeReadinessAsync(GovernedLoopLocalWorkFamily.Schedule);
 
         Assert.Equal(GovernedLoopLocalWorkResultStatus.Corrupt, familyResult!.Status);
         Assert.Equal(GovernedLoopLocalWorkResultStatus.Unavailable, clockResult!.Status);
         Assert.Equal(GovernedLoopLocalWorkResultStatus.Corrupt, corruptClockResult!.Status);
+        Assert.Equal(GovernedLoopLocalWorkResultStatus.Corrupt, readinessFamilyResult!.Status);
+        Assert.Equal(GovernedLoopLocalWorkResultStatus.Unavailable, readinessClockResult!.Status);
         Assert.Equal(0, source.Calls);
     }
 

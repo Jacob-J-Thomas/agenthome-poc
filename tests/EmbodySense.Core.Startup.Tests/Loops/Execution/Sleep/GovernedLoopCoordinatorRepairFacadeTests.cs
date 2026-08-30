@@ -74,6 +74,22 @@ public sealed class GovernedLoopCoordinatorRepairFacadeTests
     }
 
     [Fact]
+    public async Task SubmitAsync_preserves_caller_cancellation_from_the_canonical_start_host()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var service = new StubRepairService { SubmitResult = Submission(GovernedLoopCoordinatorRepairSubmitStatus.Accepted) };
+        var host = new RecordingStartupPort { Exception = new OperationCanceledException(cancellation.Token) };
+        var facade = new GovernedLoopCoordinatorRepairFacade(service, host);
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => facade.SubmitAsync(
+            new GovernedLoopCoordinatorRepairSubmitRequest(RepairDisposition()),
+            cancellation.Token));
+
+        Assert.Equal(1, host.StartCount);
+    }
+
+    [Fact]
     public async Task Preview_and_submit_reject_a_coordinator_not_owned_by_the_canonical_host_before_admission()
     {
         var service = new StubRepairService();
