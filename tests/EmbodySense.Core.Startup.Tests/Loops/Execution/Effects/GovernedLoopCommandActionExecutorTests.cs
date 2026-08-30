@@ -56,7 +56,7 @@ public sealed class GovernedLoopCommandActionExecutorTests
     [InlineData(GovernedLoopEffectAttemptExecutionStatus.AuthorityStopped, GovernedLoopCommandActionExecutionStatus.Rejected)]
     [InlineData(GovernedLoopEffectAttemptExecutionStatus.Conflict, GovernedLoopCommandActionExecutionStatus.Rejected)]
     [InlineData(GovernedLoopEffectAttemptExecutionStatus.Backpressured, GovernedLoopCommandActionExecutionStatus.Rejected)]
-    [InlineData(GovernedLoopEffectAttemptExecutionStatus.ApprovalRequired, GovernedLoopCommandActionExecutionStatus.Rejected)]
+    [InlineData(GovernedLoopEffectAttemptExecutionStatus.ApprovalRequired, GovernedLoopCommandActionExecutionStatus.ApprovalRequired)]
     [InlineData(GovernedLoopEffectAttemptExecutionStatus.ReconciliationRequired, GovernedLoopCommandActionExecutionStatus.NeedsReview)]
     public async Task ExecuteAsync_maps_nonconclusive_effect_postures_without_a_canonical_output(
         GovernedLoopEffectAttemptExecutionStatus effectStatus,

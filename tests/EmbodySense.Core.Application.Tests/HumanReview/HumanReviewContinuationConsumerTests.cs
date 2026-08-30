@@ -1,6 +1,10 @@
 using System.Collections.Immutable;
 using EmbodySense.Core.Application.HumanReview;
 using EmbodySense.Core.Application.HumanReview.Models;
+using EmbodySense.Core.Application.Loops.Sequential;
+using EmbodySense.Core.Application.Loops.Sequential.Models;
+using EmbodySense.Core.Application.Loops.Wait.Models;
+using EmbodySense.Core.Application.Tests.Loops.Execution.Custom;
 using EmbodySense.Core.Application.Tests.Loops.Sequential;
 using EmbodySense.Core.Common.HumanReview;
 using EmbodySense.Core.Common.HumanReview.Models;
@@ -404,6 +408,84 @@ public sealed class HumanReviewContinuationConsumerTests
             Assert.Equal(binding, query.Binding);
             Assert.Equal(binding.EffectAttempt, query.EffectAttempt);
         });
+    }
+
+    [Fact]
+    public async Task Ordered_release_rejects_a_changed_exact_not_started_effect_snapshot_before_any_transition_or_runtime_handoff()
+    {
+        var fixture = await ApprovedCandidateAsync(includeEffectAttempt: true);
+        var review = Assert.IsType<EmbodySense.Core.Common.Loops.Models.Custom.Execution.HumanReviewRunState>(fixture.Run.HumanReview);
+        var reservation = Assert.IsType<HumanReviewContinuationReservation>(review.ContinuationReservation);
+        var originalState = Assert.IsType<HumanReviewContinuationState>(fixture.Candidate.Continuation);
+        var publishedState = HumanReviewContinuationContractHash.ApplyState(originalState with { Claims = ImmutableArray<HumanReviewContinuationClaim>.Empty, StateHash = string.Empty });
+        var store = new HumanReviewDecisionTestStore(fixture.Run);
+        var published = fixture.Run with
+        {
+            LifecycleVersion = fixture.Run.LifecycleVersion + 1,
+            UpdatedAtUtc = originalState.Wake.PublishedAtUtc,
+            HumanReview = review with { Continuation = publishedState },
+        };
+        Assert.NotNull((await store.UpdateAsync(published, fixture.Run.LifecycleVersion)).Run);
+        var claimed = published with
+        {
+            LifecycleVersion = published.LifecycleVersion + 1,
+            UpdatedAtUtc = fixture.Claim.ClaimedAtUtc,
+            HumanReview = published.HumanReview! with { Continuation = originalState },
+        };
+        Assert.NotNull((await store.UpdateAsync(claimed, published.LifecycleVersion)).Run);
+        Assert.True(HumanReviewContinuationContractValidator.ValidateState(review.Request, reservation, originalState).IsValid);
+
+        var effectAttempt = Assert.IsType<GovernedLoopEffectAttempt>(fixture.EffectAttempt);
+        var evidence = EffectEvidence(review.Request.Binding, effectAttempt);
+        var expectedSnapshot = HumanReviewEffectReleaseContract.Create(review.Request.Binding, effectAttempt, effectAttempt.Payload.UpdatedAtUtc.AddSeconds(1));
+        var prepared = await Consumer(
+            new RecordingAuthoritySource(HumanReviewContinuationAuthorityReadStatus.Current, HumanReviewContinuationAuthorityReadStatus.Current),
+            new RecordingEffectEvidenceSource(CurrentEvidence(evidence), CurrentEvidence(evidence)),
+            new RecordingEffectCertaintySource(CurrentSnapshot(expectedSnapshot), CurrentSnapshot(expectedSnapshot)),
+            fixture.Claim.ClaimedAtUtc.AddSeconds(1)).ConsumeAsync(new HumanReviewContinuationCandidate(claimed, fixture.Candidate.GraphArtifact, originalState, fixture.Claim));
+        Assert.Equal(HumanReviewContinuationConsumptionStatus.EffectReleasePrepared, prepared.Status);
+        var action = Assert.IsType<HumanReviewContinuationActionIntent>(prepared.Action);
+        var completion = Assert.IsType<HumanReviewContinuationCompletionIntent>(prepared.Completion);
+        var receipt = Assert.IsType<HumanReviewContinuationReleaseReceiptIntent>(action.ReleaseReceipt);
+        var changedSnapshot = HumanReviewEffectReleaseContract.Create(review.Request.Binding, effectAttempt, effectAttempt.Payload.UpdatedAtUtc.AddSeconds(2));
+        Assert.NotEqual(receipt.EffectReceiptHash, changedSnapshot.SnapshotHash);
+
+        var context = await GovernedLoopSequentialRunMaterializerTests.ContextAsync();
+        Assert.Equal(claimed.SequentialAdapterBinding?.GraphArtifactHash, context.Artifact.ArtifactHash);
+        var anchor = Assert.IsType<GovernedLoopSequentialRunAnchor>(GovernedLoopSequentialRunAnchorGuard.Create(
+            context.AdapterBinding,
+            context.AdmissionRequest,
+            context.Receipt,
+            context.Invocation,
+            context.Artifact).Anchor);
+        var authority = new RecordingAuthoritySource(HumanReviewContinuationAuthorityReadStatus.Current);
+        var releaseEvidence = new RecordingEffectEvidenceSource(CurrentEvidence(evidence));
+        var releaseCertainty = new RecordingEffectCertaintySource(CurrentSnapshot(changedSnapshot));
+        var runtime = new HumanReviewOrderedReleaseTestRuntime();
+        var release = new HumanReviewOrderedReleaseService(
+            store,
+            new HumanReviewOrderedReleaseTestContextResolver(new GovernedLoopWaitOrderedContext(anchor, context.Plan, context.Artifact)),
+            runtime,
+            new GovernedLoopSequentialRunMaterializerTests.FixedTimeProvider(fixture.Claim.ClaimedAtUtc.AddSeconds(2)),
+            authority,
+            releaseEvidence,
+            releaseCertainty);
+        var retained = Assert.IsType<CustomLoopRunRecord>(store.Run);
+        var updatesBeforeRelease = store.UpdateCount;
+        var lifecycleBeforeRelease = retained.LifecycleVersion;
+        var eventCountBeforeRelease = retained.Events.Length;
+
+        var result = await release.ReleaseAsync(action, completion);
+
+        Assert.Equal(HumanReviewContinuationReleaseStatus.Invalid, result.Status);
+        Assert.Equal(updatesBeforeRelease, store.UpdateCount);
+        Assert.Equal(lifecycleBeforeRelease, store.Run?.LifecycleVersion);
+        Assert.Equal(eventCountBeforeRelease, store.Run?.Events.Length);
+        Assert.Equal(retained, store.Run);
+        Assert.Equal(1, releaseEvidence.ReadCount);
+        Assert.Equal(1, releaseCertainty.ReadCount);
+        Assert.Equal(0, authority.ReadCount);
+        Assert.Equal(0, runtime.ResumeCount);
     }
 
     [Theory]

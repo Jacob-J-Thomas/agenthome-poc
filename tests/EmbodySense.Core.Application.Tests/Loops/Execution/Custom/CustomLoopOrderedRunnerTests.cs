@@ -11,6 +11,7 @@ using EmbodySense.Core.Application.Governance.Tools;
 using EmbodySense.Core.Application.Governance.Tools.Models;
 using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Application.HumanInput.Policies;
+using EmbodySense.Core.Application.HumanReview;
 using EmbodySense.Core.Application.Capabilities.Models;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.HumanInput.Publication;
@@ -7017,7 +7018,8 @@ public sealed partial class CustomLoopOrderedRunnerTests
         IGovernedLoopFailureClassifier? failureClassifier = null,
         HumanInputPolicyResolutionService? humanInputPolicyResolutionService = null,
         IGovernedLoopSequentialHumanInputBindingSource? humanInputBindingSource = null,
-        IHumanInputRequestPublicationService? humanInputRequestPublicationService = null)
+        IHumanInputRequestPublicationService? humanInputRequestPublicationService = null,
+        IHumanReviewAdmissionService? humanReviewAdmissionService = null)
     {
         return new CustomLoopOrderedRunner(
             store,
@@ -7042,7 +7044,8 @@ public sealed partial class CustomLoopOrderedRunnerTests
             failureClassifier: failureClassifier,
             humanInputPolicyResolutionService: humanInputPolicyResolutionService,
             humanInputBindingSource: humanInputBindingSource,
-            humanInputRequestPublicationService: humanInputRequestPublicationService);
+            humanInputRequestPublicationService: humanInputRequestPublicationService,
+            humanReviewAdmissionService: humanReviewAdmissionService);
     }
 
     private static GovernedLoopWorkspaceActionExecutionResult WorkspaceActionOutcome(WorkspaceActionResultStatus status)
@@ -7905,13 +7908,14 @@ public sealed partial class CustomLoopOrderedRunnerTests
                 CustomLoopSequentialNodeDisposition.Completed => GovernedLoopSequentialNodeHandlerResultStatus.Completed,
                 CustomLoopSequentialNodeDisposition.Rejected => GovernedLoopSequentialNodeHandlerResultStatus.Rejected,
                 CustomLoopSequentialNodeDisposition.NeedsReview => GovernedLoopSequentialNodeHandlerResultStatus.NeedsReview,
+                CustomLoopSequentialNodeDisposition.ReviewPending => GovernedLoopSequentialNodeHandlerResultStatus.ReviewPending,
                 _ => GovernedLoopSequentialNodeHandlerResultStatus.Unknown,
             };
             var eventMatchesNode = dispatch.Node.Descriptor.Kind switch
             {
                 EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Trigger => orderedEvent?.Kind == CustomLoopRunEventKind.Admitted,
                 EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Inference => orderedEvent?.Kind is CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeAttemptFailed or CustomLoopRunEventKind.NodeOutcomeObserved,
-                EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Action => orderedEvent?.Kind is CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeAttemptFailed,
+                EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Action => orderedEvent?.Kind is CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeAttemptFailed or CustomLoopRunEventKind.NodeOutcomeObserved,
                 EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Transform or EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Validate => orderedEvent?.Kind is CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeAttemptFailed,
                 EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Condition or EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Join => orderedEvent?.Kind is CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeAttemptFailed,
                 EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Wait => orderedEvent?.Kind is CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeAttemptFailed,
@@ -7952,6 +7956,7 @@ public sealed partial class CustomLoopOrderedRunnerTests
                     CustomLoopSequentialNodeEvidenceKind.CompletedOutcome => GovernedLoopSequentialNodeEvidenceKind.CompletedOutcome,
                     CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection => GovernedLoopSequentialNodeEvidenceKind.DefinitiveRejection,
                     CustomLoopSequentialNodeEvidenceKind.AmbiguityAttention => GovernedLoopSequentialNodeEvidenceKind.AmbiguityAttention,
+                    CustomLoopSequentialNodeEvidenceKind.ReviewRequested => GovernedLoopSequentialNodeEvidenceKind.ReviewRequested,
                     _ => GovernedLoopSequentialNodeEvidenceKind.Unknown,
                 },
                 durable.WorkspaceId,

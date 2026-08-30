@@ -14,4 +14,7 @@ public enum CustomLoopSequentialNodeDisposition
 
     /// <summary>The node outcome is ambiguous and requires durable human attention.</summary>
     NeedsReview,
+
+    /// <summary>The exact activation is deliberately parked for a requested Human Review without ambiguous effect evidence.</summary>
+    ReviewPending,
 }

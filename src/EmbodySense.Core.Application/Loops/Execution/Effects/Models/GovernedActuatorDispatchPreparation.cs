@@ -11,4 +11,5 @@ internal sealed record GovernedActuatorDispatchPreparation(
     IGovernedActuatorOperation Operation,
     GovernedActuatorInputEvidence Input,
     GovernedActuatorPreparationEvidence Evidence,
-    AuthorityCeiling RequiredAuthority);
+    AuthorityCeiling RequiredAuthority,
+    bool RequiresGovernedHumanReview);

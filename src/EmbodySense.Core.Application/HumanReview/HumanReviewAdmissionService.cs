@@ -78,13 +78,19 @@ public sealed class HumanReviewAdmissionService : IHumanReviewAdmissionService
             return CustomLoopRunStoreResult.VersionConflict(current, command.ExpectedLifecycleVersion);
         }
 
+        if (command.ReviewBlockedEvent is not null && !MatchesReviewBlockedEvent(current, blockedFrontier, command.ReviewBlockedEvent))
+        {
+            return CustomLoopRunStoreResult.VersionConflict(current, command.ExpectedLifecycleVersion);
+        }
+
         var requestReference = new HumanReviewRequestReference(request.RequestId, request.RequestHash);
         var lifecycle = HumanReviewContractHash.ApplyLifecycle(new HumanReviewLifecycle(1, requestReference, HumanReviewLifecycleStatus.Pending, 1, atUtc, null, HumanReviewContractHash.ApplyProvenance(new HumanReviewProvenance(HumanReviewProvenanceKind.Server, "human-review-store", request.RequestOperationId, atUtc, string.Empty)), null, string.Empty));
         var evidence = HumanReviewContractHash.ApplyEvidence(new HumanReviewEvidence(1, Id("evidence", request.RequestId), requestReference, HumanReviewEvidenceKind.RequestAdmitted, null, atUtc, HumanReviewContractHash.ApplyProvenance(new HumanReviewProvenance(HumanReviewProvenanceKind.Coordinator, "human-review-store", request.RequestOperationId, atUtc, string.Empty)), ImmutableArray<HumanReviewRedactedPreview>.Empty, null, string.Empty));
+        var priorEvents = command.ReviewBlockedEvent is null ? current.Events : [.. current.Events, command.ReviewBlockedEvent];
         var lifecycleEvent = current.Status == CustomLoopRunStatus.Paused
             ? null
             : new CustomLoopRunEvent(
-                current.Events.LongLength + 1,
+                priorEvents.LongLength + 1,
                 Id("event", "paused-" + request.RequestId),
                 atUtc,
                 CustomLoopRunEventKind.LifecycleChanged,
@@ -104,7 +110,7 @@ public sealed class HumanReviewAdmissionService : IHumanReviewAdmissionService
                 ProviderResponseId: null,
                 ExitDecision: null);
         var runEvent = new CustomLoopRunEvent(
-            current.Events.LongLength + (lifecycleEvent is null ? 1 : 2),
+            priorEvents.LongLength + (lifecycleEvent is null ? 1 : 2),
             Id("event", evidence.EvidenceId),
             atUtc,
             CustomLoopRunEventKind.HumanReviewRequestAdmitted,
@@ -132,7 +138,9 @@ public sealed class HumanReviewAdmissionService : IHumanReviewAdmissionService
             Frontier = blockedFrontier,
             ExecutionClock = StopClock(current.ExecutionClock, atUtc),
             HumanReview = new HumanReviewRunState(request, lifecycle, ImmutableArray.Create(evidence)),
-            Events = lifecycleEvent is null ? [.. current.Events, runEvent] : [.. current.Events, lifecycleEvent, runEvent]
+            Events = lifecycleEvent is null
+                ? command.ReviewBlockedEvent is null ? [.. current.Events, runEvent] : [.. current.Events, command.ReviewBlockedEvent, runEvent]
+                : command.ReviewBlockedEvent is null ? [.. current.Events, lifecycleEvent, runEvent] : [.. current.Events, command.ReviewBlockedEvent, lifecycleEvent, runEvent]
         };
         if (!IsCanonicalSuccessor(current, next))
         {
@@ -187,6 +195,31 @@ public sealed class HumanReviewAdmissionService : IHumanReviewAdmissionService
     }
 
     private static string Id(string prefix, string value) => prefix + "-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant()[..24];
+
+    private static bool MatchesReviewBlockedEvent(CustomLoopRunRecord current, GovernedLoopFrontierPosture blockedFrontier, CustomLoopRunEvent reviewBlockedEvent)
+    {
+        var blocked = blockedFrontier.Payload.Nodes.Where(node => node.Status == GovernedLoopNodeExecutionStatus.ReviewBlocked).Take(2).ToArray();
+        var activation = blocked.Length == 1 ? blocked[0] : null;
+        var evidence = reviewBlockedEvent.SequentialNodeEvidence;
+        return activation is not null
+            && reviewBlockedEvent.Sequence == current.Events.LongLength + 1
+            && reviewBlockedEvent.TimestampUtc == blockedFrontier.Payload.UpdatedAtUtc
+            && reviewBlockedEvent.Kind == CustomLoopRunEventKind.NodeOutcomeObserved
+            && string.Equals(reviewBlockedEvent.StepId, activation.NodeId, StringComparison.Ordinal)
+            && reviewBlockedEvent.Attempt == activation.Attempt
+            && reviewBlockedEvent.HumanReviewEvidence is null
+            && reviewBlockedEvent.HumanReviewDecisionOperation is null
+            && reviewBlockedEvent.HumanReviewContinuationReservation is null
+            && evidence is not null
+            && evidence.Kind == CustomLoopSequentialNodeEvidenceKind.ReviewRequested
+            && evidence.Disposition == CustomLoopSequentialNodeDisposition.ReviewPending
+            && evidence.ActivationOrdinal == activation.ActivationOrdinal
+            && evidence.VisitOrdinal == activation.VisitOrdinal
+            && string.Equals(evidence.NodeId, activation.NodeId, StringComparison.Ordinal)
+            && evidence.Attempt == activation.Attempt
+            && string.Equals(evidence.OutcomeArtifactHash, activation.OutcomeEvidenceHash, StringComparison.Ordinal)
+            && string.Equals(reviewBlockedEvent.EventId, activation.OutcomeEvidenceId, StringComparison.Ordinal);
+    }
 
     private static CustomLoopExecutionClock StopClock(CustomLoopExecutionClock clock, DateTimeOffset atUtc)
     {

@@ -16,6 +16,8 @@ using EmbodySense.Core.Common.Authority.Grants;
 using EmbodySense.Core.Common.Authority.Models;
 using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Common.Capabilities;
+using EmbodySense.Core.Common.HumanReview;
+using EmbodySense.Core.Common.HumanReview.Models;
 
 namespace EmbodySense.Core.Application.Loops.Execution.Effects;
 
@@ -221,6 +223,10 @@ public sealed class GovernedLoopEffectAttemptService : IGovernedLoopEffectAttemp
             {
                 return await StopBeforeDispatchAsync(current, lease, "The exact server preparation changed before dispatch.", cancellationToken).ConfigureAwait(false);
             }
+            if (preparation.RequiresGovernedHumanReview && !HasExactReleasedHumanReview(request, current))
+            {
+                return Result(GovernedLoopEffectAttemptExecutionStatus.ApprovalRequired, current, "The exact retained effect is parked for governed Human Review before dispatch.");
+            }
             return await DispatchOwnedAsync(request, preparation, current, lease, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -268,6 +274,12 @@ public sealed class GovernedLoopEffectAttemptService : IGovernedLoopEffectAttemp
             return Result(GovernedLoopEffectAttemptExecutionStatus.EvidenceUnavailable, begun.Attempt, "The unfinished effect attempt did not return execution ownership.");
         }
         using var lease = begun.Lease;
+        if (begun.Attempt.Payload.Phase == GovernedLoopEffectPhase.IntentPrepared
+            && preparation.RequiresGovernedHumanReview
+            && !HasExactReleasedHumanReview(request, begun.Attempt))
+        {
+            return Result(GovernedLoopEffectAttemptExecutionStatus.ApprovalRequired, begun.Attempt, "The exact retained effect is parked for governed Human Review before dispatch.");
+        }
         if (begun.Attempt.Payload.Phase == GovernedLoopEffectPhase.OutcomeObserved)
         {
             return await CommitObservedAsync(begun.Attempt, lease, cancellationToken).ConfigureAwait(false);
@@ -756,11 +768,8 @@ public sealed class GovernedLoopEffectAttemptService : IGovernedLoopEffectAttemp
         {
             return (null, Result(GovernedLoopEffectAttemptExecutionStatus.InvalidRequest, null, "The caller-supplied authority does not exactly match the server-derived capability requirement."));
         }
-        if (resolved.Descriptor!.Approval == GovernedActuatorApprovalPosture.GovernedApprovalRequired
-            || !resolved.Descriptor.UnattendedEligible)
-        {
-            return (null, Result(GovernedLoopEffectAttemptExecutionStatus.ApprovalRequired, null, "A separate governed approval proof is required before this operation may dispatch."));
-        }
+        var requiresGovernedHumanReview = resolved.Descriptor!.Approval == GovernedActuatorApprovalPosture.GovernedApprovalRequired
+            || !resolved.Descriptor.UnattendedEligible;
 
         return (new GovernedActuatorDispatchPreparation(
             resolved.Capability,
@@ -768,7 +777,8 @@ public sealed class GovernedLoopEffectAttemptService : IGovernedLoopEffectAttemp
             resolved.Operation!,
             schemaInput,
             evidence!,
-            requiredAuthority), null);
+            requiredAuthority,
+            requiresGovernedHumanReview), null);
     }
 
     private static AuthorityCeiling RequiredAuthority(
@@ -859,6 +869,60 @@ public sealed class GovernedLoopEffectAttemptService : IGovernedLoopEffectAttemp
         catch (Exception exception) when (exception is not OutOfMemoryException)
         {
             storeEvidenceInvalid = true;
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Determines whether a retained pre-dispatch review release names this unchanged prepared effect exactly.
+    /// The check deliberately happens after side-effect-free re-preparation but before the authority boundary: a
+    /// release receipt is evidence of a prior whole-run transition, not authority to redispatch a changed effect.
+    /// </summary>
+    private static bool HasExactReleasedHumanReview(GovernedLoopEffectAttemptRequest request, GovernedLoopEffectAttempt current)
+    {
+        try
+        {
+            var release = request.HumanReviewRelease;
+            var reviewRequest = release?.Request;
+            var receipt = release?.ReleaseReceipt;
+            var binding = reviewRequest?.Binding;
+            var reviewed = binding?.EffectAttempt;
+            if (release is null
+                || HumanReviewContractValidator.ValidateRequest(reviewRequest).IsValid is false
+                || reviewRequest!.Purpose != HumanReviewPurpose.PreDispatchEffect
+                || binding is null
+                || reviewed is null
+                || !HumanReviewContractHash.MatchesBinding(binding)
+                || !HumanReviewContractHash.MatchesEffectAttempt(reviewed)
+                || GovernedLoopEffectAttemptContract.Validate(current) is not null
+                || current.Payload.Phase != GovernedLoopEffectPhase.IntentPrepared
+                || current.DispatchAuthorityEvidenceHash is not null
+                || !Equals(current.Binding, request.ExecutionBinding)
+                || !string.Equals(current.NodeId, request.NodeId, StringComparison.Ordinal)
+                || current.NodeAttempt != request.NodeAttempt
+                || !string.Equals(current.Payload.EffectId, request.EffectId, StringComparison.Ordinal)
+                || !string.Equals(current.Payload.OperationId, request.IdempotencyOperationId, StringComparison.Ordinal)
+                || current.Payload.EffectGeneration != request.EffectGeneration
+                || !string.Equals(current.Payload.IntentHash, reviewed.IntentHash, StringComparison.Ordinal)
+                || !string.Equals(current.Payload.EffectId, reviewed.EffectAttemptId, StringComparison.Ordinal)
+                || !string.Equals(current.Payload.OperationId, reviewed.OperationId, StringComparison.Ordinal)
+                || current.Payload.EffectGeneration != reviewed.EffectGeneration
+                || receipt is null
+                || receipt.SchemaVersion != 1
+                || receipt.Kind != HumanReviewContinuationReleaseKind.PreDispatchEffect
+                || receipt.Disposition != HumanReviewContinuationReleaseDisposition.Released
+                || !HumanReviewContractHash.IsSha256(receipt.EffectReceiptHash))
+            {
+                return false;
+            }
+
+            var preparation = HumanReviewEffectReleaseContract.CreatePreparation(binding, current);
+            var snapshot = HumanReviewEffectReleaseContract.Create(binding, current, current.Payload.UpdatedAtUtc);
+            return string.Equals(preparation.PreparationHash, reviewed.PreparationHash, StringComparison.Ordinal)
+                && string.Equals(snapshot.SnapshotHash, receipt.EffectReceiptHash, StringComparison.Ordinal);
+        }
+        catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or NullReferenceException)
+        {
             return false;
         }
     }

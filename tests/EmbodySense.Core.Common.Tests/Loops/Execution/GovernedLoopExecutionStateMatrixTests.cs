@@ -168,7 +168,7 @@ public sealed class GovernedLoopExecutionStateMatrixTests
         AssertAllowedTargets(GovernedLoopNodeExecutionStatus.Skipped, [GovernedLoopNodeExecutionStatus.Skipped], GovernedLoopExecutionStateMatrix.IsNodeTransitionAllowed);
         AssertAllowedTargets(GovernedLoopNodeExecutionStatus.Waiting, [GovernedLoopNodeExecutionStatus.Running, GovernedLoopNodeExecutionStatus.Waiting, GovernedLoopNodeExecutionStatus.Failed, GovernedLoopNodeExecutionStatus.ReviewBlocked], GovernedLoopExecutionStateMatrix.IsNodeTransitionAllowed);
         AssertAllowedTargets(GovernedLoopNodeExecutionStatus.Failed, [GovernedLoopNodeExecutionStatus.Failed], GovernedLoopExecutionStateMatrix.IsNodeTransitionAllowed);
-        AssertAllowedTargets(GovernedLoopNodeExecutionStatus.ReviewBlocked, [GovernedLoopNodeExecutionStatus.Running, GovernedLoopNodeExecutionStatus.Failed, GovernedLoopNodeExecutionStatus.ReviewBlocked], GovernedLoopExecutionStateMatrix.IsNodeTransitionAllowed);
+        AssertAllowedTargets(GovernedLoopNodeExecutionStatus.ReviewBlocked, [GovernedLoopNodeExecutionStatus.Running, GovernedLoopNodeExecutionStatus.Completed, GovernedLoopNodeExecutionStatus.Failed, GovernedLoopNodeExecutionStatus.ReviewBlocked], GovernedLoopExecutionStateMatrix.IsNodeTransitionAllowed);
 
         AssertAllowedTargets(GovernedLoopFrontierStatus.Unknown, [], GovernedLoopExecutionStateMatrix.IsFrontierTransitionAllowed);
         AssertAllowedTargets(GovernedLoopFrontierStatus.Active, [GovernedLoopFrontierStatus.Active, GovernedLoopFrontierStatus.Waiting, GovernedLoopFrontierStatus.ReviewBlocked, GovernedLoopFrontierStatus.Completed, GovernedLoopFrontierStatus.Failed, GovernedLoopFrontierStatus.Cancelled], GovernedLoopExecutionStateMatrix.IsFrontierTransitionAllowed);

@@ -889,6 +889,10 @@ public sealed class AgentRuntimeFactoryTests
         Assert.Equal("available", catalog.Status);
         Assert.Contains(catalog.NodeDescriptors, item => item.Descriptor.Kind == GovernedLoopNodeKind.Trigger && item.IsExecutable);
         Assert.Contains(catalog.NodeDescriptors, item => item.Descriptor.Kind == GovernedLoopNodeKind.Wait && item.IsExecutable);
+        var humanReview = Assert.Single(catalog.NodeDescriptors, item => item.Descriptor.Kind == GovernedLoopNodeKind.HumanReview);
+        Assert.True(humanReview.IsAdvertised);
+        Assert.False(humanReview.IsExecutable);
+        Assert.Equal(GovernedLoopHumanReviewNodeCatalogContract.Descriptor.Descriptor, humanReview.Descriptor);
         var humanInput = Assert.Single(catalog.NodeDescriptors, item => item.Descriptor.Kind == GovernedLoopNodeKind.HumanInput);
         Assert.True(humanInput.IsAdvertised);
         Assert.False(humanInput.IsExecutable);

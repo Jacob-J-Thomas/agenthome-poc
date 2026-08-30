@@ -1,5 +1,3 @@
-using System.Security.Cryptography;
-using System.Text;
 using EmbodySense.Core.Application.HumanReview.Models;
 using EmbodySense.Core.Common.HumanReview;
 using EmbodySense.Core.Common.HumanReview.Models;
@@ -614,7 +612,7 @@ public sealed class HumanReviewContinuationConsumer : IHumanReviewContinuationCo
         var wake = Reference(approved.Wake);
         var claim = Reference(approved.Claim);
         var reservation = Reference(approved.Reservation);
-        var releaseOperationId = CreateReleaseOperationId(request, wake, reservation, approved.Wake.ExpectedGeneration, kind);
+        var releaseOperationId = HumanReviewContinuationReleaseOperationId.Create(request, wake, reservation, approved.Wake.ExpectedGeneration, kind);
         if (releaseOperationId is null)
         {
             return false;
@@ -630,26 +628,6 @@ public sealed class HumanReviewContinuationConsumer : IHumanReviewContinuationCo
             kind,
             effectReceiptHash);
         return true;
-    }
-
-    private static string? CreateReleaseOperationId(
-        HumanReviewRequestReference request,
-        HumanReviewContinuationWakeReference wake,
-        HumanReviewContinuationReservationReference reservation,
-        long expectedGeneration,
-        HumanReviewContinuationReleaseKind kind)
-    {
-        try
-        {
-            // Claims fence the active worker but expire and are deliberately excluded from this release idempotency identity.
-            var material = string.Join('|', "human-review-continuation-release-operation-v1", request.RequestId, request.RequestHash, wake.WakeId, wake.WakeHash, reservation.ReservationId, reservation.ReservationHash, expectedGeneration.ToString(System.Globalization.CultureInfo.InvariantCulture), ((int)kind).ToString(System.Globalization.CultureInfo.InvariantCulture));
-            var identifier = "release-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(material))).ToLowerInvariant();
-            return HumanReviewIdentifier.IsValid(identifier) ? identifier : null;
-        }
-        catch
-        {
-            return null;
-        }
     }
 
     private static HumanReviewContinuationConsumptionResult Retire(CanonicalContext context, ApprovedContinuation approved, HumanReviewContinuationOutcome outcome, HumanReviewContinuationRetirementReason reason)

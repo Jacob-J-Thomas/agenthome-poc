@@ -57,7 +57,8 @@ public sealed class GovernedLoopWorkspaceActionExecutor : IGovernedLoopWorkspace
                 dispatch.Node.NodeId,
                 dispatch.Attempt,
                 request.AttemptOperationId,
-                pin!);
+                pin!,
+                request.HumanReviewRelease);
             var result = await executor.ExecuteEffectAsync(
                 new ToolRequest(
                     Command(kind),
@@ -83,8 +84,13 @@ public sealed class GovernedLoopWorkspaceActionExecutor : IGovernedLoopWorkspace
                     or GovernedLoopEffectAttemptExecutionStatus.AuthorityStopped
                     or GovernedLoopEffectAttemptExecutionStatus.Conflict
                     or GovernedLoopEffectAttemptExecutionStatus.Backpressured
-                    or GovernedLoopEffectAttemptExecutionStatus.ApprovalRequired
                     => Rejected($"The workspace Action stopped before mutation with posture `{result.Status}`."),
+                GovernedLoopEffectAttemptExecutionStatus.ApprovalRequired
+                    => new GovernedLoopWorkspaceActionExecutionResult(
+                        GovernedLoopWorkspaceActionExecutionStatus.ApprovalRequired,
+                        null,
+                        "The exact prepared workspace Action effect is durably parked for governed Human Review.",
+                        result.Attempt),
                 _ => Review($"The workspace Action requires reconciliation with posture `{result.Status}`."),
             };
         }
