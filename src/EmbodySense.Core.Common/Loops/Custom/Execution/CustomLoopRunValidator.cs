@@ -3547,11 +3547,11 @@ public static class CustomLoopRunValidator
         }
 
         var state = run.HumanReview;
-        var statePlaneArraysPresent = !state.OperationReceipts.IsDefault && !state.AcceptedDecisions.IsDefault && !state.LifecycleHistory.IsDefault;
+        var statePlaneArraysPresent = !state.OperationReceipts.IsDefault && !state.AcceptedDecisions.IsDefault && !state.LifecycleHistory.IsDefault && !state.DecisionActions.IsDefault;
         var evidencePresent = !state.Evidence.IsDefault;
         if (!statePlaneArraysPresent)
         {
-            Add(errors, "human_review_state_plane_required", "humanReview", "Schema-1 Human Review state requires lifecycle history, operation receipts, and accepted decisions even when empty.");
+            Add(errors, "human_review_state_plane_required", "humanReview", "Schema-1 Human Review state requires lifecycle history, operation receipts, accepted decisions, and decision actions even when empty.");
         }
 
         if (!evidencePresent)
@@ -3580,7 +3580,7 @@ public static class CustomLoopRunValidator
         {
             if (statePlaneArraysPresent)
             {
-                Add(errors, "human_review_state_plane_required", "humanReview", "Schema-1 Human Review state requires lifecycle history, operation receipts, and accepted decisions even when empty.");
+                Add(errors, "human_review_state_plane_required", "humanReview", "Schema-1 Human Review state requires lifecycle history, operation receipts, accepted decisions, and decision actions even when empty.");
             }
         }
         else if (!HasValidHumanReviewLifecycleHistory(request!, state, errors))
@@ -3876,6 +3876,40 @@ public static class CustomLoopRunValidator
                 Add(errors, "human_review_reservation_evidence_mismatch", "humanReview.evidence", "The reservation must exactly bind approval receipt, lifecycle, evidence, and nondecreasing trusted timestamps.");
             }
         }
+
+        if (state.DecisionActions.IsDefault)
+        {
+            Add(errors, "human_review_action_state_plane_required", "humanReview.decisionActions", "Schema-1 Human Review state requires the defined non-approval action ledger.");
+            return;
+        }
+
+        if (state.DecisionActions.Length > state.AcceptedDecisions.Length)
+        {
+            Add(errors, "human_review_action_cardinality_invalid", "humanReview.decisionActions", "Each non-approval action must bind one accepted decision.");
+        }
+
+        var actionReservations = new HashSet<string>(StringComparer.Ordinal);
+        var actionDecisions = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var action in state.DecisionActions)
+        {
+            if (action is null
+                || !HumanReviewDecisionActionContractValidator.ValidateState(state.Request, action).IsValid
+                || !actionReservations.Add(action.Reservation.ReservationHash)
+                || !actionDecisions.Add(action.Reservation.Decision.DecisionHash)
+                || !state.AcceptedDecisions.Any(decision => decision is not null && SameDecisionReference(action.Reservation.Decision, decision)))
+            {
+                Add(errors, "invalid_human_review_decision_action", "humanReview.decisionActions", "Each decision action must be canonical, unique, and bind one distinct exact accepted non-approval decision.");
+            }
+        }
+
+        var acceptedNonapprovalDecisionHashes = state.AcceptedDecisions
+            .Where(decision => decision is { Kind: HumanReviewDecisionKind.Reject or HumanReviewDecisionKind.Cancel or HumanReviewDecisionKind.RequestInformation })
+            .Select(decision => decision!.DecisionHash)
+            .ToHashSet(StringComparer.Ordinal);
+        if (!acceptedNonapprovalDecisionHashes.SetEquals(actionDecisions))
+        {
+            Add(errors, "human_review_nonapproval_action_ledger_mismatch", "humanReview.decisionActions", "Every accepted Reject, Cancel, and RequestInformation decision must own exactly one action reservation, and no action may bind another decision.");
+        }
     }
 
     private static void ValidateHumanReviewLifecycleCausality(HumanReviewRunState state, List<CustomLoopValidationError> errors)
@@ -4001,15 +4035,19 @@ public static class CustomLoopRunValidator
             || current.HumanReview.Evidence.IsDefault
             || current.HumanReview.OperationReceipts.IsDefault
             || current.HumanReview.AcceptedDecisions.IsDefault
+            || current.HumanReview.DecisionActions.IsDefault
             || candidate.HumanReview.LifecycleHistory.IsDefault
             || candidate.HumanReview.Evidence.IsDefault
             || candidate.HumanReview.OperationReceipts.IsDefault
             || candidate.HumanReview.AcceptedDecisions.IsDefault
+            || candidate.HumanReview.DecisionActions.IsDefault
             || !string.Equals(current.HumanReview.Request.RequestHash, candidate.HumanReview.Request.RequestHash, StringComparison.Ordinal)
             || candidate.HumanReview.LifecycleHistory.Length < current.HumanReview.LifecycleHistory.Length
             || candidate.HumanReview.Evidence.Length < current.HumanReview.Evidence.Length
             || candidate.HumanReview.OperationReceipts.Length < current.HumanReview.OperationReceipts.Length
-            || candidate.HumanReview.AcceptedDecisions.Length < current.HumanReview.AcceptedDecisions.Length)
+            || candidate.HumanReview.AcceptedDecisions.Length < current.HumanReview.AcceptedDecisions.Length
+            || candidate.HumanReview.DecisionActions.Length < current.HumanReview.DecisionActions.Length
+            || candidate.HumanReview.DecisionActions.Length > current.HumanReview.DecisionActions.Length + 1)
         {
             Add(errors, "human_review_history_changed", "humanReview", "The admitted Human Review request, initial lifecycle, and evidence cannot be removed, extended, or rewritten in this slice.");
             return;
@@ -4051,6 +4089,39 @@ public static class CustomLoopRunValidator
             {
                 Add(errors, "invalid_human_review_continuation_transition", "humanReview.continuation", "Continuation publication, claim, completion, retirement, and replay must use one exact append-only state transition.");
             }
+        }
+
+        var actionTransitions = 0;
+        for (var index = 0; index < current.HumanReview.DecisionActions.Length; index++)
+        {
+            var prior = current.HumanReview.DecisionActions[index];
+            var successor = candidate.HumanReview.DecisionActions[index];
+            if (!HumanReviewDecisionActionStateTransitionValidator.ValidateTransition(current.HumanReview.Request, prior, successor).IsValid)
+            {
+                Add(errors, "invalid_human_review_decision_action_transition", $"humanReview.decisionActions[{index}]", "Decision action changes must preserve one exact append-only chain.");
+            }
+            else if (!string.Equals(prior.StateHash, successor.StateHash, StringComparison.Ordinal))
+            {
+                actionTransitions++;
+            }
+        }
+
+        if (candidate.HumanReview.DecisionActions.Length == current.HumanReview.DecisionActions.Length + 1)
+        {
+            var added = candidate.HumanReview.DecisionActions[^1];
+            if (!HumanReviewDecisionActionStateTransitionValidator.ValidateTransition(current.HumanReview.Request, null, added).IsValid
+                || !candidate.HumanReview.AcceptedDecisions.Skip(current.HumanReview.AcceptedDecisions.Length).Any(decision => decision is not null && SameDecisionReference(added.Reservation.Decision, decision))
+                || added.ReservedLifecycleVersion != candidate.LifecycleVersion)
+            {
+                Add(errors, "invalid_human_review_decision_action_reservation", "humanReview.decisionActions", "A newly reserved action must be wake-free and bind one newly accepted decision at the exact successor lifecycle version.");
+            }
+
+            actionTransitions++;
+        }
+
+        if (actionTransitions > 1)
+        {
+            Add(errors, "human_review_decision_action_multiple_transitions", "humanReview.decisionActions", "One whole-run compare-exchange may advance only one decision-action chain.");
         }
 
     }
@@ -4238,7 +4309,10 @@ public static class CustomLoopRunValidator
             && left.AcceptedDecisions.Select(item => item?.DecisionHash).SequenceEqual(right.AcceptedDecisions.Select(item => item?.DecisionHash), StringComparer.Ordinal)
             && string.Equals(left.AcceptedTerminalDecision?.DecisionHash, right.AcceptedTerminalDecision?.DecisionHash, StringComparison.Ordinal)
             && string.Equals(left.ContinuationReservation?.ReservationHash, right.ContinuationReservation?.ReservationHash, StringComparison.Ordinal)
-            && string.Equals(left.Continuation?.StateHash, right.Continuation?.StateHash, StringComparison.Ordinal);
+            && string.Equals(left.Continuation?.StateHash, right.Continuation?.StateHash, StringComparison.Ordinal)
+            && !left.DecisionActions.IsDefault
+            && !right.DecisionActions.IsDefault
+            && left.DecisionActions.Select(item => item?.StateHash).SequenceEqual(right.DecisionActions.Select(item => item?.StateHash), StringComparer.Ordinal);
 
     private static bool HasHumanReviewPrefix(HumanReviewRunState? expectedPrefix, HumanReviewRunState? actual)
         => expectedPrefix is null
@@ -4254,6 +4328,10 @@ public static class CustomLoopRunValidator
             && expectedPrefix.OperationReceipts.Select((item, index) => string.Equals(item?.ReceiptHash, actual.OperationReceipts[index]?.ReceiptHash, StringComparison.Ordinal)).All(value => value)
             && expectedPrefix.AcceptedDecisions.Length <= actual.AcceptedDecisions.Length
             && expectedPrefix.AcceptedDecisions.Select((item, index) => string.Equals(item?.DecisionHash, actual.AcceptedDecisions[index]?.DecisionHash, StringComparison.Ordinal)).All(value => value)
+            && !expectedPrefix.DecisionActions.IsDefault
+            && !actual.DecisionActions.IsDefault
+            && expectedPrefix.DecisionActions.Length <= actual.DecisionActions.Length
+            && expectedPrefix.DecisionActions.Select((item, index) => HumanReviewDecisionActionStateTransitionValidator.ValidateTransition(expectedPrefix.Request, item, actual.DecisionActions[index]).IsValid).All(value => value)
             && (expectedPrefix.Continuation is null
                 || actual.Continuation is not null
                 && HumanReviewContinuationStateTransitionValidator.ValidateTransition(

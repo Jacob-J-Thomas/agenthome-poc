@@ -37,4 +37,9 @@ public sealed record HumanReviewRunState(
     /// <remarks>The canonical run artifact is the only authority for this state. A non-null value is validated against the exact request and approval reservation.</remarks>
     [JsonRequired]
     public HumanReviewContinuationState? Continuation { get; init; }
+
+    /// <summary>Gets the append-only action chains reserved for accepted Reject, Cancel, and RequestInformation decisions.</summary>
+    /// <remarks>These chains are disjoint from approval continuation state and cannot contain approval or effect-release evidence.</remarks>
+    [JsonRequired]
+    public ImmutableArray<HumanReviewDecisionActionState> DecisionActions { get; init; } = ImmutableArray<HumanReviewDecisionActionState>.Empty;
 }
