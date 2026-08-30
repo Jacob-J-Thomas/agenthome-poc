@@ -9,12 +9,14 @@ internal sealed class HumanReviewDecisionActionRecoveryTestConsumer(HumanReviewC
     public int Count { get; private set; }
     public HumanReviewContinuationCandidate? LastCandidate { get; private set; }
     public HumanReviewDecisionReference? LastDecision { get; private set; }
+    public Action? AfterConsume { get; set; }
 
     public Task<HumanReviewContinuationConsumptionResult> ConsumeDecisionActionAsync(HumanReviewContinuationCandidate candidate, HumanReviewDecisionReference decision, CancellationToken cancellationToken = default)
     {
         Count++;
         LastCandidate = candidate;
         LastDecision = decision;
+        AfterConsume?.Invoke();
         return Task.FromResult(result);
     }
 }

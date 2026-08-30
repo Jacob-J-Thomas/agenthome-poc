@@ -15,6 +15,7 @@ internal sealed class HumanReviewDecisionActionRecoveryTestStore(
     public HumanReviewDecisionActionClaimIntent? LastClaim { get; private set; }
     public HumanReviewDecisionActionCompletionIntent? LastCompletion { get; private set; }
     public HumanReviewDecisionActionRetirementIntent? LastRetirement { get; private set; }
+    public List<HumanReviewDecisionActionCandidateQuery> ReadQueries { get; } = [];
     public HumanReviewDecisionActionStoreMutationResult ClaimResult { get; set; } = new(HumanReviewDecisionActionStoreMutationStatus.Committed);
     public HumanReviewDecisionActionStoreMutationResult CompleteResult { get; set; } = new(HumanReviewDecisionActionStoreMutationStatus.Committed);
     public HumanReviewDecisionActionStoreMutationResult RetireResult { get; set; } = new(HumanReviewDecisionActionStoreMutationStatus.Committed);
@@ -24,8 +25,11 @@ internal sealed class HumanReviewDecisionActionRecoveryTestStore(
     public Task<HumanReviewDecisionActionCandidateReadResult> ReadAsync(HumanReviewDecisionActionCandidateQuery query, CancellationToken cancellationToken = default)
     {
         ReadCount++;
-        return Task.FromResult(reread);
+        ReadQueries.Add(query);
+        return Task.FromResult(_actionHeadAdvanced && ReadCount > 1 ? new(HumanReviewDecisionActionCandidateReadStatus.Stale) : reread);
     }
+
+    public void AdvanceActionHead() => _actionHeadAdvanced = true;
 
     public Task<HumanReviewDecisionActionStoreMutationResult> ClaimAsync(HumanReviewDecisionActionClaimIntent intent, CancellationToken cancellationToken = default)
     {
@@ -49,4 +53,6 @@ internal sealed class HumanReviewDecisionActionRecoveryTestStore(
     }
 
     public Task<HumanReviewDecisionActionStoreMutationResult> PublishAsync(string runId, int expectedLifecycleVersion, HumanReviewDecisionActionState action, CancellationToken cancellationToken = default) => Task.FromResult(new HumanReviewDecisionActionStoreMutationResult(HumanReviewDecisionActionStoreMutationStatus.Invalid));
+
+    private bool _actionHeadAdvanced;
 }

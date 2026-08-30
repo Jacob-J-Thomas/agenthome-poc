@@ -61,7 +61,7 @@ public sealed class HumanReviewDecisionActionRecoveryCoordinatorTests
 
         Assert.Equal(HumanReviewDecisionActionRecoveryItemStatus.Completed, Assert.Single(result.Items).Status);
         Assert.Equal(1, store.ClaimCount);
-        Assert.Equal(1, store.ReadCount);
+        Assert.Equal(2, store.ReadCount);
         Assert.Equal(1, consumer.Count);
         Assert.Equal(currentRun, consumer.LastCandidate?.Run);
         Assert.Equal(action.Reservation.Decision, consumer.LastDecision);
@@ -127,6 +127,24 @@ public sealed class HumanReviewDecisionActionRecoveryCoordinatorTests
         Assert.Equal(HumanReviewDecisionActionRecoveryItemStatus.StaleAfterClaim, Assert.Single(result.Items).Status);
         Assert.Equal(0, release.Count);
         Assert.Equal(0, store.CompleteCount);
+    }
+
+    [Fact]
+    public async Task Decision_action_head_advanced_during_consumption_blocks_release_after_the_second_canonical_reread()
+    {
+        var fixture = await CreateClaimedRecoveryFixtureAsync();
+        fixture.Consumer.AfterConsume = fixture.Store.AdvanceActionHead;
+        var coordinator = new HumanReviewDecisionActionRecoveryCoordinator(fixture.Store, fixture.Consumer, fixture.Release, new HumanReviewDecisionTestClock(fixture.Wake.PublishedAtUtc.AddMinutes(1)));
+
+        var result = await coordinator.RecoverAsync(new(1, null, "action-worker-two", TimeSpan.FromMinutes(5)));
+
+        Assert.Equal(HumanReviewDecisionActionRecoveryItemStatus.StaleAfterClaim, Assert.Single(result.Items).Status);
+        Assert.Equal(2, fixture.Store.ReadCount);
+        Assert.Equal(fixture.Store.ReadQueries[0], fixture.Store.ReadQueries[1]);
+        Assert.Equal(1, fixture.Consumer.Count);
+        Assert.Equal(0, fixture.Release.Count);
+        Assert.Equal(0, fixture.Store.CompleteCount);
+        Assert.Equal(0, fixture.Store.RetireCount);
     }
 
     private static HumanReviewDecisionActionRecoveryCandidate Candidate(DateTimeOffset expiresAtUtc)
