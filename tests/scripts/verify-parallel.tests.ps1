@@ -178,10 +178,10 @@ $declaredRequiredGateProfiles = @($declaredRequiredGateNames | ForEach-Object { 
 Assert-VerificationRequiredGateSchedule -Phases $declaredRequiredGateProfiles
 Assert-True -Condition ($declaredRequiredGateProfiles.Count -eq $declaredRequiredGateNames.Count) -Message "Every dynamically declared required gate must resolve to one checked-in profile."
 Assert-True -Condition ($declaredRequiredGateProfiles.Count -eq $requiredGateProfiles.Count) -Message "The checked-in scheduling catalog cannot retain stale profiles for gates outside the current plan."
-foreach ($processHeavyGateName in @("tests-EmbodySense.Core.Persistence.Tests-all", "tests-EmbodySense.Core.Startup.Tests-remainder")) {
-    $processHeavyProfile = Get-VerificationRequiredGateScheduleProfile -Name $processHeavyGateName
-    Assert-True -Condition ($processHeavyProfile.Weight -eq 6 -and $processHeavyProfile.TimeoutSeconds -eq 720 -and $processHeavyProfile.ResourceClass -ceq "ProcessHeavy") -Message "A dominant internally parallel assembly gate '$processHeavyGateName' must reserve half of the four-core runner and its measured 720-second child budget."
-}
+$persistenceProfile = Get-VerificationRequiredGateScheduleProfile -Name "tests-EmbodySense.Core.Persistence.Tests-all"
+Assert-True -Condition ($persistenceProfile.EstimatedDurationSeconds -eq 720 -and $persistenceProfile.TimeoutSeconds -eq 840 -and $persistenceProfile.Weight -eq 6 -and $persistenceProfile.ResourceClass -ceq "ProcessHeavy") -Message "Persistence must retain its measured 720-second duration, 840-second dedicated ceiling, and half-runner process-heavy reservation."
+$startupRemainderProfile = Get-VerificationRequiredGateScheduleProfile -Name "tests-EmbodySense.Core.Startup.Tests-remainder"
+Assert-True -Condition ($startupRemainderProfile.EstimatedDurationSeconds -eq 560 -and $startupRemainderProfile.TimeoutSeconds -eq 720 -and $startupRemainderProfile.Weight -eq 6 -and $startupRemainderProfile.ResourceClass -ceq "ProcessHeavy") -Message "The Startup remainder must retain its separate 560-second duration, shared 720-second ceiling, and half-runner process-heavy reservation."
 $nestedProcessProfile = Get-VerificationRequiredGateScheduleProfile -Name "tests-EmbodySense.Core.Startup.Tests-nested-process"
 Assert-True -Condition ($nestedProcessProfile.EstimatedDurationSeconds -eq 180 -and $nestedProcessProfile.TimeoutSeconds -eq 600 -and $nestedProcessProfile.Weight -eq 12 -and $nestedProcessProfile.ResourceClass -ceq "ProcessHeavy") -Message "The nested-process Startup lane must reserve the entire logical capacity with its measured profile."
 Assert-True -Condition (@($requiredGateProfiles | Where-Object { $_.Name -ceq "tests-EmbodySense.Core.Startup.Tests-all" }).Count -eq 0) -Message "The stale all-Startup scheduling profile must not survive the two-lane partition."
@@ -189,9 +189,11 @@ foreach ($testProfile in @($requiredGateProfiles | Where-Object { $_.Name.Starts
     Assert-True -Condition ($testProfile.TimeoutSeconds -eq 600) -Message "Non-dominant required test gate '$($testProfile.Name)' must retain the normal bounded 600-second child budget."
 }
 $persistenceProfileSource = @($script:VerificationRequiredGateScheduleProfiles | Where-Object Name -ceq "tests-EmbodySense.Core.Persistence.Tests-all")[0]
+$startupRemainderProfileSource = @($script:VerificationRequiredGateScheduleProfiles | Where-Object Name -ceq "tests-EmbodySense.Core.Startup.Tests-remainder")[0]
 $originalPersistenceTimeoutSeconds = $persistenceProfileSource.TimeoutSeconds
+$originalStartupRemainderTimeoutSeconds = $startupRemainderProfileSource.TimeoutSeconds
 try {
-    $persistenceProfileSource.TimeoutSeconds = 719
+    $persistenceProfileSource.TimeoutSeconds = 839
     try {
         Get-VerificationRequiredGateScheduleProfile -Name $persistenceProfileSource.Name | Out-Null
         throw "Expected insufficient Persistence timeout headroom to fail closed."
@@ -200,17 +202,27 @@ try {
         Assert-True -Condition ($_.Exception.Message.IndexOf("timeout headroom", [StringComparison]::Ordinal) -ge 0) -Message "A stale dominant-lane child budget must fail closed."
     }
 
-    $persistenceProfileSource.TimeoutSeconds = 721
+    $persistenceProfileSource.TimeoutSeconds = 841
     try {
         Get-VerificationRequiredGateScheduleProfile -Name $persistenceProfileSource.Name | Out-Null
-        throw "Expected an over-broad Persistence timeout to fail closed."
+        throw "Expected a Persistence timeout above its dedicated maximum to fail closed."
     }
     catch {
-        Assert-True -Condition ($_.Exception.Message.IndexOf("bounded child-timeout policy", [StringComparison]::Ordinal) -ge 0) -Message "An over-broad dominant-lane child budget must fail closed."
+        Assert-True -Condition ($_.Exception.Message.IndexOf("bounded child-timeout policy of 840 seconds", [StringComparison]::Ordinal) -ge 0) -Message "A Persistence timeout above its dedicated maximum must fail closed."
+    }
+
+    $startupRemainderProfileSource.TimeoutSeconds = 721
+    try {
+        Get-VerificationRequiredGateScheduleProfile -Name $startupRemainderProfileSource.Name | Out-Null
+        throw "Expected a Startup remainder timeout above the shared maximum to fail closed."
+    }
+    catch {
+        Assert-True -Condition ($_.Exception.Message.IndexOf("bounded child-timeout policy of 720 seconds", [StringComparison]::Ordinal) -ge 0) -Message "The Persistence-only maximum cannot silently widen the Startup remainder ceiling."
     }
 }
 finally {
     $persistenceProfileSource.TimeoutSeconds = $originalPersistenceTimeoutSeconds
+    $startupRemainderProfileSource.TimeoutSeconds = $originalStartupRemainderTimeoutSeconds
 }
 foreach ($processHeavyGateName in @("tests-EmbodySense.IntegrationTests-all", "tests-EmbodySense.Web.Tests-all")) {
     $processHeavyProfile = Get-VerificationRequiredGateScheduleProfile -Name $processHeavyGateName
@@ -349,6 +361,19 @@ exit $ExitCode
     @'
 param([string]$Name, [string]$ActiveRoot, [int]$ExpectedConcurrent, [int]$MaximumExpectedConcurrent)
 $activePath = Join-Path $ActiveRoot "$Name.active"
+$readyPath = Join-Path $ActiveRoot "$Name.ready"
+$acknowledgementPath = Join-Path $ActiveRoot "$Name.acknowledged"
+$releasePath = Join-Path $ActiveRoot "barrier.released"
+if (Test-Path -LiteralPath $releasePath -PathType Leaf) {
+    $releaseClearDeadline = [DateTimeOffset]::UtcNow.AddSeconds(5)
+    while ((Test-Path -LiteralPath $releasePath -PathType Leaf) -and @(Get-ChildItem -LiteralPath $ActiveRoot -Filter "*.active" -File).Count -gt 0) {
+        if ([DateTimeOffset]::UtcNow -ge $releaseClearDeadline) { exit 46 }
+        Start-Sleep -Milliseconds 10
+    }
+    if (Test-Path -LiteralPath $releasePath -PathType Leaf) {
+        Remove-Item -LiteralPath $releasePath -Force -ErrorAction SilentlyContinue
+    }
+}
 try {
     Set-Content -LiteralPath $activePath -Value "active" -Encoding UTF8
     $synchronizationDeadline = [DateTimeOffset]::UtcNow.AddSeconds(5)
@@ -356,6 +381,28 @@ try {
         if ([DateTimeOffset]::UtcNow -ge $synchronizationDeadline) { exit 42 }
         Start-Sleep -Milliseconds 10
     }
+
+    Set-Content -LiteralPath $readyPath -Value "ready" -Encoding UTF8
+    $readinessDeadline = [DateTimeOffset]::UtcNow.AddSeconds(5)
+    while (@(Get-ChildItem -LiteralPath $ActiveRoot -Filter "*.ready" -File).Count -lt $ExpectedConcurrent) {
+        if ([DateTimeOffset]::UtcNow -ge $readinessDeadline) { exit 44 }
+        Start-Sleep -Milliseconds 10
+    }
+
+    Set-Content -LiteralPath $acknowledgementPath -Value "acknowledged" -Encoding UTF8
+    $acknowledgementDeadline = [DateTimeOffset]::UtcNow.AddSeconds(5)
+    while (@(Get-ChildItem -LiteralPath $ActiveRoot -Filter "*.acknowledged" -File).Count -lt $ExpectedConcurrent -and -not (Test-Path -LiteralPath $releasePath -PathType Leaf)) {
+        if ([DateTimeOffset]::UtcNow -ge $acknowledgementDeadline) { exit 45 }
+        Start-Sleep -Milliseconds 10
+    }
+
+    New-Item -ItemType File -Path $releasePath -ErrorAction SilentlyContinue | Out-Null
+    $releaseDeadline = [DateTimeOffset]::UtcNow.AddSeconds(5)
+    while (-not (Test-Path -LiteralPath $releasePath -PathType Leaf)) {
+        if ([DateTimeOffset]::UtcNow -ge $releaseDeadline) { exit 47 }
+        Start-Sleep -Milliseconds 10
+    }
+
     $deadline = [DateTimeOffset]::UtcNow.AddMilliseconds(250)
     while ([DateTimeOffset]::UtcNow -lt $deadline) {
         $activeCount = @(Get-ChildItem -LiteralPath $ActiveRoot -Filter "*.active" -File).Count
@@ -368,6 +415,8 @@ try {
     Write-Output "weighted_probe=$Name"
 }
 finally {
+    Remove-Item -LiteralPath $acknowledgementPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $readyPath -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $activePath -Force -ErrorAction SilentlyContinue
 }
 '@ | Set-Content -LiteralPath $weightedProbePath -Encoding UTF8
@@ -387,6 +436,8 @@ finally {
     $weightedResults = @(Invoke-VerificationParallelPhases -MaximumWorkers $sixUnitCapacity -MaximumResourceCapacity $sixUnitCapacity)
     Assert-True -Condition ($weightedResults.Count -eq 4) -Message "Every weighted phase must be scheduled and aggregated."
     Assert-True -Condition (@($weightedResults | Where-Object { $_.Weight -eq $heavyWeight -and $_.EffectiveWeight -eq $heavyWeight -and $_.ResourceClass -ceq "ProcessHeavy" }).Count -eq 4) -Message "Weighted result evidence must preserve the declared process-heavy posture without adapting its weight downward."
+    Remove-Item -LiteralPath (Join-Path $activeRoot "barrier.released") -Force -ErrorAction SilentlyContinue
+    Assert-True -Condition (@(Get-ChildItem -LiteralPath $activeRoot -File).Count -eq 0) -Message "The weighted-wave coordinator must remove every barrier marker after the bounded observation drains."
 
     $physicalHeavyRoot = Join-Path $scenarioRoot "physical-heavy-active"
     New-Item -ItemType Directory -Path $physicalHeavyRoot | Out-Null
