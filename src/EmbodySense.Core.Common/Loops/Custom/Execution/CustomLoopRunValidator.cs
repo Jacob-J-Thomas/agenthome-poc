@@ -3901,6 +3901,15 @@ public static class CustomLoopRunValidator
                 Add(errors, "invalid_human_review_decision_action", "humanReview.decisionActions", "Each decision action must be canonical, unique, and bind one distinct exact accepted non-approval decision.");
             }
         }
+
+        var acceptedNonapprovalDecisionHashes = state.AcceptedDecisions
+            .Where(decision => decision is { Kind: HumanReviewDecisionKind.Reject or HumanReviewDecisionKind.Cancel or HumanReviewDecisionKind.RequestInformation })
+            .Select(decision => decision!.DecisionHash)
+            .ToHashSet(StringComparer.Ordinal);
+        if (!acceptedNonapprovalDecisionHashes.SetEquals(actionDecisions))
+        {
+            Add(errors, "human_review_nonapproval_action_ledger_mismatch", "humanReview.decisionActions", "Every accepted Reject, Cancel, and RequestInformation decision must own exactly one action reservation, and no action may bind another decision.");
+        }
     }
 
     private static void ValidateHumanReviewLifecycleCausality(HumanReviewRunState state, List<CustomLoopValidationError> errors)

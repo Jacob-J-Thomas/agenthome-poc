@@ -555,6 +555,42 @@ public sealed class HumanReviewDecisionActionRunStoreTests
         Assert.Contains(CustomLoopRunValidator.Validate(corrupt).Errors, error => error.Code == "invalid_human_review_decision_action");
     }
 
+    [Fact]
+    public async Task Whole_run_validator_requires_one_action_reservation_for_every_accepted_nonapproval_decision()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var admitted = await CustomLoopFrontierStoreTests.PersistHumanReviewAdmissionAsync(paths, "action-ledger-bijection");
+        using var store = new CustomLoopRunStore(paths);
+        var information = await new HumanReviewDecisionService(store, new HumanReviewDecisionStoreTestAuthorizer(), new HumanReviewDecisionStoreTestClock(admitted.UpdatedAtUtc.AddMinutes(1))).DecideAsync(new(admitted.Id, admitted.LifecycleVersion, "action-ledger-information", HumanReviewDecisionKind.RequestInformation, "Need a bounded clarification."));
+        Assert.Equal(HumanReviewDecisionServiceStatus.InformationRequested, information.Status);
+        var afterInformation = Assert.IsType<CustomLoopRunRecord>(await store.GetAsync(admitted.Id));
+        var rejection = await new HumanReviewDecisionService(store, new HumanReviewDecisionStoreTestAuthorizer(), new HumanReviewDecisionStoreTestClock(admitted.UpdatedAtUtc.AddMinutes(2))).DecideAsync(new(afterInformation.Id, afterInformation.LifecycleVersion, "action-ledger-reject", HumanReviewDecisionKind.Reject, null));
+        Assert.Equal(HumanReviewDecisionServiceStatus.Accepted, rejection.Status);
+        var current = Assert.IsType<CustomLoopRunRecord>(await store.GetAsync(admitted.Id));
+        var review = Assert.IsType<HumanReviewRunState>(current.HumanReview);
+        var first = review.DecisionActions[0];
+        var second = review.DecisionActions[1];
+
+        Assert.True(CustomLoopRunValidator.Validate(current).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(current).Errors));
+        Assert.Equal(
+            review.AcceptedDecisions.Where(decision => decision.Kind is HumanReviewDecisionKind.Reject or HumanReviewDecisionKind.Cancel or HumanReviewDecisionKind.RequestInformation).Select(decision => decision.DecisionHash).Order(),
+            review.DecisionActions.Select(action => action.Reservation.Decision.DecisionHash).Order());
+        AssertLedgerMismatch(current with { HumanReview = review with { DecisionActions = [] } });
+        AssertLedgerMismatch(current with { HumanReview = review with { DecisionActions = [first] } });
+        AssertLedgerMismatch(current with { HumanReview = review with { DecisionActions = [first, first] } });
+        AssertLedgerMismatch(current with { HumanReview = review with { DecisionActions = [first, Rebind(second, review.AcceptedDecisions[0])] } });
+
+        using var approvalWorkspace = new TestWorkspace();
+        using var approvalStore = new CustomLoopRunStore(new WorkspacePaths(approvalWorkspace.RootPath));
+        var approvalAdmission = await CustomLoopFrontierStoreTests.PersistHumanReviewAdmissionAsync(new WorkspacePaths(approvalWorkspace.RootPath), "action-ledger-approval");
+        var approval = await new HumanReviewDecisionService(approvalStore, new HumanReviewDecisionStoreTestAuthorizer(), new HumanReviewDecisionStoreTestClock(approvalAdmission.UpdatedAtUtc.AddMinutes(1))).DecideAsync(new(approvalAdmission.Id, approvalAdmission.LifecycleVersion, "action-ledger-approve", HumanReviewDecisionKind.Approve, null));
+        Assert.Equal(HumanReviewDecisionServiceStatus.Accepted, approval.Status);
+        var approved = Assert.IsType<CustomLoopRunRecord>(await approvalStore.GetAsync(approvalAdmission.Id));
+        Assert.Empty(Assert.IsType<HumanReviewRunState>(approved.HumanReview).DecisionActions);
+        Assert.True(CustomLoopRunValidator.Validate(approved).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(approved).Errors));
+    }
+
     [Theory]
     [InlineData(HumanReviewDecisionKind.Reject)]
     [InlineData(HumanReviewDecisionKind.Cancel)]
@@ -697,6 +733,19 @@ public sealed class HumanReviewDecisionActionRunStoreTests
 
     private static HumanReviewDecisionActionRecoveryCandidate Candidate(CustomLoopRunRecord run, HumanReviewDecisionActionState action, HumanReviewDecisionActionClaimReference? priorClaim)
         => new(run.Id, run.LifecycleVersion, new(run.HumanReview!.Request.RequestId, run.HumanReview.Request.RequestHash), action.Reservation.Decision, new(action.Wake!.WakeId, action.Wake.WakeHash), action.ExpectedGeneration, action.Wake.ExpiresAtUtc, new(action.Reservation.ReservationId, action.Reservation.ReservationHash), priorClaim);
+
+    private static void AssertLedgerMismatch(CustomLoopRunRecord run)
+        => Assert.Contains(CustomLoopRunValidator.Validate(run).Errors, error => error.Code == "human_review_nonapproval_action_ledger_mismatch");
+
+    private static HumanReviewDecisionActionState Rebind(HumanReviewDecisionActionState action, HumanReviewDecision decision)
+    {
+        var reservation = HumanReviewDecisionActionContractHash.ApplyReservation(action.Reservation with
+        {
+            Decision = new HumanReviewDecisionReference(decision.DecisionId, decision.DecisionOperationId, decision.Kind, decision.DecisionHash),
+            ReservationHash = string.Empty,
+        });
+        return HumanReviewDecisionActionContractHash.ApplyState(action with { Reservation = reservation, StateHash = string.Empty });
+    }
 
     private static HumanReviewDecisionActionClaim Claim(HumanReviewDecisionActionState action, DateTimeOffset claimedAtUtc, string claimId, TimeSpan? lease = null)
         => HumanReviewDecisionActionContractHash.ApplyClaim(new(1, claimId, new(action.Wake!.WakeId, action.Wake.WakeHash), new(action.Reservation.ReservationId, action.Reservation.ReservationHash), action.ExpectedGeneration, "worker-" + claimId, claimedAtUtc, claimedAtUtc.Add(lease ?? TimeSpan.FromMinutes(5)), Provenance(claimId, claimedAtUtc), string.Empty));
