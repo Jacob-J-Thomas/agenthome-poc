@@ -30,14 +30,30 @@ public sealed class GovernedLoopCoordinatorRepairFacade
     public Task<GovernedLoopCoordinatorRepairPreview> PreviewAsync(
         GovernedLoopCoordinatorRepairPreviewRequest request,
         CancellationToken cancellationToken = default)
-        => _service.PreviewAsync(request, cancellationToken);
+        => request is not null && !string.Equals(request.CoordinatorId, _host.CoordinatorId, StringComparison.Ordinal)
+            ? Task.FromResult(new GovernedLoopCoordinatorRepairPreview(
+                GovernedLoopCoordinatorRepairPreviewStatus.Conflict,
+                request.OperationId,
+                null,
+                "coordinator-repair-host-conflict"))
+            : _service.PreviewAsync(request!, cancellationToken);
 
     /// <summary>Appends or exactly replays an approved repair, then performs only the canonical fresh fenced startup path.</summary>
     public async Task<GovernedLoopCoordinatorRepairExecutionResult> SubmitAsync(
         GovernedLoopCoordinatorRepairSubmitRequest request,
         CancellationToken cancellationToken = default)
     {
-        var submitted = await _service.SubmitAsync(request, cancellationToken).ConfigureAwait(false);
+        if (request?.Disposition is not null && !string.Equals(request.Disposition.CoordinatorId, _host.CoordinatorId, StringComparison.Ordinal))
+        {
+            var conflict = new GovernedLoopCoordinatorRepairSubmitResult(
+                GovernedLoopCoordinatorRepairSubmitStatus.Conflict,
+                request.Disposition.OperationId,
+                null,
+                "coordinator-repair-host-conflict");
+            return new GovernedLoopCoordinatorRepairExecutionResult(GovernedLoopCoordinatorRepairExecutionStatus.Conflict, conflict, null);
+        }
+
+        var submitted = await _service.SubmitAsync(request!, cancellationToken).ConfigureAwait(false);
         if (submitted.Status is not (GovernedLoopCoordinatorRepairSubmitStatus.Accepted or GovernedLoopCoordinatorRepairSubmitStatus.Replayed))
         {
             return new GovernedLoopCoordinatorRepairExecutionResult(Map(submitted.Status), submitted, null);
@@ -46,7 +62,7 @@ public sealed class GovernedLoopCoordinatorRepairFacade
         AgentRuntimeGovernedLoopBackgroundStartResult started;
         try
         {
-            started = await _host.StartAsync(cancellationToken).ConfigureAwait(false);
+            started = await _host.StartAfterRepairAsync(cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

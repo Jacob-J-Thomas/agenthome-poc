@@ -140,6 +140,24 @@ public sealed class GovernedLoopCoordinatorRepairEvidenceStoreTests
     }
 
     [Fact]
+    public async Task Repair_allows_the_same_process_owner_to_start_one_new_fenced_epoch()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new GovernedLoopCoordinatorEvidenceStore(paths);
+        var failed = await CreateFailedSnapshotAsync(store);
+        var repair = Repair(failed, failed.LatestHeartbeat.LeaseExpiresAtUtc);
+        var request = RepairAcquisition(failed, repair, failed.Ownership.OwnerId);
+        Assert.Equal(GovernedLoopCoordinatorRepairMutationStatus.Appended, (await store.AppendAsync(repair))!.Status);
+
+        var acquired = await store.TryAcquireAfterRepairAsync(request);
+
+        Assert.Equal(GovernedLoopCoordinatorAcquisitionStatus.Acquired, acquired!.Status);
+        Assert.Equal(failed.Ownership.OwnerId, acquired.Snapshot!.Ownership.OwnerId);
+        Assert.Equal(failed.Ownership.OwnershipEpoch + 1, acquired.Snapshot.Ownership.OwnershipEpoch);
+    }
+
+    [Fact]
     public async Task Published_repair_acquisition_response_loss_reconciles_to_one_exact_successor()
     {
         using var workspace = new TestWorkspace();
@@ -229,10 +247,11 @@ public sealed class GovernedLoopCoordinatorRepairEvidenceStoreTests
 
     private static GovernedLoopCoordinatorRepairAcquisitionRequest RepairAcquisition(
         GovernedLoopCoordinatorSnapshot failed,
-        GovernedLoopCoordinatorRepairDisposition repair)
+        GovernedLoopCoordinatorRepairDisposition repair,
+        string ownerId = "process-owner-2")
     {
         var ownership = GovernedLoopSleepContractTestFixture.Ownership(
-            ownerId: "process-owner-2",
+            ownerId: ownerId,
             ownershipEpoch: failed.Ownership.OwnershipEpoch + 1,
             acquiredAtUtc: failed.LatestHeartbeat.LeaseExpiresAtUtc);
         var acquisition = new GovernedLoopCoordinatorAcquisitionRequest(

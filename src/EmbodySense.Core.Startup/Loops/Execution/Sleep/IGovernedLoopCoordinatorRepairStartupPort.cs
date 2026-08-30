@@ -5,6 +5,9 @@ namespace EmbodySense.Core.Startup.Loops.Execution.Sleep;
 /// <summary>Starts the one canonical background host after an already-durable coordinator repair disposition.</summary>
 public interface IGovernedLoopCoordinatorRepairStartupPort
 {
-    /// <summary>Performs the existing fresh fenced background start without changing the submitted repair disposition.</summary>
-    Task<AgentRuntimeGovernedLoopBackgroundStartResult> StartAsync(CancellationToken cancellationToken = default);
+    /// <summary>Gets the exact coordinator identity owned by this canonical background host.</summary>
+    string CoordinatorId { get; }
+
+    /// <summary>Reaps a completed failed local session and performs one fresh repair-fenced start for the same coordinator.</summary>
+    Task<AgentRuntimeGovernedLoopBackgroundStartResult> StartAfterRepairAsync(CancellationToken cancellationToken = default);
 }

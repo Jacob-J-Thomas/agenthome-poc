@@ -363,6 +363,44 @@ public sealed class GovernedLoopLocalCoordinatorTests
     }
 
     [Fact]
+    public async Task Completed_failed_session_is_reaped_and_repaired_in_one_explicit_start_operation()
+    {
+        var evidence = new RepairableCoordinatorEvidencePort();
+        var clock = Clock();
+        var work = new ScriptedLocalWorkRunner
+        {
+            Handler = static (_, _) => Task.FromResult<GovernedLoopLocalWorkResult?>(
+                new GovernedLoopLocalWorkResult(GovernedLoopLocalWorkResultStatus.Corrupt, "failed-work"))
+        };
+        var dependencies = new StaticCoordinatorRepairDependencyPort();
+        await using var coordinator = Coordinator(
+            evidence,
+            work,
+            clock,
+            "owner-a",
+            repairDependencies: dependencies,
+            workspaceId: "workspace-sha256:" + new string('a', 64));
+
+        Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Started, (await coordinator.StartAsync()).Status);
+        await WaitUntilAsync(() => evidence.Snapshot?.LatestLifecycle.Status == GovernedLoopCoordinatorStatus.Failed);
+        await Task.Delay(20);
+        var failed = evidence.Snapshot!;
+        clock.Advance(TimeSpan.FromMinutes(3));
+        Assert.Equal(GovernedLoopCoordinatorRepairMutationStatus.Appended, (await evidence.AppendAsync(Repair(failed)))!.Status);
+        work.Handler = static (_, _) => Task.FromResult<GovernedLoopLocalWorkResult?>(
+            new GovernedLoopLocalWorkResult(GovernedLoopLocalWorkResultStatus.Empty, "no-work"));
+
+        var repaired = await coordinator.StartAfterRepairAsync();
+
+        Assert.True(
+            repaired.Status == GovernedLoopLocalCoordinatorStartStatus.Started,
+            $"Expected repaired start; status={repaired.Status}, dependencyReads={dependencies.ReadCalls}, repairAcquisitions={evidence.RepairAcquisitionCalls}.");
+        Assert.Equal(failed.Ownership.OwnershipEpoch + 1, repaired.Snapshot!.Ownership.OwnershipEpoch);
+        Assert.Equal(1, evidence.RepairAcquisitionCalls);
+        Assert.Equal(GovernedLoopLocalCoordinatorStopStatus.Stopped, (await coordinator.StopAsync()).Status);
+    }
+
+    [Fact]
     public async Task Durably_failed_uncompleted_session_never_reports_ready_already_running_posture()
     {
         var evidence = new RecordingCoordinatorEvidencePort();

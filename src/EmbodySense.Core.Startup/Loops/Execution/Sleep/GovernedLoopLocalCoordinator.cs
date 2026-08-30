@@ -81,6 +81,15 @@ public sealed class GovernedLoopLocalCoordinator : IAsyncDisposable
     /// independently of the caller token.
     /// </remarks>
     public async Task<GovernedLoopLocalCoordinatorStartResult> StartAsync(CancellationToken cancellationToken = default)
+        => await StartCoreAsync(continueAfterCompletedFailure: false, cancellationToken).ConfigureAwait(false);
+
+    /// <summary>Reaps one completed failed local session before attempting an exact retained-repair acquisition.</summary>
+    public async Task<GovernedLoopLocalCoordinatorStartResult> StartAfterRepairAsync(CancellationToken cancellationToken = default)
+        => await StartCoreAsync(continueAfterCompletedFailure: true, cancellationToken).ConfigureAwait(false);
+
+    private async Task<GovernedLoopLocalCoordinatorStartResult> StartCoreAsync(
+        bool continueAfterCompletedFailure,
+        CancellationToken cancellationToken)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         await _operationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -95,7 +104,8 @@ public sealed class GovernedLoopLocalCoordinator : IAsyncDisposable
                 }
 
                 var completed = await ReapCompletedSessionAsync().ConfigureAwait(false);
-                if (completed is not null)
+                if (completed is not null
+                    && !(continueAfterCompletedFailure && completed.Status == GovernedLoopLocalCoordinatorStartStatus.Failed))
                 {
                     return completed;
                 }
@@ -1107,13 +1117,19 @@ public sealed class GovernedLoopLocalCoordinator : IAsyncDisposable
             lifecycle,
             heartbeat);
 
-        var transitionIsValid = current is null || (terminalSameOwnerRestart
-            ? GovernedLoopSleepContractValidator.ValidateTerminalSameOwnerRestart(
-                current.Ownership,
-                current.LatestLifecycle,
-                current.LatestHeartbeat,
-                ownership).IsValid
-            : GovernedLoopSleepContractValidator.ValidateHandoff(current.Ownership, current.LatestHeartbeat, ownership).IsValid);
+        var transitionIsValid = current is null;
+        if (current is not null)
+        {
+            transitionIsValid = repair is not null
+                ? GovernedLoopSleepContractValidator.ValidateRepairHandoff(current.Ownership, current.LatestHeartbeat, ownership).IsValid
+                : terminalSameOwnerRestart
+                    ? GovernedLoopSleepContractValidator.ValidateTerminalSameOwnerRestart(
+                        current.Ownership,
+                        current.LatestLifecycle,
+                        current.LatestHeartbeat,
+                        ownership).IsValid
+                    : GovernedLoopSleepContractValidator.ValidateHandoff(current.Ownership, current.LatestHeartbeat, ownership).IsValid;
+        }
         if (!GovernedLoopCoordinatorEvidenceContract.IsValid(request) || !transitionIsValid)
         {
             return new(false, null, null, blocked);

@@ -73,17 +73,36 @@ public sealed class GovernedLoopCoordinatorRepairFacadeTests
         Assert.Null(unavailable.Start);
     }
 
+    [Fact]
+    public async Task Preview_and_submit_reject_a_coordinator_not_owned_by_the_canonical_host_before_admission()
+    {
+        var service = new StubRepairService();
+        var host = new RecordingStartupPort { CoordinatorId = "local-background" };
+        var facade = new GovernedLoopCoordinatorRepairFacade(service, host);
+        var foreign = RepairDisposition("foreign-background");
+
+        var preview = await facade.PreviewAsync(new GovernedLoopCoordinatorRepairPreviewRequest(foreign.CoordinatorId, foreign.OperationId));
+        var submitted = await facade.SubmitAsync(new GovernedLoopCoordinatorRepairSubmitRequest(foreign));
+
+        Assert.Equal(GovernedLoopCoordinatorRepairPreviewStatus.Conflict, preview.Status);
+        Assert.Equal(GovernedLoopCoordinatorRepairExecutionStatus.Conflict, submitted.Status);
+        Assert.Equal(GovernedLoopCoordinatorRepairSubmitStatus.Conflict, submitted.Submission.Status);
+        Assert.Equal(0, service.PreviewCalls);
+        Assert.Equal(0, service.SubmitCalls);
+        Assert.Equal(0, host.StartCount);
+    }
+
     private static GovernedLoopCoordinatorRepairSubmitResult Submission(GovernedLoopCoordinatorRepairSubmitStatus status)
         => new(status, "operation", null, "test");
 
     private static AgentRuntimeGovernedLoopBackgroundStartResult Start(AgentRuntimeGovernedLoopBackgroundStartStatus status)
         => new(status, AgentRuntimeGovernedLoopBackgroundReadiness.Ready, AgentRuntimeGovernedLoopBackgroundOwnership.Local, false, "test");
 
-    private static GovernedLoopCoordinatorRepairDisposition RepairDisposition()
+    private static GovernedLoopCoordinatorRepairDisposition RepairDisposition(string coordinatorId = "coordinator")
     {
         var ownership = GovernedLoopSleepContractHash.Apply(new GovernedLoopCoordinatorOwnership(
             1,
-            "coordinator",
+            coordinatorId,
             "owner",
             1,
             _now,
@@ -91,7 +110,7 @@ public sealed class GovernedLoopCoordinatorRepairFacadeTests
         var readiness = GovernedLoopSleepContractHash.Apply(new GovernedLoopCoordinatorRepairReadiness(
             1,
             _workspaceId,
-            "coordinator",
+            coordinatorId,
             true,
             true,
             true,
@@ -101,7 +120,7 @@ public sealed class GovernedLoopCoordinatorRepairFacadeTests
         return GovernedLoopSleepContractHash.Apply(new GovernedLoopCoordinatorRepairDisposition(
             1,
             _workspaceId,
-            "coordinator",
+            coordinatorId,
             "operation",
             "actor",
             ownership,
@@ -115,13 +134,15 @@ public sealed class GovernedLoopCoordinatorRepairFacadeTests
 
     private sealed class RecordingStartupPort : IGovernedLoopCoordinatorRepairStartupPort
     {
+        public string CoordinatorId { get; init; } = "coordinator";
+
         internal Exception? Exception { get; init; }
 
         internal AgentRuntimeGovernedLoopBackgroundStartResult Result { get; init; } = Start(AgentRuntimeGovernedLoopBackgroundStartStatus.Started);
 
         internal int StartCount { get; private set; }
 
-        public Task<AgentRuntimeGovernedLoopBackgroundStartResult> StartAsync(CancellationToken cancellationToken = default)
+        public Task<AgentRuntimeGovernedLoopBackgroundStartResult> StartAfterRepairAsync(CancellationToken cancellationToken = default)
         {
             StartCount++;
             if (Exception is not null)
@@ -135,16 +156,30 @@ public sealed class GovernedLoopCoordinatorRepairFacadeTests
 
     private sealed class StubRepairService : IGovernedLoopCoordinatorRepairService
     {
+        internal int PreviewCalls { get; private set; }
+
+        internal int SubmitCalls { get; private set; }
+
         internal GovernedLoopCoordinatorRepairSubmitResult SubmitResult { get; init; } = Submission(GovernedLoopCoordinatorRepairSubmitStatus.Invalid);
 
         public Task<GovernedLoopCoordinatorRepairPreview> PreviewAsync(
             GovernedLoopCoordinatorRepairPreviewRequest request,
             CancellationToken cancellationToken = default)
-            => throw new NotSupportedException();
+        {
+            PreviewCalls++;
+            return Task.FromResult(new GovernedLoopCoordinatorRepairPreview(
+                GovernedLoopCoordinatorRepairPreviewStatus.Ready,
+                request.OperationId,
+                RepairDisposition(request.CoordinatorId),
+                "test"));
+        }
 
         public Task<GovernedLoopCoordinatorRepairSubmitResult> SubmitAsync(
             GovernedLoopCoordinatorRepairSubmitRequest request,
             CancellationToken cancellationToken = default)
-            => Task.FromResult(SubmitResult);
+        {
+            SubmitCalls++;
+            return Task.FromResult(SubmitResult);
+        }
     }
 }

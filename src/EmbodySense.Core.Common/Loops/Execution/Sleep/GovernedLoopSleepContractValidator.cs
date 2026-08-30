@@ -307,6 +307,37 @@ public static class GovernedLoopSleepContractValidator
     }
 
     /// <summary>
+    /// Validates a repair-authorized ownership successor after the failed generation's exclusive lease has expired.
+    /// Unlike an ordinary peer handoff, an exact retained repair may restart the same process owner at a new epoch.
+    /// </summary>
+    public static GovernedLoopSleepValidationResult ValidateRepairHandoff(
+        GovernedLoopCoordinatorOwnership? current,
+        GovernedLoopCoordinatorHeartbeat? currentHeartbeat,
+        GovernedLoopCoordinatorOwnership? next)
+    {
+        var errors = new List<GovernedLoopSleepValidationError>();
+        ValidateOwnership(current, "$.current", errors);
+        ValidateHeartbeat(currentHeartbeat, "$.currentHeartbeat", errors);
+        ValidateOwnership(next, "$.next", errors);
+        if (current is not null && currentHeartbeat is not null && next is not null && errors.Count == 0)
+        {
+            var heartbeatIsCurrent = SameOwnership(current, currentHeartbeat.Ownership);
+            if (!heartbeatIsCurrent)
+            {
+                Add(errors, GovernedLoopSleepValidationErrorCode.BindingMismatch, "$.currentHeartbeat.ownership");
+            }
+
+            ValidateOwnershipTransition(current, next, errors, requireNewOwner: false);
+            if (heartbeatIsCurrent && next.AcquiredAtUtc < currentHeartbeat.LeaseExpiresAtUtc)
+            {
+                Add(errors, GovernedLoopSleepValidationErrorCode.IllegalTransition, "$.next.acquiredAtUtc");
+            }
+        }
+
+        return Result(errors);
+    }
+
+    /// <summary>
     /// Validates a fenced restart by the exact owner that durably drained its own coordinator to
     /// <see cref="GovernedLoopCoordinatorStatus.Stopped"/>. This is intentionally narrower than a handoff: it never
     /// permits a different owner to bypass the live heartbeat lease and it never restarts a failed lifecycle.
@@ -866,14 +897,15 @@ public static class GovernedLoopSleepContractValidator
     private static void ValidateOwnershipTransition(
         GovernedLoopCoordinatorOwnership current,
         GovernedLoopCoordinatorOwnership next,
-        List<GovernedLoopSleepValidationError> errors)
+        List<GovernedLoopSleepValidationError> errors,
+        bool requireNewOwner = true)
     {
         if (!string.Equals(current.CoordinatorId, next.CoordinatorId, StringComparison.Ordinal))
         {
             Add(errors, GovernedLoopSleepValidationErrorCode.ImmutableEvidenceChanged, "$.next.coordinatorId");
         }
 
-        if (string.Equals(current.OwnerId, next.OwnerId, StringComparison.Ordinal))
+        if (requireNewOwner && string.Equals(current.OwnerId, next.OwnerId, StringComparison.Ordinal))
         {
             Add(errors, GovernedLoopSleepValidationErrorCode.IllegalTransition, "$.next.ownerId");
         }

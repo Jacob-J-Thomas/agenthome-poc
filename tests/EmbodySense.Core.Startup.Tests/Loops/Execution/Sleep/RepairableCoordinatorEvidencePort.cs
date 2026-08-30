@@ -102,6 +102,6 @@ internal sealed class RepairableCoordinatorEvidencePort : IGovernedLoopCoordinat
             RepairAcquisitionCalls++;
         }
 
-        return await _inner.TryAcquireAsync(request.Acquisition, cancellationToken);
+        return await _inner.TryAcquireAfterRepairAsync(request.Acquisition, cancellationToken);
     }
 }

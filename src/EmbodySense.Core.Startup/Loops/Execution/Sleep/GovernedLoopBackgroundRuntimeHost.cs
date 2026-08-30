@@ -108,9 +108,11 @@ internal sealed class GovernedLoopBackgroundRuntimeHost : ICustomLoopExecutionAc
         CancellationToken cancellationToken = default)
         => ActivateCoreAsync(cancellationToken);
 
-    Task<AgentRuntimeGovernedLoopBackgroundStartResult> IGovernedLoopCoordinatorRepairStartupPort.StartAsync(
+    string IGovernedLoopCoordinatorRepairStartupPort.CoordinatorId => CoordinatorId;
+
+    Task<AgentRuntimeGovernedLoopBackgroundStartResult> IGovernedLoopCoordinatorRepairStartupPort.StartAfterRepairAsync(
         CancellationToken cancellationToken)
-        => StartAsync(cancellationToken);
+        => ActivateCoreAsync(cancellationToken, startAfterRepair: true);
 
     internal long ActivationSequence => Volatile.Read(ref _activationSequence);
 
@@ -234,7 +236,8 @@ internal sealed class GovernedLoopBackgroundRuntimeHost : ICustomLoopExecutionAc
     }
 
     private async Task<AgentRuntimeGovernedLoopBackgroundStartResult> ActivateCoreAsync(
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool startAfterRepair = false)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         await _activationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -276,7 +279,9 @@ internal sealed class GovernedLoopBackgroundRuntimeHost : ICustomLoopExecutionAc
                     return PublishActivation(recoveryFailure);
                 }
 
-                var start = await coordinator.StartAsync(cancellationToken).ConfigureAwait(false);
+                var start = startAfterRepair
+                    ? await coordinator.StartAfterRepairAsync(cancellationToken).ConfigureAwait(false)
+                    : await coordinator.StartAsync(cancellationToken).ConfigureAwait(false);
                 return PublishActivation(MapStartResult(start));
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

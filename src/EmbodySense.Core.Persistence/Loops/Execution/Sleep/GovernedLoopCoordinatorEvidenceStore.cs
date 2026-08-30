@@ -233,7 +233,7 @@ public sealed class GovernedLoopCoordinatorEvidenceStore : IGovernedLoopCoordina
             {
                 return Acquisition(GovernedLoopCoordinatorAcquisitionStatus.LeaseNotExpired, Snapshot(entry));
             }
-            if (!GovernedLoopSleepContractValidator.ValidateHandoff(currentOwnership, currentHeartbeat, acquisition.ProposedOwnership).IsValid)
+            if (!GovernedLoopSleepContractValidator.ValidateRepairHandoff(currentOwnership, currentHeartbeat, acquisition.ProposedOwnership).IsValid)
             {
                 return Acquisition(GovernedLoopCoordinatorAcquisitionStatus.Corrupt);
             }

@@ -488,14 +488,11 @@ internal static class GovernedLoopCoordinatorEvidenceStoreCodec
                 var previousLifecycle = entry.Lifecycles.Last(item => SameOwner(item.Ownership, previous));
                 var previousHeartbeat = entry.Heartbeats.LastOrDefault(item => SameOwner(item.Ownership, previous))
                     ?? ToHeartbeat(entry.HeartbeatRetirements.Single(item => SameOwner(item.Ownership, previous)));
-                var transitionIsValid = string.Equals(previous.OwnerId, ownership.OwnerId, StringComparison.Ordinal)
-                    && previousLifecycle.Status == GovernedLoopCoordinatorStatus.Stopped
-                    ? GovernedLoopSleepContractValidator.ValidateTerminalSameOwnerRestart(
-                        previous,
-                        previousLifecycle,
-                        previousHeartbeat,
-                        ownership).IsValid
-                    : GovernedLoopSleepContractValidator.ValidateHandoff(previous, previousHeartbeat, ownership).IsValid;
+                var repair = entry.Repairs.SingleOrDefault(item => SameOwner(item.FailedOwnership, previous));
+                var transitionIsValid = repair is not null
+                    ? ownership.AcquiredAtUtc >= repair.RecordedAtUtc
+                        && GovernedLoopSleepContractValidator.ValidateRepairHandoff(previous, previousHeartbeat, ownership).IsValid
+                    : ValidateUnrepairedHandoff(previous, previousLifecycle, previousHeartbeat, ownership);
                 if (!transitionIsValid)
                 {
                     throw Invalid();
@@ -532,6 +529,20 @@ internal static class GovernedLoopCoordinatorEvidenceStoreCodec
             && string.Equals(repair.LatestHeartbeatHash, heartbeat.ContentHash, StringComparison.Ordinal)
             && string.Equals(repair.LatestFailureHash, failure.ContentHash, StringComparison.Ordinal);
     }
+
+    private static bool ValidateUnrepairedHandoff(
+        GovernedLoopCoordinatorOwnership previous,
+        GovernedLoopCoordinatorLifecycle previousLifecycle,
+        GovernedLoopCoordinatorHeartbeat previousHeartbeat,
+        GovernedLoopCoordinatorOwnership ownership)
+        => string.Equals(previous.OwnerId, ownership.OwnerId, StringComparison.Ordinal)
+            && previousLifecycle.Status == GovernedLoopCoordinatorStatus.Stopped
+            ? GovernedLoopSleepContractValidator.ValidateTerminalSameOwnerRestart(
+                previous,
+                previousLifecycle,
+                previousHeartbeat,
+                ownership).IsValid
+            : GovernedLoopSleepContractValidator.ValidateHandoff(previous, previousHeartbeat, ownership).IsValid;
 
     private static bool RetirementIsValid(GovernedLoopCoordinatorHeartbeatRetirement retirement)
     {

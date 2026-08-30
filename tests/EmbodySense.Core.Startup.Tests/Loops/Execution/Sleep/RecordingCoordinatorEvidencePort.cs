@@ -243,6 +243,47 @@ internal sealed class RecordingCoordinatorEvidencePort : IGovernedLoopCoordinato
         }
     }
 
+    internal Task<GovernedLoopCoordinatorAcquisitionResult?> TryAcquireAfterRepairAsync(
+        GovernedLoopCoordinatorAcquisitionRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_gate)
+        {
+            if (!GovernedLoopCoordinatorEvidenceContract.IsValid(request) || _snapshot is null)
+            {
+                return Task.FromResult<GovernedLoopCoordinatorAcquisitionResult?>(
+                    new GovernedLoopCoordinatorAcquisitionResult(GovernedLoopCoordinatorAcquisitionStatus.Corrupt));
+            }
+            if (IsExact(request))
+            {
+                return Task.FromResult<GovernedLoopCoordinatorAcquisitionResult?>(
+                    new GovernedLoopCoordinatorAcquisitionResult(GovernedLoopCoordinatorAcquisitionStatus.Duplicate, _snapshot));
+            }
+            if (!string.Equals(request.ExpectedOwnershipHash, _snapshot.Ownership.ContentHash, StringComparison.Ordinal)
+                || !string.Equals(request.ExpectedHeartbeatHash, _snapshot.LatestHeartbeat.ContentHash, StringComparison.Ordinal))
+            {
+                return Task.FromResult<GovernedLoopCoordinatorAcquisitionResult?>(
+                    new GovernedLoopCoordinatorAcquisitionResult(GovernedLoopCoordinatorAcquisitionStatus.Conflict, _snapshot));
+            }
+            if (request.ProposedOwnership.AcquiredAtUtc < _snapshot.LatestHeartbeat.LeaseExpiresAtUtc)
+            {
+                return Task.FromResult<GovernedLoopCoordinatorAcquisitionResult?>(
+                    new GovernedLoopCoordinatorAcquisitionResult(GovernedLoopCoordinatorAcquisitionStatus.LeaseNotExpired, _snapshot));
+            }
+            if (!GovernedLoopSleepContractValidator.ValidateRepairHandoff(
+                _snapshot.Ownership,
+                _snapshot.LatestHeartbeat,
+                request.ProposedOwnership).IsValid)
+            {
+                return Task.FromResult<GovernedLoopCoordinatorAcquisitionResult?>(
+                    new GovernedLoopCoordinatorAcquisitionResult(GovernedLoopCoordinatorAcquisitionStatus.Corrupt));
+            }
+
+            return CompleteAcquisition(Acquire(request));
+        }
+    }
+
     public Task<GovernedLoopCoordinatorHeartbeatMutationResult?> RenewHeartbeatAsync(
         GovernedLoopCoordinatorHeartbeatMutationRequest request,
         CancellationToken cancellationToken = default)
