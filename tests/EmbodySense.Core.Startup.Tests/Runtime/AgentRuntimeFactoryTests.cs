@@ -4087,6 +4087,47 @@ public sealed partial class AgentRuntimeFactoryTests
     }
 
     [Fact]
+    public async Task Default_conversation_human_input_replays_a_committed_submit_after_runtime_restart()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var store = new HumanInputRequestStore(new WorkspacePaths(workspace.RootPath), new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath));
+        var pending = CreateFreshHumanInputMutation(
+            workspace.RootPath,
+            "request-restart-cli",
+            "version-restart-cli",
+            "create-restart-cli",
+            HumanInputRequestStoreTestData.HashA,
+            eligibleActor: WorkspaceActors.Cli,
+            eligibleRole: "cli-respondent");
+        Assert.Equal(HumanInputRequestLifecycleStoreCommitStatus.Committed, (await store.CommitAsync(pending)).Status);
+        const string PrivateValue = "private-restart-response";
+        const string PrivateExplanation = "private-restart-explanation";
+        var submission = $"/human-input submit request-restart-cli submit-restart-cli response-restart-cli {{\"value\":{{\"kind\":\"text\",\"text\":\"{PrivateValue}\"}},\"explanation\":\"{PrivateExplanation}\"}}";
+
+        await using (var initialRuntime = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Cli))
+        {
+            var committed = await initialRuntime.RunTurnAsync(submission);
+
+            Assert.Equal(AgentRuntimeTurnStatus.CommandHandled, committed.Status);
+            Assert.Contains("committed", committed.Output, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain(PrivateValue, committed.Output, StringComparison.Ordinal);
+            Assert.DoesNotContain(PrivateExplanation, committed.Output, StringComparison.Ordinal);
+        }
+
+        await using var restartedRuntime = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Cli);
+        var replayed = await restartedRuntime.RunTurnAsync(submission);
+        var posture = await restartedRuntime.HumanInput.ReadAsync("request-restart-cli");
+
+        Assert.Equal(AgentRuntimeTurnStatus.CommandHandled, replayed.Status);
+        Assert.Contains("replayed", replayed.Output, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(PrivateValue, replayed.Output, StringComparison.Ordinal);
+        Assert.DoesNotContain(PrivateExplanation, replayed.Output, StringComparison.Ordinal);
+        Assert.Empty(restartedRuntime.GetActiveConversationTranscript());
+        Assert.True(posture.Request!.IsAnswered);
+    }
+
+    [Fact]
     public async Task Default_conversation_human_input_response_commands_cover_withdraw_select_and_terminal_fail_closed_posture()
     {
         using var workspace = new TestWorkspace();
@@ -4196,6 +4237,120 @@ public sealed partial class AgentRuntimeFactoryTests
         Assert.DoesNotContain("private-terminal", terminalSubmit.Output, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task Default_conversation_human_input_commands_are_rejected_before_web_facade_or_model_dispatch()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        await using var runtime = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Web);
+
+        var result = await runtime.RunTurnAsync("/human-input list");
+
+        Assert.Equal(AgentRuntimeTurnStatus.CommandHandled, result.Status);
+        Assert.Equal("Human Input commands are available only through the CLI runtime.", result.Output);
+        Assert.DoesNotContain("No Human Input requests were found.", result.Output, StringComparison.Ordinal);
+        Assert.Empty(runtime.GetActiveConversationTranscript());
+    }
+
+    [Fact]
+    public async Task Default_conversation_human_input_private_values_are_rejected_before_web_model_dispatch()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        await using var runtime = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Web);
+        const string PrivateValue = "private-web-response";
+
+        var result = await runtime.RunTurnAsync($"/human-input submit request-one operation-one response-one {{\"value\":{{\"kind\":\"text\",\"text\":\"{PrivateValue}\"}}}}");
+
+        Assert.Equal(AgentRuntimeTurnStatus.CommandHandled, result.Status);
+        Assert.Contains("CLI runtime", result.Output, StringComparison.Ordinal);
+        Assert.DoesNotContain(PrivateValue, result.Output, StringComparison.Ordinal);
+        Assert.Empty(runtime.GetActiveConversationTranscript());
+    }
+
+    [Fact]
+    public async Task Default_conversation_human_input_submit_accepts_the_maximum_canonical_structured_payload()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var fields = Enumerable.Range(0, HumanInputLimits.MaxStructuredFields)
+            .Select(index => new HumanInputStructuredFieldSchema(
+                $"field-{index:00}",
+                HumanInputStructuredFieldKind.Text,
+                true,
+                HumanInputLimits.MaxResponseTextCharacters,
+                null))
+            .ToArray();
+        var schema = new HumanInputResponseSchema(HumanInputResponseKind.Structured, null, null, fields, null);
+        var store = new HumanInputRequestStore(new WorkspacePaths(workspace.RootPath), new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath));
+        var pending = CreateFreshHumanInputMutation(
+            workspace.RootPath,
+            "request-structured-cli",
+            "version-structured-cli",
+            "create-structured-cli",
+            HumanInputRequestStoreTestData.HashA,
+            eligibleActor: WorkspaceActors.Cli,
+            eligibleRole: "cli-respondent",
+            responseSchema: schema);
+        Assert.Equal(HumanInputRequestLifecycleStoreCommitStatus.Committed, (await store.CommitAsync(pending)).Status);
+        var privateValue = new string('s', HumanInputLimits.MaxResponseTextCharacters);
+        var payload = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            value = new
+            {
+                kind = "structured",
+                fields = fields.Select(field => new { fieldId = field.FieldId, text = privateValue }).ToArray()
+            },
+            explanation = new string('e', HumanInputLimits.MaxExplanationCharacters)
+        });
+        await using var runtime = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Cli);
+
+        var submitted = await runtime.RunTurnAsync($"/human-input submit request-structured-cli submit-structured-cli response-structured-cli {payload}");
+        var posture = await runtime.HumanInput.ReadAsync("request-structured-cli");
+
+        Assert.True(payload.Length > HumanInputLimits.MaxResponseTextCharacters + HumanInputLimits.MaxExplanationCharacters + 8_192);
+        Assert.Contains("committed", submitted.Output, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(HumanInputRequestPostureReadStatus.Ready, posture.Status);
+        Assert.True(posture.Request!.IsAnswered);
+        Assert.DoesNotContain(privateValue, submitted.Output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Default_conversation_human_input_rejects_invalid_identifiers_before_cache_or_model_dispatch()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var store = new HumanInputRequestStore(new WorkspacePaths(workspace.RootPath), new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath));
+        var pending = CreateFreshHumanInputMutation(
+            workspace.RootPath,
+            "request-identifier-cli",
+            "version-identifier-cli",
+            "create-identifier-cli",
+            HumanInputRequestStoreTestData.HashA,
+            eligibleActor: WorkspaceActors.Cli,
+            eligibleRole: "cli-respondent");
+        Assert.Equal(HumanInputRequestLifecycleStoreCommitStatus.Committed, (await store.CommitAsync(pending)).Status);
+        await using var runtime = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Cli);
+        const string PrivateValue = "private-invalid-identifier";
+        var invalidRequestId = new string('r', HumanInputLimits.MaxIdentifierCharacters + 1);
+        var invalidOperationId = new string('o', HumanInputLimits.MaxIdentifierCharacters + 1);
+        var invalidResponseId = new string('s', HumanInputLimits.MaxIdentifierCharacters + 1);
+        var invalidRequest = await runtime.RunTurnAsync($"/human-input submit {invalidRequestId} request-operation response-one {{\"value\":{{\"kind\":\"text\",\"text\":\"{PrivateValue}\"}}}}");
+        var invalidOperation = await runtime.RunTurnAsync($"/human-input submit request-identifier-cli {invalidOperationId} response-two {{\"value\":{{\"kind\":\"text\",\"text\":\"{PrivateValue}\"}}}}");
+        var invalidResponse = await runtime.RunTurnAsync($"/human-input submit request-identifier-cli retry-operation {invalidResponseId} {{\"value\":{{\"kind\":\"text\",\"text\":\"{PrivateValue}\"}}}}");
+        var committed = await runtime.RunTurnAsync($"/human-input submit request-identifier-cli retry-operation response-valid {{\"value\":{{\"kind\":\"text\",\"text\":\"{PrivateValue}\"}}}}");
+
+        Assert.All([invalidRequest, invalidOperation, invalidResponse], result =>
+        {
+            Assert.Equal(AgentRuntimeTurnStatus.CommandHandled, result.Status);
+            Assert.Contains("Usage:", result.Output, StringComparison.Ordinal);
+            Assert.DoesNotContain(PrivateValue, result.Output, StringComparison.Ordinal);
+        });
+        Assert.Empty(runtime.GetActiveConversationTranscript());
+        Assert.Contains("committed", committed.Output, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(PrivateValue, committed.Output, StringComparison.Ordinal);
+    }
+
     private static async Task<AgentRuntimeGovernedLoopBackgroundStatus> WaitForBackgroundReadinessAsync(
         AgentRuntime runtime,
         AgentRuntimeGovernedLoopBackgroundReadiness readiness)
@@ -4227,7 +4382,8 @@ public sealed partial class AgentRuntimeFactoryTests
         string prompt = "Private prompt one.",
         string eligibleActor = "user-one",
         string eligibleRole = "role-one",
-        HumanInputResponsePolicyKind responsePolicyKind = HumanInputResponsePolicyKind.FirstValid)
+        HumanInputResponsePolicyKind responsePolicyKind = HumanInputResponsePolicyKind.FirstValid,
+        HumanInputResponseSchema? responseSchema = null)
     {
         var requestedAtUtc = DateTimeOffset.UtcNow.AddMinutes(-1).ToUniversalTime();
         var binding = new HumanInputRequestBinding(
@@ -4237,8 +4393,10 @@ public sealed partial class AgentRuntimeFactoryTests
             "node-one",
             "run-one",
             "checkpoint-one");
-        var request = HumanInputRequestStoreTestData.Rehash(HumanInputRequestStoreTestData.Request(requestId, requestVersionId, requestedAtUtc, binding, prompt: prompt) with
+        var initialRequest = HumanInputRequestStoreTestData.Request(requestId, requestVersionId, requestedAtUtc, binding, prompt: prompt);
+        var request = HumanInputRequestStoreTestData.Rehash(initialRequest with
         {
+            ResponseSchema = responseSchema ?? initialRequest.ResponseSchema,
             EligibleRespondents = [new HumanInputEligibleRespondent(eligibleActor, eligibleRole, "route-one")],
             ResponsePolicy = responsePolicyKind == HumanInputResponsePolicyKind.ManualSelection
                 ? new HumanInputResponsePolicy(responsePolicyKind, null, System.Collections.Immutable.ImmutableArray.Create(eligibleRole))

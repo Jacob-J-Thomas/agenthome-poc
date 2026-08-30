@@ -15,7 +15,11 @@ namespace EmbodySense.Core.Startup.Runtime;
 /// operation identities, response identifiers, and untrusted response data; the shared facade derives all authority terms.</remarks>
 internal sealed class HumanInputConversationCommandAdapter
 {
-    private const int MaximumPayloadCharacters = HumanInputLimits.MaxResponseTextCharacters + HumanInputLimits.MaxExplanationCharacters + 8_192;
+    private const int MaximumJsonEscapedCharacterLength = 6;
+    private const int MaximumPayloadCharacters = HumanInputLimits.MaxStructuredFields
+        * ((HumanInputLimits.MaxIdentifierCharacters + HumanInputLimits.MaxResponseTextCharacters) * MaximumJsonEscapedCharacterLength + 32)
+        + HumanInputLimits.MaxExplanationCharacters * MaximumJsonEscapedCharacterLength
+        + 4_096;
     private const string CommandName = "/human-input";
     private readonly HumanInputConversationOperationCache _operations = new();
     private readonly HumanInputRuntimeFacade _humanInput;
@@ -23,6 +27,18 @@ internal sealed class HumanInputConversationCommandAdapter
     internal HumanInputConversationCommandAdapter(HumanInputRuntimeFacade humanInput)
     {
         _humanInput = humanInput ?? throw new ArgumentNullException(nameof(humanInput));
+    }
+
+    internal static bool MatchesCommand(string? input)
+    {
+        if (string.IsNullOrWhiteSpace(input))
+        {
+            return false;
+        }
+
+        var trimmed = input.Trim();
+        return trimmed.StartsWith(CommandName, StringComparison.OrdinalIgnoreCase)
+            && (trimmed.Length == CommandName.Length || char.IsWhiteSpace(trimmed[CommandName.Length]));
     }
 
     internal async Task<AgentRuntimeTurnResult?> TryHandleAsync(string? input, CancellationToken cancellationToken = default)
@@ -76,7 +92,7 @@ internal sealed class HumanInputConversationCommandAdapter
     private async Task<AgentRuntimeTurnResult> InspectAsync(string remainder, CancellationToken cancellationToken)
     {
         var requestId = ReadToken(ref remainder);
-        if (string.IsNullOrWhiteSpace(requestId) || !string.IsNullOrWhiteSpace(remainder))
+        if (requestId is null || !HumanInputIdentifier.IsValid(requestId) || !string.IsNullOrWhiteSpace(remainder))
         {
             return AgentRuntimeTurnResult.CommandOutput("Usage: /human-input inspect <request-id>");
         }
@@ -187,26 +203,20 @@ internal sealed class HumanInputConversationCommandAdapter
         requestId = ReadToken(ref remainder) ?? string.Empty;
         operationId = ReadToken(ref remainder) ?? string.Empty;
         responseId = ReadToken(ref remainder) ?? string.Empty;
-        return !string.IsNullOrWhiteSpace(requestId)
-            && !string.IsNullOrWhiteSpace(operationId)
-            && !string.IsNullOrWhiteSpace(responseId);
+        return HumanInputIdentifier.IsValid(requestId)
+            && HumanInputIdentifier.IsValid(operationId)
+            && HumanInputIdentifier.IsValid(responseId);
     }
 
     private static bool TryGetRemainder(string? input, out string remainder)
     {
         remainder = string.Empty;
-        if (string.IsNullOrWhiteSpace(input))
+        if (!MatchesCommand(input))
         {
             return false;
         }
 
-        var trimmed = input.Trim();
-        if (!trimmed.StartsWith(CommandName, StringComparison.OrdinalIgnoreCase)
-            || trimmed.Length > CommandName.Length && !char.IsWhiteSpace(trimmed[CommandName.Length]))
-        {
-            return false;
-        }
-
+        var trimmed = input!.Trim();
         remainder = trimmed[CommandName.Length..].Trim();
         return true;
     }
