@@ -191,8 +191,9 @@ public sealed class IsolatedCapabilityExecutableHostTests
     {
         using var artifact = PrepareArtifact();
         using var host = new IsolatedCapabilityExecutableHost(new RecordingCapabilityAuditLog(), new TestCapabilityProcessIsolationBoundary(), new TestCapabilityExecutableArtifactResolver(artifact.RootPath));
+        // #697: Redaction semantics are independent of timeout/cancellation; keep a bounded CI child startup margin.
         var invocation = new CapabilityExecutableInvocation(
-            CapabilityClientTestData.Manifest(artifact.EntryPoint), artifact.RootPath, JsonSerializer.Serialize(privateOutput), "redacted-output");
+            CapabilityClientTestData.Manifest(artifact.EntryPoint, milliseconds: 15_000), artifact.RootPath, JsonSerializer.Serialize(privateOutput), "redacted-output");
 
         var result = await host.InvokeAsync(invocation);
 
