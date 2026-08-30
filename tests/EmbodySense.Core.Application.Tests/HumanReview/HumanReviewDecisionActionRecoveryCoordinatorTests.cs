@@ -48,7 +48,7 @@ public sealed class HumanReviewDecisionActionRecoveryCoordinatorTests
             PublicationCandidates = [publication],
         };
         var store = new HumanReviewDecisionActionRecoveryTestStore(page, new(HumanReviewDecisionActionCandidateReadStatus.Current));
-        var coordinator = new HumanReviewDecisionActionRecoveryCoordinator(store, new HumanReviewDecisionActionRecoveryTestConsumer(new(HumanReviewContinuationConsumptionStatus.Invalid)), new HumanReviewDecisionActionRecoveryTestReleasePort(new(HumanReviewDecisionActionReleaseStatus.Unavailable)), new HumanReviewDecisionTestClock(fixture.Run.UpdatedAtUtc.AddMinutes(2)));
+        var coordinator = Coordinator(store, fixture.Run.UpdatedAtUtc.AddMinutes(2));
 
         var result = await coordinator.RecoverAsync(new(1, null, "action-worker-one", TimeSpan.FromMinutes(5)));
 
@@ -58,6 +58,154 @@ public sealed class HumanReviewDecisionActionRecoveryCoordinatorTests
         Assert.Equal(1, store.PublishCount);
         Assert.Equal(2, store.ListCount);
         Assert.Empty(result.Items);
+    }
+
+    [Theory]
+    [InlineData(HumanReviewDecisionActionStoreMutationStatus.Replayed, HumanReviewDecisionActionPublicationRecoveryItemStatus.Replayed)]
+    [InlineData(HumanReviewDecisionActionStoreMutationStatus.Invalid, HumanReviewDecisionActionPublicationRecoveryItemStatus.Invalid)]
+    [InlineData(HumanReviewDecisionActionStoreMutationStatus.Conflict, HumanReviewDecisionActionPublicationRecoveryItemStatus.Parked)]
+    public async Task Retained_wake_less_reservation_exposes_the_canonical_publication_result_without_dispatch(HumanReviewDecisionActionStoreMutationStatus storeStatus, HumanReviewDecisionActionPublicationRecoveryItemStatus expectedStatus)
+    {
+        var fixture = await HumanReviewDecisionTestData.CreateAsync();
+        var decisionStore = new HumanReviewDecisionTestStore(fixture.Run);
+        _ = await new HumanReviewDecisionService(decisionStore, new HumanReviewDecisionTestAuthorizer(), new HumanReviewDecisionTestClock(fixture.Run.UpdatedAtUtc.AddMinutes(1))).DecideAsync(HumanReviewDecisionTestData.Command(fixture.Run, "action-recovery-publication-result", HumanReviewDecisionKind.Cancel));
+        var reservedRun = Assert.IsType<CustomLoopRunRecord>(decisionStore.Run);
+        var reservedAction = Assert.Single(Assert.IsType<HumanReviewRunState>(reservedRun.HumanReview).DecisionActions);
+        var publication = new HumanReviewDecisionActionPublicationCandidate(reservedRun.Id, reservedRun.LifecycleVersion, fixture.Request, reservedAction);
+        var page = new HumanReviewDecisionActionRecoveryPage(HumanReviewDecisionActionRecoveryPageStatus.Current, [], null, false) { PublicationCandidates = [publication] };
+        var store = new HumanReviewDecisionActionRecoveryTestStore(page, new(HumanReviewDecisionActionCandidateReadStatus.Current)) { PublishResult = new(storeStatus) };
+        var coordinator = Coordinator(store, fixture.Run.UpdatedAtUtc.AddMinutes(2));
+
+        var result = await coordinator.RecoverAsync(new(1, null, "action-worker-one", TimeSpan.FromMinutes(5)));
+
+        Assert.Equal(expectedStatus, Assert.Single(result.PublicationItems).Status);
+        Assert.Equal(1, store.PublishCount);
+        Assert.Equal(2, store.ListCount);
+        Assert.Empty(result.Items);
+    }
+
+    [Fact]
+    public async Task Invalid_wake_less_reservation_is_reported_without_attempting_publication()
+    {
+        var fixture = await HumanReviewDecisionTestData.CreateAsync();
+        var decisionStore = new HumanReviewDecisionTestStore(fixture.Run);
+        _ = await new HumanReviewDecisionService(decisionStore, new HumanReviewDecisionTestAuthorizer(), new HumanReviewDecisionTestClock(fixture.Run.UpdatedAtUtc.AddMinutes(1))).DecideAsync(HumanReviewDecisionTestData.Command(fixture.Run, "action-recovery-invalid-publication", HumanReviewDecisionKind.Reject));
+        var reservedRun = Assert.IsType<CustomLoopRunRecord>(decisionStore.Run);
+        var reservedAction = Assert.Single(Assert.IsType<HumanReviewRunState>(reservedRun.HumanReview).DecisionActions);
+        var invalid = new HumanReviewDecisionActionPublicationCandidate(reservedRun.Id, reservedRun.LifecycleVersion, fixture.Request, reservedAction with { StateHash = "invalid" });
+        var page = new HumanReviewDecisionActionRecoveryPage(HumanReviewDecisionActionRecoveryPageStatus.Current, [], null, false) { PublicationCandidates = [invalid] };
+        var store = new HumanReviewDecisionActionRecoveryTestStore(page, new(HumanReviewDecisionActionCandidateReadStatus.Current));
+        var coordinator = Coordinator(store, fixture.Run.UpdatedAtUtc.AddMinutes(2));
+
+        var result = await coordinator.RecoverAsync(new(1, null, "action-worker-one", TimeSpan.FromMinutes(5)));
+
+        Assert.Equal(HumanReviewDecisionActionPublicationRecoveryItemStatus.Invalid, Assert.Single(result.PublicationItems).Status);
+        Assert.Equal(0, store.PublishCount);
+        Assert.Equal(2, store.ListCount);
+    }
+
+    [Fact]
+    public async Task Publication_store_failure_is_parked_and_a_refreshed_unavailable_page_preserves_the_exact_publication_evidence()
+    {
+        var fixture = await HumanReviewDecisionTestData.CreateAsync();
+        var decisionStore = new HumanReviewDecisionTestStore(fixture.Run);
+        _ = await new HumanReviewDecisionService(decisionStore, new HumanReviewDecisionTestAuthorizer(), new HumanReviewDecisionTestClock(fixture.Run.UpdatedAtUtc.AddMinutes(1))).DecideAsync(HumanReviewDecisionTestData.Command(fixture.Run, "action-recovery-publication-unavailable", HumanReviewDecisionKind.Cancel));
+        var reservedRun = Assert.IsType<CustomLoopRunRecord>(decisionStore.Run);
+        var reservedAction = Assert.Single(Assert.IsType<HumanReviewRunState>(reservedRun.HumanReview).DecisionActions);
+        var publication = new HumanReviewDecisionActionPublicationCandidate(reservedRun.Id, reservedRun.LifecycleVersion, fixture.Request, reservedAction);
+        var page = new HumanReviewDecisionActionRecoveryPage(HumanReviewDecisionActionRecoveryPageStatus.Current, [], null, false) { PublicationCandidates = [publication] };
+        var store = new HumanReviewDecisionActionRecoveryTestStore(page, new(HumanReviewDecisionActionCandidateReadStatus.Current))
+        {
+            PublishException = new IOException("canonical action publication unavailable"),
+            PageFactory = count => count == 1 ? page : new(HumanReviewDecisionActionRecoveryPageStatus.Unavailable, [], null, false),
+        };
+        var coordinator = new HumanReviewDecisionActionRecoveryCoordinator(store, new HumanReviewDecisionActionRecoveryTestConsumer(new(HumanReviewContinuationConsumptionStatus.Invalid)), new HumanReviewDecisionActionRecoveryTestReleasePort(new(HumanReviewDecisionActionReleaseStatus.Unavailable)), new HumanReviewDecisionTestClock(fixture.Run.UpdatedAtUtc.AddMinutes(2)));
+
+        var result = await coordinator.RecoverAsync(new(1, null, "action-worker-one", TimeSpan.FromMinutes(5)));
+
+        Assert.Equal(HumanReviewDecisionActionRecoveryStatus.Unavailable, result.Status);
+        Assert.Equal(HumanReviewDecisionActionPublicationRecoveryItemStatus.Parked, Assert.Single(result.PublicationItems).Status);
+        Assert.Equal(1, store.PublishCount);
+        Assert.Equal(2, store.ListCount);
+        Assert.Empty(result.Items);
+    }
+
+    [Fact]
+    public async Task Unavailable_initial_recovery_scan_does_not_publish_or_dispatch()
+    {
+        var store = new HumanReviewDecisionActionRecoveryTestStore(new(HumanReviewDecisionActionRecoveryPageStatus.Current, [], null, false), new(HumanReviewDecisionActionCandidateReadStatus.Current))
+        {
+            ListExceptionFactory = _ => new IOException("canonical action scan unavailable"),
+        };
+        var coordinator = Coordinator(store, _now);
+
+        var result = await coordinator.RecoverAsync(new(1, null, "action-worker-one", TimeSpan.FromMinutes(5)));
+
+        Assert.Equal(HumanReviewDecisionActionRecoveryStatus.Unavailable, result.Status);
+        Assert.Equal(1, store.ListCount);
+        Assert.Equal(0, store.PublishCount);
+        Assert.Empty(result.PublicationItems);
+        Assert.Empty(result.Items);
+    }
+
+    [Fact]
+    public async Task Malformed_initial_recovery_page_is_invalid_without_publication_or_dispatch()
+    {
+        var page = new HumanReviewDecisionActionRecoveryPage(HumanReviewDecisionActionRecoveryPageStatus.Current, null!, null, false)
+        {
+            PublicationCandidates = null!,
+        };
+        var store = new HumanReviewDecisionActionRecoveryTestStore(page, new(HumanReviewDecisionActionCandidateReadStatus.Current));
+        var coordinator = Coordinator(store, _now);
+
+        var result = await coordinator.RecoverAsync(new(1, null, "action-worker-one", TimeSpan.FromMinutes(5)));
+
+        Assert.Equal(HumanReviewDecisionActionRecoveryStatus.Invalid, result.Status);
+        Assert.Equal(1, store.ListCount);
+        Assert.Equal(0, store.PublishCount);
+        Assert.Empty(result.PublicationItems);
+        Assert.Empty(result.Items);
+    }
+
+    [Fact]
+    public async Task Caller_cancellation_during_the_initial_scan_is_preserved()
+    {
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        var store = new HumanReviewDecisionActionRecoveryTestStore(new(HumanReviewDecisionActionRecoveryPageStatus.Current, [], null, false), new(HumanReviewDecisionActionCandidateReadStatus.Current))
+        {
+            ListExceptionFactory = _ => new OperationCanceledException(cancellation.Token),
+        };
+        var coordinator = Coordinator(store, _now);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => coordinator.RecoverAsync(new(1, null, "action-worker-one", TimeSpan.FromMinutes(5)), cancellation.Token));
+
+        Assert.Equal(1, store.ListCount);
+        Assert.Equal(0, store.PublishCount);
+    }
+
+    [Fact]
+    public async Task Caller_cancellation_during_publication_is_preserved()
+    {
+        var fixture = await HumanReviewDecisionTestData.CreateAsync();
+        var decisionStore = new HumanReviewDecisionTestStore(fixture.Run);
+        _ = await new HumanReviewDecisionService(decisionStore, new HumanReviewDecisionTestAuthorizer(), new HumanReviewDecisionTestClock(fixture.Run.UpdatedAtUtc.AddMinutes(1))).DecideAsync(HumanReviewDecisionTestData.Command(fixture.Run, "action-recovery-publication-cancellation", HumanReviewDecisionKind.Reject));
+        var reservedRun = Assert.IsType<CustomLoopRunRecord>(decisionStore.Run);
+        var reservedAction = Assert.Single(Assert.IsType<HumanReviewRunState>(reservedRun.HumanReview).DecisionActions);
+        var publication = new HumanReviewDecisionActionPublicationCandidate(reservedRun.Id, reservedRun.LifecycleVersion, fixture.Request, reservedAction);
+        var page = new HumanReviewDecisionActionRecoveryPage(HumanReviewDecisionActionRecoveryPageStatus.Current, [], null, false) { PublicationCandidates = [publication] };
+        using var cancellation = new CancellationTokenSource();
+        var store = new HumanReviewDecisionActionRecoveryTestStore(page, new(HumanReviewDecisionActionCandidateReadStatus.Current))
+        {
+            BeforePublish = cancellation.Cancel,
+            PublishException = new OperationCanceledException(cancellation.Token),
+        };
+        var coordinator = Coordinator(store, fixture.Run.UpdatedAtUtc.AddMinutes(2));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => coordinator.RecoverAsync(new(1, null, "action-worker-one", TimeSpan.FromMinutes(5)), cancellation.Token));
+
+        Assert.Equal(1, store.PublishCount);
+        Assert.Equal(1, store.ListCount);
     }
 
     [Fact]
@@ -175,6 +323,13 @@ public sealed class HumanReviewDecisionActionRecoveryCoordinatorTests
 
     private static HumanReviewDecisionActionRecoveryCandidate Candidate(DateTimeOffset expiresAtUtc)
         => new("action-run-one", 1, new("action-request-one", Hash('a')), new("action-decision-one", "action-operation-one", HumanReviewDecisionKind.Reject, Hash('b')), new("action-wake-one", Hash('c')), 1, expiresAtUtc, new("action-reservation-one", Hash('d')), null);
+
+    private static HumanReviewDecisionActionRecoveryCoordinator Coordinator(HumanReviewDecisionActionRecoveryTestStore store, DateTimeOffset now)
+        => new(
+            store,
+            new HumanReviewDecisionActionRecoveryTestConsumer(new(HumanReviewContinuationConsumptionStatus.Invalid)),
+            new HumanReviewDecisionActionRecoveryTestReleasePort(new(HumanReviewDecisionActionReleaseStatus.Unavailable)),
+            new HumanReviewDecisionTestClock(now));
 
     private static HumanReviewDecisionActionRecoveryCandidate Candidate(DateTimeOffset expiresAtUtc, CustomLoopRunRecord run, HumanReviewDecisionActionState action, HumanReviewDecisionActionClaimReference? priorClaim)
         => new(run.Id, run.LifecycleVersion - 1, action.Reservation.Request, action.Reservation.Decision, new(action.Wake!.WakeId, action.Wake.WakeHash), action.ExpectedGeneration, expiresAtUtc, new(action.Reservation.ReservationId, action.Reservation.ReservationHash), priorClaim);

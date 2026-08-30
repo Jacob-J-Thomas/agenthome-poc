@@ -34,7 +34,6 @@ internal static class HumanReviewDecisionActionWakeFactory
         }
         catch
         {
-            expected = null;
             return false;
         }
     }

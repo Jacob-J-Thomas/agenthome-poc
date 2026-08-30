@@ -222,8 +222,7 @@ public sealed class HumanReviewDecisionActionRecoveryCoordinator
             && value.Action.Wake is null
             && value.Action.Claims.IsDefaultOrEmpty
             && value.Action.Completion is null
-            && value.Action.Retirement is null
-            && HumanReviewDecisionActionContractValidator.ValidateState(value.Request, value.Action).IsValid;
+            && value.Action.Retirement is null;
     private static bool HasCurrentClaimAndWake(HumanReviewDecisionActionCandidate candidate, DateTimeOffset observedAtUtc)
         => candidate.Action.Wake is { } wake
             && candidate.Action.ExpectedGeneration == candidate.Claim.ExpectedGeneration
