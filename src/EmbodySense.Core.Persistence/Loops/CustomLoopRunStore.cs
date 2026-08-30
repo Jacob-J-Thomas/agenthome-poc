@@ -3328,6 +3328,11 @@ public sealed class CustomLoopRunStore :
                 {
                     Kind: CustomLoopSequentialNodeEvidenceKind.AmbiguityAttention,
                     Disposition: CustomLoopSequentialNodeDisposition.NeedsReview,
+                }
+                or
+                {
+                    Kind: CustomLoopSequentialNodeEvidenceKind.ReviewRequested,
+                    Disposition: CustomLoopSequentialNodeDisposition.ReviewPending,
                 },
             }) == 1;
     }

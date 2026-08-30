@@ -69,6 +69,84 @@ public sealed partial class CustomLoopOrderedRunnerTests
     }
 
     [Fact]
+    public async Task Authenticated_evidence_allows_one_historical_review_request_before_one_terminal_outcome_and_rejects_duplicates()
+    {
+        var context = await HumanReviewContextAsync();
+        var store = new FakeRunStore(context.Run);
+        var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+        var runtime = new GovernedLoopSequentialOrderedRuntimeAdapter(
+            Runner(store, new QueueExecutor(), new RecordingPublisher(), humanReviewAdmissionService: new HumanReviewAdmissionService(store)),
+            evidence,
+            evidence);
+        var parked = await runtime.RunAsync(new GovernedLoopSequentialOrderedRunRequest(
+            GovernedLoopSequentialOrderedRunRequest.CurrentSchemaVersion,
+            context.Anchor,
+            context.Plan,
+            context.Artifact,
+            AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Paused, parked.Status);
+        var original = Assert.Single(store.Current.Events, item => item.SequentialNodeEvidence?.Kind == CustomLoopSequentialNodeEvidenceKind.ReviewRequested);
+        var activation = Assert.Single(store.Current.Frontier!.Payload.Nodes, item => item.Status == GovernedLoopNodeExecutionStatus.ReviewBlocked);
+        var dispatch = new GovernedLoopSequentialNodeDispatchRequest(
+            GovernedLoopSequentialNodeDispatchRequest.CurrentSchemaVersion,
+            context.Anchor,
+            context.Plan,
+            context.Plan.Nodes.Single(node => node.NodeId == activation.NodeId),
+            activation,
+            activation.Attempt!.Value);
+        var retention = new GovernedLoopSequentialOrderedNodeEvidenceRequest(
+            GovernedLoopSequentialOrderedNodeEvidenceRequest.CurrentSchemaVersion,
+            dispatch,
+            GovernedLoopSequentialNodeHandlerResultStatus.ReviewPending,
+            store.Current.LifecycleVersion,
+            original.Sequence,
+            original.EventId);
+        Assert.Equal(GovernedLoopSequentialNodeHandlerResultStatus.ReviewPending, (await evidence.RetainAsync(retention)).Status);
+
+        var duplicateParking = RehashReviewEvidence(original, CustomLoopSequentialNodeEvidenceKind.ReviewRequested, CustomLoopSequentialNodeDisposition.ReviewPending, original.Sequence + 1, "duplicate-review-request");
+        var parkedWithDuplicate = store.Current with
+        {
+            LifecycleVersion = store.Current.LifecycleVersion + 1,
+            UpdatedAtUtc = duplicateParking.TimestampUtc,
+            Events = [.. store.Current.Events, duplicateParking],
+        };
+        store.ReplaceCurrent(parkedWithDuplicate, validate: false);
+        var duplicateParkingRequest = retention with { OrderedLifecycleVersion = parkedWithDuplicate.LifecycleVersion, OrderedEventSequence = duplicateParking.Sequence, OrderedEventId = duplicateParking.EventId };
+        Assert.Equal(GovernedLoopSequentialNodeHandlerResultStatus.Unknown, (await evidence.RetainAsync(duplicateParkingRequest)).Status);
+
+        var parkedRun = store.Current;
+        store.ReplaceCurrent(parkedRun with { Events = parkedRun.Events[..^1], LifecycleVersion = parkedRun.LifecycleVersion - 1, UpdatedAtUtc = original.TimestampUtc }, validate: false);
+        var terminal = RehashReviewEvidence(original, CustomLoopSequentialNodeEvidenceKind.CompletedOutcome, CustomLoopSequentialNodeDisposition.Completed, original.Sequence + 1, "review-terminal-outcome");
+        var terminalRun = store.Current with
+        {
+            LifecycleVersion = store.Current.LifecycleVersion + 1,
+            UpdatedAtUtc = terminal.TimestampUtc,
+            Events = [.. store.Current.Events, terminal],
+        };
+        store.ReplaceCurrent(terminalRun, validate: false);
+        var terminalRequest = retention with
+        {
+            Disposition = GovernedLoopSequentialNodeHandlerResultStatus.Completed,
+            OrderedLifecycleVersion = terminalRun.LifecycleVersion,
+            OrderedEventSequence = terminal.Sequence,
+            OrderedEventId = terminal.EventId,
+        };
+        Assert.Equal(GovernedLoopSequentialNodeHandlerResultStatus.Completed, (await evidence.RetainAsync(terminalRequest)).Status);
+
+        var duplicateTerminal = RehashReviewEvidence(terminal, CustomLoopSequentialNodeEvidenceKind.CompletedOutcome, CustomLoopSequentialNodeDisposition.Completed, terminal.Sequence + 1, "duplicate-review-terminal");
+        var terminalRunWithDuplicate = store.Current with
+        {
+            LifecycleVersion = store.Current.LifecycleVersion + 1,
+            UpdatedAtUtc = duplicateTerminal.TimestampUtc,
+            Events = [.. store.Current.Events, duplicateTerminal],
+        };
+        store.ReplaceCurrent(terminalRunWithDuplicate, validate: false);
+        var duplicateTerminalRequest = terminalRequest with { OrderedLifecycleVersion = terminalRunWithDuplicate.LifecycleVersion, OrderedEventSequence = duplicateTerminal.Sequence, OrderedEventId = duplicateTerminal.EventId };
+        Assert.Equal(GovernedLoopSequentialNodeHandlerResultStatus.Unknown, (await evidence.RetainAsync(duplicateTerminalRequest)).Status);
+    }
+
+    [Fact]
     public async Task Approved_human_review_race_and_replay_release_one_exact_frontier_without_a_second_runtime_reentry()
     {
         var context = await HumanReviewContextAsync();
@@ -240,11 +318,13 @@ public sealed partial class CustomLoopOrderedRunnerTests
 
         var intent = await PrepareClaimedDecisionActionAsync(store, kind);
         var reentry = new HumanReviewOrderedReleaseTestRuntime((request, cancellationToken) => ConfirmHumanReviewHandoffAsync(store, request, cancellationToken));
+        var authority = new RecordingAuthoritySource(HumanReviewContinuationAuthorityReadStatus.Current, HumanReviewContinuationAuthorityReadStatus.Current);
         var release = new HumanReviewOrderedReleaseService(
             store,
             new HumanReviewOrderedReleaseTestContextResolver(new GovernedLoopWaitOrderedContext(context.Anchor, context.Plan, context.Artifact)),
             reentry,
-            new FixedTimeProvider(store.Current.UpdatedAtUtc.AddTicks(1)));
+            new FixedTimeProvider(store.Current.UpdatedAtUtc.AddTicks(1)),
+            authority);
         var bypass = await release.ReleaseAsync(intent with { ActionOperationId = "action-release-bypass" });
         Assert.Equal(HumanReviewDecisionActionReleaseStatus.Invalid, bypass.Status);
         Assert.Equal(CustomLoopRunStatus.Paused, store.Current.Status);
@@ -260,6 +340,7 @@ public sealed partial class CustomLoopOrderedRunnerTests
         Assert.Equal(expectedFrontierStatus, store.Current.Frontier?.Payload.Status);
         Assert.Equal(expectedNodeStatus, Assert.Single(store.Current.Frontier!.Payload.Nodes, node => node.Descriptor.Kind == GovernedLoopNodeKind.HumanReview).Status);
         Assert.Equal(kind == HumanReviewDecisionKind.Reject ? 1 : 0, reentry.ResumeCount);
+        Assert.Equal(2, authority.ReadCount);
         Assert.True(CustomLoopRunValidator.Validate(store.Current).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(store.Current).Errors));
     }
 
@@ -282,11 +363,13 @@ public sealed partial class CustomLoopOrderedRunnerTests
         Assert.True(parked.Status == CustomLoopOrderedRunStatus.Paused, $"{parked.Status}: {parked.Detail}; validation={string.Join(" | ", store.ValidationFailures.Select(item => item.Code + ":" + item.Message))}");
 
         var intent = await PrepareClaimedDecisionActionAsync(store, HumanReviewDecisionKind.Reject);
+        var authority = new RecordingAuthoritySource(HumanReviewContinuationAuthorityReadStatus.Current, HumanReviewContinuationAuthorityReadStatus.Current);
         var unresolved = new HumanReviewOrderedReleaseService(
             store,
             new HumanReviewOrderedReleaseTestContextResolver(new GovernedLoopWaitOrderedContext(context.Anchor, context.Plan, context.Artifact)),
             new HumanReviewOrderedReleaseTestRuntime(),
-            new FixedTimeProvider(store.Current.UpdatedAtUtc.AddTicks(1)));
+            new FixedTimeProvider(store.Current.UpdatedAtUtc.AddTicks(1)),
+            authority);
 
         var first = await unresolved.ReleaseAsync(intent);
 
@@ -300,7 +383,8 @@ public sealed partial class CustomLoopOrderedRunnerTests
             store,
             new HumanReviewOrderedReleaseTestContextResolver(new GovernedLoopWaitOrderedContext(context.Anchor, context.Plan, context.Artifact)),
             confirmedRuntime,
-            new FixedTimeProvider(store.Current.UpdatedAtUtc.AddTicks(1)));
+            new FixedTimeProvider(store.Current.UpdatedAtUtc.AddTicks(1)),
+            authority);
 
         var replay = await replaying.ReleaseAsync(intent);
 
@@ -370,7 +454,7 @@ public sealed partial class CustomLoopOrderedRunnerTests
         var node = Assert.Single(context.Plan.Nodes, candidate => string.Equals(candidate.NodeId, activation.NodeId, StringComparison.Ordinal));
         var transition = GovernedLoopSequentialFrontierMachine.ReleaseReviewBlockedRecoverableAction(store.Current.Frontier, store.Current.SequentialAdapterBinding, context.Plan, node, activation, activation.Attempt!.Value, activation.AttemptOperationId, claimed.ClaimedAtUtc.AddTicks(1));
         Assert.True(transition.Status == GovernedLoopSequentialFrontierTransitionStatus.Applied, transition.Detail);
-        var authority = new RecordingAuthoritySource(HumanReviewContinuationAuthorityReadStatus.Current);
+        var authority = new RecordingAuthoritySource(HumanReviewContinuationAuthorityReadStatus.Current, HumanReviewContinuationAuthorityReadStatus.Current);
         var effectEvidence = new RecordingEffectEvidenceSource(
             new HumanReviewCurrentEffectAttemptEvidenceReadResult(HumanReviewCurrentEffectAttemptEvidenceReadStatus.Current, new HumanReviewCurrentEffectAttemptEvidence(HumanReviewEffectReleaseContract.CreateIdentity(review.Request.Binding, preparedEffect), HumanReviewEffectReleaseContract.CreatePreparation(review.Request.Binding, preparedEffect))),
             new HumanReviewCurrentEffectAttemptEvidenceReadResult(HumanReviewCurrentEffectAttemptEvidenceReadStatus.Current, new HumanReviewCurrentEffectAttemptEvidence(HumanReviewEffectReleaseContract.CreateIdentity(review.Request.Binding, preparedEffect), HumanReviewEffectReleaseContract.CreatePreparation(review.Request.Binding, preparedEffect))));
@@ -398,6 +482,7 @@ public sealed partial class CustomLoopOrderedRunnerTests
             action.ReleaseReceipt!.ReleaseOperationId,
             AuditSchema.Actors.Web));
 
+        Assert.Equal(2, authority.ReadCount);
         Assert.True(first.Status == HumanReviewContinuationReleaseStatus.Completed, $"{first.Status}; authority={authority.ReadCount}; effect={effectEvidence.ReadCount}; certainty={effectCertainty.ReadCount}; lifecycle={store.Current.LifecycleVersion}; frontier={store.Current.Frontier?.Payload.Status}; actuator={actuator.ActuationCount}; requests={string.Join(",", actuator.Requests.Select(request => request.HumanReviewRelease is null ? "none" : "release"))}; events={string.Join(",", store.Current.Events.Select(item => item.Kind + ":" + item.EventId))}; resume={directResume.Status}:{directResume.Detail}; validation={string.Join(" | ", CustomLoopRunValidator.Validate(store.Current).Errors)}");
         Assert.Equal(first.Completion?.CompletionHash, replay.Completion?.CompletionHash);
         Assert.Equal(2, actuator.Requests.Count);
@@ -707,6 +792,31 @@ public sealed partial class CustomLoopOrderedRunnerTests
         Assert.True(validation.IsValid, string.Join(Environment.NewLine, validation.Errors));
         var updated = await store.UpdateAsync(candidate, current.LifecycleVersion, cancellationToken);
         Assert.Equal(CustomLoopRunStoreStatus.Updated, updated.Status);
+    }
+
+    private static CustomLoopRunEvent RehashReviewEvidence(
+        CustomLoopRunEvent source,
+        CustomLoopSequentialNodeEvidenceKind kind,
+        CustomLoopSequentialNodeDisposition disposition,
+        long sequence,
+        string eventId)
+    {
+        var candidate = source with
+        {
+            Sequence = sequence,
+            EventId = eventId,
+            TimestampUtc = source.TimestampUtc.AddTicks(sequence - source.Sequence),
+            Kind = kind == CustomLoopSequentialNodeEvidenceKind.ReviewRequested ? CustomLoopRunEventKind.NodeOutcomeObserved : CustomLoopRunEventKind.NodeAttemptCompleted,
+            SequentialNodeEvidence = null,
+        };
+        var evidence = CustomLoopSequentialNodeEvidenceHash.Apply(source.SequentialNodeEvidence! with
+        {
+            Kind = kind,
+            Disposition = disposition,
+            OutcomeArtifactHash = CustomLoopSequentialOutcomeArtifactHash.Compute(candidate),
+            EvidenceHash = string.Empty,
+        });
+        return candidate with { SequentialNodeEvidence = evidence };
     }
 
     private static string ActionReleaseOperationId(string reservationHash)

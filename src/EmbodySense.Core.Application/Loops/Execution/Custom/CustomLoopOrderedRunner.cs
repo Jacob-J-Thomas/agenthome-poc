@@ -8992,10 +8992,10 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         var continuation = review?.Continuation;
         var receipt = continuation?.Completion?.ReleaseReceipt;
         return item.SequentialNodeEvidence is
-            {
-                Kind: CustomLoopSequentialNodeEvidenceKind.ReviewRequested,
-                Disposition: CustomLoopSequentialNodeDisposition.ReviewPending,
-            }
+        {
+            Kind: CustomLoopSequentialNodeEvidenceKind.ReviewRequested,
+            Disposition: CustomLoopSequentialNodeDisposition.ReviewPending,
+        }
             && request?.Purpose == HumanReviewPurpose.PreDispatchEffect
             && request.Binding.EffectAttempt is not null
             && HumanReviewContractHash.MatchesEffectAttempt(request.Binding.EffectAttempt)
@@ -10319,7 +10319,28 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             && CustomLoopSequentialNodeEvidenceHash.Matches(evidence)
             && CustomLoopSequentialOutcomeArtifactHash.Matches(item)
             && SequentialEvidenceEventMatchesNode(item, node.Descriptor.Kind)).ToArray();
-        return matches.Length == 1 ? matches[0] : null;
+        return SelectExactSequentialOutcome(matches, node.Descriptor.Kind);
+    }
+
+    private static CustomLoopRunEvent? SelectExactSequentialOutcome(
+        IReadOnlyList<CustomLoopRunEvent> matches,
+        EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind nodeKind)
+    {
+        if (matches.Count == 1) return matches[0];
+        if (nodeKind == EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.HumanReview
+            && matches.Count == 2
+            && matches[0].SequentialNodeEvidence is { } firstEvidence
+            && matches[1].SequentialNodeEvidence is { } secondEvidence
+            && firstEvidence.Kind == CustomLoopSequentialNodeEvidenceKind.ReviewRequested
+            && firstEvidence.Disposition == CustomLoopSequentialNodeDisposition.ReviewPending
+            && secondEvidence.Kind != CustomLoopSequentialNodeEvidenceKind.ReviewRequested
+            && secondEvidence.Disposition != CustomLoopSequentialNodeDisposition.ReviewPending
+            && matches[0].Sequence < matches[1].Sequence)
+        {
+            return matches[1];
+        }
+
+        return null;
     }
 
     private static bool EvidenceMatchesActivation(
@@ -12221,7 +12242,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             && !IsSupersededPreDispatchReviewParkingEvidence(run, item, node, activation, attempt)
             && SequentialEvidenceEventMatchesNode(item, node.Descriptor.Kind))
             .ToArray();
-        return matches.Length == 1 ? matches[0] : null;
+        return SelectExactSequentialOutcome(matches, node.Descriptor.Kind);
     }
 
     private static bool HasSequentialTerminalCandidate(
@@ -12258,6 +12279,8 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 => runEvent.Kind is CustomLoopRunEventKind.ExitDecisionCompleted or CustomLoopRunEventKind.NodeOutcomeObserved or CustomLoopRunEventKind.NodeAttemptFailed,
             EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Fail
                 => runEvent.Kind == CustomLoopRunEventKind.NodeAttemptFailed,
+            EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.HumanReview
+                => runEvent.Kind is CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeOutcomeObserved,
             _ => false,
         };
 

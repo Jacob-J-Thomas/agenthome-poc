@@ -7921,6 +7921,7 @@ public sealed partial class CustomLoopOrderedRunnerTests
                 EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Wait => orderedEvent?.Kind is CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeAttemptFailed,
                 EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Exit => orderedEvent?.Kind is CustomLoopRunEventKind.ExitDecisionCompleted or CustomLoopRunEventKind.NodeAttemptFailed or CustomLoopRunEventKind.NodeOutcomeObserved,
                 EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Fail => orderedEvent?.Kind == CustomLoopRunEventKind.NodeAttemptFailed,
+                EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.HumanReview => orderedEvent?.Kind is CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeOutcomeObserved,
                 _ => false,
             };
             if (request.SchemaVersion != GovernedLoopSequentialOrderedNodeEvidenceRequest.CurrentSchemaVersion
@@ -7943,7 +7944,8 @@ public sealed partial class CustomLoopOrderedRunnerTests
 
             var identity = $"{binding.ExecutionBinding.RunId}/{binding.ExecutionBinding.ExecutionGeneration}/{dispatch.Activation.ActivationOrdinal}/{dispatch.Activation.VisitOrdinal}/{dispatch.Node.NodeId}/{dispatch.Activation.CycleId}/{dispatch.Activation.CycleIteration}/{dispatch.Attempt}";
             if (_identityEvents.TryGetValue(identity, out var prior)
-                && (!string.Equals(prior.EventId, orderedEvent!.EventId, StringComparison.Ordinal) || prior.Sequence != orderedEvent.Sequence))
+                && (!string.Equals(prior.EventId, orderedEvent!.EventId, StringComparison.Ordinal) || prior.Sequence != orderedEvent.Sequence)
+                && !IsHistoricalReviewPendingTransition(run, prior, request.Disposition))
             {
                 return new GovernedLoopSequentialNodeHandlerResult(GovernedLoopSequentialNodeHandlerResultStatus.Unknown, string.Empty);
             }
@@ -7990,6 +7992,19 @@ public sealed partial class CustomLoopOrderedRunnerTests
 
             return new GovernedLoopSequentialNodeHandlerResult(request.Disposition, receipt.EvidenceHash);
         }
+
+        private static bool IsHistoricalReviewPendingTransition(
+            CustomLoopRunRecord run,
+            (string EventId, long Sequence) prior,
+            GovernedLoopSequentialNodeHandlerResultStatus currentDisposition)
+            => currentDisposition is (GovernedLoopSequentialNodeHandlerResultStatus.Completed
+                or GovernedLoopSequentialNodeHandlerResultStatus.Rejected
+                or GovernedLoopSequentialNodeHandlerResultStatus.NeedsReview)
+                && run.Events.SingleOrDefault(item => string.Equals(item.EventId, prior.EventId, StringComparison.Ordinal) && item.Sequence == prior.Sequence)?.SequentialNodeEvidence is
+                {
+                    Kind: CustomLoopSequentialNodeEvidenceKind.ReviewRequested,
+                    Disposition: CustomLoopSequentialNodeDisposition.ReviewPending,
+                };
 
         Task<GovernedLoopSequentialNodeEvidenceReceipt?> IGovernedLoopSequentialNodeEvidenceSource.ResolveAsync(
             string evidenceHash,

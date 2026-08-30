@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Collections.Immutable;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json.Nodes;
 using EmbodySense.Core.Application.HumanReview;
@@ -1730,7 +1731,7 @@ public sealed class CustomLoopFrontierStoreTests
             parkedEvent.SequentialNodeEvidence!.OutcomeArtifactHash,
             parkedAtUtc);
         var blocked = Assert.IsType<GovernedLoopFrontierPosture>(transition.Frontier);
-        var request = CreateHumanReviewRequest(active, blocked, parkedAtUtc, identity);
+        var request = CreateHumanReviewRequest(active, blocked, parkedAtUtc, identity, canonicalNodeBinding: true);
         var result = await new HumanReviewAdmissionService(store).AdmitAsync(new HumanReviewAdmissionCommand(active.Id, active.LifecycleVersion, request, blocked, parkedEvent));
         var admitted = Assert.IsType<CustomLoopRunRecord>(result.Run);
         Assert.Equal(CustomLoopRunStoreStatus.Updated, result.Status);
@@ -2047,9 +2048,14 @@ public sealed class CustomLoopFrontierStoreTests
         CustomLoopRunRecord predecessor,
         GovernedLoopFrontierPosture blocked,
         DateTimeOffset createdAtUtc,
-        string identity = "one")
+        string identity = "one",
+        bool canonicalNodeBinding = false)
     {
         var blockedNode = Assert.Single(blocked.Payload.Nodes, node => node.Status == GovernedLoopNodeExecutionStatus.ReviewBlocked);
+        var adapter = Assert.IsType<GovernedLoopSequentialAdapterBinding>(predecessor.SequentialAdapterBinding);
+        var targetHash = canonicalNodeBinding ? adapter.GraphArtifactHash : HumanReviewHash('e');
+        var preconditionHash = canonicalNodeBinding ? adapter.GraphLayoutHash : HumanReviewHash('f');
+        var payloadHash = canonicalNodeBinding ? ComputeHumanReviewNodePayloadHash(adapter, blockedNode.NodeId, "review-scope-one") : HumanReviewHash('1');
         var binding = HumanReviewContractHash.ApplyBinding(new HumanReviewBinding(
             1,
             blocked.WorkspaceId,
@@ -2068,9 +2074,9 @@ public sealed class CustomLoopFrontierStoreTests
             HumanReviewHash('b'),
             HumanReviewHash('c'),
             HumanReviewHash('d'),
-            HumanReviewHash('e'),
-            HumanReviewHash('f'),
-            HumanReviewHash('1'),
+            targetHash,
+            preconditionHash,
+            payloadHash,
             null,
             string.Empty));
         var scope = HumanReviewContractHash.ApplyApprovalScope(new HumanReviewApprovalScope(HumanReviewApprovalScopeKind.Continuation, binding.BindingHash, null, string.Empty));
@@ -2092,6 +2098,9 @@ public sealed class CustomLoopFrontierStoreTests
             HumanReviewContractHash.ApplyProvenance(new HumanReviewProvenance(HumanReviewProvenanceKind.Server, "human-review-store", "request-correlation-" + identity, createdAtUtc, string.Empty)),
             string.Empty));
     }
+
+    private static string ComputeHumanReviewNodePayloadHash(GovernedLoopSequentialAdapterBinding adapter, string nodeId, string approvalScopeId)
+        => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join('\n', "human-review-node-payload-v1", adapter.ContentHash, nodeId, approvalScopeId))));
 
     private static string HumanReviewHash(char character) => new(character, HumanReviewContractLimits.Sha256HexCharacters);
 
@@ -2633,7 +2642,7 @@ public sealed class CustomLoopFrontierStoreTests
             null);
         var evidence = CustomLoopSequentialNodeEvidenceHash.Apply(new CustomLoopSequentialNodeEvidence(
             CustomLoopSequentialNodeEvidence.CurrentSchemaVersion,
-            CustomLoopSequentialNodeEvidenceKind.AmbiguityAttention,
+            CustomLoopSequentialNodeEvidenceKind.ReviewRequested,
             binding.WorkspaceId,
             binding.ExecutionBinding.RunId,
             binding.ExecutionBinding.Revision,
@@ -2649,7 +2658,7 @@ public sealed class CustomLoopFrontierStoreTests
             [],
             null,
             null,
-            CustomLoopSequentialNodeDisposition.NeedsReview,
+            CustomLoopSequentialNodeDisposition.ReviewPending,
             CustomLoopSequentialOutcomeArtifactHash.Compute(parked),
             string.Empty));
         return parked with { SequentialNodeEvidence = evidence };

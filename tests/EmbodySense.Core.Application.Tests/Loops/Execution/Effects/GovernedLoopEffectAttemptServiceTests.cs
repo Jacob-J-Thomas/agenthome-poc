@@ -232,6 +232,29 @@ public sealed class GovernedLoopEffectAttemptServiceTests
         Assert.Equal(0, attendedOperation.ExecuteCalls);
     }
 
+    [Fact]
+    public async Task Canonical_effect_attempt_service_replays_one_pre_dispatch_human_review_intent_without_dispatch()
+    {
+        var fixture = GovernedLoopEffectAttemptTestFixture.Create(unattended: false);
+        var store = new InMemoryEffectAttemptStore();
+        var operation = new StubOperation(fixture.Descriptor, Preparation(fixture));
+        var service = new GovernedLoopEffectAttemptService(
+            new StubCatalog(fixture, operation),
+            store,
+            new StubAuthorityBoundary(),
+            new FixedTimeProvider(GovernedLoopEffectAttemptTestFixture.Now.AddMinutes(1)));
+
+        var first = await service.ExecuteAsync(fixture.Request);
+        var replay = await service.ExecuteAsync(fixture.Request);
+
+        Assert.Equal(GovernedLoopEffectAttemptExecutionStatus.ApprovalRequired, first.Status);
+        Assert.Equal(GovernedLoopEffectAttemptExecutionStatus.ApprovalRequired, replay.Status);
+        Assert.Equal(GovernedLoopEffectPhase.IntentPrepared, store.Current?.Payload.Phase);
+        Assert.Equal(1, store.BeginCalls);
+        Assert.Equal(0, store.ExchangeCalls);
+        Assert.Equal(0, operation.ExecuteCalls);
+    }
+
     [Theory]
     [InlineData(GovernedLoopEffectPhase.Committed, GovernedLoopEffectAttemptExecutionStatus.Replayed)]
     [InlineData(GovernedLoopEffectPhase.DispatchNotStarted, GovernedLoopEffectAttemptExecutionStatus.DispatchNotStarted)]

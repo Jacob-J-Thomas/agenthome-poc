@@ -21,7 +21,8 @@ internal static class HumanReviewOrderedReleaseProcessHost
             store,
             new HumanReviewOrderedReleaseProcessContextResolver(),
             new HumanReviewOrderedReleaseProcessRuntime(),
-            new HumanReviewOrderedReleaseProcessClock(releaseAtUtc)).ReleaseAsync(intent);
+            new HumanReviewOrderedReleaseProcessClock(releaseAtUtc),
+            new HumanReviewOrderedReleaseProcessAuthority()).ReleaseAsync(intent);
         await File.WriteAllTextAsync(resultPath, result.Status.ToString());
         return result.Status == HumanReviewDecisionActionReleaseStatus.Completed ? 0 : 3;
     }
@@ -39,7 +40,8 @@ internal static class HumanReviewOrderedReleaseProcessHost
             store,
             new HumanReviewOrderedReleaseProcessContextResolver(),
             new HumanReviewOrderedReleaseProcessRuntime(),
-            new HumanReviewOrderedReleaseProcessClock(releaseAtUtc)).ReleaseAsync(intent);
+            new HumanReviewOrderedReleaseProcessClock(releaseAtUtc),
+            new HumanReviewOrderedReleaseProcessAuthority()).ReleaseAsync(intent);
         return result.Status == HumanReviewDecisionActionReleaseStatus.Completed ? 0 : 4;
     }
 
@@ -56,7 +58,8 @@ internal static class HumanReviewOrderedReleaseProcessHost
             store,
             new HumanReviewOrderedReleaseProcessContextResolver(),
             new HumanReviewOrderedReleaseProcessRuntime(),
-            new HumanReviewOrderedReleaseProcessClock(releaseAtUtc)).ReleaseAsync(intent);
+            new HumanReviewOrderedReleaseProcessClock(releaseAtUtc),
+            new HumanReviewOrderedReleaseProcessAuthority()).ReleaseAsync(intent);
         await File.WriteAllTextAsync(resultPath, result.Status.ToString());
         return result.Status == HumanReviewDecisionActionReleaseStatus.Completed ? 0 : 3;
     }
