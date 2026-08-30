@@ -257,7 +257,14 @@ public sealed class HumanInputResponseContinuationProcessTests
             return;
         }
 
-        await markerPublished.Task.ConfigureAwait(false);
+        try
+        {
+            await markerPublished.Task.WaitAsync(TimeSpan.FromSeconds(30)).ConfigureAwait(false);
+        }
+        catch (TimeoutException exception)
+        {
+            throw new TimeoutException($"The Human Input continuation marker `{path}` was not published.", exception);
+        }
     }
 
     private static void AssertCompletedAcceptedResponse(CustomLoopRunRecord completed, string auditEvidence, string orderedDiagnostic = "")
