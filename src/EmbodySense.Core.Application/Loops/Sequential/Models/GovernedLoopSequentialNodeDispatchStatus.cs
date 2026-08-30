@@ -11,6 +11,8 @@ public enum GovernedLoopSequentialNodeDispatchStatus
     Rejected,
     /// <summary>The exact handler stopped for durable review with retained ambiguity evidence.</summary>
     NeedsReview,
+    /// <summary>The exact handler durably parked for an intentional human-review decision.</summary>
+    ReviewPending,
     /// <summary>The request does not compose one guarded anchor, builder plan, exact node, and bounded attempt.</summary>
     InvalidRequest,
     /// <summary>No handler remains registered under the exact kind, type identifier, and version.</summary>

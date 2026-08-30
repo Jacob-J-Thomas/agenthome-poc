@@ -226,7 +226,9 @@ public sealed class GovernedLoopEffectAttemptServiceTests
         var attendedStore = new InMemoryEffectAttemptStore();
         var approval = await Service(new StubCatalog(attended, attendedOperation), attendedStore, new StubAuthorityBoundary()).ExecuteAsync(attended.Request);
         Assert.Equal(GovernedLoopEffectAttemptExecutionStatus.ApprovalRequired, approval.Status);
-        Assert.Equal(0, attendedStore.BeginCalls);
+        Assert.Equal(1, attendedStore.BeginCalls);
+        Assert.Equal(GovernedLoopEffectPhase.IntentPrepared, approval.Attempt?.Payload.Phase);
+        Assert.Null(approval.Attempt?.DispatchAuthorityEvidenceHash);
         Assert.Equal(0, attendedOperation.ExecuteCalls);
     }
 

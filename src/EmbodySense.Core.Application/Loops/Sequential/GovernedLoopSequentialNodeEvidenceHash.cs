@@ -79,7 +79,7 @@ public static class GovernedLoopSequentialNodeEvidenceHash
             || !IsHash(receipt.OutcomeArtifactHash)
             || (receipt.FailureEvidenceId is null) != (receipt.FailureEvidenceHash is null)
             || receipt.FailureEvidenceHash is not null && !IsHash(receipt.FailureEvidenceHash)
-            || receipt.Disposition == GovernedLoopSequentialNodeHandlerResultStatus.Completed && receipt.FailureEvidenceId is not null
+            || receipt.Disposition is GovernedLoopSequentialNodeHandlerResultStatus.Completed or GovernedLoopSequentialNodeHandlerResultStatus.ReviewPending && receipt.FailureEvidenceId is not null
             || receipt.Disposition is GovernedLoopSequentialNodeHandlerResultStatus.Rejected or GovernedLoopSequentialNodeHandlerResultStatus.NeedsReview && receipt.FailureEvidenceId is null)
         {
             return false;
@@ -105,6 +105,7 @@ public static class GovernedLoopSequentialNodeEvidenceHash
             GovernedLoopSequentialNodeEvidenceKind.CompletedOutcome => "completed-outcome",
             GovernedLoopSequentialNodeEvidenceKind.DefinitiveRejection => "definitive-rejection",
             GovernedLoopSequentialNodeEvidenceKind.AmbiguityAttention => "ambiguity-attention",
+            GovernedLoopSequentialNodeEvidenceKind.ReviewRequested => "review-requested",
             _ => throw new ArgumentOutOfRangeException(nameof(kind)),
         };
 
@@ -114,6 +115,7 @@ public static class GovernedLoopSequentialNodeEvidenceHash
             GovernedLoopSequentialNodeHandlerResultStatus.Completed => "completed",
             GovernedLoopSequentialNodeHandlerResultStatus.Rejected => "rejected",
             GovernedLoopSequentialNodeHandlerResultStatus.NeedsReview => "needs-review",
+            GovernedLoopSequentialNodeHandlerResultStatus.ReviewPending => "review-pending",
             _ => throw new ArgumentOutOfRangeException(nameof(disposition)),
         };
 

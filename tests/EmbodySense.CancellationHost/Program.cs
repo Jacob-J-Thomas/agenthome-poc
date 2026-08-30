@@ -97,6 +97,21 @@ if (args is ["human-review-decision-action-transition-process-loss", var humanRe
     return await HumanReviewDecisionActionTransitionProcessLossHost.RunAsync(humanReviewDecisionActionTransitionWorkspaceRoot, humanReviewDecisionActionTransitionRunId, humanReviewDecisionActionTransition, humanReviewDecisionActionTransitionBoundary);
 }
 
+if (args is ["human-review-ordered-release-process-loss", var humanReviewOrderedReleaseWorkspaceRoot, var humanReviewOrderedReleaseRunId, var humanReviewOrderedReleaseBoundary])
+{
+    return await HumanReviewOrderedReleaseProcessHost.RunProcessLossAsync(humanReviewOrderedReleaseWorkspaceRoot, humanReviewOrderedReleaseRunId, humanReviewOrderedReleaseBoundary);
+}
+
+if (args is ["human-review-ordered-release", var humanReviewOrderedReleaseCompletionWorkspaceRoot, var humanReviewOrderedReleaseCompletionRunId, var humanReviewOrderedReleaseResultPath])
+{
+    return await HumanReviewOrderedReleaseProcessHost.RunAsync(humanReviewOrderedReleaseCompletionWorkspaceRoot, humanReviewOrderedReleaseCompletionRunId, humanReviewOrderedReleaseResultPath);
+}
+
+if (args is ["human-review-ordered-release-race", var humanReviewOrderedReleaseRaceWorkspaceRoot, var humanReviewOrderedReleaseRaceRunId, var humanReviewOrderedReleaseRaceReadyPath, var humanReviewOrderedReleaseRaceReleasePath, var humanReviewOrderedReleaseRaceResultPath])
+{
+    return await HumanReviewOrderedReleaseProcessHost.RunRaceAsync(humanReviewOrderedReleaseRaceWorkspaceRoot, humanReviewOrderedReleaseRaceRunId, humanReviewOrderedReleaseRaceReadyPath, humanReviewOrderedReleaseRaceReleasePath, humanReviewOrderedReleaseRaceResultPath);
+}
+
 if (args is ["codex-runtime-probe", var probeConfigurationPath, .. var probeArguments])
 {
     return await CodexRuntimeProbeHost.RunAsync(probeConfigurationPath, probeArguments);

@@ -6,6 +6,7 @@ using EmbodySense.Core.Application.Loops.GraphValidation;
 using EmbodySense.Core.Common.LocalWorkspace.Actions;
 using EmbodySense.Core.Common.CommandActions;
 using EmbodySense.Core.Common.Loops.Failures;
+using EmbodySense.Core.Common.HumanReview;
 
 namespace EmbodySense.Core.Application.Loops.Sequential;
 
@@ -35,6 +36,9 @@ public static class GovernedLoopSequentialNodeDescriptors
 
     /// <summary>Gets the exact supported failed-terminal descriptor.</summary>
     public static GovernedLoopNodeDescriptor FailTerminal { get; } = new(GovernedLoopNodeKind.Fail, GovernedLoopFailNodeVocabulary.TypeId, GovernedLoopFailNodeVocabulary.DescriptorVersion);
+
+    /// <summary>Gets the exact supported governed Human Review boundary descriptor.</summary>
+    public static GovernedLoopNodeDescriptor HumanReview { get; } = new(GovernedLoopNodeKind.HumanReview, GovernedLoopHumanReviewVocabulary.TypeId, GovernedLoopHumanReviewVocabulary.DescriptorVersion);
 
     /// <summary>Gets the exact supported UTC timestamp Wait descriptor.</summary>
     public static GovernedLoopNodeDescriptor TimestampWait { get; } = Wait(GovernedLoopWaitVocabulary.Timestamp);
@@ -97,6 +101,7 @@ public static class GovernedLoopSequentialNodeDescriptors
                 || IsCommandAction(descriptor)
                 || Equals(descriptor, SuccessExit)
                 || Equals(descriptor, FailTerminal)
+                || Equals(descriptor, HumanReview)
                 || IsWait(descriptor)
                 || IsHumanInput(descriptor)
                 || IsTopology(descriptor)
@@ -118,6 +123,12 @@ public static class GovernedLoopSequentialNodeDescriptors
     /// <returns><see langword="true"/> only for the supported data-only Human Input descriptor; otherwise, <see langword="false"/>.</returns>
     public static bool IsHumanInput(GovernedLoopNodeDescriptor? descriptor)
         => GovernedLoopHumanInputVocabulary.IsSupported(descriptor);
+
+    /// <summary>Gets whether a descriptor exactly names the one schema-1 Human Review boundary.</summary>
+    /// <param name="descriptor">The descriptor to compare.</param>
+    /// <returns><see langword="true"/> only for the governed Human Review gate.</returns>
+    public static bool IsHumanReview(GovernedLoopNodeDescriptor? descriptor)
+        => Equals(descriptor, HumanReview);
 
     /// <summary>Gets whether a descriptor exactly names one schema-1 governed workspace Action.</summary>
     public static bool IsWorkspaceAction(GovernedLoopNodeDescriptor? descriptor)

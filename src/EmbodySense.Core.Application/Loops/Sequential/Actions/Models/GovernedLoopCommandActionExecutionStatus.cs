@@ -12,6 +12,9 @@ public enum GovernedLoopCommandActionExecutionStatus
     /// <summary>A conclusive failed command result is durable.</summary>
     Failed = 2,
 
+    /// <summary>The exact prepared effect is conclusively undispatched and requires governed Human Review.</summary>
+    ApprovalRequired = 3,
+
     /// <summary>The effect may have crossed its external boundary and requires reconciliation.</summary>
-    NeedsReview = 3,
+    NeedsReview = 4,
 }

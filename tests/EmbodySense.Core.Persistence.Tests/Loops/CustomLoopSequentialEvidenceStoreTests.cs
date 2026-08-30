@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Text;
 using System.Text.Json.Nodes;
+using EmbodySense.Core.Application.Loops.GraphValidation;
 using EmbodySense.Core.Application.Loops.Sequential;
 using EmbodySense.Core.Application.Loops.Sequential.Models;
 using EmbodySense.Core.Application.Loops.Admission;
@@ -14,6 +15,7 @@ using EmbodySense.Core.Common.Governance.Tools;
 using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.HumanInput;
 using EmbodySense.Core.Common.HumanInput.Models;
+using EmbodySense.Core.Common.HumanReview;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Inference.Profiles.Models;
 using EmbodySense.Core.Common.Loops.Admission;
@@ -1272,6 +1274,9 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
     internal static SequentialContext CreateContext(GovernedLoopSequentialTriggerOrigin? triggerOrigin = null, string identity = "sequential", bool scheduleTrigger = false)
         => CreateContext(LinearGraph(scheduleTrigger), triggerOrigin, identity, scheduleTrigger);
 
+    internal static SequentialContext CreateHumanReviewContext(string identity)
+        => CreateContext(HumanReviewGraph(), identity: identity);
+
     private static SequentialContext CreateContext(
         GovernedLoopGraphDefinition graph,
         GovernedLoopSequentialTriggerOrigin? triggerOrigin = null,
@@ -2420,6 +2425,8 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
                 nodes.Select((node, index) => new GovernedLoopNodeDisplayMetadata(node.Id, node.Id, "Node.", index * 100, 0)).ToArray()),
             DefaultModelRoutingPolicy());
     }
+
+    private static GovernedLoopGraphDefinition HumanReviewGraph() => HumanReviewOrderedReleaseGraphFixture.Graph();
 
     private static GovernedLoopGraphDefinition MaximumHumanInputGraph(GovernedLoopHumanInputNodeConfiguration configuration)
     {

@@ -1,3 +1,4 @@
+using EmbodySense.Core.Application.HumanReview.Models;
 using EmbodySense.Core.Common.Authority.Models;
 using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Common.Loops.Admission.Models;
@@ -20,7 +21,8 @@ public sealed record GovernedLoopEffectAttemptRequest(
     long EffectGeneration,
     string InputJson,
     AuthorityCeiling RequiredAuthority,
-    string CorrelationId)
+    string CorrelationId,
+    HumanReviewPreDispatchEffectRelease? HumanReviewRelease = null)
 {
     /// <summary>
     /// Gets the already immutable common authority contract supplied by the caller. The execution service validates its

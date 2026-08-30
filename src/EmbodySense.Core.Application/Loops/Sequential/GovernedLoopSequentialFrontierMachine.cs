@@ -198,14 +198,19 @@ public static class GovernedLoopSequentialFrontierMachine
             && activation?.Status == GovernedLoopNodeExecutionStatus.Waiting
             && frontier!.Payload.Nodes.ElementAtOrDefault(activation.ActivationOrdinal) is { } retained
             && SameActivation(retained, activation);
+        var selectedReviewBlocked = Validate(frontier, binding, plan)
+            && frontier!.Payload.Status == GovernedLoopFrontierStatus.ReviewBlocked
+            && activation?.Status == GovernedLoopNodeExecutionStatus.ReviewBlocked
+            && frontier.Payload.Nodes.ElementAtOrDefault(activation.ActivationOrdinal) is { } blocked
+            && SameActivation(blocked, activation);
         var selectedNode = activation is null || plan is null || activation.PlanOrdinal < 0 || activation.PlanOrdinal >= plan.Nodes.Count
             ? null
             : plan.Nodes[activation.PlanOrdinal];
-        if ((!selectedRunning && !selectedWaiting)
+        if ((!selectedRunning && !selectedWaiting && !selectedReviewBlocked)
             || selectedNode is null
-            || !TryResolveRoute(plan!, selectedNode, controlOutcome, out _, out var skippedEdges))
+            || !TryResolveRoute(plan!, selectedNode, controlOutcome, out _, out var skippedEdges, allowUnroutedFailure: controlOutcome == GovernedLoopControlCondition.Failure))
         {
-            return new GovernedLoopSequentialPruningPlanResult(GovernedLoopSequentialFrontierTransitionStatus.Invalid, [], "Only the exact Running or Waiting activation and one admitted control outcome can plan pruning.");
+            return new GovernedLoopSequentialPruningPlanResult(GovernedLoopSequentialFrontierTransitionStatus.Invalid, [], "Only the exact Running, Waiting, or ReviewBlocked activation and one admitted control outcome can plan pruning.");
         }
 
         var pruned = frontier!.Payload.Nodes
@@ -560,6 +565,112 @@ public static class GovernedLoopSequentialFrontierMachine
             cycleStartedAtUtc);
     }
 
+    /// <summary>Completes the exact ReviewBlocked Human Review activation and exposes only its admitted Success route.</summary>
+    /// <remarks>This pure transition is used only after a release receipt and successor frontier evidence can be committed atomically. It never claims or dispatches a dependent activation.</remarks>
+    public static GovernedLoopSequentialFrontierTransitionResult CompleteReviewBlockedHumanReview(
+        GovernedLoopFrontierPosture? frontier,
+        GovernedLoopSequentialAdapterBinding? binding,
+        GovernedLoopSequentialPlan? plan,
+        GovernedLoopSequentialPlanNode? node,
+        GovernedLoopNodeExecutionEvidence? activation,
+        int attempt,
+        string? attemptOperationId,
+        string? outcomeEvidenceId,
+        string? outcomeEvidenceHash,
+        DateTimeOffset updatedAtUtc,
+        IReadOnlyList<GovernedLoopSequentialSkipEvidenceReference>? skipEvidence = null,
+        DateTimeOffset? cycleStartedAtUtc = null)
+    {
+        if (!GovernedLoopSequentialNodeDescriptors.IsHumanReview(node?.Descriptor)) return Invalid("Only an exact ReviewBlocked Human Review activation can complete from a claimed continuation.");
+        return ResolveClaimed(frontier, binding, plan, node, activation, attempt, attemptOperationId, GovernedLoopNodeExecutionStatus.ReviewBlocked, GovernedLoopNodeExecutionStatus.Completed, outcomeEvidenceId, outcomeEvidenceHash, GovernedLoopControlCondition.Success, skipEvidence, updatedAtUtc, cycleStartedAtUtc);
+    }
+
+    /// <summary>Fails the exact ReviewBlocked Human Review activation and advances only its admitted Failure route, when present.</summary>
+    /// <remarks>An unrouted failure remains a terminal failed frontier. This method never selects or dispatches a dependent activation.</remarks>
+    public static GovernedLoopSequentialFrontierTransitionResult FailReviewBlockedHumanReview(
+        GovernedLoopFrontierPosture? frontier,
+        GovernedLoopSequentialAdapterBinding? binding,
+        GovernedLoopSequentialPlan? plan,
+        GovernedLoopSequentialPlanNode? node,
+        GovernedLoopNodeExecutionEvidence? activation,
+        int attempt,
+        string? attemptOperationId,
+        string? outcomeEvidenceId,
+        string? outcomeEvidenceHash,
+        DateTimeOffset updatedAtUtc,
+        IReadOnlyList<GovernedLoopSequentialSkipEvidenceReference>? skipEvidence = null,
+        DateTimeOffset? cycleStartedAtUtc = null)
+    {
+        if (!GovernedLoopSequentialNodeDescriptors.IsHumanReview(node?.Descriptor)) return Invalid("Only an exact ReviewBlocked Human Review activation can fail from a claimed nonapproval action.");
+        return ResolveClaimed(frontier, binding, plan, node, activation, attempt, attemptOperationId, GovernedLoopNodeExecutionStatus.ReviewBlocked, GovernedLoopNodeExecutionStatus.Failed, outcomeEvidenceId, outcomeEvidenceHash, GovernedLoopControlCondition.Failure, skipEvidence, updatedAtUtc, cycleStartedAtUtc);
+    }
+
+    /// <summary>Fails one exact ReviewBlocked recoverable Action without crossing its prepared effect boundary.</summary>
+    /// <remarks>This transition serves a nonapproval decision for a pre-dispatch Human Review request. It selects only
+    /// authored Failure routing and leaves no path that could redispatch the retained effect.</remarks>
+    public static GovernedLoopSequentialFrontierTransitionResult FailReviewBlockedRecoverableAction(
+        GovernedLoopFrontierPosture? frontier,
+        GovernedLoopSequentialAdapterBinding? binding,
+        GovernedLoopSequentialPlan? plan,
+        GovernedLoopSequentialPlanNode? node,
+        GovernedLoopNodeExecutionEvidence? activation,
+        int attempt,
+        string? attemptOperationId,
+        string? outcomeEvidenceId,
+        string? outcomeEvidenceHash,
+        DateTimeOffset updatedAtUtc,
+        IReadOnlyList<GovernedLoopSequentialSkipEvidenceReference>? skipEvidence = null,
+        DateTimeOffset? cycleStartedAtUtc = null)
+    {
+        if (!GovernedLoopSequentialNodeDescriptors.IsRecoverableAction(node?.Descriptor)) return Invalid("Only an exact ReviewBlocked recoverable Action can fail from a pre-dispatch nonapproval action.");
+        return ResolveClaimed(frontier, binding, plan, node, activation, attempt, attemptOperationId, GovernedLoopNodeExecutionStatus.ReviewBlocked, GovernedLoopNodeExecutionStatus.Failed, outcomeEvidenceId, outcomeEvidenceHash, GovernedLoopControlCondition.Failure, skipEvidence, updatedAtUtc, cycleStartedAtUtc);
+    }
+
+    /// <summary>Releases one exact pre-dispatch review block back to its original recoverable Action attempt.</summary>
+    /// <remarks>This transition is intentionally narrower than general review release: it preserves the exact attempt and
+    /// operation identity, clears the review-only outcome routing, and exposes no successor. The existing ordered runtime
+    /// subsequently owns the already-admitted Action's effect-attempt reconciliation and dispatch boundary.</remarks>
+    public static GovernedLoopSequentialFrontierTransitionResult ReleaseReviewBlockedRecoverableAction(
+        GovernedLoopFrontierPosture? frontier,
+        GovernedLoopSequentialAdapterBinding? binding,
+        GovernedLoopSequentialPlan? plan,
+        GovernedLoopSequentialPlanNode? node,
+        GovernedLoopNodeExecutionEvidence? activation,
+        int attempt,
+        string? attemptOperationId,
+        DateTimeOffset updatedAtUtc)
+    {
+        if (!GovernedLoopSequentialNodeDescriptors.IsRecoverableAction(node?.Descriptor))
+        {
+            return Invalid("Only an exact ReviewBlocked recoverable Action can re-enter after a conclusive pre-dispatch release.");
+        }
+
+        if (!Validate(frontier, binding, plan)
+            || frontier!.Payload.Status != GovernedLoopFrontierStatus.ReviewBlocked
+            || activation?.Status != GovernedLoopNodeExecutionStatus.ReviewBlocked
+            || activation.Attempt != attempt
+            || !string.Equals(activation.AttemptOperationId, attemptOperationId, StringComparison.Ordinal)
+            || activation.PlanOrdinal != node!.Ordinal
+            || frontier.Payload.Nodes.ElementAtOrDefault(activation.ActivationOrdinal) is not { } retained
+            || !SameActivation(retained, activation))
+        {
+            return Invalid("The retained review block does not identify one exact recoverable Action attempt and operation.");
+        }
+
+        try
+        {
+            var running = CopyActivation(activation, GovernedLoopNodeExecutionStatus.Running, attempt, attemptOperationId, null, null, null, [], []);
+            var successor = ReplaceActivation(frontier, binding!, running, GovernedLoopFrontierStatus.Active, updatedAtUtc);
+            return TransitionIsValid(frontier, successor, binding, plan)
+                ? Applied(successor, "The exact review-blocked recoverable Action re-entered its original pre-dispatch attempt.")
+                : Invalid("The review-blocked recoverable Action successor violates the canonical frontier transition contract.");
+        }
+        catch (Exception exception) when (IsContractFailure(exception))
+        {
+            return Invalid($"The recoverable Action release transition was rejected by its bounded contract: {exception.GetType().Name}.");
+        }
+    }
+
     /// <summary>Commits one exact definitive failed outcome and advances only an admitted Failure route, when present.</summary>
     public static GovernedLoopSequentialFrontierTransitionResult FailRunning(
         GovernedLoopFrontierPosture? frontier,
@@ -862,10 +973,20 @@ public static class GovernedLoopSequentialFrontierMachine
             && activation.PlanOrdinal == node.Ordinal
             && frontier!.Payload.Nodes.ElementAtOrDefault(activation.ActivationOrdinal) is { } retained
             && SameActivation(retained, activation);
-        if ((!exactRunning && !exactWaiting)
+        var exactReviewBlocked = claimedStatus == GovernedLoopNodeExecutionStatus.ReviewBlocked
+            && Validate(frontier, binding, plan)
+            && frontier!.Payload.Status == GovernedLoopFrontierStatus.ReviewBlocked
+            && activation?.Status == GovernedLoopNodeExecutionStatus.ReviewBlocked
+            && activation.Attempt == attempt
+            && string.Equals(activation.AttemptOperationId, attemptOperationId, StringComparison.Ordinal)
+            && node is not null
+            && activation.PlanOrdinal == node.Ordinal
+            && frontier.Payload.Nodes.ElementAtOrDefault(activation.ActivationOrdinal) is { } blocked
+            && SameActivation(blocked, activation);
+        if ((!exactRunning && !exactWaiting && !exactReviewBlocked)
             || resolution is not (GovernedLoopNodeExecutionStatus.Completed or GovernedLoopNodeExecutionStatus.Failed or GovernedLoopNodeExecutionStatus.ReviewBlocked))
         {
-            return Invalid("Only the exact committed Running or Waiting activation can resolve the canonical frontier.");
+            return Invalid("Only the exact committed Running, Waiting, or ReviewBlocked activation can resolve the canonical frontier.");
         }
 
         if (resolution == GovernedLoopNodeExecutionStatus.ReviewBlocked)

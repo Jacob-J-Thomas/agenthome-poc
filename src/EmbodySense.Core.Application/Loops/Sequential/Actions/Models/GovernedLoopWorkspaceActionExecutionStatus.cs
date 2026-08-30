@@ -12,6 +12,9 @@ public enum GovernedLoopWorkspaceActionExecutionStatus
     /// <summary>The effect was conclusively stopped before mutation.</summary>
     Rejected = 2,
 
+    /// <summary>The exact prepared effect is conclusively undispatched and requires governed Human Review.</summary>
+    ApprovalRequired = 3,
+
     /// <summary>The effect or its durable evidence is ambiguous and requires review.</summary>
-    NeedsReview = 3,
+    NeedsReview = 4,
 }

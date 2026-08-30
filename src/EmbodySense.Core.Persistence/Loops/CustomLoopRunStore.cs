@@ -3105,6 +3105,7 @@ public sealed class CustomLoopRunStore :
         var pureCompletions = attemptClosures.Count(item => IsExactPureCompletion(candidate, item));
         var lifecycleEvents = appended.Count(IsLifecycleControlEvent);
         var retryStateEvents = appended.Count(item => item.Kind == CustomLoopRunEventKind.RetryStateChanged);
+        var humanReviewAdmission = IsHumanReviewAdmission(current, candidate, appended);
         var humanInputCheckpointPublication = candidate.HumanInputWaitingCheckpoints.Count == current.HumanInputWaitingCheckpoints.Count + 1
             && appended.All(IsLifecycleControlEvent)
             && lifecycleEvents <= 1;
@@ -3159,6 +3160,11 @@ public sealed class CustomLoopRunStore :
                     : "A mixed node-attempt outcome append exceeded its reserved maximum serialized footprint.");
         }
 
+        if (humanReviewAdmission && delta > checked(CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes + lifecycleControlBudget))
+        {
+            throw new FormatException("A Human Review parking admission exceeded its atomic attempt-outcome and lifecycle reservation.");
+        }
+
         var controlEventCount = candidate.Events.Count(IsLifecycleControlEvent);
         if (controlEventCount > MaximumLifecycleControlEvents(candidate))
         {
@@ -3180,6 +3186,7 @@ public sealed class CustomLoopRunStore :
         if (retryStateEvents == 0
             && lifecycleEvents > 0
             && !humanInputCheckpointPublication
+            && !humanReviewAdmission
             && delta > lifecycleControlBudget)
         {
             throw new FormatException("A lifecycle control event exceeded its permanent reserved serialized footprint.");
@@ -3307,6 +3314,22 @@ public sealed class CustomLoopRunStore :
     private static bool IsLifecycleControlEvent(CustomLoopRunEvent item)
     {
         return item.Kind is CustomLoopRunEventKind.LifecycleChanged or CustomLoopRunEventKind.IntegrityWarning;
+    }
+
+    private static bool IsHumanReviewAdmission(CustomLoopRunRecord current, CustomLoopRunRecord candidate, IReadOnlyList<CustomLoopRunEvent> appended)
+    {
+        return current.HumanReview is null
+            && candidate.HumanReview is not null
+            && appended.Count(item => item.Kind == CustomLoopRunEventKind.HumanReviewRequestAdmitted) == 1
+            && appended.Count(item => item is
+            {
+                Kind: CustomLoopRunEventKind.NodeOutcomeObserved,
+                SequentialNodeEvidence:
+                {
+                    Kind: CustomLoopSequentialNodeEvidenceKind.AmbiguityAttention,
+                    Disposition: CustomLoopSequentialNodeDisposition.NeedsReview,
+                },
+            }) == 1;
     }
 
     private static bool IsRetryStateAtomicEvent(CustomLoopRunEvent item)
