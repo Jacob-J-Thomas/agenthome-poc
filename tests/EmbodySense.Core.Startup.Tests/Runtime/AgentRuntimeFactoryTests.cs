@@ -4077,7 +4077,8 @@ public sealed partial class AgentRuntimeFactoryTests
         var inspected = await runtime.RunTurnAsync("/human-input inspect request-cli");
         const string PrivateValue = "private-cli-response";
         const string PrivateExplanation = "private-cli-explanation";
-        var submission = $"/human-input submit request-cli submit-cli response-cli {{\"value\":{{\"kind\":\"text\",\"text\":\"{PrivateValue}\"}},\"explanation\":\"{PrivateExplanation}\"}}";
+        var inspectedPosture = Assert.IsType<HumanInputRequestPosture>(apiBefore.Request);
+        var submission = $"/human-input submit request-cli {inspectedPosture.LifecycleVersion} {inspectedPosture.Status.ToString().ToLowerInvariant()} {inspectedPosture.CurrentRequest.RequestVersionId} {inspectedPosture.CurrentRequest.RequestHash} submit-cli response-cli {{\"value\":{{\"kind\":\"text\",\"text\":\"{PrivateValue}\"}},\"explanation\":\"{PrivateExplanation}\"}}";
         var committed = await runtime.RunTurnAsync(submission);
         var apiReplay = await runtime.HumanInput.SubmitResponseAsync(new HumanInputResponseOperationInput(
             "submit-cli",
@@ -4090,7 +4091,7 @@ public sealed partial class AgentRuntimeFactoryTests
             new HumanInputResponseValue(HumanInputResponseKind.Text, PrivateValue, null, null, null, null),
             PrivateExplanation));
         var replayed = await runtime.RunTurnAsync(submission);
-        var actorClaim = await runtime.RunTurnAsync("/human-input submit request-cli rejected-claim response-claim {\"value\":{\"kind\":\"text\",\"text\":\"private-claim\"},\"actor\":\"user-owner\"}");
+        var actorClaim = await runtime.RunTurnAsync($"/human-input submit request-cli {inspectedPosture.LifecycleVersion} {inspectedPosture.Status.ToString().ToLowerInvariant()} {inspectedPosture.CurrentRequest.RequestVersionId} {inspectedPosture.CurrentRequest.RequestHash} rejected-claim response-claim {{\"value\":{{\"kind\":\"text\",\"text\":\"private-claim\"}},\"actor\":\"user-owner\"}}");
         var canonical = await runtime.HumanInput.ReadAsync("request-cli");
         var transcript = runtime.GetActiveConversationTranscript();
 
@@ -4130,7 +4131,8 @@ public sealed partial class AgentRuntimeFactoryTests
         Assert.Equal(HumanInputRequestLifecycleStoreCommitStatus.Committed, (await store.CommitAsync(pending)).Status);
         const string PrivateValue = "private-restart-response";
         const string PrivateExplanation = "private-restart-explanation";
-        var submission = $"/human-input submit request-restart-cli submit-restart-cli response-restart-cli {{\"value\":{{\"kind\":\"text\",\"text\":\"{PrivateValue}\"}},\"explanation\":\"{PrivateExplanation}\"}}";
+        var inspectedHead = Assert.IsType<HumanInputRequestLifecycleHead>(pending.PrimaryHeadToWrite);
+        var submission = $"/human-input submit request-restart-cli {inspectedHead.LifecycleVersion} {inspectedHead.Status.ToString().ToLowerInvariant()} {inspectedHead.CurrentRequest.RequestVersionId} {inspectedHead.CurrentRequest.RequestHash} submit-restart-cli response-restart-cli {{\"value\":{{\"kind\":\"text\",\"text\":\"{PrivateValue}\"}},\"explanation\":\"{PrivateExplanation}\"}}";
 
         await using (var initialRuntime = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Cli))
         {
@@ -4240,12 +4242,15 @@ public sealed partial class AgentRuntimeFactoryTests
                 HumanInputRequestStoreTestData.HashC))).Status);
 
         await using var runtime = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Cli);
-        var withdrawSubmit = await runtime.RunTurnAsync("/human-input submit request-withdraw submit-withdraw response-withdraw {\"value\":{\"kind\":\"text\",\"text\":\"private-withdraw\"}}");
-        var withdrew = await runtime.RunTurnAsync("/human-input withdraw request-withdraw withdraw-cli response-withdraw");
-        var selectSubmit = await runtime.RunTurnAsync("/human-input submit request-select submit-select response-select {\"value\":{\"kind\":\"text\",\"text\":\"private-select\"}}");
-        var selectedResponse = await runtime.RunTurnAsync("/human-input select request-select select-cli response-select");
+        var withdrawBefore = Assert.IsType<HumanInputRequestPosture>((await runtime.HumanInput.ReadAsync("request-withdraw")).Request);
+        var selectBefore = Assert.IsType<HumanInputRequestPosture>((await runtime.HumanInput.ReadAsync("request-select")).Request);
+        var cancelledBefore = Assert.IsType<HumanInputRequestPosture>((await runtime.HumanInput.ReadAsync("request-cancelled-cli")).Request);
+        var withdrawSubmit = await runtime.RunTurnAsync($"/human-input submit request-withdraw {withdrawBefore.LifecycleVersion} {withdrawBefore.Status.ToString().ToLowerInvariant()} {withdrawBefore.CurrentRequest.RequestVersionId} {withdrawBefore.CurrentRequest.RequestHash} submit-withdraw response-withdraw {{\"value\":{{\"kind\":\"text\",\"text\":\"private-withdraw\"}}}}");
+        var withdrew = await runtime.RunTurnAsync($"/human-input withdraw request-withdraw {withdrawBefore.LifecycleVersion} {withdrawBefore.Status.ToString().ToLowerInvariant()} {withdrawBefore.CurrentRequest.RequestVersionId} {withdrawBefore.CurrentRequest.RequestHash} withdraw-cli response-withdraw");
+        var selectSubmit = await runtime.RunTurnAsync($"/human-input submit request-select {selectBefore.LifecycleVersion} {selectBefore.Status.ToString().ToLowerInvariant()} {selectBefore.CurrentRequest.RequestVersionId} {selectBefore.CurrentRequest.RequestHash} submit-select response-select {{\"value\":{{\"kind\":\"text\",\"text\":\"private-select\"}}}}");
+        var selectedResponse = await runtime.RunTurnAsync($"/human-input select request-select {selectBefore.LifecycleVersion} {selectBefore.Status.ToString().ToLowerInvariant()} {selectBefore.CurrentRequest.RequestVersionId} {selectBefore.CurrentRequest.RequestHash} select-cli response-select");
         var terminalInspection = await runtime.RunTurnAsync("/human-input inspect request-cancelled-cli");
-        var terminalSubmit = await runtime.RunTurnAsync("/human-input submit request-cancelled-cli submit-cancelled response-cancelled {\"value\":{\"kind\":\"text\",\"text\":\"private-terminal\"}}");
+        var terminalSubmit = await runtime.RunTurnAsync($"/human-input submit request-cancelled-cli {cancelledBefore.LifecycleVersion} {cancelledBefore.Status.ToString().ToLowerInvariant()} {cancelledBefore.CurrentRequest.RequestVersionId} {cancelledBefore.CurrentRequest.RequestHash} submit-cancelled response-cancelled {{\"value\":{{\"kind\":\"text\",\"text\":\"private-terminal\"}}}}");
         var terminalCatalog = await runtime.RunTurnAsync("/human-input list");
         var withdrawnPosture = await runtime.HumanInput.ReadAsync("request-withdraw");
         var selectedPosture = await runtime.HumanInput.ReadAsync("request-select");
@@ -4332,7 +4337,8 @@ public sealed partial class AgentRuntimeFactoryTests
         });
         await using var runtime = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Cli);
 
-        var submitted = await runtime.RunTurnAsync($"/human-input submit request-structured-cli submit-structured-cli response-structured-cli {payload}");
+        var inspected = Assert.IsType<HumanInputRequestPosture>((await runtime.HumanInput.ReadAsync("request-structured-cli")).Request);
+        var submitted = await runtime.RunTurnAsync($"/human-input submit request-structured-cli {inspected.LifecycleVersion} {inspected.Status.ToString().ToLowerInvariant()} {inspected.CurrentRequest.RequestVersionId} {inspected.CurrentRequest.RequestHash} submit-structured-cli response-structured-cli {payload}");
         var posture = await runtime.HumanInput.ReadAsync("request-structured-cli");
 
         Assert.True(payload.Length > HumanInputLimits.MaxResponseTextCharacters + HumanInputLimits.MaxExplanationCharacters + 8_192);
@@ -4362,10 +4368,11 @@ public sealed partial class AgentRuntimeFactoryTests
         var invalidRequestId = new string('r', HumanInputLimits.MaxIdentifierCharacters + 1);
         var invalidOperationId = new string('o', HumanInputLimits.MaxIdentifierCharacters + 1);
         var invalidResponseId = new string('s', HumanInputLimits.MaxIdentifierCharacters + 1);
-        var invalidRequest = await runtime.RunTurnAsync($"/human-input submit {invalidRequestId} request-operation response-one {{\"value\":{{\"kind\":\"text\",\"text\":\"{PrivateValue}\"}}}}");
-        var invalidOperation = await runtime.RunTurnAsync($"/human-input submit request-identifier-cli {invalidOperationId} response-two {{\"value\":{{\"kind\":\"text\",\"text\":\"{PrivateValue}\"}}}}");
-        var invalidResponse = await runtime.RunTurnAsync($"/human-input submit request-identifier-cli retry-operation {invalidResponseId} {{\"value\":{{\"kind\":\"text\",\"text\":\"{PrivateValue}\"}}}}");
-        var committed = await runtime.RunTurnAsync($"/human-input submit request-identifier-cli retry-operation response-valid {{\"value\":{{\"kind\":\"text\",\"text\":\"{PrivateValue}\"}}}}");
+        var inspected = Assert.IsType<HumanInputRequestPosture>((await runtime.HumanInput.ReadAsync("request-identifier-cli")).Request);
+        var invalidRequest = await runtime.RunTurnAsync($"/human-input submit {invalidRequestId} {inspected.LifecycleVersion} {inspected.Status.ToString().ToLowerInvariant()} {inspected.CurrentRequest.RequestVersionId} {inspected.CurrentRequest.RequestHash} request-operation response-one {{\"value\":{{\"kind\":\"text\",\"text\":\"{PrivateValue}\"}}}}");
+        var invalidOperation = await runtime.RunTurnAsync($"/human-input submit request-identifier-cli {inspected.LifecycleVersion} {inspected.Status.ToString().ToLowerInvariant()} {inspected.CurrentRequest.RequestVersionId} {inspected.CurrentRequest.RequestHash} {invalidOperationId} response-two {{\"value\":{{\"kind\":\"text\",\"text\":\"{PrivateValue}\"}}}}");
+        var invalidResponse = await runtime.RunTurnAsync($"/human-input submit request-identifier-cli {inspected.LifecycleVersion} {inspected.Status.ToString().ToLowerInvariant()} {inspected.CurrentRequest.RequestVersionId} {inspected.CurrentRequest.RequestHash} retry-operation {invalidResponseId} {{\"value\":{{\"kind\":\"text\",\"text\":\"{PrivateValue}\"}}}}");
+        var committed = await runtime.RunTurnAsync($"/human-input submit request-identifier-cli {inspected.LifecycleVersion} {inspected.Status.ToString().ToLowerInvariant()} {inspected.CurrentRequest.RequestVersionId} {inspected.CurrentRequest.RequestHash} retry-operation response-valid {{\"value\":{{\"kind\":\"text\",\"text\":\"{PrivateValue}\"}}}}");
 
         Assert.All([invalidRequest, invalidOperation, invalidResponse], result =>
         {
