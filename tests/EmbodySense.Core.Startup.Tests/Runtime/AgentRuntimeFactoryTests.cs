@@ -4026,6 +4026,176 @@ public sealed partial class AgentRuntimeFactoryTests
         }
     }
 
+    [Fact]
+    public async Task Default_conversation_human_input_commands_project_the_canonical_facade_and_keep_response_values_out_of_transcript()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var store = new HumanInputRequestStore(new WorkspacePaths(workspace.RootPath), new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath));
+        var pending = CreateFreshHumanInputMutation(
+            workspace.RootPath,
+            "request-cli",
+            "version-cli",
+            "create-cli",
+            HumanInputRequestStoreTestData.HashA,
+            prompt: "Display-safe CLI prompt.",
+            eligibleActor: WorkspaceActors.Cli,
+            eligibleRole: "cli-respondent");
+        Assert.Equal(HumanInputRequestLifecycleStoreCommitStatus.Committed, (await store.CommitAsync(pending)).Status);
+
+        await using var runtime = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Cli);
+        var apiBefore = await runtime.HumanInput.ReadAsync("request-cli");
+        var help = await runtime.RunTurnAsync("/help");
+        var listed = await runtime.RunTurnAsync("/human-input list");
+        var inspected = await runtime.RunTurnAsync("/human-input inspect request-cli");
+        const string PrivateValue = "private-cli-response";
+        const string PrivateExplanation = "private-cli-explanation";
+        var submission = $"/human-input submit request-cli submit-cli response-cli {{\"value\":{{\"kind\":\"text\",\"text\":\"{PrivateValue}\"}},\"explanation\":\"{PrivateExplanation}\"}}";
+        var committed = await runtime.RunTurnAsync(submission);
+        var apiReplay = await runtime.HumanInput.SubmitResponseAsync(new HumanInputResponseOperationInput(
+            "submit-cli",
+            HumanInputResponseOperationKind.Submit,
+            "request-cli",
+            apiBefore.Request!.LifecycleVersion,
+            apiBefore.Request.Status,
+            apiBefore.Request.CurrentRequest,
+            "response-cli",
+            new HumanInputResponseValue(HumanInputResponseKind.Text, PrivateValue, null, null, null, null),
+            PrivateExplanation));
+        var replayed = await runtime.RunTurnAsync(submission);
+        var actorClaim = await runtime.RunTurnAsync("/human-input submit request-cli rejected-claim response-claim {\"value\":{\"kind\":\"text\",\"text\":\"private-claim\"},\"actor\":\"user-owner\"}");
+        var canonical = await runtime.HumanInput.ReadAsync("request-cli");
+        var transcript = runtime.GetActiveConversationTranscript();
+
+        Assert.Equal(AgentRuntimeTurnStatus.CommandHandled, listed.Status);
+        Assert.Contains("/human-input help", help.Output, StringComparison.Ordinal);
+        Assert.Contains("request-cli", listed.Output, StringComparison.Ordinal);
+        Assert.Contains("Pending", inspected.Output, StringComparison.Ordinal);
+        Assert.Contains("Display-safe CLI prompt.", inspected.Output, StringComparison.Ordinal);
+        Assert.Contains("committed", committed.Output, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(HumanInputOperationStatus.Replayed, apiReplay.Status);
+        Assert.Contains("replayed", replayed.Output, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("invalid", actorClaim.Output, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(HumanInputRequestPostureReadStatus.Ready, canonical.Status);
+        Assert.True(canonical.Request!.IsAnswered);
+        Assert.DoesNotContain(PrivateValue, committed.Output, StringComparison.Ordinal);
+        Assert.DoesNotContain(PrivateExplanation, committed.Output, StringComparison.Ordinal);
+        Assert.DoesNotContain("private-claim", actorClaim.Output, StringComparison.Ordinal);
+        Assert.DoesNotContain(transcript, message => message.Content.Contains(PrivateValue, StringComparison.Ordinal));
+        Assert.DoesNotContain(transcript, message => message.Content.Contains(PrivateExplanation, StringComparison.Ordinal));
+        Assert.DoesNotContain(transcript, message => message.Content.Contains("private-claim", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Default_conversation_human_input_response_commands_cover_withdraw_select_and_terminal_fail_closed_posture()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var store = new HumanInputRequestStore(new WorkspacePaths(workspace.RootPath), new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath));
+        var withdrawn = CreateFreshHumanInputMutation(
+            workspace.RootPath,
+            "request-withdraw",
+            "version-withdraw",
+            "create-withdraw",
+            HumanInputRequestStoreTestData.HashA,
+            eligibleActor: WorkspaceActors.Cli,
+            eligibleRole: "cli-selector",
+            responsePolicyKind: HumanInputResponsePolicyKind.ManualSelection);
+        var selected = CreateFreshHumanInputMutation(
+            workspace.RootPath,
+            "request-select",
+            "version-select",
+            "create-select",
+            HumanInputRequestStoreTestData.HashB,
+            generation: 1,
+            eligibleActor: WorkspaceActors.Cli,
+            eligibleRole: "cli-selector",
+            responsePolicyKind: HumanInputResponsePolicyKind.ManualSelection);
+        var cancelled = CreateFreshHumanInputMutation(
+            workspace.RootPath,
+            "request-cancelled-cli",
+            "version-cancelled-cli",
+            "create-cancelled-cli",
+            HumanInputRequestStoreTestData.HashC,
+            generation: 2,
+            eligibleActor: WorkspaceActors.Cli,
+            eligibleRole: "cli-selector");
+        Assert.Equal(HumanInputRequestLifecycleStoreCommitStatus.Committed, (await store.CommitAsync(withdrawn)).Status);
+        Assert.Equal(HumanInputRequestLifecycleStoreCommitStatus.Committed, (await store.CommitAsync(selected)).Status);
+        Assert.Equal(HumanInputRequestLifecycleStoreCommitStatus.Committed, (await store.CommitAsync(cancelled)).Status);
+        var cancelledHead = Assert.IsType<HumanInputRequestLifecycleHead>(cancelled.PrimaryHeadToWrite);
+        var cancelledRequest = Assert.IsType<HumanInputRequest>(cancelled.RequestToAppend);
+        Assert.Equal(HumanInputRequestLifecycleStoreCommitStatus.Committed, (await store.CommitAsync(
+            CreateFreshTerminalHumanInputMutation(
+                HumanInputRequestLifecycleOperationKind.Cancel,
+                cancelledRequest,
+                cancelledHead,
+                3,
+                "cancel-cli",
+                HumanInputRequestStoreTestData.HashA))).Status);
+        var expired = CreateFreshHumanInputMutation(
+            workspace.RootPath,
+            "request-expired-cli",
+            "version-expired-cli",
+            "create-expired-cli",
+            HumanInputRequestStoreTestData.HashB,
+            generation: 4,
+            eligibleActor: WorkspaceActors.Cli,
+            eligibleRole: "cli-selector");
+        Assert.Equal(HumanInputRequestLifecycleStoreCommitStatus.Committed, (await store.CommitAsync(expired)).Status);
+        var expiredHead = Assert.IsType<HumanInputRequestLifecycleHead>(expired.PrimaryHeadToWrite);
+        var expiredRequest = Assert.IsType<HumanInputRequest>(expired.RequestToAppend);
+        Assert.Equal(HumanInputRequestLifecycleStoreCommitStatus.Committed, (await store.CommitAsync(
+            CreateFreshTerminalHumanInputMutation(
+                HumanInputRequestLifecycleOperationKind.Expire,
+                expiredRequest,
+                expiredHead,
+                5,
+                "expire-cli",
+                HumanInputRequestStoreTestData.HashB))).Status);
+        var superseded = CreateFreshHumanInputMutation(
+            workspace.RootPath,
+            "request-superseded-cli",
+            "version-superseded-cli",
+            "create-superseded-cli",
+            HumanInputRequestStoreTestData.HashC,
+            generation: 6,
+            eligibleActor: WorkspaceActors.Cli,
+            eligibleRole: "cli-selector");
+        Assert.Equal(HumanInputRequestLifecycleStoreCommitStatus.Committed, (await store.CommitAsync(superseded)).Status);
+        Assert.Equal(HumanInputRequestLifecycleStoreCommitStatus.Committed, (await store.CommitAsync(
+            HumanInputRequestStoreTestData.SupersedeMutation(
+                Assert.IsType<HumanInputRequest>(superseded.RequestToAppend),
+                Assert.IsType<HumanInputRequestLifecycleHead>(superseded.PrimaryHeadToWrite),
+                7,
+                "supersede-cli",
+                HumanInputRequestStoreTestData.HashC))).Status);
+
+        await using var runtime = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Cli);
+        var withdrawSubmit = await runtime.RunTurnAsync("/human-input submit request-withdraw submit-withdraw response-withdraw {\"value\":{\"kind\":\"text\",\"text\":\"private-withdraw\"}}");
+        var withdrew = await runtime.RunTurnAsync("/human-input withdraw request-withdraw withdraw-cli response-withdraw");
+        var selectSubmit = await runtime.RunTurnAsync("/human-input submit request-select submit-select response-select {\"value\":{\"kind\":\"text\",\"text\":\"private-select\"}}");
+        var selectedResponse = await runtime.RunTurnAsync("/human-input select request-select select-cli response-select");
+        var terminalInspection = await runtime.RunTurnAsync("/human-input inspect request-cancelled-cli");
+        var terminalSubmit = await runtime.RunTurnAsync("/human-input submit request-cancelled-cli submit-cancelled response-cancelled {\"value\":{\"kind\":\"text\",\"text\":\"private-terminal\"}}");
+        var terminalCatalog = await runtime.RunTurnAsync("/human-input list");
+        var withdrawnPosture = await runtime.HumanInput.ReadAsync("request-withdraw");
+        var selectedPosture = await runtime.HumanInput.ReadAsync("request-select");
+
+        Assert.Contains("committed", withdrawSubmit.Output, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("committed", withdrew.Output, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("committed", selectSubmit.Output, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("committed", selectedResponse.Output, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Cancelled", terminalInspection.Output, StringComparison.Ordinal);
+        Assert.Contains("Cancelled", terminalCatalog.Output, StringComparison.Ordinal);
+        Assert.Contains("Expired", terminalCatalog.Output, StringComparison.Ordinal);
+        Assert.Contains("Superseded", terminalCatalog.Output, StringComparison.Ordinal);
+        Assert.Contains("invalid", terminalSubmit.Output, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(1, withdrawnPosture.Request!.WithdrawnResponseCount);
+        Assert.True(selectedPosture.Request!.IsAnswered);
+        Assert.DoesNotContain("private-terminal", terminalSubmit.Output, StringComparison.Ordinal);
+    }
+
     private static async Task<AgentRuntimeGovernedLoopBackgroundStatus> WaitForBackgroundReadinessAsync(
         AgentRuntime runtime,
         AgentRuntimeGovernedLoopBackgroundReadiness readiness)
@@ -4054,7 +4224,10 @@ public sealed partial class AgentRuntimeFactoryTests
         string operationId,
         string requestHash,
         long generation = 0,
-        string prompt = "Private prompt one.")
+        string prompt = "Private prompt one.",
+        string eligibleActor = "user-one",
+        string eligibleRole = "role-one",
+        HumanInputResponsePolicyKind responsePolicyKind = HumanInputResponsePolicyKind.FirstValid)
     {
         var requestedAtUtc = DateTimeOffset.UtcNow.AddMinutes(-1).ToUniversalTime();
         var binding = new HumanInputRequestBinding(
@@ -4064,7 +4237,13 @@ public sealed partial class AgentRuntimeFactoryTests
             "node-one",
             "run-one",
             "checkpoint-one");
-        var request = HumanInputRequestStoreTestData.Request(requestId, requestVersionId, requestedAtUtc, binding, prompt: prompt);
+        var request = HumanInputRequestStoreTestData.Rehash(HumanInputRequestStoreTestData.Request(requestId, requestVersionId, requestedAtUtc, binding, prompt: prompt) with
+        {
+            EligibleRespondents = [new HumanInputEligibleRespondent(eligibleActor, eligibleRole, "route-one")],
+            ResponsePolicy = responsePolicyKind == HumanInputResponsePolicyKind.ManualSelection
+                ? new HumanInputResponsePolicy(responsePolicyKind, null, System.Collections.Immutable.ImmutableArray.Create(eligibleRole))
+                : new HumanInputResponsePolicy(responsePolicyKind, null, null)
+        });
         var head = HumanInputRequestStoreTestData.Head(
             request,
             1,

@@ -65,6 +65,7 @@ public sealed class AgentRuntime : IAsyncDisposable
     private readonly GovernedLoopScheduleAuthoringFacade _governedLoopScheduleAuthoring;
     private readonly IModelProfileCatalogFacade _modelProfiles;
     private readonly HumanInputRuntimeFacade _humanInput;
+    private readonly HumanInputConversationCommandAdapter _humanInputConversationCommands;
     private readonly DefaultConversationTurnReviewService _defaultConversationReviews;
     private readonly ITriggerWorkerCurrentEvidenceAuthorizer _triggerWorkerCurrentEvidenceAuthorizer;
     private readonly GovernedLoopBackgroundRuntimeHost _governedBackgroundRuntimeHost;
@@ -142,6 +143,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         _governedLoopScheduleAuthoring = governedLoopScheduleAuthoring;
         _modelProfiles = modelProfiles;
         _humanInput = humanInput;
+        _humanInputConversationCommands = new HumanInputConversationCommandAdapter(humanInput);
         _defaultConversationReviews = defaultConversationReviews;
         _triggerWorkerCurrentEvidenceAuthorizer = triggerWorkerCurrentEvidenceAuthorizer;
         _governedBackgroundRuntimeHost = governedBackgroundRuntimeHost;
@@ -239,6 +241,13 @@ public sealed class AgentRuntime : IAsyncDisposable
         if (reviewCommand is not null)
         {
             return reviewCommand;
+        }
+
+        var humanInputCommand = await _humanInputConversationCommands.TryHandleAsync(input, cancellationToken);
+        if (humanInputCommand is not null)
+        {
+            _commandService.ClearPendingInput();
+            return humanInputCommand;
         }
 
         var commandResult = await _commandService.TryHandleAsync(input, _conversationState, _state, cancellationToken);
