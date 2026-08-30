@@ -1715,6 +1715,7 @@ public sealed class CustomLoopFrontierStoreTests
         var evidence = state.Evidence.ToList();
         var receipts = state.OperationReceipts.ToList();
         var decisions = state.AcceptedDecisions.ToList();
+        var actions = state.DecisionActions.ToList();
         var lifecycleHistory = state.LifecycleHistory.ToList();
         var events = admitted.Events.ToList();
         var timestamp = admitted.UpdatedAtUtc;
@@ -1776,6 +1777,29 @@ public sealed class CustomLoopFrontierStoreTests
                 }
 
                 lifecycleHistory.Add(CreateDecisionLifecycle(requestReference, lifecycleHistory[^1], decision, timestamp));
+                if (decision.Kind is HumanReviewDecisionKind.Reject or HumanReviewDecisionKind.Cancel or HumanReviewDecisionKind.RequestInformation)
+                {
+                    var actionReservation = HumanReviewDecisionActionContractHash.ApplyReservation(new HumanReviewDecisionActionReservation(
+                        HumanReviewDecisionActionReservation.CurrentSchemaVersion,
+                        "action-reservation-" + operationNumber,
+                        requestReference,
+                        DecisionReference(decision),
+                        timestamp,
+                        HumanReviewContractHash.ApplyProvenance(new HumanReviewProvenance(HumanReviewProvenanceKind.Server, "human-review-decision-store", "action-reservation-" + operationNumber, timestamp, string.Empty)),
+                        string.Empty));
+                    var adapter = Assert.IsType<GovernedLoopSequentialAdapterBinding>(admitted.SequentialAdapterBinding);
+                    actions.Add(HumanReviewDecisionActionContractHash.ApplyState(new HumanReviewDecisionActionState(
+                        HumanReviewDecisionActionState.CurrentSchemaVersion,
+                        actionReservation,
+                        request.Binding.BindingHash,
+                        adapter.ExecutionBinding.ExecutionGeneration,
+                        admitted.LifecycleVersion + 1,
+                        null,
+                        ImmutableArray<HumanReviewDecisionActionClaim>.Empty,
+                        null,
+                        null,
+                        string.Empty)));
+                }
             }
             else if (scenario == HumanReviewDecisionScenario.Expired && terminal is null && lifecycleHistory.All(item => item.Status != HumanReviewLifecycleStatus.Expired))
             {
@@ -1830,6 +1854,7 @@ public sealed class CustomLoopFrontierStoreTests
                 AcceptedDecisions = decisions.ToImmutableArray(),
                 AcceptedTerminalDecision = terminal,
                 ContinuationReservation = reservation,
+                DecisionActions = actions.ToImmutableArray(),
                 Evidence = evidence.ToImmutableArray(),
             },
             Events = events.ToArray(),
