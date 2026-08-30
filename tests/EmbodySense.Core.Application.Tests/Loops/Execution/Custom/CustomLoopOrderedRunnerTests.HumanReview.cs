@@ -255,7 +255,11 @@ public sealed partial class CustomLoopOrderedRunnerTests
             new HumanReviewOrderedReleaseTestContextResolver(new GovernedLoopWaitOrderedContext(context.Anchor, context.Plan, context.Artifact)),
             reentry,
             new FixedTimeProvider(claimAtUtc.AddTicks(1)),
-            new RecordingAuthoritySource(HumanReviewContinuationAuthorityReadStatus.Current, HumanReviewContinuationAuthorityReadStatus.Current));
+            new RecordingAuthoritySource(
+                HumanReviewContinuationAuthorityReadStatus.Current,
+                HumanReviewContinuationAuthorityReadStatus.Current,
+                HumanReviewContinuationAuthorityReadStatus.Current,
+                HumanReviewContinuationAuthorityReadStatus.Current));
         var bypassReceipt = releaseReceipt with { ReleaseOperationId = "human-review-release-bypass" };
         var bypass = await release.ReleaseAsync(action with { ReleaseReceipt = bypassReceipt }, completionIntent with { ReleaseReceipt = bypassReceipt });
         Assert.Equal(HumanReviewContinuationReleaseStatus.Invalid, bypass.Status);
@@ -344,6 +348,50 @@ public sealed partial class CustomLoopOrderedRunnerTests
         Assert.True(CustomLoopRunValidator.Validate(store.Current).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(store.Current).Errors));
     }
 
+    [Theory]
+    [InlineData(HumanReviewDecisionKind.RequestInformation)]
+    [InlineData(HumanReviewDecisionKind.Reject)]
+    [InlineData(HumanReviewDecisionKind.Cancel)]
+    public async Task Nonapproval_release_authority_drift_in_the_final_window_leaves_the_run_unchanged(HumanReviewDecisionKind kind)
+    {
+        var context = await HumanReviewContextAsync();
+        var store = new FakeRunStore(context.Run);
+        var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+        var initialRuntime = new GovernedLoopSequentialOrderedRuntimeAdapter(
+            Runner(store, new QueueExecutor(), new RecordingPublisher(), humanReviewAdmissionService: new HumanReviewAdmissionService(store)),
+            evidence,
+            evidence);
+        var parked = await initialRuntime.RunAsync(new GovernedLoopSequentialOrderedRunRequest(
+            GovernedLoopSequentialOrderedRunRequest.CurrentSchemaVersion,
+            context.Anchor,
+            context.Plan,
+            context.Artifact,
+            AuditSchema.Actors.Web));
+        Assert.Equal(CustomLoopOrderedRunStatus.Paused, parked.Status);
+
+        var intent = await PrepareClaimedDecisionActionAsync(store, kind);
+        var before = store.Current;
+        var beforeLifecycle = before.LifecycleVersion;
+        var beforeEvents = before.Events;
+        var authority = new RecordingAuthoritySource(HumanReviewContinuationAuthorityReadStatus.Current, HumanReviewContinuationAuthorityReadStatus.Unavailable);
+        var release = new HumanReviewOrderedReleaseService(
+            store,
+            new HumanReviewOrderedReleaseTestContextResolver(new GovernedLoopWaitOrderedContext(context.Anchor, context.Plan, context.Artifact)),
+            new HumanReviewOrderedReleaseTestRuntime(),
+            new FixedTimeProvider(store.Current.UpdatedAtUtc.AddTicks(1)),
+            authority);
+
+        var result = await release.ReleaseAsync(intent);
+
+        Assert.Equal(HumanReviewDecisionActionReleaseStatus.Unavailable, result.Status);
+        Assert.Equal(2, authority.ReadCount);
+        Assert.Equal(beforeLifecycle, store.Current.LifecycleVersion);
+        Assert.Equal(beforeEvents, store.Current.Events);
+        Assert.Equal(before.Status, store.Current.Status);
+        Assert.Equal(before.Frontier, store.Current.Frontier);
+        Assert.Null(store.Current.HumanReview?.DecisionActions.Single(action => action.Reservation.ReservationHash == intent.Reservation.ReservationHash).Completion);
+    }
+
     [Fact]
     public async Task Routed_reject_release_returns_unavailable_until_its_durable_ordered_handoff_is_observed_and_replay_retries_the_same_operation()
     {
@@ -393,6 +441,134 @@ public sealed partial class CustomLoopOrderedRunnerTests
         Assert.NotEqual(intent.ActionOperationId, store.Current.Events[^1].EventId);
         Assert.Single(store.Current.Events, item => item.Kind == CustomLoopRunEventKind.NodeAttemptFailed);
         Assert.True(CustomLoopRunValidator.Validate(store.Current).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(store.Current).Errors));
+    }
+
+    [Fact]
+    public async Task Pre_dispatch_effect_certainty_drift_in_the_final_window_leaves_the_run_unchanged_and_never_actuates()
+    {
+        var context = await SequentialContextAsync(
+            Run(SequentialDefinition()),
+            artifactFactory: role => GovernedLoopSequentialApplicationTestFixture.WorkspaceActionArtifact(owningRole: role));
+        var store = new FakeRunStore(context.Run);
+        var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+        var actuator = new PreDispatchApprovalWorkspaceActionExecutor();
+        var runtime = new GovernedLoopSequentialOrderedRuntimeAdapter(
+            Runner(store, new QueueExecutor(Result("bounded provider output")), workspaceActionExecutor: actuator, humanReviewAdmissionService: new HumanReviewAdmissionService(store)),
+            evidence,
+            evidence);
+
+        var parked = await runtime.RunAsync(new GovernedLoopSequentialOrderedRunRequest(
+            GovernedLoopSequentialOrderedRunRequest.CurrentSchemaVersion,
+            context.Anchor,
+            context.Plan,
+            context.Artifact,
+            AuditSchema.Actors.Web));
+        Assert.Equal(CustomLoopOrderedRunStatus.Paused, parked.Status);
+        var preparedEffect = Assert.IsType<GovernedLoopEffectAttempt>(actuator.PreparedEffectAttempt);
+        var claimed = await PrepareClaimedPreDispatchEffectApprovalAsync(context, store);
+        var review = Assert.IsType<HumanReviewRunState>(store.Current.HumanReview);
+        var snapshot = HumanReviewEffectReleaseContract.Create(review.Request.Binding, preparedEffect, preparedEffect.Payload.UpdatedAtUtc);
+        var receipt = new HumanReviewContinuationReleaseReceiptIntent(
+            Assert.IsType<string>(HumanReviewContinuationReleaseOperationId.Create(claimed.Request, claimed.Wake, claimed.Reservation, claimed.ExpectedGeneration, HumanReviewContinuationReleaseKind.PreDispatchEffect)),
+            claimed.Request,
+            claimed.Wake,
+            claimed.Claim,
+            claimed.Reservation,
+            claimed.ExpectedGeneration,
+            HumanReviewContinuationReleaseKind.PreDispatchEffect,
+            snapshot.SnapshotHash);
+        var action = new HumanReviewContinuationActionIntent(
+            HumanReviewContinuationAction.ReleaseEffect,
+            store.Current.Id,
+            store.Current.LifecycleVersion,
+            claimed.Request,
+            claimed.Decision,
+            claimed.Wake,
+            claimed.Claim,
+            claimed.Reservation,
+            claimed.ExpectedGeneration,
+            new GovernedLoopEffectCertaintySnapshotQuery(
+                HumanReviewEffectReleaseContract.CreateIdentity(review.Request.Binding, preparedEffect),
+                HumanReviewEffectReleaseContract.CreatePreparation(review.Request.Binding, preparedEffect)),
+            receipt);
+        var completion = new HumanReviewContinuationCompletionIntent(store.Current.Id, store.Current.LifecycleVersion, claimed.Request, claimed.Wake, claimed.Claim, claimed.Reservation, claimed.ExpectedGeneration, receipt);
+        var activation = Assert.Single(store.Current.Frontier!.Payload.Nodes, node => node.Status == GovernedLoopNodeExecutionStatus.ReviewBlocked);
+        var node = Assert.Single(context.Plan.Nodes, candidate => string.Equals(candidate.NodeId, activation.NodeId, StringComparison.Ordinal));
+        var transition = GovernedLoopSequentialFrontierMachine.ReleaseReviewBlockedRecoverableAction(store.Current.Frontier, store.Current.SequentialAdapterBinding, context.Plan, node, activation, activation.Attempt!.Value, activation.AttemptOperationId, claimed.ClaimedAtUtc.AddTicks(1));
+        Assert.Equal(GovernedLoopSequentialFrontierTransitionStatus.Applied, transition.Status);
+        var authority = new RecordingAuthoritySource(HumanReviewContinuationAuthorityReadStatus.Current, HumanReviewContinuationAuthorityReadStatus.Current);
+        var effectEvidence = new RecordingEffectEvidenceSource(
+            new HumanReviewCurrentEffectAttemptEvidenceReadResult(HumanReviewCurrentEffectAttemptEvidenceReadStatus.Current, new HumanReviewCurrentEffectAttemptEvidence(HumanReviewEffectReleaseContract.CreateIdentity(review.Request.Binding, preparedEffect), HumanReviewEffectReleaseContract.CreatePreparation(review.Request.Binding, preparedEffect))),
+            new HumanReviewCurrentEffectAttemptEvidenceReadResult(HumanReviewCurrentEffectAttemptEvidenceReadStatus.Current, new HumanReviewCurrentEffectAttemptEvidence(HumanReviewEffectReleaseContract.CreateIdentity(review.Request.Binding, preparedEffect), HumanReviewEffectReleaseContract.CreatePreparation(review.Request.Binding, preparedEffect))));
+        var effectCertainty = new RecordingEffectCertaintySource(
+            new GovernedLoopEffectCertaintySnapshotResult(GovernedLoopEffectCertaintySnapshotStatus.Current, snapshot),
+            new GovernedLoopEffectCertaintySnapshotResult(GovernedLoopEffectCertaintySnapshotStatus.Unavailable));
+        var release = new HumanReviewOrderedReleaseService(
+            store,
+            new HumanReviewOrderedReleaseTestContextResolver(new GovernedLoopWaitOrderedContext(context.Anchor, context.Plan, context.Artifact)),
+            runtime,
+            new FixedTimeProvider(claimed.ClaimedAtUtc.AddTicks(1)),
+            authority,
+            effectEvidence,
+            effectCertainty);
+        var before = store.Current;
+
+        var result = await release.ReleaseAsync(action, completion);
+
+        Assert.Equal(HumanReviewContinuationReleaseStatus.Unavailable, result.Status);
+        Assert.Equal(2, authority.ReadCount);
+        Assert.Equal(2, effectEvidence.ReadCount);
+        Assert.Equal(2, effectCertainty.ReadCount);
+        Assert.Equal(before.LifecycleVersion, store.Current.LifecycleVersion);
+        Assert.Equal(before.Events, store.Current.Events);
+        Assert.Equal(before.Frontier, store.Current.Frontier);
+        Assert.Single(actuator.Requests);
+        Assert.Equal(0, actuator.ActuationCount);
+    }
+
+    [Theory]
+    [InlineData(HumanReviewDecisionKind.RequestInformation)]
+    [InlineData(HumanReviewDecisionKind.Reject)]
+    [InlineData(HumanReviewDecisionKind.Cancel)]
+    public async Task Pre_dispatch_nonapproval_final_authority_drift_leaves_the_run_unchanged(HumanReviewDecisionKind kind)
+    {
+        var context = await SequentialContextAsync(
+            Run(SequentialDefinition()),
+            artifactFactory: role => GovernedLoopSequentialApplicationTestFixture.WorkspaceActionArtifact(owningRole: role));
+        var store = new FakeRunStore(context.Run);
+        var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+        var actuator = new PreDispatchApprovalWorkspaceActionExecutor();
+        var runtime = new GovernedLoopSequentialOrderedRuntimeAdapter(
+            Runner(store, new QueueExecutor(Result("bounded provider output")), workspaceActionExecutor: actuator, humanReviewAdmissionService: new HumanReviewAdmissionService(store)),
+            evidence,
+            evidence);
+        var parked = await runtime.RunAsync(new GovernedLoopSequentialOrderedRunRequest(
+            GovernedLoopSequentialOrderedRunRequest.CurrentSchemaVersion,
+            context.Anchor,
+            context.Plan,
+            context.Artifact,
+            AuditSchema.Actors.Web));
+        Assert.Equal(CustomLoopOrderedRunStatus.Paused, parked.Status);
+        Assert.Equal(HumanReviewPurpose.PreDispatchEffect, store.Current.HumanReview?.Request.Purpose);
+        var intent = await PrepareClaimedDecisionActionAsync(store, kind);
+        var before = store.Current;
+        var authority = new RecordingAuthoritySource(HumanReviewContinuationAuthorityReadStatus.Current, HumanReviewContinuationAuthorityReadStatus.Unavailable);
+        var release = new HumanReviewOrderedReleaseService(
+            store,
+            new HumanReviewOrderedReleaseTestContextResolver(new GovernedLoopWaitOrderedContext(context.Anchor, context.Plan, context.Artifact)),
+            new HumanReviewOrderedReleaseTestRuntime(),
+            new FixedTimeProvider(store.Current.UpdatedAtUtc.AddTicks(1)),
+            authority);
+
+        var result = await release.ReleaseAsync(intent);
+
+        Assert.Equal(kind == HumanReviewDecisionKind.Reject ? HumanReviewDecisionActionReleaseStatus.Invalid : HumanReviewDecisionActionReleaseStatus.Unavailable, result.Status);
+        Assert.Equal(kind == HumanReviewDecisionKind.Reject ? 1 : 2, authority.ReadCount);
+        Assert.Equal(before.LifecycleVersion, store.Current.LifecycleVersion);
+        Assert.Equal(before.Events, store.Current.Events);
+        Assert.Equal(before.Frontier, store.Current.Frontier);
+        Assert.Equal(before.Status, store.Current.Status);
+        Assert.Equal(0, actuator.ActuationCount);
     }
 
     [Fact]
@@ -509,10 +685,11 @@ public sealed partial class CustomLoopOrderedRunnerTests
     private static async Task<HumanReviewDecisionActionIntent> PrepareClaimedDecisionActionAsync(FakeRunStore store, HumanReviewDecisionKind kind)
     {
         var approvedAtUtc = store.Current.UpdatedAtUtc.AddMinutes(1);
+        var isPreDispatchEffect = store.Current.HumanReview?.Request.Purpose == HumanReviewPurpose.PreDispatchEffect;
         var authorizer = new HumanReviewDecisionTestAuthorizer
         {
-            ReviewerRoleId = "governed-reviewer",
-            ScopeIds = ["review-scope-one"],
+            ReviewerRoleId = isPreDispatchEffect ? GovernedLoopHumanReviewNodeCatalogContract.LocalReviewerRoleId : "governed-reviewer",
+            ScopeIds = [isPreDispatchEffect ? "pre-dispatch-effect" : "review-scope-one"],
         };
         var decision = await new HumanReviewDecisionService(store, authorizer, new HumanReviewDecisionTestClock(approvedAtUtc)).DecideAsync(
             new HumanReviewDecisionCommand(store.Current.Id, store.Current.LifecycleVersion, "decision-" + kind.ToString().ToLowerInvariant(), kind, kind == HumanReviewDecisionKind.RequestInformation ? "Need a redacted clarification." : null));

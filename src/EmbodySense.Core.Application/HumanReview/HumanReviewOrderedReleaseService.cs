@@ -85,10 +85,6 @@ public sealed class HumanReviewOrderedReleaseService : IHumanReviewContinuationR
         {
             if (!HasExactPreDispatchEffectNode(run, currentReview.Request, context, out var effectNode, out var effectActivation)) return Continuation(HumanReviewContinuationReleaseStatus.Invalid);
             if (!await HasCurrentAuthorityAsync(currentReview.Request, run.SequentialAdapterBinding!, context.Artifact, cancellationToken).ConfigureAwait(false)) return Continuation(HumanReviewContinuationReleaseStatus.Unavailable);
-            // The first certainty read above rejects stale input before context work. Re-read the same volatile effect
-            // evidence as the final operation before the whole-run compare-exchange so no graph or authority work can
-            // stretch a conclusively-not-dispatched proof across the durable release boundary.
-            if (!await HasExactNotStartedEffectAsync(action, currentReview.Request, cancellationToken).ConfigureAwait(false)) return Continuation(HumanReviewContinuationReleaseStatus.Invalid);
             var latestEffectRun = await ReadAsync(run.Id, cancellationToken).ConfigureAwait(false);
             if (latestEffectRun is null) return Continuation(HumanReviewContinuationReleaseStatus.Unavailable);
             if (!CustomLoopRunValidator.HasSameDurableVersion(run, latestEffectRun))
@@ -146,9 +142,8 @@ public sealed class HumanReviewOrderedReleaseService : IHumanReviewContinuationR
             Events = [.. run.Events, .. pruning.Value.Events, terminalEvent, LifecycleEvent(run, pruning.Value.Events.Count + 1, action.ReleaseReceipt.ReleaseOperationId, now, "The exact Human Review approval is durable before ordered continuation.")],
         };
         if (!CustomLoopRunValidator.ValidateUpdate(run, candidate).IsValid) return Continuation(HumanReviewContinuationReleaseStatus.Invalid);
-        if (!await HasCurrentAuthorityAsync(currentReview.Request, run.SequentialAdapterBinding!, context.Artifact, cancellationToken).ConfigureAwait(false)) return Continuation(HumanReviewContinuationReleaseStatus.Unavailable);
 
-        var persisted = await PersistAsync(run, candidate, currentReview.Request.Timing.ExpiresAtUtc, state.Wake.ExpiresAtUtc, activeClaim.ClaimedAtUtc, activeClaim.LeaseExpiresAtUtc, cancellationToken).ConfigureAwait(false);
+        var persisted = await PersistAsync(run, candidate, currentReview.Request, context.Artifact, null, currentReview.Request.Timing.ExpiresAtUtc, state.Wake.ExpiresAtUtc, activeClaim.ClaimedAtUtc, activeClaim.LeaseExpiresAtUtc, cancellationToken).ConfigureAwait(false);
         if (persisted.Run is null) return Continuation(HumanReviewContinuationReleaseStatus.Unavailable);
         if (!TryContinuationReplay(persisted.Run, action, out var retainedCompletion) || retainedCompletion is null) return Continuation(HumanReviewContinuationReleaseStatus.Invalid);
         return await CompleteContinuationHandoffAsync(persisted.Run, context, action.ReleaseReceipt.ReleaseOperationId, retainedCompletion, cancellationToken).ConfigureAwait(false);
@@ -197,9 +192,8 @@ public sealed class HumanReviewOrderedReleaseService : IHumanReviewContinuationR
             Events = [.. run.Events, LifecycleEvent(run, 0, action.ReleaseReceipt.ReleaseOperationId, now, "The exact pre-dispatch Human Review release is durable before the original recoverable Action re-enters ordered execution.")],
         };
         if (!CustomLoopRunValidator.ValidateUpdate(run, candidate).IsValid) return Continuation(HumanReviewContinuationReleaseStatus.Invalid);
-        if (!await HasCurrentAuthorityAsync(review.Request, run.SequentialAdapterBinding!, context.Artifact, cancellationToken).ConfigureAwait(false)) return Continuation(HumanReviewContinuationReleaseStatus.Unavailable);
 
-        var persisted = await PersistAsync(run, candidate, review.Request.Timing.ExpiresAtUtc, state.Wake.ExpiresAtUtc, claim.ClaimedAtUtc, claim.LeaseExpiresAtUtc, cancellationToken).ConfigureAwait(false);
+        var persisted = await PersistAsync(run, candidate, review.Request, context.Artifact, action, review.Request.Timing.ExpiresAtUtc, state.Wake.ExpiresAtUtc, claim.ClaimedAtUtc, claim.LeaseExpiresAtUtc, cancellationToken).ConfigureAwait(false);
         if (persisted.Run is null) return Continuation(HumanReviewContinuationReleaseStatus.Unavailable);
         if (!TryContinuationReplay(persisted.Run, action, out var retainedCompletion) || retainedCompletion is null) return Continuation(HumanReviewContinuationReleaseStatus.Invalid);
         return await CompleteContinuationHandoffAsync(persisted.Run, context, action.ReleaseReceipt.ReleaseOperationId, retainedCompletion, cancellationToken).ConfigureAwait(false);
@@ -304,9 +298,8 @@ public sealed class HumanReviewOrderedReleaseService : IHumanReviewContinuationR
     private async Task<HumanReviewDecisionActionReleaseResult> PersistActionAsync(CustomLoopRunRecord current, CustomLoopRunRecord candidate, HumanReviewDecisionActionIntent intent, GovernedLoopWaitOrderedContext context, CancellationToken cancellationToken)
     {
         if (!CustomLoopRunValidator.ValidateUpdate(current, candidate).IsValid) return Action(HumanReviewDecisionActionReleaseStatus.Invalid);
-        if (!await HasCurrentAuthorityAsync(candidate.HumanReview!.Request, candidate.SequentialAdapterBinding!, context.Artifact, cancellationToken).ConfigureAwait(false)) return Action(HumanReviewDecisionActionReleaseStatus.Unavailable);
         if (!TryGetDecisionMutationWindow(candidate, intent, out var requestExpiresAtUtc, out var wakeExpiresAtUtc, out var claimedAtUtc, out var leaseExpiresAtUtc)) return Action(HumanReviewDecisionActionReleaseStatus.Unavailable);
-        var persisted = await PersistAsync(current, candidate, requestExpiresAtUtc, wakeExpiresAtUtc, claimedAtUtc, leaseExpiresAtUtc, cancellationToken).ConfigureAwait(false);
+        var persisted = await PersistAsync(current, candidate, candidate.HumanReview!.Request, context.Artifact, null, requestExpiresAtUtc, wakeExpiresAtUtc, claimedAtUtc, leaseExpiresAtUtc, cancellationToken).ConfigureAwait(false);
         return persisted.Run is null ? Action(HumanReviewDecisionActionReleaseStatus.Unavailable) : TryDecisionReplay(persisted.Run, intent, out var completion) ? Action(HumanReviewDecisionActionReleaseStatus.Completed, completion) : Action(HumanReviewDecisionActionReleaseStatus.Invalid);
     }
 
@@ -319,9 +312,8 @@ public sealed class HumanReviewOrderedReleaseService : IHumanReviewContinuationR
         CancellationToken cancellationToken)
     {
         if (!CustomLoopRunValidator.ValidateUpdate(current, candidate).IsValid) return Action(HumanReviewDecisionActionReleaseStatus.Invalid);
-        if (!await HasCurrentAuthorityAsync(candidate.HumanReview!.Request, candidate.SequentialAdapterBinding!, context.Artifact, cancellationToken).ConfigureAwait(false)) return Action(HumanReviewDecisionActionReleaseStatus.Unavailable);
         if (!TryGetDecisionMutationWindow(candidate, intent, out var requestExpiresAtUtc, out var wakeExpiresAtUtc, out var claimedAtUtc, out var leaseExpiresAtUtc)) return Action(HumanReviewDecisionActionReleaseStatus.Unavailable);
-        var persisted = await PersistAsync(current, candidate, requestExpiresAtUtc, wakeExpiresAtUtc, claimedAtUtc, leaseExpiresAtUtc, cancellationToken).ConfigureAwait(false);
+        var persisted = await PersistAsync(current, candidate, candidate.HumanReview!.Request, context.Artifact, null, requestExpiresAtUtc, wakeExpiresAtUtc, claimedAtUtc, leaseExpiresAtUtc, cancellationToken).ConfigureAwait(false);
         if (persisted.Run is null) return Action(HumanReviewDecisionActionReleaseStatus.Unavailable);
         if (!TryDecisionReplay(persisted.Run, intent, out var completion)) return Action(HumanReviewDecisionActionReleaseStatus.Invalid);
         return reenterFailureRoute
@@ -370,6 +362,9 @@ public sealed class HumanReviewOrderedReleaseService : IHumanReviewContinuationR
     private async Task<(CustomLoopRunRecord? Run, bool Committed)> PersistAsync(
         CustomLoopRunRecord current,
         CustomLoopRunRecord candidate,
+        HumanReviewRequest authorityRequest,
+        GovernedLoopGraphRevisionArtifact artifact,
+        HumanReviewContinuationActionIntent? effectAction,
         DateTimeOffset requestExpiresAtUtc,
         DateTimeOffset wakeExpiresAtUtc,
         DateTimeOffset claimedAtUtc,
@@ -384,6 +379,12 @@ public sealed class HumanReviewOrderedReleaseService : IHumanReviewContinuationR
             if (!TryNow(latest.UpdatedAtUtc, claimedAtUtc, leaseExpiresAtUtc, out var now)
                 || now >= wakeExpiresAtUtc
                 || now >= requestExpiresAtUtc) return (null, false);
+            if (latest.SequentialAdapterBinding is not { } binding
+                || !await HasCurrentAuthorityAsync(authorityRequest, binding, artifact, cancellationToken).ConfigureAwait(false)) return (null, false);
+            // Authority is the final volatile read for ordinary decisions. For a pre-dispatch effect, the exact
+            // not-started evidence is read last so neither proof can span the compare-exchange boundary.
+            if (effectAction is not null
+                && !await HasExactNotStartedEffectAsync(effectAction, authorityRequest, cancellationToken).ConfigureAwait(false)) return (null, false);
             var persisted = await _runs.UpdateAsync(candidate, current.LifecycleVersion, cancellationToken).ConfigureAwait(false);
             if (persisted.Status == CustomLoopRunStoreStatus.Updated && persisted.Run is not null && CustomLoopRunValidator.HasSameDurableVersion(candidate, persisted.Run)) return (persisted.Run, true);
         }

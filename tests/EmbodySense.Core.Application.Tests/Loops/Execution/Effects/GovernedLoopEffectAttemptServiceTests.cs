@@ -6,6 +6,8 @@ using EmbodySense.Core.Application.Loops.Execution.Authority;
 using EmbodySense.Core.Application.Loops.Execution.Authority.Models;
 using EmbodySense.Core.Application.Loops.Execution.Effects;
 using EmbodySense.Core.Application.Loops.Execution.Effects.Models;
+using EmbodySense.Core.Application.HumanReview.Models;
+using EmbodySense.Core.Application.Tests.HumanReview;
 using EmbodySense.Core.Common.Authority;
 using EmbodySense.Core.Common.Authority.Grants.Models;
 using EmbodySense.Core.Common.Authority.Models;
@@ -17,6 +19,8 @@ using EmbodySense.Core.Common.Loops.Execution.Authority.Models;
 using EmbodySense.Core.Common.Loops.Execution.Effects;
 using EmbodySense.Core.Common.Loops.Execution.Effects.Models;
 using EmbodySense.Core.Common.Loops.Execution.Models;
+using EmbodySense.Core.Common.HumanReview;
+using EmbodySense.Core.Common.HumanReview.Models;
 
 namespace EmbodySense.Core.Application.Tests.Loops.Execution.Effects;
 
@@ -233,26 +237,106 @@ public sealed class GovernedLoopEffectAttemptServiceTests
     }
 
     [Fact]
-    public async Task Canonical_effect_attempt_service_replays_one_pre_dispatch_human_review_intent_without_dispatch()
+    public async Task Canonical_effect_attempt_service_releases_one_pre_dispatch_human_review_intent_and_replays_without_redispatch()
     {
         var fixture = GovernedLoopEffectAttemptTestFixture.Create(unattended: false);
         var store = new InMemoryEffectAttemptStore();
         var operation = new StubOperation(fixture.Descriptor, Preparation(fixture));
+        operation.Execute = async (_, boundary, token) =>
+        {
+            var outcome = await boundary.CrossAsync(_ => Task.FromResult(new GovernedActuatorExternalOutcome(GovernedLoopEffectOutcome.Succeeded, "outcome-review", "after-review")), token);
+            return new GovernedActuatorAdapterResult(GovernedActuatorAdapterStatus.OutcomeObserved, outcome);
+        };
+        var authority = new StubAuthorityBoundary();
         var service = new GovernedLoopEffectAttemptService(
             new StubCatalog(fixture, operation),
             store,
-            new StubAuthorityBoundary(),
+            authority,
             new FixedTimeProvider(GovernedLoopEffectAttemptTestFixture.Now.AddMinutes(1)));
 
         var first = await service.ExecuteAsync(fixture.Request);
-        var replay = await service.ExecuteAsync(fixture.Request);
+        var prepared = Assert.IsType<GovernedLoopEffectAttempt>(first.Attempt);
+        var release = await PreDispatchReleaseAsync(fixture, prepared);
+        var releasedRequest = fixture.Request with { HumanReviewRelease = release };
+        var released = await service.ExecuteAsync(releasedRequest);
+        var replay = await service.ExecuteAsync(releasedRequest);
 
         Assert.Equal(GovernedLoopEffectAttemptExecutionStatus.ApprovalRequired, first.Status);
-        Assert.Equal(GovernedLoopEffectAttemptExecutionStatus.ApprovalRequired, replay.Status);
-        Assert.Equal(GovernedLoopEffectPhase.IntentPrepared, store.Current?.Payload.Phase);
+        Assert.True(released.Status == GovernedLoopEffectAttemptExecutionStatus.Committed, released.Detail);
+        Assert.Equal(GovernedLoopEffectAttemptExecutionStatus.Committed, released.Status);
+        Assert.Equal(GovernedLoopEffectAttemptExecutionStatus.Replayed, replay.Status);
+        Assert.Equal(GovernedLoopEffectPhase.Committed, store.Current?.Payload.Phase);
         Assert.Equal(1, store.BeginCalls);
-        Assert.Equal(0, store.ExchangeCalls);
-        Assert.Equal(0, operation.ExecuteCalls);
+        Assert.Equal(1, operation.ExecuteCalls);
+        Assert.Equal(1, authority.Calls);
+    }
+
+    private static async Task<HumanReviewPreDispatchEffectRelease> PreDispatchReleaseAsync(GovernedLoopEffectAttemptTestFixture fixture, GovernedLoopEffectAttempt prepared)
+    {
+        var template = (await HumanReviewDecisionTestData.CreateAsync()).Request;
+        var execution = fixture.Request.ExecutionBinding;
+        var baseBinding = HumanReviewContractHash.ApplyBinding(new HumanReviewBinding(
+            1,
+            fixture.Request.AdmissionReceipt.Intent.WorkspaceId,
+            execution.RunId,
+            execution.Revision.GraphId,
+            execution.Revision.RevisionId,
+            execution.Revision.ExecutableHash,
+            fixture.Request.NodeId,
+            0,
+            null,
+            fixture.Request.NodeAttempt,
+            "frontier-effect-one",
+            1,
+            GovernedLoopEffectAttemptTestFixture.Hash('1'),
+            GovernedLoopEffectAttemptTestFixture.Hash('2'),
+            GovernedLoopEffectAttemptTestFixture.Hash('3'),
+            GovernedLoopEffectAttemptTestFixture.Hash('4'),
+            GovernedLoopEffectAttemptTestFixture.Hash('5'),
+            prepared.TargetFingerprint,
+            prepared.PreconditionEvidenceHash!,
+            prepared.InputFingerprint,
+            null,
+            string.Empty));
+        var preparation = HumanReviewEffectReleaseContract.CreatePreparation(baseBinding, prepared);
+        var reviewed = HumanReviewContractHash.ApplyEffectAttempt(new HumanReviewEffectAttemptBinding(
+            prepared.Payload.EffectId,
+            prepared.Payload.OperationId,
+            prepared.Payload.EffectGeneration,
+            prepared.Payload.IntentHash,
+            preparation.PreparationHash,
+            HumanReviewEffectDispatchCertainty.NotDispatched,
+            string.Empty));
+        var binding = HumanReviewContractHash.ApplyBinding(baseBinding with { EffectAttempt = reviewed, BindingHash = string.Empty });
+        var scope = HumanReviewContractHash.ApplyApprovalScope(new HumanReviewApprovalScope(HumanReviewApprovalScopeKind.PreDispatchEffect, binding.BindingHash, prepared.Payload.EffectId, string.Empty));
+        var request = HumanReviewContractHash.ApplyRequest(template with
+        {
+            RequestId = "effect-review-request-one",
+            RequestOperationId = "effect-review-operation-one",
+            Binding = binding,
+            Purpose = HumanReviewPurpose.PreDispatchEffect,
+            ApprovalScope = scope,
+            RequestHash = string.Empty,
+        });
+        var snapshot = HumanReviewEffectReleaseContract.Create(binding, prepared, prepared.Payload.UpdatedAtUtc);
+        var wake = new HumanReviewContinuationWakeReference("wake-effect-one", GovernedLoopEffectAttemptTestFixture.Hash('6'));
+        var claim = new HumanReviewContinuationClaimReference("claim-effect-one", GovernedLoopEffectAttemptTestFixture.Hash('7'));
+        var reservation = new HumanReviewContinuationReservationReference("reservation-effect-one", GovernedLoopEffectAttemptTestFixture.Hash('8'));
+        var receipt = HumanReviewContinuationContractHash.ApplyReleaseReceipt(new HumanReviewContinuationReleaseReceipt(
+            1,
+            "release-effect-one",
+            wake,
+            claim,
+            reservation,
+            1,
+            HumanReviewContinuationReleaseKind.PreDispatchEffect,
+            HumanReviewContinuationReleaseDisposition.Released,
+            GovernedLoopEffectAttemptTestFixture.Hash('9'),
+            GovernedLoopEffectAttemptTestFixture.Hash('a'),
+            snapshot.SnapshotHash,
+            string.Empty));
+        Assert.True(HumanReviewContractValidator.ValidateRequest(request).IsValid, HumanReviewContractValidator.ValidateRequest(request).ToString());
+        return new HumanReviewPreDispatchEffectRelease(request, receipt);
     }
 
     [Theory]
