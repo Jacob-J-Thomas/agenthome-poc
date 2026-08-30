@@ -6,6 +6,7 @@ import {
 } from "./operational-posture.js";
 import { projectFrontier } from "./frontier-projection.js";
 import { createGovernedGraphWorkspace } from "./governed-graph-workspace.js";
+import { createGovernedScheduleAuthoring } from "./governed-schedule-authoring.js";
 
 let catalog = null;
 let currentDefinition = null;
@@ -241,6 +242,15 @@ const governedGraphWorkspace = createGovernedGraphWorkspace({
   runtimeCatalog: () => catalog,
   invokePublishedGraph: invokePublishedGovernedGraph,
   retryWorkspaceHydration: refreshWorkspace,
+});
+const governedScheduleAuthoring = createGovernedScheduleAuthoring({
+  document,
+  requestJson,
+  operationId: (prefix) => `${prefix}-${newOperationId()}`,
+  selectedGraph: () => governedGraphWorkspace.scheduleSelector(),
+  refreshed: async () => {
+    await loadOperationalPosture({ silent: true });
+  },
 });
 
 setWorkspaceAuthoringHydrated(false);
@@ -1688,8 +1698,10 @@ function setWorkspaceAuthoringHydrated(hydrated) {
   if (!workspaceAuthoringHydrated) {
     workspaceAuthoringHydrationGeneration++;
     governedGraphWorkspace.markHydrationStale();
+    governedScheduleAuthoring.clear();
   }
   governedGraphWorkspace.setInteractive(workspaceAuthoringHydrated);
+  governedScheduleAuthoring.setInteractive(workspaceAuthoringHydrated);
   renderTabs();
   return workspaceAuthoringHydrationGeneration;
 }
@@ -1703,6 +1715,9 @@ function ownsWorkspaceAuthoringHydration(hydrationGeneration, signal) {
 }
 
 function renderTabs() {
+  governedScheduleAuthoring.setInteractive(
+    !mutationInFlight && workspaceAuthoringHydrated,
+  );
   const builderActive = currentView === "builder" && !historicalLoopId;
   const graphActive = currentView === "graph";
   const runsActive =
@@ -1765,7 +1780,9 @@ async function switchView(view) {
   currentView = view;
   if (view === "graph") {
     renderAll();
-    return await governedGraphWorkspace.activate();
+    const activated = await governedGraphWorkspace.activate();
+    renderTabs();
+    return activated;
   }
   governedGraphWorkspace.deactivate();
   if (view === "runs") {
@@ -7398,6 +7415,7 @@ function setBusy(busy, label) {
     region.setAttribute("aria-busy", String(busy));
   }
   governedGraphWorkspace.setInteractive(!busy && workspaceAuthoringHydrated);
+  governedScheduleAuthoring.setInteractive(!busy && workspaceAuthoringHydrated);
   if (busy) {
     renderAll();
     elements.saveState.textContent = label;
@@ -7430,6 +7448,9 @@ function setInteractive(enabled) {
   elements.description.disabled = !enabled;
   elements.loopSearch.disabled = !enabled;
   governedGraphWorkspace.setInteractive(
+    Boolean(enabled) && workspaceAuthoringHydrated,
+  );
+  governedScheduleAuthoring.setInteractive(
     Boolean(enabled) && workspaceAuthoringHydrated,
   );
   renderTabs();

@@ -8,6 +8,7 @@ using EmbodySense.Core.Common.Inference.Profiles.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Startup.Capabilities;
 using EmbodySense.Core.Startup.Inference.Profiles.Models;
+using EmbodySense.Core.Startup.Loops.Schedules.Models;
 using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Tests.Support;
@@ -20,6 +21,100 @@ namespace EmbodySense.Web.Tests;
 
 public sealed class GovernedGraphsApiControllerTests
 {
+    [Fact]
+    public async Task Governed_schedule_api_requires_authentication_and_rejects_forged_server_owned_fields()
+    {
+        using var workspace = new TestWorkspace();
+        var codexPath = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
+        await using var app = CreateApp(workspace, codexPath, out var options);
+        await app.StartAsync();
+
+        try
+        {
+            using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
+            var token = app.Services.GetRequiredService<WebSessionSecurity>().Token;
+            var unauthorized = await client.GetAsync("/api/governed-schedules/detail?scheduleId=schedule-1");
+            var beforeInitialization = await SendAsync(client, HttpMethod.Post, "/api/governed-schedules/create", token);
+            var initialized = await SendAsync(client, HttpMethod.Post, "/api/workspace/init", token);
+            var missing = await SendAsync(client, HttpMethod.Post, "/api/governed-schedules/create", token);
+            var missingSchedule = await SendAsync(client, HttpMethod.Get, "/api/governed-schedules/detail?scheduleId=schedule-missing", token);
+            var forged = await SendAsync(
+                client,
+                HttpMethod.Post,
+                "/api/governed-schedules/create",
+                token,
+                new
+                {
+                    operationId = "schedule-forged-owner",
+                    graphId = "scheduled-graph",
+                    revisionId = "revision-1",
+                    expectedGraphLifecycleVersion = 1,
+                    recurrenceKind = "once",
+                    firstLocalOccurrence = "2030-01-01T00:00:00",
+                    fixedIntervalSeconds = (long?)null,
+                    timeZoneId = "UTC",
+                    invalidLocalTime = "skip",
+                    ambiguousLocalTime = "earlier-utc",
+                    misfireKind = "skip",
+                    catchUpLimit = 0,
+                    overlap = "skip",
+                    priority = "normal",
+                    enabled = true,
+                    actorId = "caller-selected",
+                });
+
+            Assert.Equal(HttpStatusCode.Unauthorized, unauthorized.StatusCode);
+            Assert.Equal(HttpStatusCode.Conflict, beforeInitialization.StatusCode);
+            Assert.Equal(HttpStatusCode.OK, initialized.StatusCode);
+            Assert.Equal(HttpStatusCode.BadRequest, missing.StatusCode);
+            Assert.Equal(HttpStatusCode.BadRequest, forged.StatusCode);
+            Assert.Equal(HttpStatusCode.NotFound, missingSchedule.StatusCode);
+            Assert.True(missingSchedule.Headers.CacheControl?.NoStore == true);
+        }
+        finally
+        {
+            await app.StopAsync();
+        }
+    }
+
+    [Fact]
+    public void Governed_schedule_public_projection_excludes_authority_payload_and_operational_evidence()
+    {
+        var response = new GovernedLoopScheduleAuthoringResponse(
+            "ready",
+            "schedule-operation",
+            "Canonical schedule is current.",
+            new GovernedLoopScheduleAuthoringSnapshot(
+                "schedule-visible",
+                "graph-visible",
+                "revision-visible",
+                true,
+                7,
+                new DateTimeOffset(2030, 1, 1, 12, 0, 0, TimeSpan.Zero),
+                "daily",
+                new DateTime(2030, 1, 1, 6, 0, 0, DateTimeKind.Unspecified),
+                null,
+                "UTC",
+                "skip",
+                "earlier-utc",
+                "skip",
+                0,
+                "skip",
+                "normal"),
+            null);
+
+        var json = JsonSerializer.Serialize(response, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+
+        Assert.Contains("schedule-visible", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("authorityProfile", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("workspace", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("actor", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("grant", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("payload", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("pendingDelivery", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("evidenceHash", json, StringComparison.OrdinalIgnoreCase);
+    }
+
     [Fact]
     public void Graph_json_contract_round_trips_canonical_private_constructor_values_and_rejects_nested_unknown_members()
     {

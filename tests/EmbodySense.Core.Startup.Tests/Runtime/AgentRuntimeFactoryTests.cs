@@ -72,6 +72,8 @@ using EmbodySense.Core.Common.HumanInput.Models;
 using EmbodySense.Core.Common.HumanInput.Responses.Models;
 using EmbodySense.Core.Common.Runtime;
 using EmbodySense.Core.Persistence.Loops;
+using EmbodySense.Core.Persistence.Loops.GraphAuthoring;
+using EmbodySense.Core.Persistence.Loops.Revisions;
 using EmbodySense.Core.Persistence.Loops.Execution.Sleep;
 using EmbodySense.Core.Persistence.Loops.Execution.Authority;
 using EmbodySense.Core.Persistence.Authority;
@@ -86,6 +88,7 @@ using EmbodySense.Core.Startup.Loops.GraphAuthoring.Models;
 using EmbodySense.Core.Startup.Loops.InvocationPreparation;
 using EmbodySense.Core.Startup.Loops.InvocationPreparation.Models;
 using EmbodySense.Core.Startup.Loops.Posture.Models;
+using EmbodySense.Core.Startup.Loops.Schedules.Models;
 using EmbodySense.Core.Startup.Capabilities;
 using EmbodySense.Core.Startup.Capabilities.Models;
 using EmbodySense.Core.Startup.Loops;
@@ -100,6 +103,7 @@ using EmbodySense.Core.Application.Triggers.Models;
 using EmbodySense.Core.Application.Triggers.Schedules.Models;
 using EmbodySense.Core.Common.Tests.Triggers.Schedules;
 using EmbodySense.Core.Common.Triggers.Schedules;
+using EmbodySense.Core.Common.Triggers.Schedules.Models;
 using EmbodySense.Core.Persistence.Triggers;
 using EmbodySense.Core.Persistence.Triggers.Schedules;
 using EmbodySense.Core.Persistence.HumanInput.Requests;
@@ -107,6 +111,8 @@ using EmbodySense.Core.Persistence.HumanInput.Requests.Models;
 using EmbodySense.Core.Persistence.Tests.HumanInput.Continuations;
 using EmbodySense.HumanInputContinuationHost;
 using EmbodySense.Core.Startup.Triggers;
+using EmbodySense.Core.Startup.Triggers.Schedules;
+using EmbodySense.Core.Startup.Triggers.Schedules.Models;
 using EmbodySense.Core.Startup.Triggers.Models;
 using EmbodySense.Core.Startup.Tests.Triggers;
 using EmbodySense.Core.Startup.Tests.Loops.Execution.Effects;
@@ -247,17 +253,20 @@ public sealed class AgentRuntimeFactoryTests
     }
 
     [Fact]
-    public async Task StartGovernedLoopLocalBackgroundAsync_parks_schedule_authoring_pending_work_and_reuses_the_factory_owned_queue()
+    public async Task StartGovernedLoopLocalBackgroundAsync_parks_disabled_schedule_and_reuses_the_factory_owned_queue()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var paths = new WorkspacePaths(workspace.RootPath);
-        var scheduleDefinition = ScheduleContractTestData.Definition();
+        var scheduleDefinition = ScheduleContractTestData.Definition(enabled: false);
         Assert.True(ScheduleContractHash.TryComputeDefinition(scheduleDefinition, out var scheduleDefinitionHash, out _));
         var scheduleState = ScheduleContractTestData.State(
             definitionRevision: scheduleDefinition.Revision,
             definitionHash: scheduleDefinitionHash!,
-            scheduleId: scheduleDefinition.ScheduleId);
+            scheduleId: scheduleDefinition.ScheduleId) with
+        {
+            Enabled = false,
+        };
         var schedules = new ScheduleStore(paths);
         var scheduleCreated = await schedules.CreateAsync(new ScheduleStoreCreateRequest(scheduleDefinition, scheduleState, scheduleDefinitionHash!));
         var workspaceId = CapabilityWorkspaceScopeId.Create(workspace.RootPath)["workspace-sha256:".Length..];
@@ -1178,6 +1187,97 @@ public sealed class AgentRuntimeFactoryTests
         Assert.Equal(GovernedLoopInvocationPreparationStatus.Unavailable, malformedPublicationPreparation.Status);
         Assert.Empty(malformedPublicationPreparation.EligibleGrants);
         Assert.Null(malformedPublicationPreparation.Preview);
+    }
+
+    [Fact]
+    public async Task CreateAsync_authors_rereads_replays_and_rejects_stale_or_conflicting_governed_schedules()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var role = await CreateScheduleGraphAuthoringRoleAsync(paths);
+        await using var runtime = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Web);
+        var candidate = ScheduleBrowserGraphCandidate(role);
+        var createdGraph = await runtime.GovernedLoopGraphAuthoring.MutateAsync(new GovernedLoopGraphMutationInput(
+            "create-schedule-authoring-graph",
+            GovernedLoopGraphMutationKind.CreateDraft,
+            candidate.GraphId!,
+            GovernedLoopRevisionLifecycleStatus.Unknown,
+            0,
+            null,
+            null,
+            candidate));
+        var draftHead = Assert.IsType<GovernedLoopRevisionLifecycleHead>(createdGraph.Current?.Lifecycle);
+        var publishedGraph = await runtime.GovernedLoopGraphAuthoring.MutateAsync(new GovernedLoopGraphMutationInput(
+            "publish-schedule-authoring-graph",
+            GovernedLoopGraphMutationKind.Publish,
+            candidate.GraphId!,
+            draftHead.Status,
+            draftHead.LifecycleVersion,
+            draftHead.DraftRevision,
+            draftHead.PublishedRevision,
+            null));
+        var publishedHead = Assert.IsType<GovernedLoopRevisionLifecycleHead>(publishedGraph.Current?.Lifecycle);
+        var input = new GovernedLoopScheduleAuthoringInput(
+            "author-schedule-1",
+            candidate.GraphId!,
+            candidate.RevisionId!,
+            publishedHead.LifecycleVersion,
+            null,
+            ScheduleRecurrenceKind.FixedInterval,
+            DateTime.SpecifyKind(DateTime.UtcNow.AddHours(2), DateTimeKind.Unspecified),
+            300,
+            "UTC",
+            ScheduleInvalidLocalTimePolicy.Skip,
+            ScheduleAmbiguousLocalTimePolicy.EarlierUtc,
+            ScheduleMisfirePolicyKind.Skip,
+            0,
+            ScheduleOverlapPolicy.Skip,
+            SchedulePriority.Normal,
+            true);
+
+        var invalidRead = await runtime.GovernedLoopScheduleAuthoring.ReadAsync("not a schedule id");
+        var missingRead = await runtime.GovernedLoopScheduleAuthoring.ReadAsync("schedule-missing");
+        var stale = await runtime.GovernedLoopScheduleAuthoring.CreateAsync(input with { ExpectedGraphLifecycleVersion = publishedHead.LifecycleVersion + 1 });
+        var unavailableTimeZone = await runtime.GovernedLoopScheduleAuthoring.CreateAsync(input with { TimeZoneId = "Etc/Definitely-Not-A-Time-Zone" });
+        var preview = await runtime.GovernedLoopScheduleAuthoring.CreateAsync(input);
+        var confirmed = await runtime.GovernedLoopScheduleAuthoring.CreateAsync(input with { ExpectedAuthorityPreviewHash = preview.AuthorityPreviewHash });
+        var replayed = await runtime.GovernedLoopScheduleAuthoring.CreateAsync(input);
+        var conflict = await runtime.GovernedLoopScheduleAuthoring.CreateAsync(input with { Overlap = ScheduleOverlapPolicy.Allow });
+        var reread = await runtime.GovernedLoopScheduleAuthoring.ReadAsync(confirmed.Schedule?.ScheduleId);
+        Assert.True(ScheduleId.TryParse(confirmed.Schedule?.ScheduleId, out var scheduleId));
+        var persisted = await new ScheduleStore(paths).ReadAsync(scheduleId!);
+        var trustProvider = new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath);
+        var authorityTransaction = new CapabilityAuthorityTransaction(paths);
+        var lifecycleStore = new GovernedLoopRevisionLifecycleStore(paths, trustProvider, authorityTransaction: authorityTransaction);
+        var graphStore = new GovernedLoopGraphRevisionStore(paths, lifecycleStore, trustProvider, authorityTransaction: authorityTransaction);
+        var payload = await new GovernedLoopSchedulePayloadSource(new ScheduleStore(paths), graphStore)
+            .ResolveAsync(persisted.Definition!.Payload.GovernedReference);
+
+        Assert.Equal("committed", createdGraph.Status);
+        Assert.Equal("committed", publishedGraph.Status);
+        Assert.Equal("invalid", invalidRead.Status);
+        Assert.Equal("not-found", missingRead.Status);
+        Assert.Equal("stale", stale.Status);
+        Assert.Equal("invalid", unavailableTimeZone.Status);
+        Assert.Equal("confirmation-required", preview.Status);
+        Assert.Matches("^[0-9a-f]{64}$", preview.AuthorityPreviewHash);
+        Assert.Equal("created", confirmed.Status);
+        Assert.Equal("replayed", replayed.Status);
+        Assert.Equal("conflict", conflict.Status);
+        Assert.Equal("ready", reread.Status);
+        Assert.Equal(confirmed.Schedule, replayed.Schedule);
+        Assert.Equal(confirmed.Schedule, reread.Schedule);
+        Assert.Equal(candidate.GraphId, confirmed.Schedule?.GraphId);
+        Assert.Equal(candidate.RevisionId, confirmed.Schedule?.RevisionId);
+        Assert.Equal("UTC", confirmed.Schedule?.TimeZoneId);
+        Assert.Equal(ScheduleStoreReadStatus.Found, persisted.Status);
+        Assert.Equal("web", persisted.Definition?.SurfaceId);
+        Assert.Equal(CapabilityWorkspaceScopeId.Create(workspace.RootPath)["workspace-sha256:".Length..], persisted.Definition?.WorkspaceId);
+        Assert.Equal(GovernedLoopSchedulePayloadSource.CreateReference(persisted.Definition!.ScheduleId), persisted.Definition.Payload.GovernedReference);
+        Assert.Equal(ScheduleGovernedPayloadResolutionStatus.Available, payload.Status);
+        Assert.Equal(candidate.Purpose, Encoding.UTF8.GetString(payload.GetContent()!));
+        Assert.Equal(persisted.Definition.Payload.ContentHash, payload.ContentHash);
     }
 
     [Fact]
@@ -4257,6 +4357,63 @@ public sealed class AgentRuntimeFactoryTests
                     new GovernedLoopNodeDisplayMetadata(exit.Id, "Exit", "Publish.", 200, 0),
                 ]),
             EmbodySense.Core.Application.Tests.GovernedModelProfileApplicationTestFixture.DefaultRoutingPolicy());
+    }
+
+    private static GovernedLoopGraphCandidate ScheduleBrowserGraphCandidate(ContextualRoleRevisionPin role)
+    {
+        const string ConversationTurnCapability = "org.embodysense/conversation-turn";
+        const string ScheduleTriggerCapability = "org.embodysense/triggers/time";
+        var source = BrowserGraphCandidate(role);
+        var trigger = Assert.IsType<GovernedLoopNodeDefinition>(source.Nodes?[0]) with
+        {
+            Descriptor = GovernedLoopSequentialNodeDescriptors.ScheduleTrigger,
+            AuthorityCeiling = GovernedLoopAuthorityCeiling.Create([ScheduleTriggerCapability]),
+        };
+        return source with
+        {
+            GraphId = "browser-schedule-authoring-graph",
+            Purpose = "Publish one exact schedule payload through the governed graph runtime.",
+            AuthorityCeiling = GovernedLoopAuthorityCeiling.Create([ConversationTurnCapability, ScheduleTriggerCapability]),
+            Nodes = [trigger, Assert.IsType<GovernedLoopNodeDefinition>(source.Nodes?[1])],
+        };
+    }
+
+    private static async Task<ContextualRoleRevisionPin> CreateScheduleGraphAuthoringRoleAsync(WorkspacePaths paths)
+    {
+        var workspaceId = CapabilityWorkspaceScopeId.Create(paths.RootPath);
+        var revision = ContextualRoleRevisionContentHash.Apply(new ContextualRoleRevision(
+            ContextualRoleLimits.SchemaVersion,
+            new ContextualRoleRevisionIdentity("schedule-graph-author", 1),
+            string.Empty,
+            "Schedule graph author",
+            "Author one bounded scheduled graph through a governed interface.",
+            ContextualRoleStatus.Published,
+            new ContextualRoleProvenance("test-author", DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch),
+            new ContextualRoleWorkspaceApplicability([workspaceId]),
+            new ContextualRoleInstructionSourceReference(
+                ContextualRoleInstructionSourceKind.WorkspaceRoleMarkdown,
+                "role",
+                ContextualRoleInstructionClassification.RoleInstruction),
+            new ContextualRolePolicyMaxima([
+                "org.embodysense/conversation-turn",
+                "org.embodysense/model-inference",
+                BuiltInCapabilityCatalog.CodexModelProfileCapabilityId,
+                "org.embodysense/triggers/time",
+            ])));
+        var request = ContextualRoleRevisionMutationRequestHash.Apply(new ContextualRoleRevisionMutationRequest(
+            "create-schedule-graph-author",
+            string.Empty,
+            ContextualRoleRevisionMutationKind.Create,
+            revision.Identity.RoleId,
+            "test-author",
+            revision,
+            null,
+            DateTimeOffset.UnixEpoch));
+        using var store = new ContextualRoleRevisionStore(paths, workspaceId);
+        var result = await store.MutateAsync(request);
+        Assert.Equal(ContextualRoleRevisionMutationStatus.Accepted, result.Status);
+        var persisted = Assert.IsType<ContextualRoleRevision>(result.Revision);
+        return new ContextualRoleRevisionPin(persisted.Identity, persisted.ContentHash);
     }
 
     private static GovernedLoopGraphCandidate BrowserUnsupportedInvocationProjectionGraphCandidate(ContextualRoleRevisionPin role)

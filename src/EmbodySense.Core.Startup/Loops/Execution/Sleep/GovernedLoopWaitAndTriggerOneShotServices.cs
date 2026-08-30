@@ -7,23 +7,21 @@ using EmbodySense.Core.Application.Triggers.Schedules;
 using EmbodySense.Core.Application.Triggers.Schedules.Models;
 using EmbodySense.Core.Common.Triggers.Schedules;
 using EmbodySense.Core.Startup.Loops.Execution.Sleep.Models;
+using EmbodySense.Core.Startup.Triggers.Schedules;
 
 namespace EmbodySense.Core.Startup.Loops.Execution.Sleep;
 
-/// <summary>Aggregates the canonical trigger, retained schedule-retry, and Wake boundaries before schedule authoring exists.</summary>
+/// <summary>Aggregates the canonical schedule evaluation, trigger, retained schedule-retry, and Wake boundaries.</summary>
 /// <remarks>
-/// This composition parks a discovered schedule without dispatching it. Phase 2 has no production
-/// <c>IScheduleGovernedPayloadSource</c> until the later authorized Web-authoring slice supplies one, so the exact
-/// persisted state is returned as <see cref="ScheduleEvaluationStatus.NeedsReview"/> instead of fabricating a payload or
-/// terminating unrelated Trigger and Wake delivery. Retained schedule admission finalization remains safe to retry
-/// because it consumes only already-persisted envelopes and exact run-store evidence. All dependencies borrow the
-/// factory-owned workspace stores and no request, connection, or surface supplies a dispatch dependency. See
-/// https://github.com/Jacob-J-Thomas/agenthome-poc/issues/565.
+/// Schedule evaluation receives only the factory-composed runtime facade, whose current evidence rereads the canonical
+/// schedule definition, immutable graph revision, authority, capability, and payload source. Retained schedule admission
+/// finalization remains safe to retry because it consumes only already-persisted envelopes and exact run-store evidence.
+/// All dependencies borrow factory-owned workspace stores and no request, connection, or surface supplies a dispatch
+/// dependency.
 /// </remarks>
 internal sealed class GovernedLoopWaitAndTriggerOneShotServices : IGovernedLoopLocalOneShotServices
 {
-    private const string ScheduleUnavailableReason = "schedule-payload-source-unavailable";
-    private readonly IScheduleStorePort _schedules;
+    private readonly ScheduleRuntimeFacade _scheduleRuntime;
     private readonly GovernedLoopSleepService _sleep;
     private readonly GovernedLoopScheduleAdmissionRetryService _scheduleRetries;
     private readonly ITriggerQueueQueryPort _triggerQueue;
@@ -31,13 +29,13 @@ internal sealed class GovernedLoopWaitAndTriggerOneShotServices : IGovernedLoopL
 
     internal GovernedLoopWaitAndTriggerOneShotServices(
         ICustomLoopRunStore runs,
-        IScheduleStorePort schedules,
+        ScheduleRuntimeFacade scheduleRuntime,
         ITriggerQueueQueryPort triggerQueue,
         TriggerWorkerService triggers,
         GovernedLoopSleepService sleep,
         int scheduleRetryPageSize)
     {
-        _schedules = schedules ?? throw new ArgumentNullException(nameof(schedules));
+        _scheduleRuntime = scheduleRuntime ?? throw new ArgumentNullException(nameof(scheduleRuntime));
         _triggerQueue = triggerQueue ?? throw new ArgumentNullException(nameof(triggerQueue));
         _triggers = triggers ?? throw new ArgumentNullException(nameof(triggers));
         _sleep = sleep ?? throw new ArgumentNullException(nameof(sleep));
@@ -49,36 +47,16 @@ internal sealed class GovernedLoopWaitAndTriggerOneShotServices : IGovernedLoopL
     }
 
     /// <inheritdoc />
-    public async Task<ScheduleEvaluationResult?> EvaluateScheduleOnceAsync(
+    public Task<ScheduleEvaluationResult?> EvaluateScheduleOnceAsync(
         ScheduleId scheduleId,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(scheduleId);
-        var read = await _schedules.ReadAsync(scheduleId, cancellationToken).ConfigureAwait(false);
-        return read.Status switch
-        {
-            ScheduleStoreReadStatus.Found when read.State is not null => new ScheduleEvaluationResult(
-                ScheduleEvaluationStatus.NeedsReview,
-                ScheduleUnavailableReason,
-                read.State),
-            ScheduleStoreReadStatus.NotFound => new ScheduleEvaluationResult(
-                ScheduleEvaluationStatus.NotFound,
-                "schedule-not-found",
-                null),
-            ScheduleStoreReadStatus.Backpressured => new ScheduleEvaluationResult(
-                ScheduleEvaluationStatus.Backpressured,
-                "schedule-store-backpressured",
-                null),
-            ScheduleStoreReadStatus.Unavailable => new ScheduleEvaluationResult(
-                ScheduleEvaluationStatus.Unavailable,
-                "schedule-store-unavailable",
-                null),
-            _ => new ScheduleEvaluationResult(
-                ScheduleEvaluationStatus.Corrupt,
-                "schedule-store-corrupt",
-                null),
-        };
+        return EvaluateAsync(scheduleId, cancellationToken);
     }
+
+    private async Task<ScheduleEvaluationResult?> EvaluateAsync(ScheduleId scheduleId, CancellationToken cancellationToken)
+        => await _scheduleRuntime.EvaluateOnceAsync(scheduleId, cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
     public async Task<TriggerQueueSnapshot?> ReadTriggerQueueAsync(

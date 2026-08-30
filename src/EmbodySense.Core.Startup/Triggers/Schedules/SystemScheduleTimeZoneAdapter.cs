@@ -66,6 +66,37 @@ public sealed class SystemScheduleTimeZoneAdapter : IScheduleTimeZonePort
         _timeZones = captured;
     }
 
+    /// <summary>Creates a canonical reference to one time-zone rule snapshot retained by this adapter.</summary>
+    /// <remarks>
+    /// Callers provide only the exact bounded time-zone identifier. The adapter derives the fingerprint from its
+    /// composition-owned immutable rule snapshot so interface surfaces cannot select or forge scheduling rules.
+    /// </remarks>
+    /// <param name="timeZoneId">The exact case-sensitive identifier selected from the host snapshot.</param>
+    /// <param name="reference">The canonical identifier and derived rules fingerprint when available.</param>
+    /// <returns><see langword="true"/> when the snapshot contains a trustworthy matching rule set.</returns>
+    public bool TryCreateReference(string? timeZoneId, out ScheduleTimeZoneReference? reference)
+    {
+        reference = null;
+        if (!IsValidTimeZoneId(timeZoneId) || !_timeZones.TryGetValue(timeZoneId!, out var timeZone))
+        {
+            return false;
+        }
+
+        try
+        {
+            reference = new ScheduleTimeZoneReference(timeZone.Id, ComputeFingerprint(timeZone, CancellationToken.None));
+            return true;
+        }
+        catch (CryptographicException)
+        {
+            return false;
+        }
+        catch (Exception exception) when (IsRuleFailure(exception))
+        {
+            return false;
+        }
+    }
+
     /// <inheritdoc />
     public Task<ScheduleTimeZoneResolution> ResolveLocalAsync(
         ScheduleTimeZoneReference timeZone,

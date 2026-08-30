@@ -6,6 +6,7 @@ using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Core.Startup.Loops.Posture;
 using EmbodySense.Core.Startup.Loops.GraphAuthoring.Models;
 using EmbodySense.Core.Startup.Loops.InvocationPreparation.Models;
+using EmbodySense.Core.Startup.Loops.Schedules.Models;
 using EmbodySense.Core.Startup.Inference.Profiles.Models;
 using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Runtime.Models;
@@ -739,6 +740,45 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         try
         {
             return await runtime.PrepareGovernedLoopInvocationAsync(request, cancellationToken);
+        }
+        finally
+        {
+            await EndCustomRuntimeOperationAsync();
+        }
+    }
+
+    /// <summary>Rereads one exact canonical schedule through the retained runtime authoring facade.</summary>
+    /// <param name="scheduleId">The stable canonical schedule identity.</param>
+    /// <param name="cancellationToken">Cancels runtime acquisition or the canonical read.</param>
+    /// <returns>The bounded current schedule projection.</returns>
+    internal async Task<GovernedLoopScheduleAuthoringResponse> ReadGovernedLoopScheduleAsync(
+        string scheduleId,
+        CancellationToken cancellationToken)
+    {
+        var runtime = await BeginCustomRuntimeOperationAsync(cancellationToken);
+        try
+        {
+            return await runtime.GovernedLoopScheduleAuthoring.ReadAsync(scheduleId, cancellationToken);
+        }
+        finally
+        {
+            await EndCustomRuntimeOperationAsync();
+        }
+    }
+
+    /// <summary>Creates or replays one immutable canonical schedule from bounded visible-Web authoring intent.</summary>
+    /// <param name="input">The browser-selected graph revision, exact lifecycle evidence, and bounded time policies.</param>
+    /// <param name="cancellationToken">Cancels before durable authority or schedule boundaries.</param>
+    /// <returns>The closed authoring result and canonical reread when safely available.</returns>
+    internal async Task<GovernedLoopScheduleAuthoringResponse> CreateGovernedLoopScheduleAsync(
+        GovernedLoopScheduleAuthoringInput input,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        var runtime = await BeginGraphAuthoringRuntimeOperationAsync(cancellationToken);
+        try
+        {
+            return await runtime.GovernedLoopScheduleAuthoring.CreateAsync(input, cancellationToken);
         }
         finally
         {
