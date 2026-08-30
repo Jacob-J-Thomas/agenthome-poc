@@ -362,6 +362,18 @@ exit $ExitCode
 param([string]$Name, [string]$ActiveRoot, [int]$ExpectedConcurrent, [int]$MaximumExpectedConcurrent)
 $activePath = Join-Path $ActiveRoot "$Name.active"
 $readyPath = Join-Path $ActiveRoot "$Name.ready"
+$acknowledgementPath = Join-Path $ActiveRoot "$Name.acknowledged"
+$releasePath = Join-Path $ActiveRoot "barrier.released"
+if (Test-Path -LiteralPath $releasePath -PathType Leaf) {
+    $releaseClearDeadline = [DateTimeOffset]::UtcNow.AddSeconds(5)
+    while ((Test-Path -LiteralPath $releasePath -PathType Leaf) -and @(Get-ChildItem -LiteralPath $ActiveRoot -Filter "*.active" -File).Count -gt 0) {
+        if ([DateTimeOffset]::UtcNow -ge $releaseClearDeadline) { exit 46 }
+        Start-Sleep -Milliseconds 10
+    }
+    if (Test-Path -LiteralPath $releasePath -PathType Leaf) {
+        Remove-Item -LiteralPath $releasePath -Force -ErrorAction SilentlyContinue
+    }
+}
 try {
     Set-Content -LiteralPath $activePath -Value "active" -Encoding UTF8
     $synchronizationDeadline = [DateTimeOffset]::UtcNow.AddSeconds(5)
@@ -374,6 +386,20 @@ try {
     $readinessDeadline = [DateTimeOffset]::UtcNow.AddSeconds(5)
     while (@(Get-ChildItem -LiteralPath $ActiveRoot -Filter "*.ready" -File).Count -lt $ExpectedConcurrent) {
         if ([DateTimeOffset]::UtcNow -ge $readinessDeadline) { exit 44 }
+        Start-Sleep -Milliseconds 10
+    }
+
+    Set-Content -LiteralPath $acknowledgementPath -Value "acknowledged" -Encoding UTF8
+    $acknowledgementDeadline = [DateTimeOffset]::UtcNow.AddSeconds(5)
+    while (@(Get-ChildItem -LiteralPath $ActiveRoot -Filter "*.acknowledged" -File).Count -lt $ExpectedConcurrent -and -not (Test-Path -LiteralPath $releasePath -PathType Leaf)) {
+        if ([DateTimeOffset]::UtcNow -ge $acknowledgementDeadline) { exit 45 }
+        Start-Sleep -Milliseconds 10
+    }
+
+    New-Item -ItemType File -Path $releasePath -ErrorAction SilentlyContinue | Out-Null
+    $releaseDeadline = [DateTimeOffset]::UtcNow.AddSeconds(5)
+    while (-not (Test-Path -LiteralPath $releasePath -PathType Leaf)) {
+        if ([DateTimeOffset]::UtcNow -ge $releaseDeadline) { exit 47 }
         Start-Sleep -Milliseconds 10
     }
 
@@ -391,6 +417,7 @@ try {
 finally {
     Remove-Item -LiteralPath $activePath -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $readyPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $acknowledgementPath -Force -ErrorAction SilentlyContinue
 }
 '@ | Set-Content -LiteralPath $weightedProbePath -Encoding UTF8
     $weightedArguments = @("-NoProfile")
@@ -409,7 +436,8 @@ finally {
     $weightedResults = @(Invoke-VerificationParallelPhases -MaximumWorkers $sixUnitCapacity -MaximumResourceCapacity $sixUnitCapacity)
     Assert-True -Condition ($weightedResults.Count -eq 4) -Message "Every weighted phase must be scheduled and aggregated."
     Assert-True -Condition (@($weightedResults | Where-Object { $_.Weight -eq $heavyWeight -and $_.EffectiveWeight -eq $heavyWeight -and $_.ResourceClass -ceq "ProcessHeavy" }).Count -eq 4) -Message "Weighted result evidence must preserve the declared process-heavy posture without adapting its weight downward."
-    Assert-True -Condition (@(Get-ChildItem -LiteralPath $activeRoot -Filter "*.active" -File).Count -eq 0 -and @(Get-ChildItem -LiteralPath $activeRoot -Filter "*.ready" -File).Count -eq 0) -Message "Weighted probes must remove both two-phase barrier markers after their bounded observation."
+    Remove-Item -LiteralPath (Join-Path $activeRoot "barrier.released") -Force -ErrorAction SilentlyContinue
+    Assert-True -Condition (@(Get-ChildItem -LiteralPath $activeRoot -File).Count -eq 0) -Message "The weighted-wave coordinator must remove every barrier marker after the bounded observation drains."
 
     $physicalHeavyRoot = Join-Path $scenarioRoot "physical-heavy-active"
     New-Item -ItemType Directory -Path $physicalHeavyRoot | Out-Null
