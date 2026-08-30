@@ -42,6 +42,7 @@
     <Compile Include="..\EmbodySense.HumanInputContinuationHost\HumanInputResponseContinuationHostContextPort.cs" Link="Support\HumanInputResponseContinuationHostContextPort.cs" />
     <Compile Include="..\EmbodySense.HumanInputContinuationHost\HumanInputResponseContinuationHostConversationPublisher.cs" Link="Support\HumanInputResponseContinuationHostConversationPublisher.cs" />
     <Compile Include="..\EmbodySense.HumanInputContinuationHost\HumanInputResponseContinuationHostCurrentPosturePort.cs" Link="Support\HumanInputResponseContinuationHostCurrentPosturePort.cs" />
+    <Compile Include="..\EmbodySense.HumanInputContinuationHost\HumanInputResponseContinuationHostPostureGate.cs" Link="Support\HumanInputResponseContinuationHostPostureGate.cs" />
     <Compile Include="..\EmbodySense.HumanInputContinuationHost\HumanInputResponseContinuationHostInferenceExecutor.cs" Link="Support\HumanInputResponseContinuationHostInferenceExecutor.cs" />
   </ItemGroup>
 
