@@ -415,9 +415,9 @@ try {
     Write-Output "weighted_probe=$Name"
 }
 finally {
-    Remove-Item -LiteralPath $activePath -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $readyPath -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $acknowledgementPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $readyPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $activePath -Force -ErrorAction SilentlyContinue
 }
 '@ | Set-Content -LiteralPath $weightedProbePath -Encoding UTF8
     $weightedArguments = @("-NoProfile")
