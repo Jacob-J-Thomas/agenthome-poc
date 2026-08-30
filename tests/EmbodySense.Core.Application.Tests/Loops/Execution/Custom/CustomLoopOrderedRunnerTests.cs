@@ -459,6 +459,42 @@ public sealed partial class CustomLoopOrderedRunnerTests
     }
 
     [Fact]
+    public async Task Canonical_command_action_owned_by_another_executor_returns_conflict_without_terminal_evidence()
+    {
+        var context = await SequentialContextAsync(
+            Run(SequentialDefinition()),
+            artifactFactory: role => GovernedLoopSequentialApplicationTestFixture.CommandActionOnlyArtifact(owningRole: role));
+        var store = new FakeRunStore(context.Run);
+        var inference = new QueueExecutor();
+        var action = new QueueCommandActionExecutor(new GovernedLoopCommandActionExecutionResult(
+            GovernedLoopCommandActionExecutionStatus.OperationInProgress,
+            null,
+            "Another executor owns the exact command Action effect attempt."));
+        var audit = new RecordingAuditLog();
+        var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+        var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(Runner(store, inference, audit: audit, commandActionExecutor: action), evidence, evidence);
+
+        var result = await adapter.RunAsync(new GovernedLoopSequentialOrderedRunRequest(
+            1,
+            context.Anchor,
+            context.Plan,
+            context.Artifact,
+            AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Conflict, result.Status);
+        Assert.Equal(CustomLoopRunStatus.Running, result.Run?.Status);
+        Assert.Null(result.Run?.FailureCode);
+        Assert.Empty(inference.Requests);
+        Assert.Single(action.Requests);
+        Assert.Single(result.Run!.Events, IsCommandActionStart);
+        Assert.DoesNotContain(result.Run.Events, item => item.SequentialNodeEvidence is { NodeId: "command-action", Kind: not CustomLoopSequentialNodeEvidenceKind.DispatchStarted });
+        var lifecycleAudit = Assert.Single(audit.Events);
+        Assert.Equal(AuditSchema.Actions.LoopRunLifecycle, lifecycleAudit.Action);
+        Assert.Equal(AuditSchema.Outcomes.Started, lifecycleAudit.Outcome);
+        Assert.Empty(store.ValidationFailures);
+    }
+
+    [Fact]
     public async Task Canonical_command_action_start_recovers_and_replays_one_retained_outcome_without_relaunch()
     {
         var context = await SequentialContextAsync(

@@ -17,4 +17,7 @@ public enum GovernedLoopCommandActionExecutionStatus
 
     /// <summary>The effect may have crossed its external boundary and requires reconciliation.</summary>
     NeedsReview = 4,
+
+    /// <summary>Another executor owns the exact effect attempt, so this invocation must stop without adding outcome evidence.</summary>
+    OperationInProgress = 5,
 }

@@ -2380,6 +2380,10 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 actor,
                 cancellationToken).ConfigureAwait(false);
         }
+        if (result.Status == GovernedLoopCommandActionExecutionStatus.OperationInProgress)
+        {
+            return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.Conflict, run, result.Detail));
+        }
         if (result.Status == GovernedLoopCommandActionExecutionStatus.Completed
             && parsedResult?.Outcome == CommandActionResultOutcome.Succeeded
             && result.CanonicalOutput is { } completedOutput)

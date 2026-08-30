@@ -118,6 +118,11 @@ public sealed class GovernedLoopCommandActionExecutor : IGovernedLoopCommandActi
                         null,
                         "The exact prepared command Action effect is durably parked for governed Human Review.",
                         result.Attempt),
+                GovernedLoopEffectAttemptExecutionStatus.OperationInProgress
+                    => new GovernedLoopCommandActionExecutionResult(
+                        GovernedLoopCommandActionExecutionStatus.OperationInProgress,
+                        null,
+                        "Another executor owns the exact command Action effect attempt."),
                 _ => Review($"The structured command Action requires reconciliation with posture `{result.Status}`."),
             };
         }
