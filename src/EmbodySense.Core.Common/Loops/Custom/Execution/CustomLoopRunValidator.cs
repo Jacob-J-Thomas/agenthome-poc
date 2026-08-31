@@ -3820,8 +3820,19 @@ public static class CustomLoopRunValidator
         ValidateHumanReviewDecisionState(request!, state, errors);
         ValidateCompletedHumanReviewHistory(run, state, errors);
         var operationIds = new HashSet<string>(StringComparer.Ordinal);
+        var requestOperationIds = new HashSet<string>(StringComparer.Ordinal);
         foreach (var reviewState in new[] { state }.Concat(state.CompletedReviews))
         {
+            if (reviewState is null)
+            {
+                continue;
+            }
+
+            if (!requestOperationIds.Add(reviewState.Request.RequestOperationId))
+            {
+                Add(errors, "duplicate_human_review_request_operation_identity", "humanReview.request", "An admission operation identity may belong to only one current or archived review boundary.");
+            }
+
             foreach (var receipt in reviewState.OperationReceipts)
             {
                 if (receipt is not null && !operationIds.Add(receipt.DecisionOperationId))

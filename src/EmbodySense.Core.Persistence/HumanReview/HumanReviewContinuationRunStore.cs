@@ -38,7 +38,6 @@ public sealed class HumanReviewContinuationRunStore : IHumanReviewContinuationPu
         if (read.Failure is { } failure) return Result(failure);
         var current = read.Run;
         if (current is null) return Result(HumanReviewContinuationMutationStatus.NotFound);
-        if (!TryGetApprovedReview(current, runId, out var review)) return Result(HumanReviewContinuationMutationStatus.Invalid);
         var located = continuation.Wake is null ? [] : FindApprovedReviews(current, runId, continuation.Wake.Reservation);
         if (located.Length > 1) return Result(HumanReviewContinuationMutationStatus.Invalid, current);
         if (located.Length == 1 && located[0].Archived)
@@ -48,6 +47,7 @@ public sealed class HumanReviewContinuationRunStore : IHumanReviewContinuationPu
                 ? Result(HumanReviewContinuationMutationStatus.Replayed, current)
                 : Result(HumanReviewContinuationMutationStatus.Conflict, current);
         }
+        if (!TryGetApprovedReview(current, runId, out var review)) return Result(HumanReviewContinuationMutationStatus.Invalid);
 
         if (review.Continuation is not null)
         {
@@ -86,7 +86,6 @@ public sealed class HumanReviewContinuationRunStore : IHumanReviewContinuationPu
         if (read.Failure is { } failure) return Result(failure);
         var current = read.Run;
         if (current is null) return Result(HumanReviewContinuationMutationStatus.NotFound);
-        if (!TryGetApprovedReview(current, runId, out var review) || review.Continuation is not { } continuation) return Result(HumanReviewContinuationMutationStatus.Invalid);
         var located = FindApprovedReviews(current, runId, new HumanReviewContinuationReservationReference(claim.Reservation.ReservationId, claim.Reservation.ReservationHash));
         if (located.Length > 1) return Result(HumanReviewContinuationMutationStatus.Invalid, current);
         if (located.Length == 1 && located[0].Archived)
@@ -97,6 +96,7 @@ public sealed class HumanReviewContinuationRunStore : IHumanReviewContinuationPu
                 ? Result(HumanReviewContinuationMutationStatus.Replayed, current)
                 : Result(HumanReviewContinuationMutationStatus.Conflict, current);
         }
+        if (!TryGetApprovedReview(current, runId, out var review) || review.Continuation is not { } continuation) return Result(HumanReviewContinuationMutationStatus.Invalid);
 
         if (continuation.Completion is not null || continuation.Retirement is not null) return Result(HumanReviewContinuationMutationStatus.Conflict, current);
         var active = continuation.Claims.IsDefaultOrEmpty ? null : continuation.Claims[^1];
@@ -128,7 +128,6 @@ public sealed class HumanReviewContinuationRunStore : IHumanReviewContinuationPu
         if (read.Failure is { } failure) return Result(failure);
         var current = read.Run;
         if (current is null) return Result(HumanReviewContinuationMutationStatus.NotFound);
-        if (!TryGetApprovedReview(current, runId, out var review) || review.Continuation is not { } continuation) return Result(HumanReviewContinuationMutationStatus.Invalid);
         var located = FindApprovedReviews(current, runId, new HumanReviewContinuationReservationReference(completion.Reservation.ReservationId, completion.Reservation.ReservationHash));
         if (located.Length > 1) return Result(HumanReviewContinuationMutationStatus.Invalid, current);
         if (located.Length == 1 && located[0].Archived)
@@ -138,6 +137,7 @@ public sealed class HumanReviewContinuationRunStore : IHumanReviewContinuationPu
                 ? Result(HumanReviewContinuationMutationStatus.Replayed, current)
                 : Result(HumanReviewContinuationMutationStatus.Conflict, current);
         }
+        if (!TryGetApprovedReview(current, runId, out var review) || review.Continuation is not { } continuation) return Result(HumanReviewContinuationMutationStatus.Invalid);
 
         if (continuation.Completion is not null)
         {
@@ -172,7 +172,6 @@ public sealed class HumanReviewContinuationRunStore : IHumanReviewContinuationPu
         if (read.Failure is { } failure) return Result(failure);
         var current = read.Run;
         if (current is null) return Result(HumanReviewContinuationMutationStatus.NotFound);
-        if (!TryGetApprovedReview(current, runId, out var review) || review.Continuation is not { } continuation) return Result(HumanReviewContinuationMutationStatus.Invalid);
         var located = FindApprovedReviews(current, runId, new HumanReviewContinuationReservationReference(retirement.Reservation.ReservationId, retirement.Reservation.ReservationHash));
         if (located.Length > 1) return Result(HumanReviewContinuationMutationStatus.Invalid, current);
         if (located.Length == 1 && located[0].Archived)
@@ -182,6 +181,7 @@ public sealed class HumanReviewContinuationRunStore : IHumanReviewContinuationPu
                 ? Result(HumanReviewContinuationMutationStatus.Replayed, current)
                 : Result(HumanReviewContinuationMutationStatus.Conflict, current);
         }
+        if (!TryGetApprovedReview(current, runId, out var review) || review.Continuation is not { } continuation) return Result(HumanReviewContinuationMutationStatus.Invalid);
 
         if (continuation.Claims.IsDefaultOrEmpty
             || !Equals(new HumanReviewContinuationClaimReference(continuation.Claims[^1].ClaimId, continuation.Claims[^1].ClaimHash), claim))

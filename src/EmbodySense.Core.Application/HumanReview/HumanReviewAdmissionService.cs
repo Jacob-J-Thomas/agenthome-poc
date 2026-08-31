@@ -55,6 +55,22 @@ public sealed class HumanReviewAdmissionService : IHumanReviewAdmissionService
             return CustomLoopRunStoreResult.VersionConflict(current, command.ExpectedLifecycleVersion);
         }
 
+        var operationMatches = FindRequestOperationMatches(current, request.RequestOperationId);
+        if (operationMatches.Length > 1)
+        {
+            return CustomLoopRunStoreResult.VersionConflict(current, command.ExpectedLifecycleVersion);
+        }
+
+        if (operationMatches.Length == 1)
+        {
+            var retained = operationMatches[0];
+            return string.Equals(retained.Request.RequestId, request.RequestId, StringComparison.Ordinal)
+                && string.Equals(retained.Request.RequestHash, request.RequestHash, StringComparison.Ordinal)
+                && MatchesRetainedFrontier(blockedFrontier, request)
+                ? CustomLoopRunStoreResult.AlreadyCreated(current)
+                : CustomLoopRunStoreResult.VersionConflict(current, command.ExpectedLifecycleVersion);
+        }
+
         var rotateCompletedReview = false;
         ImmutableArray<HumanReviewRunState> completedReviews = ImmutableArray<HumanReviewRunState>.Empty;
         if (current.HumanReview is { } existing)
@@ -227,11 +243,16 @@ public sealed class HumanReviewAdmissionService : IHumanReviewAdmissionService
 
     private static bool Matches(CustomLoopRunRecord run, GovernedLoopFrontierPosture frontier, HumanReviewRequest request)
     {
+        return string.Equals(run.Id, request.Binding.RunId, StringComparison.Ordinal)
+            && MatchesRetainedFrontier(frontier, request);
+    }
+
+    private static bool MatchesRetainedFrontier(GovernedLoopFrontierPosture frontier, HumanReviewRequest request)
+    {
         var blockedNodes = frontier.Payload.Nodes.Where(node => node.Status == GovernedLoopNodeExecutionStatus.ReviewBlocked).Take(2).ToArray();
         var blockedNode = blockedNodes.Length == 1 ? blockedNodes[0] : null;
-        return string.Equals(run.Id, request.Binding.RunId, StringComparison.Ordinal)
-            && string.Equals(frontier.WorkspaceId, request.Binding.WorkspaceId, StringComparison.Ordinal)
-            && string.Equals(frontier.Binding.RunId, run.Id, StringComparison.Ordinal)
+        return string.Equals(frontier.WorkspaceId, request.Binding.WorkspaceId, StringComparison.Ordinal)
+            && string.Equals(frontier.Binding.RunId, request.Binding.RunId, StringComparison.Ordinal)
             && string.Equals(frontier.Binding.Revision.GraphId, request.Binding.GraphId, StringComparison.Ordinal)
             && string.Equals(frontier.Binding.Revision.RevisionId, request.Binding.RevisionId, StringComparison.Ordinal)
             && string.Equals(frontier.Binding.Revision.ExecutableHash, request.Binding.RevisionHash, StringComparison.Ordinal)
@@ -243,6 +264,30 @@ public sealed class HumanReviewAdmissionService : IHumanReviewAdmissionService
             && blockedNode.Attempt == request.Binding.Attempt
             && (request.Binding.ActivationOrdinal is null || blockedNode.ActivationOrdinal == request.Binding.ActivationOrdinal)
             && (request.Binding.VisitOrdinal is null || blockedNode.VisitOrdinal == request.Binding.VisitOrdinal);
+    }
+
+    private static (HumanReviewRunState Review, HumanReviewRequest Request)[] FindRequestOperationMatches(CustomLoopRunRecord run, string requestOperationId)
+    {
+        try
+        {
+            if (run.HumanReview is not { } current || string.IsNullOrWhiteSpace(requestOperationId)) return [];
+            var matches = new List<(HumanReviewRunState Review, HumanReviewRequest Request)>();
+            if (string.Equals(current.Request.RequestOperationId, requestOperationId, StringComparison.Ordinal)) matches.Add((current, current.Request));
+            if (!current.CompletedReviews.IsDefault)
+            {
+                foreach (var archived in current.CompletedReviews)
+                {
+                    if (archived is not null && string.Equals(archived.Request.RequestOperationId, requestOperationId, StringComparison.Ordinal)) matches.Add((archived, archived.Request));
+                    if (matches.Count > 1) break;
+                }
+            }
+
+            return [.. matches];
+        }
+        catch
+        {
+            return [];
+        }
     }
 
     private static string Id(string prefix, string value) => prefix + "-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant()[..24];

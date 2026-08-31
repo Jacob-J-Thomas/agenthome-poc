@@ -15,6 +15,7 @@ using EmbodySense.Core.Common.HumanReview;
 using EmbodySense.Core.Common.HumanReview.Models;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Execution.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
@@ -60,6 +61,7 @@ public sealed partial class CustomLoopOrderedRunnerTests
         Assert.Equal(HumanReviewDecisionServiceStatus.Accepted, decision.Status);
 
         var approved = store.Current;
+        var firstFrontier = Assert.IsType<GovernedLoopFrontierPosture>(approved.Frontier);
         var review = Assert.IsType<HumanReviewRunState>(approved.HumanReview);
         var reservation = Assert.IsType<HumanReviewContinuationReservation>(review.ContinuationReservation);
         var accepted = Assert.IsType<HumanReviewDecision>(review.AcceptedTerminalDecision);
@@ -130,6 +132,18 @@ public sealed partial class CustomLoopOrderedRunnerTests
         Assert.Equal(firstRequest.RequestHash, second.CompletedReviews[0].Request.RequestHash);
         Assert.Equal(HumanReviewLifecycleStatus.Pending, second.Lifecycle.Status);
         Assert.True(CustomLoopRunValidator.Validate(store.Current).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(store.Current).Errors));
+
+        var admission = new HumanReviewAdmissionService(store);
+        var archivedAdmissionReplay = await admission.AdmitAsync(new HumanReviewAdmissionCommand(store.Current.Id, store.Current.LifecycleVersion, firstRequest, firstFrontier));
+        Assert.Equal(CustomLoopRunStoreStatus.AlreadyCreated, archivedAdmissionReplay.Status);
+        var archivedAdmissionReuse = await admission.AdmitAsync(new HumanReviewAdmissionCommand(store.Current.Id, store.Current.LifecycleVersion, Reissue(firstRequest, "first-review-reused-request", firstRequest.RequestOperationId), firstFrontier));
+        Assert.Equal(CustomLoopRunStoreStatus.Conflict, archivedAdmissionReuse.Status);
+
+        var duplicateArchivedRequest = Reissue(second.CompletedReviews[0].Request, "first-review-duplicate-request", second.Request.RequestOperationId);
+        var duplicateArchived = second.CompletedReviews[0] with { Request = duplicateArchivedRequest };
+        var duplicateAdmissionIdentity = store.Current with { HumanReview = second with { CompletedReviews = [duplicateArchived] } };
+        var duplicateAdmissionValidation = CustomLoopRunValidator.Validate(duplicateAdmissionIdentity);
+        Assert.Contains(duplicateAdmissionValidation.Errors, error => error.Code == "duplicate_human_review_request_operation_identity");
 
         var archivedReplay = await new HumanReviewDecisionService(
             store,
@@ -218,4 +232,13 @@ public sealed partial class CustomLoopOrderedRunnerTests
             null,
             null,
             null);
+
+    private static HumanReviewRequest Reissue(HumanReviewRequest request, string requestId, string operationId)
+        => HumanReviewContractHash.ApplyRequest(request with
+        {
+            RequestId = requestId,
+            RequestOperationId = operationId,
+            Provenance = request.Provenance with { CorrelationId = operationId, ProvenanceHash = string.Empty },
+            RequestHash = string.Empty,
+        });
 }
