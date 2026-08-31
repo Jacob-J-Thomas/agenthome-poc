@@ -10,7 +10,7 @@ namespace EmbodySense.Core.Startup.Tests.Runtime;
 public sealed partial class AgentRuntimeFactoryTests
 {
     [Fact]
-    public async Task Schedule_authoring_rejects_malformed_intent_without_consulting_canonical_dependencies()
+    public async Task Schedule_authoring_rejects_malformed_intent()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
@@ -42,7 +42,7 @@ public sealed partial class AgentRuntimeFactoryTests
     }
 
     [Fact]
-    public async Task Schedule_authoring_reports_a_missing_graph_before_time_or_authority_resolution()
+    public async Task Schedule_authoring_reports_a_missing_graph()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
