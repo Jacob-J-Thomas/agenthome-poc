@@ -27,6 +27,8 @@ $maximumTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests
 $retentionTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Loops\CustomLoopTraceRetentionStoreTests.cs"
 $coverageChildProcessPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Verification\CoverageChildProcessAssembly.cs"
 $admissionStoreTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Loops\Admission\GovernedLoopAdmissionStoreTests.cs"
+$admissionStoreFixturePath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Loops\Admission\GovernedLoopAdmissionStoreTestFixture.cs"
+$admissionStoreHostTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Loops\Admission\GovernedLoopAdmissionStoreCrossProcessHostTests.cs"
 $persistenceEnvironmentCollectionPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Verification\ProcessEnvironmentCollection.cs"
 $persistenceCapabilityCatalogTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Capabilities\FileCapabilityCatalogTrustProviderTests.cs"
 $startupRuntimeCollectionPath = Join-Path $repoRoot "tests\EmbodySense.Core.Startup.Tests\Loops\Execution\LoopRuntimeIntegrationCollection.cs"
@@ -171,6 +173,8 @@ $maximumTest = Get-Content -LiteralPath $maximumTestPath -Raw
 $retentionTest = Get-Content -LiteralPath $retentionTestPath -Raw
 $coverageChildProcess = Get-Content -LiteralPath $coverageChildProcessPath -Raw
 $admissionStoreTest = Get-Content -LiteralPath $admissionStoreTestPath -Raw
+$admissionStoreFixture = Get-Content -LiteralPath $admissionStoreFixturePath -Raw
+$admissionStoreHostTest = Get-Content -LiteralPath $admissionStoreHostTestPath -Raw
 $persistenceEnvironmentCollection = Get-Content -LiteralPath $persistenceEnvironmentCollectionPath -Raw
 $persistenceCapabilityCatalogTest = Get-Content -LiteralPath $persistenceCapabilityCatalogTestPath -Raw
 $startupRuntimeCollection = Get-Content -LiteralPath $startupRuntimeCollectionPath -Raw
@@ -212,10 +216,10 @@ Assert-Contains -Actual $verifyScript -Expected 'EMBODYSENSE_COVERAGE_CHILD_ASSE
 Assert-Contains -Actual $verifyScript -Expected 'Assert-VerificationDirectoryManifest -Expected $isolation.PristineManifest -Directory $isolation.PristineDirectory' -Message "Every verifier run must re-hash the immutable pristine source after all child processes exit."
 Assert-Contains -Actual $coverageChildProcess -Expected 'AddExpectedTerminationVstestArguments' -Message "Intentional process-loss cases must retain an exact VSTest testhost path instead of a custom executable helper."
 Assert-Contains -Actual $coverageChildProcess -Expected 'startInfo.ArgumentList.Add(isolatedPath);' -Message "Expected-termination VSTest must read the immutable pristine test assembly directly."
-Assert-Contains -Actual $admissionStoreTest -Expected '"crash-proof" or "crash-primary" or "crash-trust" => true' -Message "Only the three admitted abrupt-loss modes may omit an impossible child coverage report."
-Assert-Contains -Actual $admissionStoreTest -Expected '"writer" => false' -Message "Successful cross-process writers must retain the report-producing coverage path."
-Assert-Contains -Actual $admissionStoreTest -Expected 'AddExpectedTerminationVstestArguments(startInfo, typeof(GovernedLoopAdmissionStoreTests).Assembly.Location, CrossProcessHostTestName)' -Message "The crash-only route must execute the existing exact xUnit worker identity."
-Assert-Contains -Actual $admissionStoreTest -Expected 'public async Task Cross_process_admission_store_host()' -Message "The existing child worker test ID must remain in canonical inventory."
+Assert-Contains -Actual $admissionStoreFixture -Expected '"crash-proof" or "crash-primary" or "crash-trust" => true' -Message "Only the three admitted abrupt-loss modes may omit an impossible child coverage report."
+Assert-Contains -Actual $admissionStoreFixture -Expected '"writer" => false' -Message "Successful cross-process writers must retain the report-producing coverage path."
+Assert-Contains -Actual $admissionStoreFixture -Expected 'AddExpectedTerminationVstestArguments(startInfo, typeof(GovernedLoopAdmissionStoreCrossProcessHostTests).Assembly.Location, CrossProcessHostTestName)' -Message "The crash-only route must execute the exact isolated xUnit worker identity."
+Assert-Contains -Actual $admissionStoreHostTest -Expected 'public Task Cross_process_admission_store_host() => RunCrossProcessHostAsync();' -Message "The isolated child worker must remain discoverable in canonical inventory."
 Assert-Contains -Actual $verifyScript -Expected 'Resolve-VerificationPhysicalTempRoot -RunnerTemp $env:RUNNER_TEMP -SystemTempPath ([IO.Path]::GetTempPath())' -Message "Hosted verification must select the runner-owned ephemeral volume with a local fallback."
 Assert-Contains -Actual $verifyScript -Expected 'Get-VerificationLaneFixturePath -PhysicalTempRoot $verificationPhysicalTempRoot' -Message "Lane fixture isolation must remain short, disjoint, and outside retained repository artifacts."
 Assert-Contains -Actual $verifyScript -Expected 'EMBODYSENSE_CAPABILITY_CATALOG_TRUST_ROOT = Join-Path $laneFixtureRoot "catalog-trust"' -Message "Every project lane must receive a disjoint process-scoped catalog trust root."
@@ -263,7 +267,7 @@ foreach ($startupRuntimeWrapper in @(
 Assert-Contains -Actual $startupNestedProcessTest -Expected '[Collection(LoopRuntimeIntegrationCollection.Name)]' -Message "The held runtime-authoring nested-process test must serialize with the restart fixtures."
 Assert-Contains -Actual $persistenceEnvironmentCollection -Expected '[CollectionDefinition(Name, DisableParallelization = true)]' -Message "Persistence process-environment mutation must remain exclusive of all assembly tests."
 Assert-Contains -Actual $persistenceCapabilityCatalogTest -Expected '[Collection(Verification.ProcessEnvironmentCollection.Name)]' -Message "Capability-catalog trust-root mutation must retain process-environment serialization."
-Assert-Contains -Actual $admissionStoreTest -Expected '[Collection(Verification.ProcessEnvironmentCollection.Name)]' -Message "Coverage child-directory mutation must retain process-environment serialization."
+Assert-Contains -Actual $admissionStoreHostTest -Expected '[Collection(ProcessEnvironmentCollection.Name)]' -Message "Coverage child-directory mutation must retain process-environment serialization."
 foreach ($webSharedRuntimeTest in @(
     "CapabilityApiControllerTests.cs",
     "LoopApiControllerTests.cs",
