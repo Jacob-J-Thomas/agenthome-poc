@@ -129,7 +129,7 @@ export function createGovernedScheduleAuthoring({
           response?.detail ??
           "The canonical schedule has no visible authoring projection.";
       } else {
-        elements.result.textContent = `Inspected ${inspectedSchedule.scheduleId} at state revision ${inspectedSchedule.stateRevision}. Use “Prepare immutable successor edit” to change it.`;
+        elements.result.textContent = `Inspected ${inspectedSchedule.scheduleId} at state revision ${inspectedSchedule.stateRevision}; ${inspectedSchedule.enabled ? "enabled" : "disabled"}. Use “Prepare immutable successor edit” to change it.`;
       }
     } catch (error) {
       inspectedSchedule = null;

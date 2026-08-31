@@ -110,6 +110,8 @@ test("schedule authoring keeps one confirmed operation through response loss, re
     view.elements.result.textContent,
     /Inspected schedule-inspected/i,
   );
+  assert.match(view.elements.result.textContent, /enabled/i);
+  assert.equal(view.elements.result.children.length, 0);
 });
 
 test("immutable replacement rereads canonical posture and never enables a successor before its predecessor is disabled", async () => {
@@ -211,6 +213,7 @@ test("immutable replacement rereads canonical posture and never enables a succes
     view.elements.result.textContent,
     /schedule-old at state revision 6/i,
   );
+  assert.match(view.elements.result.textContent, /disabled/i);
   assert.equal(view.elements.prepareEdit.disabled, false);
 });
 
