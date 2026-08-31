@@ -640,6 +640,7 @@ public sealed class AgentRuntimeFactory
                 permissionService);
             var governedWorkspaceActionFacade = GovernedLoopEffectAttemptFactory.Create(
                 paths,
+                customRunStore,
                 _capabilityTrustProvider,
                 capabilityAuthority,
                 governedWorkspaceActionRegistry,
@@ -657,6 +658,7 @@ public sealed class AgentRuntimeFactory
                     commandActionRuntime.IsolationBoundary);
                 var commandActionFacade = GovernedLoopEffectAttemptFactory.Create(
                     paths,
+                    customRunStore,
                     _capabilityTrustProvider,
                     capabilityAuthority,
                     commandActions.Operations,

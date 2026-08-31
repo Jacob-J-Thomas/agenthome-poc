@@ -26,6 +26,7 @@ using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Execution.Models;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Capabilities;
+using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Core.Startup.Loops.Execution.Effects;
 using EmbodySense.Core.Startup.Workspace;
@@ -65,6 +66,7 @@ public sealed class GovernedWorkspaceActionFactoryTests
         using var workspace = new TestWorkspace();
         var fixture = WorkspaceToolAuthorityTestFixture.CreateAction();
         var paths = new WorkspacePaths(workspace.RootPath);
+        using var runs = new CustomLoopRunStore(paths);
         var trust = new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath);
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         Directory.CreateDirectory(workspace.File("shared"));
@@ -88,6 +90,7 @@ public sealed class GovernedWorkspaceActionFactoryTests
             new FixedTimeProvider(WorkspaceToolAuthorityTestFixture.Now.AddMinutes(1)));
         var facade = GovernedLoopEffectAttemptFactory.Create(
             paths,
+            runs,
             trust,
             transaction,
             registry,

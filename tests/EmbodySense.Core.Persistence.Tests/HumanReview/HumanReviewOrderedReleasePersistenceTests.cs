@@ -63,6 +63,14 @@ public sealed class HumanReviewOrderedReleasePersistenceTests
         var paths = new WorkspacePaths(workspace.RootPath);
         var markerPath = workspace.File("release-cas.marker");
         var claimed = await CreateClaimedPreDispatchApprovalAsync(workspace, paths, markerPath, "approved-release-cas-loss");
+        var claimedAttempt = await ReadEffectAttemptAsync(paths, claimed);
+        var forgedRelease = CreateSyntheticRelease(claimed, claimedAttempt);
+        using (var claimedStore = new CustomLoopRunStore(paths))
+        {
+            var claimedEvidence = new CanonicalHumanReviewEffectEvidenceSource(claimedStore, new GovernedLoopEffectAttemptStore(paths));
+            var missingStatus = await claimedEvidence.ReadReleasedAsync(Query(claimed, claimedAttempt, forgedRelease));
+            Assert.Equal(HumanReviewPreDispatchEffectReleaseEvidenceReadStatus.Missing, missingStatus);
+        }
 
         await AssertExpectedHostLossAsync(
             "human-review-ordered-effect-process-loss",
@@ -73,6 +81,36 @@ public sealed class HumanReviewOrderedReleasePersistenceTests
             CustomLoopRunPublicationBoundary.TargetProven.ToString());
         Assert.False(File.Exists(markerPath));
         Assert.Equal(GovernedLoopEffectPhase.IntentPrepared, (await ReadEffectAttemptAsync(paths, claimed)).Payload.Phase);
+
+        using (var releasedStore = new CustomLoopRunStore(paths))
+        {
+            var releasedRun = Assert.IsType<CustomLoopRunRecord>(await releasedStore.GetAsync(claimed.Id));
+            var releasedAttempt = await ReadEffectAttemptAsync(paths, releasedRun);
+            var releasedReview = Assert.IsType<HumanReviewRunState>(releasedRun.HumanReview);
+            var releasedReceipt = Assert.IsType<HumanReviewContinuationReleaseReceipt>(releasedReview.Continuation?.Completion?.ReleaseReceipt);
+            var releasedEvidence = new CanonicalHumanReviewEffectEvidenceSource(releasedStore, new GovernedLoopEffectAttemptStore(paths));
+            var canonicalRelease = new HumanReviewPreDispatchEffectRelease(releasedReview.Request, releasedReceipt);
+            var releaseStatus = await releasedEvidence.ReadReleasedAsync(Query(releasedRun, releasedAttempt, canonicalRelease));
+            var staleStatus = await releasedEvidence.ReadReleasedAsync(Query(releasedRun, releasedAttempt, forgedRelease));
+            Assert.Equal(HumanReviewPreDispatchEffectReleaseEvidenceReadStatus.Current, releaseStatus);
+            Assert.Equal(HumanReviewPreDispatchEffectReleaseEvidenceReadStatus.Stale, staleStatus);
+
+            var runPath = Path.Combine(paths.CustomLoopRunsPath, releasedRun.LoopId, releasedRun.Id + ".json");
+            var artifact = await File.ReadAllTextAsync(runPath);
+            var tamperedHash = (releasedReceipt.ReleaseReceiptHash[0] == '0' ? "1" : "0") + releasedReceipt.ReleaseReceiptHash[1..];
+            var tamperedArtifact = artifact.Replace(releasedReceipt.ReleaseReceiptHash, tamperedHash, StringComparison.Ordinal);
+            Assert.NotEqual(artifact, tamperedArtifact);
+            await File.WriteAllTextAsync(runPath, tamperedArtifact);
+            try
+            {
+                var corruptStatus = await releasedEvidence.ReadReleasedAsync(Query(releasedRun, releasedAttempt, canonicalRelease));
+                Assert.Equal(HumanReviewPreDispatchEffectReleaseEvidenceReadStatus.Corrupt, corruptStatus);
+            }
+            finally
+            {
+                await File.WriteAllTextAsync(runPath, artifact);
+            }
+        }
 
         var resultPath = workspace.File("release-cas-restart");
         await AssertEffectHostCompletedAsync(workspace.RootPath, claimed.Id, markerPath, resultPath);
@@ -475,6 +513,50 @@ public sealed class HumanReviewOrderedReleasePersistenceTests
         var read = await ((IGovernedLoopEffectAttemptReadStore)new GovernedLoopEffectAttemptStore(paths)).ReadAsync(run.HumanReview!.Request.Binding.WorkspaceId, binding.OperationId, binding.EffectGeneration);
         Assert.Equal(GovernedLoopEffectAttemptReadStatus.Current, read.Status);
         return Assert.IsType<GovernedLoopEffectAttempt>(read.Attempt);
+    }
+
+    private static HumanReviewPreDispatchEffectReleaseEvidenceQuery Query(
+        CustomLoopRunRecord run,
+        GovernedLoopEffectAttempt attempt,
+        HumanReviewPreDispatchEffectRelease release)
+        => new(
+            release.Request.Binding.WorkspaceId,
+            run.SequentialAdapterBinding!.AdmissionReceipt.ContentHash,
+            release,
+            attempt);
+
+    private static HumanReviewPreDispatchEffectRelease CreateSyntheticRelease(CustomLoopRunRecord run, GovernedLoopEffectAttempt attempt)
+    {
+        var review = Assert.IsType<HumanReviewRunState>(run.HumanReview);
+        var continuation = Assert.IsType<HumanReviewContinuationState>(review.Continuation);
+        var wake = continuation.Wake;
+        var claim = Assert.IsType<HumanReviewContinuationClaim>(continuation.Claims.LastOrDefault());
+        var reservation = Assert.IsType<HumanReviewContinuationReservation>(review.ContinuationReservation);
+        var requestReference = new HumanReviewRequestReference(review.Request.RequestId, review.Request.RequestHash);
+        var wakeReference = new HumanReviewContinuationWakeReference(wake.WakeId, wake.WakeHash);
+        var claimReference = new HumanReviewContinuationClaimReference(claim.ClaimId, claim.ClaimHash);
+        var reservationReference = new HumanReviewContinuationReservationReference(reservation.ReservationId, reservation.ReservationHash);
+        var operationId = Assert.IsType<string>(HumanReviewContinuationReleaseOperationId.Create(
+            requestReference,
+            wakeReference,
+            reservationReference,
+            wake.ExpectedGeneration,
+            HumanReviewContinuationReleaseKind.PreDispatchEffect));
+        var effectReceipt = HumanReviewEffectReleaseContract.Create(review.Request.Binding, attempt, attempt.Payload.UpdatedAtUtc).SnapshotHash;
+        var receipt = HumanReviewContinuationContractHash.ApplyReleaseReceipt(new HumanReviewContinuationReleaseReceipt(
+            HumanReviewContinuationReleaseReceipt.CurrentSchemaVersion,
+            operationId,
+            wakeReference,
+            claimReference,
+            reservationReference,
+            wake.ExpectedGeneration,
+            HumanReviewContinuationReleaseKind.PreDispatchEffect,
+            HumanReviewContinuationReleaseDisposition.Released,
+            new string('b', HumanReviewContractLimits.Sha256HexCharacters),
+            new string('c', HumanReviewContractLimits.Sha256HexCharacters),
+            effectReceipt,
+            string.Empty));
+        return new HumanReviewPreDispatchEffectRelease(review.Request, receipt);
     }
 
     private static async Task AssertSingleApprovedEffectAsync(WorkspacePaths paths, string markerPath, CustomLoopRunRecord durable)

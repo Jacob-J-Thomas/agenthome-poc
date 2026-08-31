@@ -4,6 +4,7 @@ using EmbodySense.Core.Application.Loops.EffectAttempts;
 using EmbodySense.Core.Application.Loops.EffectAttempts.Models;
 using EmbodySense.Core.Common.HumanReview;
 using EmbodySense.Core.Common.HumanReview.Models;
+using EmbodySense.Core.Common.Loops.Admission;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Execution.Effects;
@@ -15,7 +16,7 @@ namespace EmbodySense.Core.Application.HumanReview;
 
 /// <summary>Projects current Human Review effect evidence and certainty from canonical run and effect-attempt reads.</summary>
 /// <remarks>This source owns no effect transition. Every result is reconstructed from the current persisted Human Review binding and a read-only effect-attempt head, so caller-supplied evidence can never become proof.</remarks>
-public sealed class CanonicalHumanReviewEffectEvidenceSource : IHumanReviewCurrentEffectAttemptEvidenceSource, IGovernedLoopEffectCertaintySnapshotSource
+public sealed class CanonicalHumanReviewEffectEvidenceSource : IHumanReviewCurrentEffectAttemptEvidenceSource, IGovernedLoopEffectCertaintySnapshotSource, IHumanReviewPreDispatchEffectReleaseEvidenceSource
 {
     private readonly ICustomLoopRunStore _runs;
     private readonly IGovernedLoopEffectAttemptReadStore _attempts;
@@ -27,6 +28,35 @@ public sealed class CanonicalHumanReviewEffectEvidenceSource : IHumanReviewCurre
     {
         _runs = runs ?? throw new ArgumentNullException(nameof(runs));
         _attempts = attempts ?? throw new ArgumentNullException(nameof(attempts));
+    }
+
+    /// <inheritdoc />
+    public async Task<HumanReviewPreDispatchEffectReleaseEvidenceReadStatus> ReadReleasedAsync(
+        HumanReviewPreDispatchEffectReleaseEvidenceQuery query,
+        CancellationToken cancellationToken = default)
+    {
+        if (!TryCaptureReleaseExpectation(query, out var release, out var expectedAttempt))
+        {
+            return HumanReviewPreDispatchEffectReleaseEvidenceReadStatus.Corrupt;
+        }
+        if (!string.Equals(query.WorkspaceId, release!.Request.Binding.WorkspaceId, StringComparison.Ordinal)
+            || !string.Equals(query.AdmissionReceiptHash, expectedAttempt!.AdmissionAuthorityEvidenceHash, StringComparison.Ordinal)
+            || !MatchesReviewedAttempt(release.Request.Binding, release.Request.Binding.EffectAttempt!, expectedAttempt))
+        {
+            return HumanReviewPreDispatchEffectReleaseEvidenceReadStatus.Stale;
+        }
+
+        var source = await ReadSourceAsync(query.WorkspaceId, expectedAttempt.Binding.RunId, expectedAttempt.Payload.OperationId, expectedAttempt.Payload.EffectGeneration, cancellationToken).ConfigureAwait(false);
+        if (source.Status != GovernedLoopEffectAttemptReadStatus.Current || source.Run is null || source.Attempt is null)
+        {
+            return MapReleaseStatus(source.Status);
+        }
+        if (!string.Equals(source.Attempt.ContentHash, expectedAttempt.ContentHash, StringComparison.Ordinal))
+        {
+            return HumanReviewPreDispatchEffectReleaseEvidenceReadStatus.Stale;
+        }
+
+        return ClassifyReleasedEvidence(source.Run, source.Attempt, query, release);
     }
 
     /// <inheritdoc />
@@ -164,6 +194,146 @@ public sealed class CanonicalHumanReviewEffectEvidenceSource : IHumanReviewCurre
         }
     }
 
+    private static HumanReviewPreDispatchEffectReleaseEvidenceReadStatus ClassifyReleasedEvidence(
+        CustomLoopRunRecord run,
+        GovernedLoopEffectAttempt attempt,
+        HumanReviewPreDispatchEffectReleaseEvidenceQuery query,
+        HumanReviewPreDispatchEffectRelease release)
+    {
+        try
+        {
+            if (!CustomLoopRunValidator.Validate(run).IsValid || GovernedLoopEffectAttemptContract.Validate(attempt) is not null)
+            {
+                return HumanReviewPreDispatchEffectReleaseEvidenceReadStatus.Corrupt;
+            }
+
+            var review = run.HumanReview;
+            var reservation = review?.ContinuationReservation;
+            var continuation = review?.Continuation;
+            var completion = continuation?.Completion;
+            var receipt = completion?.ReleaseReceipt;
+            if (review is null || reservation is null || continuation is null || completion is null || receipt is null)
+            {
+                return HumanReviewPreDispatchEffectReleaseEvidenceReadStatus.Missing;
+            }
+            if (!HumanReviewContinuationContractValidator.ValidateState(review.Request, reservation, continuation).IsValid)
+            {
+                return HumanReviewPreDispatchEffectReleaseEvidenceReadStatus.Corrupt;
+            }
+            if (!string.Equals(release.Request.RequestHash, review.Request.RequestHash, StringComparison.Ordinal)
+                || !string.Equals(release.Request.RequestId, review.Request.RequestId, StringComparison.Ordinal)
+                || !string.Equals(release.ReleaseReceipt.ReleaseReceiptHash, receipt.ReleaseReceiptHash, StringComparison.Ordinal)
+                || !string.Equals(release.ReleaseReceipt.ReleaseOperationId, receipt.ReleaseOperationId, StringComparison.Ordinal))
+            {
+                return HumanReviewPreDispatchEffectReleaseEvidenceReadStatus.Stale;
+            }
+
+            var binding = review.Request.Binding;
+            var adapter = run.SequentialAdapterBinding;
+            var frontier = run.Frontier;
+            var decision = review.AcceptedTerminalDecision;
+            var latestClaim = continuation.Claims.IsDefaultOrEmpty ? null : continuation.Claims[^1];
+            var activation = frontier?.Payload.Nodes.Where(node => node.Status == GovernedLoopNodeExecutionStatus.Running
+                    && string.Equals(node.NodeId, binding.NodeId, StringComparison.Ordinal)
+                    && node.Attempt == binding.Attempt
+                    && (binding.ActivationOrdinal is null || node.ActivationOrdinal == binding.ActivationOrdinal)
+                    && (binding.VisitOrdinal is null || node.VisitOrdinal == binding.VisitOrdinal))
+                .Take(2)
+                .ToArray();
+            if (run.IsTerminal
+                || run.Status != CustomLoopRunStatus.Running
+                || adapter is null
+                || frontier?.Payload.Status != GovernedLoopFrontierStatus.Active
+                || activation?.Length != 1
+                || decision?.Kind != HumanReviewDecisionKind.Approve
+                || latestClaim is null
+                || !Equals(adapter.ExecutionBinding, attempt.Binding)
+                || !Equals(frontier.Binding, attempt.Binding)
+                || !string.Equals(run.Id, attempt.Binding.RunId, StringComparison.Ordinal)
+                || !string.Equals(adapter.WorkspaceId, query.WorkspaceId, StringComparison.Ordinal)
+                || !string.Equals(adapter.AdmissionReceipt.ContentHash, query.AdmissionReceiptHash, StringComparison.Ordinal)
+                || !string.Equals(binding.WorkspaceId, query.WorkspaceId, StringComparison.Ordinal)
+                || !string.Equals(binding.RunId, attempt.Binding.RunId, StringComparison.Ordinal)
+                || !string.Equals(binding.GraphId, attempt.Binding.Revision.GraphId, StringComparison.Ordinal)
+                || !string.Equals(binding.RevisionId, attempt.Binding.Revision.RevisionId, StringComparison.Ordinal)
+                || !string.Equals(binding.RevisionHash, attempt.Binding.Revision.ExecutableHash, StringComparison.Ordinal)
+                || !string.Equals(binding.NodeId, attempt.NodeId, StringComparison.Ordinal)
+                || binding.Attempt != attempt.NodeAttempt
+                || activation[0].AttemptOperationId is not { } activationOperationId
+                || run.Events.Count(item => item.Kind == CustomLoopRunEventKind.NodeAttemptStarted && string.Equals(item.EventId, activationOperationId, StringComparison.Ordinal)) != 1
+                || continuation.Wake.ExpectedGeneration != attempt.Binding.ExecutionGeneration
+                || receipt.ExpectedGeneration != attempt.Binding.ExecutionGeneration
+                || receipt.Kind != HumanReviewContinuationReleaseKind.PreDispatchEffect
+                || receipt.Disposition != HumanReviewContinuationReleaseDisposition.Released
+                || !string.Equals(receipt.FrontierReceiptHash, frontier.Payload.ContentHash, StringComparison.Ordinal)
+                || run.Events.Count(item => item.Kind == CustomLoopRunEventKind.LifecycleChanged && string.Equals(item.EventId, receipt.ReleaseOperationId, StringComparison.Ordinal)) != 1
+                || !string.Equals(binding.AuthorityProfileHash, HumanReviewAuthorityBindingHash.FromProfile(adapter.AdmissionReceipt.Evidence.GrantProfile.ContentHash), StringComparison.Ordinal)
+                || !string.Equals(binding.AuthorityGrantHash, adapter.AdmissionReceipt.Evidence.GrantDependencyEvidenceHash, StringComparison.Ordinal)
+                || !string.Equals(binding.CapabilityHash, GovernedLoopAdmissionContractHash.ComputeCapabilityAdmissionReferenceHash(adapter.AdmissionReceipt.Evidence.CapabilityAdmission), StringComparison.Ordinal)
+                || !string.Equals(binding.ModelProfileHash, adapter.AdmissionReceipt.Evidence.ModelRoutingAdmission.ContentHash, StringComparison.Ordinal)
+                || !string.Equals(binding.TargetHash, attempt.TargetFingerprint, StringComparison.Ordinal)
+                || !string.Equals(binding.PreconditionHash, attempt.PreconditionEvidenceHash, StringComparison.Ordinal)
+                || !string.Equals(binding.PayloadHash, attempt.InputFingerprint, StringComparison.Ordinal)
+                || !GovernedLoopHumanReviewReleaseReceiptHash.Matches(receipt.ResultHash, receipt.ReleaseOperationId, receipt.EffectReceiptHash!, receipt.FrontierReceiptHash)
+                || !HumanReviewContinuationReleaseOperationId.Matches(
+                    receipt.ReleaseOperationId,
+                    new HumanReviewRequestReference(review.Request.RequestId, review.Request.RequestHash),
+                    receipt.Wake,
+                    receipt.Reservation,
+                    receipt.ExpectedGeneration,
+                    receipt.Kind))
+            {
+                return HumanReviewPreDispatchEffectReleaseEvidenceReadStatus.Stale;
+            }
+
+            var preparation = HumanReviewEffectReleaseContract.CreatePreparation(binding, attempt);
+            var snapshot = HumanReviewEffectReleaseContract.Create(binding, attempt, attempt.Payload.UpdatedAtUtc);
+            return string.Equals(binding.EffectAttempt?.PreparationHash, preparation.PreparationHash, StringComparison.Ordinal)
+                && string.Equals(receipt.EffectReceiptHash, snapshot.SnapshotHash, StringComparison.Ordinal)
+                ? HumanReviewPreDispatchEffectReleaseEvidenceReadStatus.Current
+                : HumanReviewPreDispatchEffectReleaseEvidenceReadStatus.Stale;
+        }
+        catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or NullReferenceException or IndexOutOfRangeException)
+        {
+            return HumanReviewPreDispatchEffectReleaseEvidenceReadStatus.Corrupt;
+        }
+    }
+
+    private static bool TryCaptureReleaseExpectation(
+        HumanReviewPreDispatchEffectReleaseEvidenceQuery? query,
+        out HumanReviewPreDispatchEffectRelease? release,
+        out GovernedLoopEffectAttempt? attempt)
+    {
+        release = null;
+        attempt = null;
+        try
+        {
+            if (query?.Release?.Request is null
+                || query.Release.ReleaseReceipt is null
+                || query.Attempt is null
+                || GovernedLoopEffectAttemptContract.Validate(query.Attempt) is not null
+                || query.Attempt.Payload.Phase != GovernedLoopEffectPhase.IntentPrepared
+                || query.Attempt.DispatchAuthorityEvidenceHash is not null
+                || !HumanReviewContractValidator.ValidateRequest(query.Release.Request).IsValid
+                || query.Release.Request.Purpose != HumanReviewPurpose.PreDispatchEffect
+                || query.Release.Request.Binding.EffectAttempt is null
+                || !HumanReviewContinuationContractHash.MatchesReleaseReceipt(query.Release.ReleaseReceipt))
+            {
+                return false;
+            }
+
+            release = new HumanReviewPreDispatchEffectRelease(query.Release.Request, query.Release.ReleaseReceipt);
+            attempt = query.Attempt;
+            return true;
+        }
+        catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or NullReferenceException or IndexOutOfRangeException)
+        {
+            release = null;
+            attempt = null;
+            return false;
+        }
+    }
+
     private static bool TryCreateEvidence(HumanReviewBinding binding, HumanReviewEffectAttemptBinding reviewed, GovernedLoopEffectAttempt attempt, out HumanReviewCurrentEffectAttemptEvidence? evidence)
     {
         evidence = null;
@@ -266,5 +436,14 @@ public sealed class CanonicalHumanReviewEffectEvidenceSource : IHumanReviewCurre
             GovernedLoopEffectAttemptReadStatus.Corrupt => GovernedLoopEffectCertaintySnapshotStatus.Corrupt,
             GovernedLoopEffectAttemptReadStatus.Unavailable => GovernedLoopEffectCertaintySnapshotStatus.Unavailable,
             _ => GovernedLoopEffectCertaintySnapshotStatus.Corrupt,
+        };
+
+    private static HumanReviewPreDispatchEffectReleaseEvidenceReadStatus MapReleaseStatus(GovernedLoopEffectAttemptReadStatus status)
+        => status switch
+        {
+            GovernedLoopEffectAttemptReadStatus.Missing => HumanReviewPreDispatchEffectReleaseEvidenceReadStatus.Missing,
+            GovernedLoopEffectAttemptReadStatus.Corrupt => HumanReviewPreDispatchEffectReleaseEvidenceReadStatus.Corrupt,
+            GovernedLoopEffectAttemptReadStatus.Unavailable => HumanReviewPreDispatchEffectReleaseEvidenceReadStatus.Unavailable,
+            _ => HumanReviewPreDispatchEffectReleaseEvidenceReadStatus.Corrupt,
         };
 }

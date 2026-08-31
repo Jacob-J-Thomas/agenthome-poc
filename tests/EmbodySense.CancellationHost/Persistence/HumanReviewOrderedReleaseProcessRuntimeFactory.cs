@@ -28,10 +28,12 @@ internal static class HumanReviewOrderedReleaseProcessRuntimeFactory
         var transaction = new HumanReviewOrderedReleaseProcessAuthorityTransaction();
         var operation = new HumanReviewOrderedReleaseProcessMarkerOperation(markerPath, crashAfterMarker, ownerReadyPath, ownerReleasePath);
         var catalog = new HumanReviewOrderedReleaseProcessCatalog(operation);
+        var attempts = new GovernedLoopEffectAttemptStore(paths);
         var effects = new GovernedLoopEffectAttemptService(
             catalog,
-            new GovernedLoopEffectAttemptStore(paths),
+            attempts,
             new HumanReviewOrderedReleaseProcessEffectAuthority(transaction, timeProvider),
+            new CanonicalHumanReviewEffectEvidenceSource(runStore, attempts),
             timeProvider);
         var workspaceActions = new GovernedLoopWorkspaceActionExecutor(new GovernedLoopEffectAttemptFacade(catalog, effects));
         var audit = new AuditLog(paths);
