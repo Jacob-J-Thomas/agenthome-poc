@@ -1542,56 +1542,19 @@ public sealed class CustomLoopFrontierStoreTests
     {
         using var workspace = new TestWorkspace();
         var current = await PersistHumanReviewAdmissionAsync(new WorkspacePaths(workspace.RootPath), "event-equality-admission-binding");
-        var currentState = Assert.IsType<HumanReviewRunState>(current.HumanReview);
-        var currentRequest = currentState.Request;
-        var substitutedBinding = HumanReviewContractHash.ApplyBinding(currentRequest.Binding with
-        {
-            FrontierId = currentRequest.Binding.FrontierId + "-substituted",
-            BindingHash = string.Empty,
-        });
-        var substitutedScope = HumanReviewContractHash.ApplyApprovalScope(currentRequest.ApprovalScope with
-        {
-            BindingHash = substitutedBinding.BindingHash,
-            ScopeHash = string.Empty,
-        });
-        var substitutedRequest = HumanReviewContractHash.ApplyRequest(currentRequest with
-        {
-            Binding = substitutedBinding,
-            ApprovalScope = substitutedScope,
-            RequestHash = string.Empty,
-        });
-        var substitutedRequestReference = new HumanReviewRequestReference(substitutedRequest.RequestId, substitutedRequest.RequestHash);
-        var substitutedLifecycle = HumanReviewContractHash.ApplyLifecycle(currentState.Lifecycle with
-        {
-            Request = substitutedRequestReference,
-            LifecycleHash = string.Empty,
-        });
-        var substitutedEvidence = HumanReviewContractHash.ApplyEvidence(currentState.Evidence[0] with
-        {
-            Request = substitutedRequestReference,
-            EvidenceHash = string.Empty,
-        });
         var admissionEvent = Assert.Single(current.Events, item => item.Kind == CustomLoopRunEventKind.HumanReviewRequestAdmitted);
         var retained = Assert.IsType<HumanReviewAdmissionBindingEvidence>(admissionEvent.HumanReviewAdmissionBinding);
         var substitutedAdmissionBinding = HumanReviewContractHash.ApplyAdmissionBindingEvidence(retained with
         {
-            BindingHash = substitutedBinding.BindingHash,
-            FrontierId = substitutedBinding.FrontierId,
+            ExecutionGeneration = retained.ExecutionGeneration + 1,
             EvidenceHash = string.Empty,
         });
         var candidate = current with
         {
             LifecycleVersion = current.LifecycleVersion + 1,
             UpdatedAtUtc = current.UpdatedAtUtc.AddTicks(1),
-            HumanReview = currentState with
-            {
-                Request = substitutedRequest,
-                Lifecycle = substitutedLifecycle,
-                LifecycleHistory = [substitutedLifecycle],
-                Evidence = [substitutedEvidence],
-            },
             Events = current.Events.Select(item => item.EventId == admissionEvent.EventId
-                ? item with { HumanReviewEvidence = substitutedEvidence, HumanReviewAdmissionBinding = substitutedAdmissionBinding }
+                ? item with { HumanReviewAdmissionBinding = substitutedAdmissionBinding }
                 : item).ToArray(),
         };
 
