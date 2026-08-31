@@ -3828,7 +3828,7 @@ public static class CustomLoopRunValidator
                 continue;
             }
 
-            if (!requestOperationIds.Add(reviewState.Request.RequestOperationId))
+            if (reviewState.Request is { } reviewRequest && !requestOperationIds.Add(reviewRequest.RequestOperationId))
             {
                 Add(errors, "duplicate_human_review_request_operation_identity", "humanReview.request", "An admission operation identity may belong to only one current or archived review boundary.");
             }
