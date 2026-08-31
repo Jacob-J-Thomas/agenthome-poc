@@ -739,6 +739,37 @@ public sealed class BrowserFlowTests
             await ClickAsync(browser, "#governedScheduleInspectButton");
             await browser.WaitForExpressionAsync("document.getElementById('governedScheduleResult').textContent.includes('Inspected') && !document.getElementById('governedSchedulePrepareEditButton').disabled");
             Assert.Contains(scheduleId, await browser.EvaluateStringAsync("document.getElementById('governedScheduleResult').textContent"), StringComparison.Ordinal);
+            await ClickAsync(browser, "#governedSchedulePrepareEditButton");
+            await browser.WaitForExpressionAsync("document.getElementById('governedScheduleResult').textContent.includes('Successor prepared') && document.getElementById('governedScheduleEnabled').checked === false");
+            await SetValueAsync(browser, "#governedScheduleFixedIntervalSeconds", "600", "input");
+            await ClickAsync(browser, "#governedScheduleSubmitButton");
+            await browser.WaitForExpressionAsync("document.getElementById('governedScheduleResult').textContent.includes('server derived least-authority terms')");
+            await ClickAsync(browser, "#governedScheduleSubmitButton");
+            await browser.WaitForExpressionAsync("document.getElementById('governedScheduleResult').textContent.includes('Replacement complete') && document.getElementById('governedScheduleInspectId').value !== ''");
+            var successorScheduleId = await browser.EvaluateStringAsync("document.getElementById('governedScheduleInspectId').value");
+            Assert.Matches("^schedule-[a-f0-9]{48}$", successorScheduleId);
+            Assert.NotEqual(scheduleId, successorScheduleId);
+            Assert.False(await browser.EvaluateBooleanAsync("Object.keys(localStorage).concat(Object.keys(sessionStorage)).some((key) => key.toLowerCase().includes('schedule-author'))"));
+
+            await SetValueAsync(browser, "#governedScheduleInspectId", scheduleId);
+            await ClickAsync(browser, "#governedScheduleInspectButton");
+            await browser.WaitForExpressionAsync("document.getElementById('governedScheduleResult').textContent.includes('Inspected') && document.getElementById('governedScheduleResult').textContent.includes('state revision 2')");
+            Assert.Contains("disabled", await browser.EvaluateStringAsync("document.getElementById('governedScheduleResult').textContent"), StringComparison.OrdinalIgnoreCase);
+            await SetValueAsync(browser, "#governedScheduleInspectId", successorScheduleId);
+            await ClickAsync(browser, "#governedScheduleInspectButton");
+            await browser.WaitForExpressionAsync("document.getElementById('governedScheduleResult').textContent.includes('Inspected') && document.getElementById('governedScheduleResult').textContent.includes('state revision 2')");
+            Assert.Contains("enabled", await browser.EvaluateStringAsync("document.getElementById('governedScheduleResult').textContent"), StringComparison.OrdinalIgnoreCase);
+            await browser.ReloadAsync();
+            await browser.WaitForExpressionAsync("document.getElementById('workspaceStatus').textContent.includes('Initialized')");
+            await ClickAsync(browser, "#loopsNav");
+            await browser.WaitForExpressionAsync("!document.getElementById('loopsView').hidden && document.getElementById('governedGraphTab').getAttribute('aria-disabled') === 'false'");
+            await ClickAsync(browser, "#governedGraphTab");
+            await browser.WaitForExpressionAsync("!document.getElementById('governedScheduleInspectButton').disabled");
+            await SetValueAsync(browser, "#governedScheduleInspectId", successorScheduleId);
+            await ClickAsync(browser, "#governedScheduleInspectButton");
+            await browser.WaitForExpressionAsync("document.getElementById('governedScheduleResult').textContent.includes('Inspected') && document.getElementById('governedScheduleResult').textContent.includes('state revision 2')");
+            Assert.Contains("enabled", await browser.EvaluateStringAsync("document.getElementById('governedScheduleResult').textContent"), StringComparison.OrdinalIgnoreCase);
+            Assert.False(await browser.EvaluateBooleanAsync("Object.keys(localStorage).concat(Object.keys(sessionStorage)).some((key) => key.toLowerCase().includes('schedule-author'))"));
             app.AssertHealthy();
             await browser.AssertHealthyAsync(("/api/governed-graphs/detail?graphId=browser-scheduled-graph", 404));
         }

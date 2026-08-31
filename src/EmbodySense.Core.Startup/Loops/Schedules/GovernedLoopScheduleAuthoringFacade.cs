@@ -170,7 +170,7 @@ public sealed class GovernedLoopScheduleAuthoringFacade
         ScheduleRuntimeCreateResult created;
         try
         {
-            created = await _schedules.CreateAsync(definition!, cancellationToken).ConfigureAwait(false);
+            created = await _schedules.CreateAsync(definition!, input.Enabled, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -353,7 +353,7 @@ public sealed class GovernedLoopScheduleAuthoringFacade
             new ScheduleDaylightSavingPolicy(input.InvalidLocalTime, input.AmbiguousLocalTime),
             new ScheduleMisfirePolicy(input.MisfireKind, input.CatchUpLimit),
             input.Overlap,
-            input.Enabled);
+            true);
         var validation = ScheduleContractValidator.ValidateDefinition(definition);
         if (validation.IsValid)
         {

@@ -195,6 +195,13 @@ test("immutable replacement rereads canonical posture and never enables a succes
     ).fixedIntervalSeconds,
     600,
   );
+  assert.equal(
+    JSON.parse(
+      calls.find((call) => call.url === "/api/governed-schedules/create")
+        .options.body,
+    ).enabled,
+    false,
+  );
   assert.match(view.elements.result.textContent, /Replacement complete/i);
 
   authoring.clear();

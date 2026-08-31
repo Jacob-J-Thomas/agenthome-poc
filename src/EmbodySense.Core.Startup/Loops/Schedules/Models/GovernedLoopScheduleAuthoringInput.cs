@@ -23,7 +23,7 @@ namespace EmbodySense.Core.Startup.Loops.Schedules.Models;
 /// <param name="CatchUpLimit">The requested bounded catch-up limit.</param>
 /// <param name="Overlap">The requested overlap policy.</param>
 /// <param name="Priority">The requested bounded queue priority.</param>
-/// <param name="Enabled">Whether the immutable successor should initially be eligible for due-occurrence claims.</param>
+/// <param name="Enabled">Whether the revision-1 state should initially be eligible for due-occurrence claims.</param>
 public sealed record GovernedLoopScheduleAuthoringInput(
     string OperationId,
     string GraphId,

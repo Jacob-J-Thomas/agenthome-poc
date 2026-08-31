@@ -1234,7 +1234,7 @@ public sealed partial class AgentRuntimeFactoryTests
             0,
             ScheduleOverlapPolicy.Skip,
             SchedulePriority.Normal,
-            true);
+            false);
 
         var invalidRead = await runtime.GovernedLoopScheduleAuthoring.ReadAsync("not a schedule id");
         var missingRead = await runtime.GovernedLoopScheduleAuthoring.ReadAsync("schedule-missing");
@@ -1272,6 +1272,8 @@ public sealed partial class AgentRuntimeFactoryTests
         Assert.Equal(candidate.RevisionId, confirmed.Schedule?.RevisionId);
         Assert.Equal("UTC", confirmed.Schedule?.TimeZoneId);
         Assert.Equal(ScheduleStoreReadStatus.Found, persisted.Status);
+        Assert.True(persisted.Definition?.Enabled);
+        Assert.False(persisted.State?.Enabled);
         Assert.Equal("web", persisted.Definition?.SurfaceId);
         Assert.Equal(CapabilityWorkspaceScopeId.Create(workspace.RootPath)["workspace-sha256:".Length..], persisted.Definition?.WorkspaceId);
         Assert.Equal(GovernedLoopSchedulePayloadSource.CreateReference(persisted.Definition!.ScheduleId), persisted.Definition.Payload.GovernedReference);
