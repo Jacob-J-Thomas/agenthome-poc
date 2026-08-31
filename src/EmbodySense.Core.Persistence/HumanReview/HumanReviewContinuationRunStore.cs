@@ -250,9 +250,7 @@ public sealed class HumanReviewContinuationRunStore : IHumanReviewContinuationPu
             var recovered = await _runs.GetAsync(expected.Id, CancellationToken.None).ConfigureAwait(false);
             if (recovered is null) return Result(HumanReviewContinuationMutationStatus.NotFound);
             return CustomLoopRunValidator.HasSameDurableVersion(expected, recovered)
-                || TryGetApprovedReview(expected, expected.Id, out var expectedReview)
-                && TryGetApprovedReview(recovered, expected.Id, out var recoveredReview)
-                && IsContinuationDescendant(expectedReview.Continuation, recoveredReview.Continuation)
+                || IsReconciledContinuation(expected, recovered)
                 ? Result(HumanReviewContinuationMutationStatus.Replayed, recovered)
                 : Result(HumanReviewContinuationMutationStatus.Conflict, recovered);
         }
@@ -260,6 +258,18 @@ public sealed class HumanReviewContinuationRunStore : IHumanReviewContinuationPu
         {
             return Result(HumanReviewContinuationMutationStatus.Unavailable);
         }
+    }
+
+    private static bool IsReconciledContinuation(CustomLoopRunRecord expected, CustomLoopRunRecord recovered)
+    {
+        if (!TryGetApprovedReview(expected, expected.Id, out var expectedReview)
+            || expectedReview.ContinuationReservation is not { } reservation)
+        {
+            return false;
+        }
+
+        var located = FindApprovedReviews(recovered, expected.Id, new HumanReviewContinuationReservationReference(reservation.ReservationId, reservation.ReservationHash));
+        return located.Length == 1 && IsContinuationDescendant(expectedReview.Continuation, located[0].Review.Continuation);
     }
 
     private async Task<(CustomLoopRunRecord? Run, HumanReviewContinuationMutationStatus? Failure)> TryReadAsync(string runId, CancellationToken cancellationToken)

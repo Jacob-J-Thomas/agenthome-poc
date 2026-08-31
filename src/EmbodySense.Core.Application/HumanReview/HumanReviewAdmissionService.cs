@@ -118,6 +118,15 @@ public sealed class HumanReviewAdmissionService : IHumanReviewAdmissionService
         var requestReference = new HumanReviewRequestReference(request.RequestId, request.RequestHash);
         var lifecycle = HumanReviewContractHash.ApplyLifecycle(new HumanReviewLifecycle(1, requestReference, HumanReviewLifecycleStatus.Pending, 1, atUtc, null, HumanReviewContractHash.ApplyProvenance(new HumanReviewProvenance(HumanReviewProvenanceKind.Server, "human-review-store", request.RequestOperationId, atUtc, string.Empty)), null, string.Empty));
         var evidence = HumanReviewContractHash.ApplyEvidence(new HumanReviewEvidence(1, Id("evidence", request.RequestId), requestReference, HumanReviewEvidenceKind.RequestAdmitted, null, atUtc, HumanReviewContractHash.ApplyProvenance(new HumanReviewProvenance(HumanReviewProvenanceKind.Coordinator, "human-review-store", request.RequestOperationId, atUtc, string.Empty)), ImmutableArray<HumanReviewRedactedPreview>.Empty, null, string.Empty));
+        var admissionBinding = HumanReviewContractHash.ApplyAdmissionBindingEvidence(new HumanReviewAdmissionBindingEvidence(
+            HumanReviewAdmissionBindingEvidence.CurrentSchemaVersion,
+            request.Binding.BindingHash,
+            request.Binding.FrontierId,
+            request.Binding.FrontierVersion,
+            request.Binding.FrontierHash,
+            request.Binding.EffectAttempt,
+            blockedFrontier.Binding.ExecutionGeneration,
+            string.Empty));
         var priorEvents = command.ReviewBlockedEvent is null ? current.Events : [.. current.Events, command.ReviewBlockedEvent];
         var lifecycleEvent = current.Status == CustomLoopRunStatus.Paused
             ? null
@@ -161,7 +170,7 @@ public sealed class HumanReviewAdmissionService : IHumanReviewAdmissionService
             Model: null,
             ProviderResponseId: null,
             ExitDecision: null)
-        { HumanReviewEvidence = evidence };
+        { HumanReviewEvidence = evidence, HumanReviewAdmissionBinding = admissionBinding };
         var next = current with
         {
             LifecycleVersion = checked(current.LifecycleVersion + 1),

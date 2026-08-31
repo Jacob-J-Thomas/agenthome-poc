@@ -99,4 +99,8 @@ public sealed record CustomLoopRunEvent(
     [JsonRequired]
     public HumanReviewContinuationReservationReference? HumanReviewContinuationReservation { get; init; }
 
+    /// <summary>Gets the exact immutable binding captured atomically with a Human Review admission event, or null for other events.</summary>
+    /// <remarks>Archived Human Review validation fails closed when the admission event does not retain this complete binding evidence.</remarks>
+    public HumanReviewAdmissionBindingEvidence? HumanReviewAdmissionBinding { get; init; }
+
 }

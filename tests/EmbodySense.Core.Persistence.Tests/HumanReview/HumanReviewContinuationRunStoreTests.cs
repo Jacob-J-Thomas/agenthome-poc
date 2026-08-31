@@ -123,6 +123,72 @@ public sealed class HumanReviewContinuationRunStoreTests
     }
 
     [Fact]
+    public async Task Response_lost_publication_reconciles_an_archived_continuation_after_rotation()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var approved = await CreateStrictApprovedRunAsync(paths, "continuation-response-loss-rotation");
+        using var canonical = new CustomLoopRunStore(paths);
+        var approvedReview = Assert.IsType<HumanReviewRunState>(approved.HumanReview);
+        var reservation = Assert.IsType<HumanReviewContinuationReservation>(approvedReview.ContinuationReservation);
+        var wakeAtUtc = approved.UpdatedAtUtc.AddSeconds(1);
+        var wake = Wake(approvedReview, reservation, wakeAtUtc, "wake-response-loss-rotation");
+        var initial = HumanReviewContinuationContractHash.ApplyState(new HumanReviewContinuationState(1, wake, [], null, null, string.Empty));
+
+        async Task RotateAfterPublicationAsync(CustomLoopRunRecord published)
+        {
+            var innerContinuations = new HumanReviewContinuationRunStore(canonical);
+            var claim = Claim(wake, reservation, wakeAtUtc.AddMinutes(1), "claim-response-loss-rotation");
+            var claimed = await innerContinuations.ClaimAsync(published.Id, published.LifecycleVersion, claim);
+            Assert.Equal(HumanReviewContinuationMutationStatus.Committed, claimed.Status);
+            var claimedRun = Assert.IsType<CustomLoopRunRecord>(claimed.Run);
+            var completion = Completion(approvedReview.Request, wake, reservation, claim, claim.ClaimedAtUtc.AddSeconds(1), "completion-response-loss-rotation");
+            var completed = await innerContinuations.CompleteAsync(claimedRun.Id, claimedRun.LifecycleVersion, completion);
+            Assert.Equal(HumanReviewContinuationMutationStatus.Committed, completed.Status);
+            var terminal = Assert.IsType<CustomLoopRunRecord>(completed.Run);
+            var rotated = CreateFollowOnCurrent(terminal, "continuation-response-loss-rotation");
+            Assert.Equal(CustomLoopRunStoreStatus.Updated, (await canonical.UpdateAsync(rotated, terminal.LifecycleVersion)).Status);
+        }
+
+        var responseLostStore = new ResponseLossAfterClaimingCustomLoopRunStore(canonical, RotateAfterPublicationAsync);
+        var result = await new HumanReviewContinuationRunStore(responseLostStore).PublishAsync(approved.Id, approved.LifecycleVersion, initial);
+        var durable = Assert.IsType<CustomLoopRunRecord>(await canonical.GetAsync(approved.Id));
+
+        Assert.Equal(HumanReviewContinuationMutationStatus.Replayed, result.Status);
+        var archived = Assert.Single(Assert.IsType<HumanReviewRunState>(durable.HumanReview).CompletedReviews);
+        var archivedContinuation = Assert.IsType<HumanReviewContinuationState>(archived.Continuation);
+        Assert.Equal(initial.Wake.WakeHash, archivedContinuation.Wake.WakeHash);
+        Assert.NotNull(archivedContinuation.Completion);
+    }
+
+    [Fact]
+    public async Task Archived_admission_binding_frontier_substitution_fails_closed_even_with_a_valid_recomputed_evidence_hash()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var current = await CreateArchivedCurrentReviewAsync(paths, "continuation-archived-frontier-corruption", retire: false);
+        var archivedReview = Assert.Single(Assert.IsType<HumanReviewRunState>(current.HumanReview).CompletedReviews);
+        var admission = Assert.Single(current.Events, item => item.Kind == CustomLoopRunEventKind.HumanReviewRequestAdmitted
+            && item.HumanReviewEvidence?.Request.RequestHash == archivedReview.Request.RequestHash);
+        var retained = Assert.IsType<HumanReviewAdmissionBindingEvidence>(admission.HumanReviewAdmissionBinding);
+        var substituted = HumanReviewContractHash.ApplyAdmissionBindingEvidence(retained with
+        {
+            FrontierId = retained.FrontierId + "-substituted",
+        });
+        var candidate = current with
+        {
+            Events = current.Events.Select(item => item.EventId == admission.EventId
+                ? item with { HumanReviewAdmissionBinding = substituted }
+                : item).ToArray(),
+        };
+
+        var validation = CustomLoopRunValidator.Validate(candidate);
+
+        Assert.False(validation.IsValid);
+        Assert.Contains(validation.Errors, error => error.Code == "invalid_human_review_completed_admission_binding");
+    }
+
+    [Fact]
     public async Task Cancellation_after_a_durable_publication_returns_the_exact_canonical_replay()
     {
         using var workspace = new TestWorkspace();
@@ -688,15 +754,8 @@ public sealed class HumanReviewContinuationRunStoreTests
 
     private static async Task<CustomLoopRunRecord> CreateArchivedCurrentReviewAsync(WorkspacePaths paths, string identity, bool retire)
     {
-        var admitted = await CustomLoopFrontierStoreTests.PersistStrictHumanReviewAdmissionAsync(paths, identity);
+        var approved = await CreateStrictApprovedRunAsync(paths, identity);
         using var store = new CustomLoopRunStore(paths);
-        var decision = await new HumanReviewDecisionService(
-            store,
-            new HumanReviewDecisionStoreTestAuthorizer(),
-            new HumanReviewDecisionStoreTestClock(admitted.UpdatedAtUtc.AddMinutes(1)))
-            .DecideAsync(new HumanReviewDecisionCommand(admitted.Id, admitted.LifecycleVersion, "approve-" + identity, HumanReviewDecisionKind.Approve, null));
-        Assert.Equal(HumanReviewDecisionServiceStatus.Accepted, decision.Status);
-        var approved = Assert.IsType<CustomLoopRunRecord>(await store.GetAsync(admitted.Id));
         var approvedReview = Assert.IsType<HumanReviewRunState>(approved.HumanReview);
         var reservation = Assert.IsType<HumanReviewContinuationReservation>(approvedReview.ContinuationReservation);
         var wakeAtUtc = approved.UpdatedAtUtc.AddSeconds(1);
@@ -726,6 +785,16 @@ public sealed class HumanReviewContinuationRunStoreTests
             terminal = Assert.IsType<CustomLoopRunRecord>(completed.Run);
         }
 
+        var candidate = CreateFollowOnCurrent(terminal, identity);
+        var validation = CustomLoopRunValidator.ValidateUpdate(terminal, candidate);
+        Assert.True(validation.IsValid, string.Join(Environment.NewLine, validation.Errors));
+        var persisted = await store.UpdateAsync(candidate, terminal.LifecycleVersion);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, persisted.Status);
+        return Assert.IsType<CustomLoopRunRecord>(persisted.Run);
+    }
+
+    private static CustomLoopRunRecord CreateFollowOnCurrent(CustomLoopRunRecord terminal, string identity)
+    {
         var archivedState = Assert.IsType<HumanReviewRunState>(terminal.HumanReview);
         var nextRequest = HumanReviewContractHash.ApplyRequest(archivedState.Request with
         {
@@ -738,6 +807,16 @@ public sealed class HumanReviewContinuationRunStoreTests
         var requestReference = new HumanReviewRequestReference(nextRequest.RequestId, nextRequest.RequestHash);
         var lifecycle = HumanReviewContractHash.ApplyLifecycle(new HumanReviewLifecycle(1, requestReference, HumanReviewLifecycleStatus.Pending, 1, nextAtUtc, null, HumanReviewContractHash.ApplyProvenance(new HumanReviewProvenance(HumanReviewProvenanceKind.Server, "human-review-store", nextRequest.RequestOperationId, nextAtUtc, string.Empty)), null, string.Empty));
         var evidence = HumanReviewContractHash.ApplyEvidence(new HumanReviewEvidence(1, "evidence-next-" + identity, requestReference, HumanReviewEvidenceKind.RequestAdmitted, null, nextAtUtc, HumanReviewContractHash.ApplyProvenance(new HumanReviewProvenance(HumanReviewProvenanceKind.Coordinator, "human-review-store", nextRequest.RequestOperationId, nextAtUtc, string.Empty)), ImmutableArray<HumanReviewRedactedPreview>.Empty, null, string.Empty));
+        var adapter = Assert.IsType<EmbodySense.Core.Common.Loops.Sequential.Models.GovernedLoopSequentialAdapterBinding>(terminal.SequentialAdapterBinding);
+        var admissionBinding = HumanReviewContractHash.ApplyAdmissionBindingEvidence(new HumanReviewAdmissionBindingEvidence(
+            HumanReviewAdmissionBindingEvidence.CurrentSchemaVersion,
+            nextRequest.Binding.BindingHash,
+            nextRequest.Binding.FrontierId,
+            nextRequest.Binding.FrontierVersion,
+            nextRequest.Binding.FrontierHash,
+            nextRequest.Binding.EffectAttempt,
+            adapter.ExecutionBinding.ExecutionGeneration,
+            string.Empty));
         var nextAdmissionEvent = new CustomLoopRunEvent(
             terminal.Events[^1].Sequence + 1,
             "event-next-admitted-" + identity,
@@ -758,28 +837,36 @@ public sealed class HumanReviewContinuationRunStoreTests
             null,
             null,
             null)
-        { HumanReviewEvidence = evidence };
+        { HumanReviewEvidence = evidence, HumanReviewAdmissionBinding = admissionBinding };
         var nextState = new HumanReviewRunState(nextRequest, lifecycle, [evidence])
         {
             CompletedReviews = [archivedState with { CompletedReviews = [] }],
         };
-        var candidate = terminal with
+        return terminal with
         {
             LifecycleVersion = terminal.LifecycleVersion + 1,
             UpdatedAtUtc = nextAtUtc,
             HumanReview = nextState,
             Events = [.. terminal.Events, nextAdmissionEvent],
         };
-        var validation = CustomLoopRunValidator.ValidateUpdate(terminal, candidate);
-        Assert.True(validation.IsValid, string.Join(Environment.NewLine, validation.Errors));
-        var persisted = await store.UpdateAsync(candidate, terminal.LifecycleVersion);
-        Assert.Equal(CustomLoopRunStoreStatus.Updated, persisted.Status);
-        return Assert.IsType<CustomLoopRunRecord>(persisted.Run);
     }
 
     private static async Task<CustomLoopRunRecord> CreateApprovedRunAsync(WorkspacePaths paths, string identity)
     {
         var admitted = await CustomLoopFrontierStoreTests.PersistHumanReviewAdmissionAsync(paths, identity);
+        using var store = new CustomLoopRunStore(paths);
+        var decision = await new HumanReviewDecisionService(
+            store,
+            new HumanReviewDecisionStoreTestAuthorizer(),
+            new HumanReviewDecisionStoreTestClock(admitted.UpdatedAtUtc.AddMinutes(1)))
+            .DecideAsync(new HumanReviewDecisionCommand(admitted.Id, admitted.LifecycleVersion, "approve-" + identity, HumanReviewDecisionKind.Approve, null));
+        Assert.Equal(HumanReviewDecisionServiceStatus.Accepted, decision.Status);
+        return Assert.IsType<CustomLoopRunRecord>(await store.GetAsync(admitted.Id));
+    }
+
+    private static async Task<CustomLoopRunRecord> CreateStrictApprovedRunAsync(WorkspacePaths paths, string identity)
+    {
+        var admitted = await CustomLoopFrontierStoreTests.PersistStrictHumanReviewAdmissionAsync(paths, identity);
         using var store = new CustomLoopRunStore(paths);
         var decision = await new HumanReviewDecisionService(
             store,

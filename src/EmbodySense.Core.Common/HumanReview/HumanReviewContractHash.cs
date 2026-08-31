@@ -61,6 +61,40 @@ public static class HumanReviewContractHash
             && (binding.EffectAttempt is null || MatchesEffectAttempt(binding.EffectAttempt))
             && FixedEquals(ComputeBinding(binding), binding.BindingHash);
 
+    /// <summary>Computes the canonical hash of retained admission binding evidence excluding its self-referential hash field.</summary>
+    /// <param name="evidence">The immutable admission binding evidence.</param>
+    /// <returns>The canonical lowercase SHA-256 hash.</returns>
+    public static string ComputeAdmissionBindingEvidence(HumanReviewAdmissionBindingEvidence evidence)
+    {
+        ArgumentNullException.ThrowIfNull(evidence);
+        return Compute("human-review-admission-binding-evidence-v1", canonical => AppendAdmissionBindingEvidence(canonical, evidence, includeHash: false));
+    }
+
+    /// <summary>Returns admission binding evidence with its canonical nested binding and evidence hashes applied.</summary>
+    /// <param name="evidence">The admission binding evidence candidate.</param>
+    /// <returns>A copy carrying canonical hashes.</returns>
+    public static HumanReviewAdmissionBindingEvidence ApplyAdmissionBindingEvidence(HumanReviewAdmissionBindingEvidence evidence)
+    {
+        ArgumentNullException.ThrowIfNull(evidence);
+        var withEffectHash = evidence with { EffectAttempt = evidence.EffectAttempt is null ? null : ApplyEffectAttempt(evidence.EffectAttempt) };
+        return withEffectHash with { EvidenceHash = ComputeAdmissionBindingEvidence(withEffectHash) };
+    }
+
+    /// <summary>Gets whether retained admission binding evidence is complete and hash-valid.</summary>
+    /// <param name="evidence">The admission binding evidence to inspect.</param>
+    /// <returns><see langword="true"/> only when every retained field is canonical.</returns>
+    public static bool MatchesAdmissionBindingEvidence(HumanReviewAdmissionBindingEvidence? evidence)
+        => evidence is not null
+            && evidence.SchemaVersion == HumanReviewAdmissionBindingEvidence.CurrentSchemaVersion
+            && IsSha256(evidence.BindingHash)
+            && !string.IsNullOrWhiteSpace(evidence.FrontierId)
+            && evidence.FrontierVersion is > 0 and <= HumanReviewContractLimits.MaxVersion
+            && IsSha256(evidence.FrontierHash)
+            && (evidence.EffectAttempt is null || MatchesEffectAttempt(evidence.EffectAttempt))
+            && evidence.ExecutionGeneration is > 0 and <= HumanReviewContractLimits.MaxVersion
+            && IsSha256(evidence.EvidenceHash)
+            && FixedEquals(ComputeAdmissionBindingEvidence(evidence), evidence.EvidenceHash);
+
     /// <summary>Computes the canonical hash of an exact approval scope excluding its self-referential hash field.</summary>
     /// <param name="scope">The approval scope.</param>
     /// <returns>The canonical lowercase SHA-256 hash.</returns>
@@ -460,6 +494,21 @@ public static class HumanReviewContractHash
         if (includeHash)
         {
             Append(canonical, binding.BindingHash);
+        }
+    }
+
+    private static void AppendAdmissionBindingEvidence(StringBuilder canonical, HumanReviewAdmissionBindingEvidence evidence, bool includeHash)
+    {
+        Append(canonical, evidence.SchemaVersion);
+        Append(canonical, evidence.BindingHash);
+        Append(canonical, evidence.FrontierId);
+        Append(canonical, evidence.FrontierVersion);
+        Append(canonical, evidence.FrontierHash);
+        AppendEffectAttempt(canonical, evidence.EffectAttempt, includeHash: true);
+        Append(canonical, evidence.ExecutionGeneration);
+        if (includeHash)
+        {
+            Append(canonical, evidence.EvidenceHash);
         }
     }
 

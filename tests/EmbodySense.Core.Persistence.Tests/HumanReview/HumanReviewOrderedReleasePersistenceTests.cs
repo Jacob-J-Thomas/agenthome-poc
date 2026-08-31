@@ -29,6 +29,32 @@ namespace EmbodySense.Core.Persistence.Tests.HumanReview;
 public sealed class HumanReviewOrderedReleasePersistenceTests
 {
     [Fact]
+    public async Task Admission_event_effect_substitution_fails_closed_after_recomputing_its_retained_hash()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var claimed = await CreateClaimedPreDispatchApprovalAsync(workspace, paths, workspace.File("effect-substitution.marker"), "effect-substitution");
+        var admission = Assert.Single(claimed.Events, item => item.Kind == CustomLoopRunEventKind.HumanReviewRequestAdmitted);
+        var retained = Assert.IsType<HumanReviewAdmissionBindingEvidence>(admission.HumanReviewAdmissionBinding);
+        var effect = Assert.IsType<HumanReviewEffectAttemptBinding>(retained.EffectAttempt);
+        var substituted = HumanReviewContractHash.ApplyAdmissionBindingEvidence(retained with
+        {
+            EffectAttempt = HumanReviewContractHash.ApplyEffectAttempt(effect with { OperationId = effect.OperationId + "-substituted", EffectAttemptHash = string.Empty }),
+        });
+        var candidate = claimed with
+        {
+            Events = claimed.Events.Select(item => item.EventId == admission.EventId
+                ? item with { HumanReviewAdmissionBinding = substituted }
+                : item).ToArray(),
+        };
+
+        var validation = CustomLoopRunValidator.Validate(candidate);
+
+        Assert.False(validation.IsValid);
+        Assert.Contains(validation.Errors, error => error.Code == "human_review_event_evidence_mismatch");
+    }
+
+    [Fact]
     public async Task External_process_response_loss_after_release_CAS_restarts_and_replays_one_observable_effect()
     {
         using var workspace = new TestWorkspace();

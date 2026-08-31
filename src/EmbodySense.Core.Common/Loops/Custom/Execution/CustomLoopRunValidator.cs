@@ -3712,7 +3712,7 @@ public static class CustomLoopRunValidator
         var reviewEventMarkers = run.Events?.Where(item => item?.Kind is CustomLoopRunEventKind.HumanReviewRequestAdmitted or CustomLoopRunEventKind.HumanReviewDecisionOperationRecorded or CustomLoopRunEventKind.HumanReviewContinuationReserved).ToArray() ?? [];
         if (run.HumanReview is null)
         {
-            if (reviewEventMarkers.Length != 0 || run.Events?.Any(item => item is not null && (item.HumanReviewEvidence is not null || item.HumanReviewDecisionOperation is not null || item.HumanReviewContinuationReservation is not null)) == true)
+            if (reviewEventMarkers.Length != 0 || run.Events?.Any(item => item is not null && (item.HumanReviewEvidence is not null || item.HumanReviewAdmissionBinding is not null || item.HumanReviewDecisionOperation is not null || item.HumanReviewContinuationReservation is not null)) == true)
             {
                 Add(errors, "human_review_state_required", "humanReview", "Human Review events require the canonical Human Review state plane.");
             }
@@ -3896,10 +3896,31 @@ public static class CustomLoopRunValidator
         return admitted.Length == 1
             && parked.Length == 1
             && parked[0].Sequence < admitted[0].Sequence
+            && MatchesRetainedHumanReviewAdmissionEvidence(run, request, admitted[0], parked[0].SequentialNodeEvidence!)
             && CustomLoopSequentialNodeEvidenceHash.Matches(parked[0].SequentialNodeEvidence!)
             && CustomLoopSequentialOutcomeArtifactHash.Matches(parked[0])
             && MatchesRetainedHumanReviewParking(run, request, parked[0], parked[0].SequentialNodeEvidence);
     }
+
+    private static bool MatchesRetainedHumanReviewAdmissionEvidence(CustomLoopRunRecord run, HumanReviewRequest request, CustomLoopRunEvent admitted, CustomLoopSequentialNodeEvidence parkedEvidence)
+    {
+        var retained = admitted.HumanReviewAdmissionBinding;
+        var adapter = run.SequentialAdapterBinding;
+        return MatchesHumanReviewAdmissionBindingEvidence(request, retained)
+            && retained is not null
+            && adapter is not null
+            && retained.ExecutionGeneration == parkedEvidence.ExecutionGeneration
+            && retained.ExecutionGeneration == adapter.ExecutionBinding.ExecutionGeneration;
+    }
+
+    private static bool MatchesHumanReviewAdmissionBindingEvidence(HumanReviewRequest request, HumanReviewAdmissionBindingEvidence? retained)
+        => retained is not null
+            && HumanReviewContractHash.MatchesAdmissionBindingEvidence(retained)
+            && string.Equals(retained.BindingHash, request.Binding.BindingHash, StringComparison.Ordinal)
+            && string.Equals(retained.FrontierId, request.Binding.FrontierId, StringComparison.Ordinal)
+            && retained.FrontierVersion == request.Binding.FrontierVersion
+            && string.Equals(retained.FrontierHash, request.Binding.FrontierHash, StringComparison.Ordinal)
+            && Equals(retained.EffectAttempt, request.Binding.EffectAttempt);
 
     private static bool HasTerminalHumanReviewRelease(HumanReviewRunState state)
     {
@@ -4148,7 +4169,8 @@ public static class CustomLoopRunValidator
         {
             var evidence = state.Evidence[index]; var item = reviewEvents[index];
             if (item is null || evidence is null || !IsValidHumanReviewEvidence(request, item.HumanReviewEvidence!) || !string.Equals(item.HumanReviewEvidence?.EvidenceHash, evidence.EvidenceHash, StringComparison.Ordinal) || item.TimestampUtc != evidence.RecordedAtUtc) return false;
-            if (index == 0 && (item.Kind != CustomLoopRunEventKind.HumanReviewRequestAdmitted || item.HumanReviewDecisionOperation is not null || item.HumanReviewContinuationReservation is not null)) return false;
+            if (index == 0 && (item.Kind != CustomLoopRunEventKind.HumanReviewRequestAdmitted || !MatchesHumanReviewAdmissionBindingEvidence(request, item.HumanReviewAdmissionBinding) || item.HumanReviewDecisionOperation is not null || item.HumanReviewContinuationReservation is not null)) return false;
+            if (index > 0 && item.HumanReviewAdmissionBinding is not null) return false;
             if (evidence.DecisionOperation is not null && (item.Kind != CustomLoopRunEventKind.HumanReviewDecisionOperationRecorded || !Equals(item.HumanReviewDecisionOperation, evidence.DecisionOperation) || item.HumanReviewContinuationReservation is not null)) return false;
             if (evidence.ContinuationReservation is not null && (item.Kind != CustomLoopRunEventKind.HumanReviewContinuationReserved || !Equals(item.HumanReviewContinuationReservation, evidence.ContinuationReservation) || item.HumanReviewDecisionOperation is not null)) return false;
             if (evidence.DecisionOperation is null && evidence.ContinuationReservation is null && (item.HumanReviewDecisionOperation is not null || item.HumanReviewContinuationReservation is not null)) return false;
@@ -4159,10 +4181,10 @@ public static class CustomLoopRunValidator
     private static bool HasRequiredHumanReviewEventPayload(CustomLoopRunEvent item)
         => item.Kind switch
         {
-            CustomLoopRunEventKind.HumanReviewRequestAdmitted => item.HumanReviewEvidence is not null && item.HumanReviewDecisionOperation is null && item.HumanReviewContinuationReservation is null,
-            CustomLoopRunEventKind.HumanReviewDecisionOperationRecorded => item.HumanReviewEvidence is not null && item.HumanReviewDecisionOperation is not null && item.HumanReviewContinuationReservation is null,
-            CustomLoopRunEventKind.HumanReviewContinuationReserved => item.HumanReviewEvidence is not null && item.HumanReviewDecisionOperation is null && item.HumanReviewContinuationReservation is not null,
-            _ => true,
+            CustomLoopRunEventKind.HumanReviewRequestAdmitted => item.HumanReviewEvidence is not null && item.HumanReviewAdmissionBinding is not null && item.HumanReviewDecisionOperation is null && item.HumanReviewContinuationReservation is null,
+            CustomLoopRunEventKind.HumanReviewDecisionOperationRecorded => item.HumanReviewEvidence is not null && item.HumanReviewAdmissionBinding is null && item.HumanReviewDecisionOperation is not null && item.HumanReviewContinuationReservation is null,
+            CustomLoopRunEventKind.HumanReviewContinuationReserved => item.HumanReviewEvidence is not null && item.HumanReviewAdmissionBinding is null && item.HumanReviewDecisionOperation is null && item.HumanReviewContinuationReservation is not null,
+            _ => item.HumanReviewAdmissionBinding is null,
         };
 
     private static void ValidateHumanReviewReceiptEvidenceCausality(HumanReviewRunState state, List<CustomLoopValidationError> errors)
