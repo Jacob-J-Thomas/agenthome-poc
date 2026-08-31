@@ -1,4 +1,6 @@
 using EmbodySense.Core.Application.Capabilities;
+using EmbodySense.Core.Application.HumanReview;
+using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Execution.Authority;
 using EmbodySense.Core.Application.Loops.Execution.Effects;
 using EmbodySense.Core.Common.Capabilities;
@@ -15,6 +17,7 @@ public static class GovernedLoopEffectAttemptFactory
     /// <summary>Creates production workspace composition under one shared capability-authority transaction.</summary>
     public static GovernedLoopEffectAttemptFacade Create(
         WorkspacePaths paths,
+        ICustomLoopRunStore runStore,
         ICapabilityCatalogTrustProvider trustProvider,
         ICapabilityAuthorityTransaction authorityTransaction,
         IGovernedActuatorOperationRegistry registry,
@@ -22,6 +25,7 @@ public static class GovernedLoopEffectAttemptFactory
         TimeProvider? timeProvider = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
+        ArgumentNullException.ThrowIfNull(runStore);
         ArgumentNullException.ThrowIfNull(trustProvider);
         ArgumentNullException.ThrowIfNull(authorityTransaction);
         ArgumentNullException.ThrowIfNull(registry);
@@ -45,6 +49,7 @@ public static class GovernedLoopEffectAttemptFactory
         var currentCatalog = new CapabilityLifecycleCatalogStore(catalog, lifecycle, authorityTransaction);
         return Create(
             paths,
+            runStore,
             currentCatalog,
             registry,
             authorityBoundary,
@@ -56,6 +61,7 @@ public static class GovernedLoopEffectAttemptFactory
     /// <summary>Creates inert composition over caller-owned catalog, registry, and authority ports.</summary>
     public static GovernedLoopEffectAttemptFacade Create(
         WorkspacePaths paths,
+        ICustomLoopRunStore runStore,
         ICapabilityCatalogStore catalogStore,
         IGovernedActuatorOperationRegistry registry,
         IGovernedLoopEffectAuthorityDecisionBoundary authorityBoundary,
@@ -64,6 +70,7 @@ public static class GovernedLoopEffectAttemptFactory
         TimeProvider? timeProvider = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
+        ArgumentNullException.ThrowIfNull(runStore);
         ArgumentNullException.ThrowIfNull(catalogStore);
         ArgumentNullException.ThrowIfNull(registry);
         ArgumentNullException.ThrowIfNull(authorityBoundary);
@@ -75,10 +82,12 @@ public static class GovernedLoopEffectAttemptFactory
             registry,
             hostContractVersion,
             hostPlatform);
+        var attempts = new GovernedLoopEffectAttemptStore(paths);
         var service = new GovernedLoopEffectAttemptService(
             resolver,
-            new GovernedLoopEffectAttemptStore(paths),
+            attempts,
             authorityBoundary,
+            new CanonicalHumanReviewEffectEvidenceSource(runStore, attempts),
             timeProvider);
         return new GovernedLoopEffectAttemptFacade(resolver, service);
     }

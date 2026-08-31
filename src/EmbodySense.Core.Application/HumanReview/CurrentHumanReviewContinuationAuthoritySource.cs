@@ -121,7 +121,7 @@ public sealed class CurrentHumanReviewContinuationAuthoritySource : IHumanReview
             && string.Equals(binding.GraphId, adapter.ExecutionBinding.Revision.GraphId, StringComparison.Ordinal)
             && string.Equals(binding.RevisionId, adapter.ExecutionBinding.Revision.RevisionId, StringComparison.Ordinal)
             && string.Equals(binding.RevisionHash, adapter.ExecutionBinding.Revision.ExecutableHash, StringComparison.Ordinal)
-            && string.Equals(binding.AuthorityProfileHash, evidence.GrantProfile.ContentHash.Value, StringComparison.Ordinal)
+            && string.Equals(binding.AuthorityProfileHash, HumanReviewAuthorityBindingHash.FromProfile(evidence.GrantProfile.ContentHash), StringComparison.Ordinal)
             && string.Equals(binding.AuthorityGrantHash, evidence.GrantDependencyEvidenceHash, StringComparison.Ordinal)
             && string.Equals(binding.CapabilityHash, GovernedLoopAdmissionContractHash.ComputeCapabilityAdmissionReferenceHash(evidence.CapabilityAdmission), StringComparison.Ordinal)
             && string.Equals(binding.ModelProfileHash, evidence.ModelRoutingAdmission.ContentHash, StringComparison.Ordinal);

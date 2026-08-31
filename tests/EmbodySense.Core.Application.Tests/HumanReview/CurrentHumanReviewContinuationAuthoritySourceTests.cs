@@ -183,7 +183,7 @@ public sealed class CurrentHumanReviewContinuationAuthoritySourceTests
             "frontier-one",
             1,
             Hash('1'),
-            receipt.Evidence.GrantProfile.ContentHash.Value,
+            receipt.Evidence.GrantProfile.ContentHash.Value["sha256:".Length..],
             receipt.Evidence.GrantDependencyEvidenceHash,
             GovernedLoopAdmissionContractHash.ComputeCapabilityAdmissionReferenceHash(receipt.Evidence.CapabilityAdmission),
             receipt.Evidence.ModelRoutingAdmission.ContentHash,

@@ -228,7 +228,7 @@ public static class GovernedLoopExecutionStateMatrix
             GovernedLoopNodeExecutionStatus.Ready => next is GovernedLoopNodeExecutionStatus.Running or GovernedLoopNodeExecutionStatus.Skipped or GovernedLoopNodeExecutionStatus.Failed or GovernedLoopNodeExecutionStatus.ReviewBlocked,
             GovernedLoopNodeExecutionStatus.Running => next is GovernedLoopNodeExecutionStatus.Completed or GovernedLoopNodeExecutionStatus.Waiting or GovernedLoopNodeExecutionStatus.Failed or GovernedLoopNodeExecutionStatus.ReviewBlocked,
             GovernedLoopNodeExecutionStatus.Waiting => next is GovernedLoopNodeExecutionStatus.Running or GovernedLoopNodeExecutionStatus.Failed or GovernedLoopNodeExecutionStatus.ReviewBlocked,
-            GovernedLoopNodeExecutionStatus.ReviewBlocked => next is GovernedLoopNodeExecutionStatus.Running or GovernedLoopNodeExecutionStatus.Failed,
+            GovernedLoopNodeExecutionStatus.ReviewBlocked => next is GovernedLoopNodeExecutionStatus.Running or GovernedLoopNodeExecutionStatus.Completed or GovernedLoopNodeExecutionStatus.Failed,
             _ => false
         };
     }
@@ -267,6 +267,34 @@ public static class GovernedLoopExecutionStateMatrix
                 && string.Equals(current.OutcomeEvidenceId, next.OutcomeEvidenceId, StringComparison.Ordinal)
                 && string.Equals(current.OutcomeEvidenceHash, next.OutcomeEvidenceHash, StringComparison.Ordinal)
                 && SameRoutingEvidence(current, next);
+        }
+
+        // A pre-dispatch Action rejection has authenticated failure evidence and an authored Failure route;
+        // it may terminalize only as Failed, while Human Review retains its existing Completed/Failed edges.
+        if (current.Status == GovernedLoopNodeExecutionStatus.ReviewBlocked
+            && (next.Status is GovernedLoopNodeExecutionStatus.Completed or GovernedLoopNodeExecutionStatus.Failed)
+            && (current.Descriptor.Kind == GovernedLoopNodeKind.HumanReview
+                || (current.Descriptor.Kind == GovernedLoopNodeKind.Action && next.Status == GovernedLoopNodeExecutionStatus.Failed)))
+        {
+            return IsHumanReviewTerminalization(current, next);
+        }
+
+        if (current.Status == GovernedLoopNodeExecutionStatus.ReviewBlocked
+            && next.Status == GovernedLoopNodeExecutionStatus.Running
+            && current.Descriptor.Kind == GovernedLoopNodeKind.Action)
+        {
+            return current.Attempt == next.Attempt
+                && string.Equals(current.AttemptOperationId, next.AttemptOperationId, StringComparison.Ordinal)
+                && current.OutcomeEvidenceId is not null
+                && current.OutcomeEvidenceHash is not null
+                && current.ControlOutcome is null
+                && current.SelectedControlEdgeIds.Count == 0
+                && current.SkippedControlEdgeIds.Count == 0
+                && next.OutcomeEvidenceId is null
+                && next.OutcomeEvidenceHash is null
+                && next.ControlOutcome is null
+                && next.SelectedControlEdgeIds.Count == 0
+                && next.SkippedControlEdgeIds.Count == 0;
         }
 
         if (current.Status == GovernedLoopNodeExecutionStatus.Ready)
@@ -308,6 +336,28 @@ public static class GovernedLoopExecutionStateMatrix
             && current.SkippedControlEdgeIds.Count == 0
             && (next.Status is not (GovernedLoopNodeExecutionStatus.Completed or GovernedLoopNodeExecutionStatus.Failed) || next.OutcomeEvidenceId is not null);
     }
+
+    private static bool IsHumanReviewTerminalization(GovernedLoopNodeExecutionEvidence current, GovernedLoopNodeExecutionEvidence next)
+        => ((current.Descriptor.Kind == GovernedLoopNodeKind.HumanReview
+                && (next.Status is GovernedLoopNodeExecutionStatus.Completed or GovernedLoopNodeExecutionStatus.Failed))
+            || (current.Descriptor.Kind == GovernedLoopNodeKind.Action && next.Status == GovernedLoopNodeExecutionStatus.Failed))
+            && current.Status == GovernedLoopNodeExecutionStatus.ReviewBlocked
+            && (next.Status is GovernedLoopNodeExecutionStatus.Completed or GovernedLoopNodeExecutionStatus.Failed)
+            && current.Attempt == next.Attempt
+            && string.Equals(current.AttemptOperationId, next.AttemptOperationId, StringComparison.Ordinal)
+            && current.OutcomeEvidenceId is not null
+            && current.OutcomeEvidenceHash is not null
+            && next.OutcomeEvidenceId is not null
+            && next.OutcomeEvidenceHash is not null
+            && current.ControlOutcome is null
+            && current.SelectedControlEdgeIds.Count == 0
+            && current.SkippedControlEdgeIds.Count == 0
+            && (next.Status == GovernedLoopNodeExecutionStatus.Completed
+                ? next.ControlOutcome == GovernedLoopControlCondition.Success && next.SelectedControlEdgeIds.Count > 0
+                : next.ControlOutcome == GovernedLoopControlCondition.Failure
+                    && next.SelectedControlEdgeIds.Count <= 1
+                    && next.SelectedControlEdgeIds.Concat(next.SkippedControlEdgeIds).Order(StringComparer.Ordinal)
+                        .SequenceEqual(current.OutgoingControlEdgeIds.Order(StringComparer.Ordinal), StringComparer.Ordinal));
 
     private static bool SameRoutingEvidence(GovernedLoopNodeExecutionEvidence current, GovernedLoopNodeExecutionEvidence next)
     {

@@ -11,6 +11,7 @@ using EmbodySense.Core.Application.Governance.Tools;
 using EmbodySense.Core.Application.Governance.Tools.Models;
 using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Application.HumanInput.Policies;
+using EmbodySense.Core.Application.HumanReview;
 using EmbodySense.Core.Application.Capabilities.Models;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.HumanInput.Publication;
@@ -258,6 +259,37 @@ public sealed partial class CustomLoopOrderedRunnerTests
     }
 
     [Fact]
+    public async Task Canonical_workspace_action_owned_by_another_executor_returns_conflict_without_terminal_evidence()
+    {
+        var context = await SequentialContextAsync(
+            Run(SequentialDefinition()),
+            artifactFactory: role => GovernedLoopSequentialApplicationTestFixture.WorkspaceActionArtifact(owningRole: role));
+        var store = new FakeRunStore(context.Run);
+        var inference = new QueueExecutor(Result("bounded provider output"));
+        var action = new QueueWorkspaceActionExecutor(new GovernedLoopWorkspaceActionExecutionResult(
+            GovernedLoopWorkspaceActionExecutionStatus.OperationInProgress,
+            null,
+            "Another executor owns the exact workspace Action effect attempt."));
+        var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+        var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(Runner(store, inference, workspaceActionExecutor: action), evidence, evidence);
+
+        var result = await adapter.RunAsync(new GovernedLoopSequentialOrderedRunRequest(
+            1,
+            context.Anchor,
+            context.Plan,
+            context.Artifact,
+            AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Conflict, result.Status);
+        Assert.Equal(CustomLoopRunStatus.Running, result.Run?.Status);
+        Assert.Null(result.Run?.FailureCode);
+        Assert.Single(action.Requests);
+        Assert.Single(result.Run!.Events, IsWorkspaceActionStart);
+        Assert.DoesNotContain(result.Run.Events, item => item.SequentialNodeEvidence is { NodeId: "workspace-action", Kind: not CustomLoopSequentialNodeEvidenceKind.DispatchStarted });
+        Assert.Empty(store.ValidationFailures);
+    }
+
+    [Fact]
     public async Task Canonical_workspace_action_completion_response_loss_reads_back_the_exact_durable_outcome_without_redispatch()
     {
         var context = await SequentialContextAsync(
@@ -424,6 +456,42 @@ public sealed partial class CustomLoopOrderedRunnerTests
         Assert.Equal(CommandActionResultStatus.Committed, retained!.Status);
         Assert.Single(result.Run.Events, item => IsCommandActionStart(item));
         Assert.Single(result.Run.Events, item => IsCommandActionCompletion(item));
+    }
+
+    [Fact]
+    public async Task Canonical_command_action_owned_by_another_executor_returns_conflict_without_terminal_evidence()
+    {
+        var context = await SequentialContextAsync(
+            Run(SequentialDefinition()),
+            artifactFactory: role => GovernedLoopSequentialApplicationTestFixture.CommandActionOnlyArtifact(owningRole: role));
+        var store = new FakeRunStore(context.Run);
+        var inference = new QueueExecutor();
+        var action = new QueueCommandActionExecutor(new GovernedLoopCommandActionExecutionResult(
+            GovernedLoopCommandActionExecutionStatus.OperationInProgress,
+            null,
+            "Another executor owns the exact command Action effect attempt."));
+        var audit = new RecordingAuditLog();
+        var evidence = new SequentialEvidenceHarness(store, context.Evidence);
+        var adapter = new GovernedLoopSequentialOrderedRuntimeAdapter(Runner(store, inference, audit: audit, commandActionExecutor: action), evidence, evidence);
+
+        var result = await adapter.RunAsync(new GovernedLoopSequentialOrderedRunRequest(
+            1,
+            context.Anchor,
+            context.Plan,
+            context.Artifact,
+            AuditSchema.Actors.Web));
+
+        Assert.Equal(CustomLoopOrderedRunStatus.Conflict, result.Status);
+        Assert.Equal(CustomLoopRunStatus.Running, result.Run?.Status);
+        Assert.Null(result.Run?.FailureCode);
+        Assert.Empty(inference.Requests);
+        Assert.Single(action.Requests);
+        Assert.Single(result.Run!.Events, IsCommandActionStart);
+        Assert.DoesNotContain(result.Run.Events, item => item.SequentialNodeEvidence is { NodeId: "command-action", Kind: not CustomLoopSequentialNodeEvidenceKind.DispatchStarted });
+        var lifecycleAudit = Assert.Single(audit.Events);
+        Assert.Equal(AuditSchema.Actions.LoopRunLifecycle, lifecycleAudit.Action);
+        Assert.Equal(AuditSchema.Outcomes.Started, lifecycleAudit.Outcome);
+        Assert.Empty(store.ValidationFailures);
     }
 
     [Fact]
@@ -7017,7 +7085,8 @@ public sealed partial class CustomLoopOrderedRunnerTests
         IGovernedLoopFailureClassifier? failureClassifier = null,
         HumanInputPolicyResolutionService? humanInputPolicyResolutionService = null,
         IGovernedLoopSequentialHumanInputBindingSource? humanInputBindingSource = null,
-        IHumanInputRequestPublicationService? humanInputRequestPublicationService = null)
+        IHumanInputRequestPublicationService? humanInputRequestPublicationService = null,
+        IHumanReviewAdmissionService? humanReviewAdmissionService = null)
     {
         return new CustomLoopOrderedRunner(
             store,
@@ -7042,7 +7111,8 @@ public sealed partial class CustomLoopOrderedRunnerTests
             failureClassifier: failureClassifier,
             humanInputPolicyResolutionService: humanInputPolicyResolutionService,
             humanInputBindingSource: humanInputBindingSource,
-            humanInputRequestPublicationService: humanInputRequestPublicationService);
+            humanInputRequestPublicationService: humanInputRequestPublicationService,
+            humanReviewAdmissionService: humanReviewAdmissionService);
     }
 
     private static GovernedLoopWorkspaceActionExecutionResult WorkspaceActionOutcome(WorkspaceActionResultStatus status)
@@ -7905,18 +7975,20 @@ public sealed partial class CustomLoopOrderedRunnerTests
                 CustomLoopSequentialNodeDisposition.Completed => GovernedLoopSequentialNodeHandlerResultStatus.Completed,
                 CustomLoopSequentialNodeDisposition.Rejected => GovernedLoopSequentialNodeHandlerResultStatus.Rejected,
                 CustomLoopSequentialNodeDisposition.NeedsReview => GovernedLoopSequentialNodeHandlerResultStatus.NeedsReview,
+                CustomLoopSequentialNodeDisposition.ReviewPending => GovernedLoopSequentialNodeHandlerResultStatus.ReviewPending,
                 _ => GovernedLoopSequentialNodeHandlerResultStatus.Unknown,
             };
             var eventMatchesNode = dispatch.Node.Descriptor.Kind switch
             {
                 EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Trigger => orderedEvent?.Kind == CustomLoopRunEventKind.Admitted,
                 EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Inference => orderedEvent?.Kind is CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeAttemptFailed or CustomLoopRunEventKind.NodeOutcomeObserved,
-                EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Action => orderedEvent?.Kind is CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeAttemptFailed,
+                EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Action => orderedEvent?.Kind is CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeAttemptFailed or CustomLoopRunEventKind.NodeOutcomeObserved,
                 EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Transform or EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Validate => orderedEvent?.Kind is CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeAttemptFailed,
                 EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Condition or EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Join => orderedEvent?.Kind is CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeAttemptFailed,
                 EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Wait => orderedEvent?.Kind is CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeAttemptFailed,
                 EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Exit => orderedEvent?.Kind is CustomLoopRunEventKind.ExitDecisionCompleted or CustomLoopRunEventKind.NodeAttemptFailed or CustomLoopRunEventKind.NodeOutcomeObserved,
                 EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Fail => orderedEvent?.Kind == CustomLoopRunEventKind.NodeAttemptFailed,
+                EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.HumanReview => orderedEvent?.Kind is CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeOutcomeObserved,
                 _ => false,
             };
             if (request.SchemaVersion != GovernedLoopSequentialOrderedNodeEvidenceRequest.CurrentSchemaVersion
@@ -7939,7 +8011,8 @@ public sealed partial class CustomLoopOrderedRunnerTests
 
             var identity = $"{binding.ExecutionBinding.RunId}/{binding.ExecutionBinding.ExecutionGeneration}/{dispatch.Activation.ActivationOrdinal}/{dispatch.Activation.VisitOrdinal}/{dispatch.Node.NodeId}/{dispatch.Activation.CycleId}/{dispatch.Activation.CycleIteration}/{dispatch.Attempt}";
             if (_identityEvents.TryGetValue(identity, out var prior)
-                && (!string.Equals(prior.EventId, orderedEvent!.EventId, StringComparison.Ordinal) || prior.Sequence != orderedEvent.Sequence))
+                && (!string.Equals(prior.EventId, orderedEvent!.EventId, StringComparison.Ordinal) || prior.Sequence != orderedEvent.Sequence)
+                && !IsHistoricalReviewPendingTransition(run, prior, request.Disposition))
             {
                 return new GovernedLoopSequentialNodeHandlerResult(GovernedLoopSequentialNodeHandlerResultStatus.Unknown, string.Empty);
             }
@@ -7952,6 +8025,7 @@ public sealed partial class CustomLoopOrderedRunnerTests
                     CustomLoopSequentialNodeEvidenceKind.CompletedOutcome => GovernedLoopSequentialNodeEvidenceKind.CompletedOutcome,
                     CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection => GovernedLoopSequentialNodeEvidenceKind.DefinitiveRejection,
                     CustomLoopSequentialNodeEvidenceKind.AmbiguityAttention => GovernedLoopSequentialNodeEvidenceKind.AmbiguityAttention,
+                    CustomLoopSequentialNodeEvidenceKind.ReviewRequested => GovernedLoopSequentialNodeEvidenceKind.ReviewRequested,
                     _ => GovernedLoopSequentialNodeEvidenceKind.Unknown,
                 },
                 durable.WorkspaceId,
@@ -7985,6 +8059,19 @@ public sealed partial class CustomLoopOrderedRunnerTests
 
             return new GovernedLoopSequentialNodeHandlerResult(request.Disposition, receipt.EvidenceHash);
         }
+
+        private static bool IsHistoricalReviewPendingTransition(
+            CustomLoopRunRecord run,
+            (string EventId, long Sequence) prior,
+            GovernedLoopSequentialNodeHandlerResultStatus currentDisposition)
+            => currentDisposition is (GovernedLoopSequentialNodeHandlerResultStatus.Completed
+                or GovernedLoopSequentialNodeHandlerResultStatus.Rejected
+                or GovernedLoopSequentialNodeHandlerResultStatus.NeedsReview)
+                && run.Events.SingleOrDefault(item => string.Equals(item.EventId, prior.EventId, StringComparison.Ordinal) && item.Sequence == prior.Sequence)?.SequentialNodeEvidence is
+                {
+                    Kind: CustomLoopSequentialNodeEvidenceKind.ReviewRequested,
+                    Disposition: CustomLoopSequentialNodeDisposition.ReviewPending,
+                };
 
         Task<GovernedLoopSequentialNodeEvidenceReceipt?> IGovernedLoopSequentialNodeEvidenceSource.ResolveAsync(
             string evidenceHash,

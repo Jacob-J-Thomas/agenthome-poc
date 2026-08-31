@@ -20,4 +20,7 @@ public enum CustomLoopSequentialNodeEvidenceKind
 
     /// <summary>An undispatched Ready activation was durably pruned by an earlier authenticated control decision.</summary>
     TopologySkipped,
+
+    /// <summary>An exact undispatched activation was deliberately parked for immutable Human Review admission.</summary>
+    ReviewRequested,
 }

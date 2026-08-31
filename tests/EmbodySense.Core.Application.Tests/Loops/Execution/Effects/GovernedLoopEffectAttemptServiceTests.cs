@@ -6,6 +6,8 @@ using EmbodySense.Core.Application.Loops.Execution.Authority;
 using EmbodySense.Core.Application.Loops.Execution.Authority.Models;
 using EmbodySense.Core.Application.Loops.Execution.Effects;
 using EmbodySense.Core.Application.Loops.Execution.Effects.Models;
+using EmbodySense.Core.Application.HumanReview.Models;
+using EmbodySense.Core.Application.Tests.HumanReview;
 using EmbodySense.Core.Common.Authority;
 using EmbodySense.Core.Common.Authority.Grants.Models;
 using EmbodySense.Core.Common.Authority.Models;
@@ -17,6 +19,8 @@ using EmbodySense.Core.Common.Loops.Execution.Authority.Models;
 using EmbodySense.Core.Common.Loops.Execution.Effects;
 using EmbodySense.Core.Common.Loops.Execution.Effects.Models;
 using EmbodySense.Core.Common.Loops.Execution.Models;
+using EmbodySense.Core.Common.HumanReview;
+using EmbodySense.Core.Common.HumanReview.Models;
 
 namespace EmbodySense.Core.Application.Tests.Loops.Execution.Effects;
 
@@ -226,8 +230,180 @@ public sealed class GovernedLoopEffectAttemptServiceTests
         var attendedStore = new InMemoryEffectAttemptStore();
         var approval = await Service(new StubCatalog(attended, attendedOperation), attendedStore, new StubAuthorityBoundary()).ExecuteAsync(attended.Request);
         Assert.Equal(GovernedLoopEffectAttemptExecutionStatus.ApprovalRequired, approval.Status);
-        Assert.Equal(0, attendedStore.BeginCalls);
+        Assert.Equal(1, attendedStore.BeginCalls);
+        Assert.Equal(GovernedLoopEffectPhase.IntentPrepared, approval.Attempt?.Payload.Phase);
+        Assert.Null(approval.Attempt?.DispatchAuthorityEvidenceHash);
         Assert.Equal(0, attendedOperation.ExecuteCalls);
+    }
+
+    [Fact]
+    public async Task Canonical_effect_attempt_service_releases_one_pre_dispatch_human_review_intent_and_replays_without_redispatch()
+    {
+        var fixture = GovernedLoopEffectAttemptTestFixture.Create(unattended: false);
+        var store = new InMemoryEffectAttemptStore();
+        var operation = new StubOperation(fixture.Descriptor, Preparation(fixture));
+        operation.Execute = async (_, boundary, token) =>
+        {
+            var outcome = await boundary.CrossAsync(_ => Task.FromResult(new GovernedActuatorExternalOutcome(GovernedLoopEffectOutcome.Succeeded, "outcome-review", "after-review")), token);
+            return new GovernedActuatorAdapterResult(GovernedActuatorAdapterStatus.OutcomeObserved, outcome);
+        };
+        var authority = new StubAuthorityBoundary();
+        var releases = new StubHumanReviewReleaseEvidenceSource(HumanReviewPreDispatchEffectReleaseEvidenceReadStatus.Current);
+        var service = new GovernedLoopEffectAttemptService(
+            new StubCatalog(fixture, operation),
+            store,
+            authority,
+            releases,
+            new FixedTimeProvider(GovernedLoopEffectAttemptTestFixture.Now.AddMinutes(1)));
+
+        var first = await service.ExecuteAsync(fixture.Request);
+        var prepared = Assert.IsType<GovernedLoopEffectAttempt>(first.Attempt);
+        var release = await PreDispatchReleaseAsync(fixture, prepared);
+        var releasedRequest = fixture.Request with { HumanReviewRelease = release };
+        var released = await service.ExecuteAsync(releasedRequest);
+        var replay = await service.ExecuteAsync(releasedRequest);
+
+        Assert.Equal(GovernedLoopEffectAttemptExecutionStatus.ApprovalRequired, first.Status);
+        Assert.True(released.Status == GovernedLoopEffectAttemptExecutionStatus.Committed, released.Detail);
+        Assert.Equal(GovernedLoopEffectAttemptExecutionStatus.Committed, released.Status);
+        Assert.Equal(GovernedLoopEffectAttemptExecutionStatus.Replayed, replay.Status);
+        Assert.Equal(GovernedLoopEffectPhase.Committed, store.Current?.Payload.Phase);
+        Assert.Equal(1, store.BeginCalls);
+        Assert.Equal(1, operation.ExecuteCalls);
+        Assert.Equal(1, authority.Calls);
+        Assert.Equal(2, releases.Calls);
+    }
+
+    [Theory]
+    [InlineData(HumanReviewPreDispatchEffectReleaseEvidenceReadStatus.Missing, GovernedLoopEffectAttemptExecutionStatus.ApprovalRequired)]
+    [InlineData(HumanReviewPreDispatchEffectReleaseEvidenceReadStatus.Stale, GovernedLoopEffectAttemptExecutionStatus.ApprovalRequired)]
+    [InlineData(HumanReviewPreDispatchEffectReleaseEvidenceReadStatus.Corrupt, GovernedLoopEffectAttemptExecutionStatus.EvidenceUnavailable)]
+    [InlineData(HumanReviewPreDispatchEffectReleaseEvidenceReadStatus.Unavailable, GovernedLoopEffectAttemptExecutionStatus.EvidenceUnavailable)]
+    public async Task Self_consistent_caller_forged_release_never_dispatches_without_current_canonical_evidence(
+        HumanReviewPreDispatchEffectReleaseEvidenceReadStatus evidenceStatus,
+        GovernedLoopEffectAttemptExecutionStatus expectedStatus)
+    {
+        var fixture = GovernedLoopEffectAttemptTestFixture.Create(unattended: false);
+        var store = new InMemoryEffectAttemptStore();
+        var operation = new StubOperation(fixture.Descriptor, Preparation(fixture));
+        var authority = new StubAuthorityBoundary();
+        var releases = new StubHumanReviewReleaseEvidenceSource(evidenceStatus);
+        var service = new GovernedLoopEffectAttemptService(
+            new StubCatalog(fixture, operation),
+            store,
+            authority,
+            releases,
+            new FixedTimeProvider(GovernedLoopEffectAttemptTestFixture.Now.AddMinutes(1)));
+        var parked = await service.ExecuteAsync(fixture.Request);
+        var prepared = Assert.IsType<GovernedLoopEffectAttempt>(parked.Attempt);
+        var forged = await PreDispatchReleaseAsync(fixture, prepared);
+
+        var result = await service.ExecuteAsync(fixture.Request with { HumanReviewRelease = forged });
+
+        Assert.Equal(expectedStatus, result.Status);
+        Assert.Equal(GovernedLoopEffectPhase.IntentPrepared, result.Attempt?.Payload.Phase);
+        Assert.Equal(1, releases.Calls);
+        Assert.Equal(0, authority.Calls);
+        Assert.Equal(0, operation.ExecuteCalls);
+        Assert.Equal(0, store.ExchangeCalls);
+    }
+
+    [Fact]
+    public async Task Canonical_release_drift_in_the_final_authority_window_never_reaches_the_actuator()
+    {
+        var fixture = GovernedLoopEffectAttemptTestFixture.Create(unattended: false);
+        var store = new InMemoryEffectAttemptStore();
+        var operation = new StubOperation(fixture.Descriptor, Preparation(fixture));
+        var authority = new StubAuthorityBoundary();
+        var releases = new StubHumanReviewReleaseEvidenceSource(
+            HumanReviewPreDispatchEffectReleaseEvidenceReadStatus.Current,
+            HumanReviewPreDispatchEffectReleaseEvidenceReadStatus.Stale);
+        var service = new GovernedLoopEffectAttemptService(
+            new StubCatalog(fixture, operation),
+            store,
+            authority,
+            releases,
+            new FixedTimeProvider(GovernedLoopEffectAttemptTestFixture.Now.AddMinutes(1)));
+        var parked = await service.ExecuteAsync(fixture.Request);
+        var prepared = Assert.IsType<GovernedLoopEffectAttempt>(parked.Attempt);
+        var release = await PreDispatchReleaseAsync(fixture, prepared);
+
+        var result = await service.ExecuteAsync(fixture.Request with { HumanReviewRelease = release });
+
+        Assert.Equal(GovernedLoopEffectAttemptExecutionStatus.EvidenceUnavailable, result.Status);
+        Assert.Equal(GovernedLoopEffectPhase.IntentPrepared, result.Attempt?.Payload.Phase);
+        Assert.Equal(2, releases.Calls);
+        Assert.Equal(1, authority.Calls);
+        Assert.Equal(0, operation.ExecuteCalls);
+        Assert.Equal(0, store.ExchangeCalls);
+    }
+
+    private static async Task<HumanReviewPreDispatchEffectRelease> PreDispatchReleaseAsync(GovernedLoopEffectAttemptTestFixture fixture, GovernedLoopEffectAttempt prepared)
+    {
+        var template = (await HumanReviewDecisionTestData.CreateAsync()).Request;
+        var execution = fixture.Request.ExecutionBinding;
+        var baseBinding = HumanReviewContractHash.ApplyBinding(new HumanReviewBinding(
+            1,
+            fixture.Request.AdmissionReceipt.Intent.WorkspaceId,
+            execution.RunId,
+            execution.Revision.GraphId,
+            execution.Revision.RevisionId,
+            execution.Revision.ExecutableHash,
+            fixture.Request.NodeId,
+            0,
+            null,
+            fixture.Request.NodeAttempt,
+            "frontier-effect-one",
+            1,
+            GovernedLoopEffectAttemptTestFixture.Hash('1'),
+            GovernedLoopEffectAttemptTestFixture.Hash('2'),
+            GovernedLoopEffectAttemptTestFixture.Hash('3'),
+            GovernedLoopEffectAttemptTestFixture.Hash('4'),
+            GovernedLoopEffectAttemptTestFixture.Hash('5'),
+            prepared.TargetFingerprint,
+            prepared.PreconditionEvidenceHash!,
+            prepared.InputFingerprint,
+            null,
+            string.Empty));
+        var preparation = HumanReviewEffectReleaseContract.CreatePreparation(baseBinding, prepared);
+        var reviewed = HumanReviewContractHash.ApplyEffectAttempt(new HumanReviewEffectAttemptBinding(
+            prepared.Payload.EffectId,
+            prepared.Payload.OperationId,
+            prepared.Payload.EffectGeneration,
+            prepared.Payload.IntentHash,
+            preparation.PreparationHash,
+            HumanReviewEffectDispatchCertainty.NotDispatched,
+            string.Empty));
+        var binding = HumanReviewContractHash.ApplyBinding(baseBinding with { EffectAttempt = reviewed, BindingHash = string.Empty });
+        var scope = HumanReviewContractHash.ApplyApprovalScope(new HumanReviewApprovalScope(HumanReviewApprovalScopeKind.PreDispatchEffect, binding.BindingHash, prepared.Payload.EffectId, string.Empty));
+        var request = HumanReviewContractHash.ApplyRequest(template with
+        {
+            RequestId = "effect-review-request-one",
+            RequestOperationId = "effect-review-operation-one",
+            Binding = binding,
+            Purpose = HumanReviewPurpose.PreDispatchEffect,
+            ApprovalScope = scope,
+            RequestHash = string.Empty,
+        });
+        var snapshot = HumanReviewEffectReleaseContract.Create(binding, prepared, prepared.Payload.UpdatedAtUtc);
+        var wake = new HumanReviewContinuationWakeReference("wake-effect-one", GovernedLoopEffectAttemptTestFixture.Hash('6'));
+        var claim = new HumanReviewContinuationClaimReference("claim-effect-one", GovernedLoopEffectAttemptTestFixture.Hash('7'));
+        var reservation = new HumanReviewContinuationReservationReference("reservation-effect-one", GovernedLoopEffectAttemptTestFixture.Hash('8'));
+        var receipt = HumanReviewContinuationContractHash.ApplyReleaseReceipt(new HumanReviewContinuationReleaseReceipt(
+            1,
+            "release-effect-one",
+            wake,
+            claim,
+            reservation,
+            1,
+            HumanReviewContinuationReleaseKind.PreDispatchEffect,
+            HumanReviewContinuationReleaseDisposition.Released,
+            GovernedLoopEffectAttemptTestFixture.Hash('9'),
+            GovernedLoopEffectAttemptTestFixture.Hash('a'),
+            snapshot.SnapshotHash,
+            string.Empty));
+        Assert.True(HumanReviewContractValidator.ValidateRequest(request).IsValid, HumanReviewContractValidator.ValidateRequest(request).ToString());
+        return new HumanReviewPreDispatchEffectRelease(request, receipt);
     }
 
     [Theory]
@@ -347,7 +523,7 @@ public sealed class GovernedLoopEffectAttemptServiceTests
                 GovernedActuatorProbePosture.OutcomeObserved,
                 new GovernedActuatorExternalOutcome(GovernedLoopEffectOutcome.Succeeded, "outcome-recovered", "after-recovered")),
         };
-        var service = new GovernedLoopEffectAttemptService(new StubCatalog(fixture, operation), store, new StubAuthorityBoundary(), new ThrowingTimeProvider());
+        var service = new GovernedLoopEffectAttemptService(new StubCatalog(fixture, operation), store, new StubAuthorityBoundary(), new StubHumanReviewReleaseEvidenceSource(), new ThrowingTimeProvider());
 
         var result = await service.ExecuteAsync(fixture.Request);
 
@@ -675,6 +851,7 @@ public sealed class GovernedLoopEffectAttemptServiceTests
             new StubCatalog(fixture, operation),
             store,
             new StubAuthorityBoundary(),
+            new StubHumanReviewReleaseEvidenceSource(),
             new ThrowingTimeProvider());
 
         var result = await service.ExecuteAsync(fixture.Request);
@@ -705,6 +882,7 @@ public sealed class GovernedLoopEffectAttemptServiceTests
             new StubCatalog(fixture, operation),
             store,
             new StubAuthorityBoundary(),
+            new StubHumanReviewReleaseEvidenceSource(),
             new FailingAfterTimeProvider(validTimeReads));
 
         var result = await service.ExecuteAsync(fixture.Request);
@@ -726,6 +904,7 @@ public sealed class GovernedLoopEffectAttemptServiceTests
             new StubCatalog(fixture, operation),
             store,
             new StubAuthorityBoundary(),
+            new StubHumanReviewReleaseEvidenceSource(),
             new ThrowingTimeProvider());
 
         var result = await service.ExecuteAsync(fixture.Request);
@@ -746,6 +925,7 @@ public sealed class GovernedLoopEffectAttemptServiceTests
             new StubCatalog(fixture, operation),
             store,
             new StubAuthorityBoundary(),
+            new StubHumanReviewReleaseEvidenceSource(),
             new RegressingTimeProvider());
 
         var result = await service.ExecuteAsync(fixture.Request);
@@ -1298,7 +1478,7 @@ public sealed class GovernedLoopEffectAttemptServiceTests
         operation.Execute = (_, _, _) => Task.FromResult(new GovernedActuatorAdapterResult(GovernedActuatorAdapterStatus.OutcomeObserved, null));
         TimeProvider timeProvider = failureMode == 1 ? new FailingAfterTimeProvider(2) : new FixedTimeProvider(GovernedLoopEffectAttemptTestFixture.Now.AddMinutes(1));
 
-        var result = await new GovernedLoopEffectAttemptService(new StubCatalog(fixture, operation), store, new StubAuthorityBoundary(), timeProvider).ExecuteAsync(fixture.Request);
+        var result = await new GovernedLoopEffectAttemptService(new StubCatalog(fixture, operation), store, new StubAuthorityBoundary(), new StubHumanReviewReleaseEvidenceSource(), timeProvider).ExecuteAsync(fixture.Request);
 
         Assert.Equal(expectedStatus, result.Status);
         Assert.Equal(expectedPhase, result.Attempt?.Payload.Phase);
@@ -1342,7 +1522,7 @@ public sealed class GovernedLoopEffectAttemptServiceTests
             Current = ToPhase(GovernedLoopEffectAttemptTestFixture.Prepare(fixture.Request, fixture.Descriptor, input!), GovernedLoopEffectPhase.DispatchBoundaryReached),
         };
         var operation = new StubOperation(fixture.Descriptor, Preparation(fixture));
-        var service = new GovernedLoopEffectAttemptService(new StubCatalog(fixture, operation), store, new StubAuthorityBoundary(), new ThrowingTimeProvider());
+        var service = new GovernedLoopEffectAttemptService(new StubCatalog(fixture, operation), store, new StubAuthorityBoundary(), new StubHumanReviewReleaseEvidenceSource(), new ThrowingTimeProvider());
 
         var result = await service.ExecuteAsync(fixture.Request);
 
@@ -1411,6 +1591,7 @@ public sealed class GovernedLoopEffectAttemptServiceTests
             new StubCatalog(fixture, operation),
             store,
             new StubAuthorityBoundary(),
+            new StubHumanReviewReleaseEvidenceSource(),
             new FailingAfterTimeProvider(2));
 
         var result = await service.ExecuteAsync(fixture.Request);
@@ -1424,7 +1605,7 @@ public sealed class GovernedLoopEffectAttemptServiceTests
         IGovernedActuatorCatalogResolver catalog,
         IGovernedLoopEffectAttemptStore store,
         IGovernedLoopEffectAuthorityDecisionBoundary authority)
-        => new(catalog, store, authority, new FixedTimeProvider(GovernedLoopEffectAttemptTestFixture.Now.AddMinutes(1)));
+        => new(catalog, store, authority, new StubHumanReviewReleaseEvidenceSource(), new FixedTimeProvider(GovernedLoopEffectAttemptTestFixture.Now.AddMinutes(1)));
 
     private static GovernedActuatorPreparationEvidence Preparation(GovernedLoopEffectAttemptTestFixture fixture)
         => new(GovernedLoopEffectAttemptTestFixture.HashInput("target:alpha"), GovernedLoopEffectAttemptTestFixture.Hash('e'), "before-alpha");

@@ -56,6 +56,7 @@ public sealed class GovernedLoopSequentialNodeDispatcher
             GovernedLoopSequentialNodeHandlerResultStatus.Completed => GovernedLoopSequentialNodeDispatchStatus.Completed,
             GovernedLoopSequentialNodeHandlerResultStatus.Rejected => GovernedLoopSequentialNodeDispatchStatus.Rejected,
             GovernedLoopSequentialNodeHandlerResultStatus.NeedsReview => GovernedLoopSequentialNodeDispatchStatus.NeedsReview,
+            GovernedLoopSequentialNodeHandlerResultStatus.ReviewPending => GovernedLoopSequentialNodeDispatchStatus.ReviewPending,
             _ => GovernedLoopSequentialNodeDispatchStatus.InvalidHandlerResult,
         };
         return new GovernedLoopSequentialNodeDispatchResult(status, result.EvidenceHash);
@@ -121,7 +122,7 @@ public sealed class GovernedLoopSequentialNodeDispatcher
             && evidence.Attempt == request.Attempt
             && string.Equals(evidence.CycleId, request.Activation.CycleId, StringComparison.Ordinal)
             && evidence.CycleIteration == request.Activation.CycleIteration
-            && (result.Status == GovernedLoopSequentialNodeHandlerResultStatus.Completed
+            && (result.Status is GovernedLoopSequentialNodeHandlerResultStatus.Completed or GovernedLoopSequentialNodeHandlerResultStatus.ReviewPending
                 ? evidence.FailureEvidenceId is null && evidence.FailureEvidenceHash is null
                 : evidence.FailureEvidenceId is not null && evidence.FailureEvidenceHash is not null)
             && IsExactRouteEvidence(evidence, request)
@@ -141,7 +142,7 @@ public sealed class GovernedLoopSequentialNodeDispatcher
             return false;
         }
 
-        if (evidence.Disposition == GovernedLoopSequentialNodeHandlerResultStatus.NeedsReview)
+        if (evidence.Disposition is GovernedLoopSequentialNodeHandlerResultStatus.NeedsReview or GovernedLoopSequentialNodeHandlerResultStatus.ReviewPending)
         {
             return evidence.ControlOutcome is null
                 && evidence.SelectedControlEdgeIds.Length == 0
@@ -178,6 +179,7 @@ public sealed class GovernedLoopSequentialNodeDispatcher
             GovernedLoopSequentialNodeHandlerResultStatus.Completed => GovernedLoopSequentialNodeEvidenceKind.CompletedOutcome,
             GovernedLoopSequentialNodeHandlerResultStatus.Rejected => GovernedLoopSequentialNodeEvidenceKind.DefinitiveRejection,
             GovernedLoopSequentialNodeHandlerResultStatus.NeedsReview => GovernedLoopSequentialNodeEvidenceKind.AmbiguityAttention,
+            GovernedLoopSequentialNodeHandlerResultStatus.ReviewPending => GovernedLoopSequentialNodeEvidenceKind.ReviewRequested,
             _ => GovernedLoopSequentialNodeEvidenceKind.Unknown,
         };
 }

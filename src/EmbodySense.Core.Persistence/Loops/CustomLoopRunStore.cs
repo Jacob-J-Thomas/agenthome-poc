@@ -17,6 +17,7 @@ using EmbodySense.Core.Application.Loops.Sleep;
 using EmbodySense.Core.Application.Loops.TraceRetention;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using EmbodySense.Core.Common.HumanReview.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Execution.Models;
 using EmbodySense.Core.Common.Loops.Execution.Retry;
@@ -3105,6 +3106,8 @@ public sealed class CustomLoopRunStore :
         var pureCompletions = attemptClosures.Count(item => IsExactPureCompletion(candidate, item));
         var lifecycleEvents = appended.Count(IsLifecycleControlEvent);
         var retryStateEvents = appended.Count(item => item.Kind == CustomLoopRunEventKind.RetryStateChanged);
+        var humanReviewAdmission = IsHumanReviewAdmission(current, candidate, appended);
+        var humanReviewRotation = IsHumanReviewRotation(current, candidate);
         var humanInputCheckpointPublication = candidate.HumanInputWaitingCheckpoints.Count == current.HumanInputWaitingCheckpoints.Count + 1
             && appended.All(IsLifecycleControlEvent)
             && lifecycleEvents <= 1;
@@ -3159,6 +3162,11 @@ public sealed class CustomLoopRunStore :
                     : "A mixed node-attempt outcome append exceeded its reserved maximum serialized footprint.");
         }
 
+        if (humanReviewAdmission && !humanReviewRotation && delta > checked(CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes + lifecycleControlBudget))
+        {
+            throw new FormatException("A Human Review parking admission exceeded its atomic attempt-outcome and lifecycle reservation.");
+        }
+
         var controlEventCount = candidate.Events.Count(IsLifecycleControlEvent);
         if (controlEventCount > MaximumLifecycleControlEvents(candidate))
         {
@@ -3180,6 +3188,7 @@ public sealed class CustomLoopRunStore :
         if (retryStateEvents == 0
             && lifecycleEvents > 0
             && !humanInputCheckpointPublication
+            && !humanReviewAdmission
             && delta > lifecycleControlBudget)
         {
             throw new FormatException("A lifecycle control event exceeded its permanent reserved serialized footprint.");
@@ -3308,6 +3317,60 @@ public sealed class CustomLoopRunStore :
     {
         return item.Kind is CustomLoopRunEventKind.LifecycleChanged or CustomLoopRunEventKind.IntegrityWarning;
     }
+
+    private static bool IsHumanReviewAdmission(CustomLoopRunRecord current, CustomLoopRunRecord candidate, IReadOnlyList<CustomLoopRunEvent> appended)
+    {
+        return candidate.HumanReview is not null
+            && (current.HumanReview is null || IsHumanReviewRotation(current, candidate))
+            && appended.Count(item => item.Kind == CustomLoopRunEventKind.HumanReviewRequestAdmitted) == 1
+            && appended.Count(item => item is
+            {
+                Kind: CustomLoopRunEventKind.NodeOutcomeObserved,
+                SequentialNodeEvidence:
+                {
+                    Kind: CustomLoopSequentialNodeEvidenceKind.AmbiguityAttention,
+                    Disposition: CustomLoopSequentialNodeDisposition.NeedsReview,
+                }
+                or
+                {
+                    Kind: CustomLoopSequentialNodeEvidenceKind.ReviewRequested,
+                    Disposition: CustomLoopSequentialNodeDisposition.ReviewPending,
+                },
+            }) == 1;
+    }
+
+    private static bool IsHumanReviewRotation(CustomLoopRunRecord current, CustomLoopRunRecord candidate)
+    {
+        if (current.HumanReview is not { } prior
+            || candidate.HumanReview is not { } next
+            || string.Equals(prior.Request.RequestHash, next.Request.RequestHash, StringComparison.Ordinal)
+            || next.CompletedReviews.Length != prior.CompletedReviews.Length + 1
+            || next.CompletedReviews[^1] is not { } archived
+            || archived.CompletedReviews.Length != 0
+            || !string.Equals(archived.Request.RequestHash, prior.Request.RequestHash, StringComparison.Ordinal)
+            || !string.Equals(archived.Lifecycle.LifecycleHash, prior.Lifecycle.LifecycleHash, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return prior.AcceptedTerminalDecision is { } terminal
+            && ((terminal.Kind == HumanReviewDecisionKind.Approve
+                && prior.ContinuationReservation is { Decision: { } continuationDecision } reservation
+                && SameDecisionReference(continuationDecision, terminal)
+                && prior.Continuation is { } continuation
+                && (continuation.Completion?.Reservation is { } completionReservation && string.Equals(completionReservation.ReservationHash, reservation.ReservationHash, StringComparison.Ordinal)
+                    || continuation.Retirement?.Reservation is { } retirementReservation && string.Equals(retirementReservation.ReservationHash, reservation.ReservationHash, StringComparison.Ordinal)))
+                || prior.DecisionActions.Any(action => action is { Reservation.Decision: { } actionDecision }
+                    && SameDecisionReference(actionDecision, terminal)
+                    && (action.Completion?.Reservation is { } completionReservation && string.Equals(completionReservation.ReservationHash, action.Reservation.ReservationHash, StringComparison.Ordinal)
+                        || action.Retirement?.Reservation is { } retirementReservation && string.Equals(retirementReservation.ReservationHash, action.Reservation.ReservationHash, StringComparison.Ordinal))));
+    }
+
+    private static bool SameDecisionReference(HumanReviewDecisionReference left, HumanReviewDecision right)
+        => string.Equals(left.DecisionId, right.DecisionId, StringComparison.Ordinal)
+            && string.Equals(left.DecisionOperationId, right.DecisionOperationId, StringComparison.Ordinal)
+            && left.Kind == right.Kind
+            && string.Equals(left.DecisionHash, right.DecisionHash, StringComparison.Ordinal);
 
     private static bool IsRetryStateAtomicEvent(CustomLoopRunEvent item)
     {
@@ -4397,6 +4460,7 @@ public sealed class CustomLoopRunStore :
             CustomLoopSequentialNodeEvidenceKind.CompletedOutcome => GovernedLoopSequentialNodeEvidenceKind.CompletedOutcome,
             CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection => GovernedLoopSequentialNodeEvidenceKind.DefinitiveRejection,
             CustomLoopSequentialNodeEvidenceKind.AmbiguityAttention => GovernedLoopSequentialNodeEvidenceKind.AmbiguityAttention,
+            CustomLoopSequentialNodeEvidenceKind.ReviewRequested => GovernedLoopSequentialNodeEvidenceKind.ReviewRequested,
             _ => throw new FormatException("Dispatch-start evidence cannot satisfy a terminal sequential-node receipt lookup."),
         };
         var disposition = evidence.Disposition switch
@@ -4404,6 +4468,7 @@ public sealed class CustomLoopRunStore :
             CustomLoopSequentialNodeDisposition.Completed => GovernedLoopSequentialNodeHandlerResultStatus.Completed,
             CustomLoopSequentialNodeDisposition.Rejected => GovernedLoopSequentialNodeHandlerResultStatus.Rejected,
             CustomLoopSequentialNodeDisposition.NeedsReview => GovernedLoopSequentialNodeHandlerResultStatus.NeedsReview,
+            CustomLoopSequentialNodeDisposition.ReviewPending => GovernedLoopSequentialNodeHandlerResultStatus.ReviewPending,
             _ => throw new FormatException("Terminal sequential-node evidence has no terminal disposition."),
         };
         return new GovernedLoopSequentialNodeEvidenceReceipt(
@@ -4490,6 +4555,7 @@ public sealed class CustomLoopRunStore :
             GovernedLoopSequentialNodeHandlerResultStatus.Completed => GovernedLoopSequentialNodeEvidenceKind.CompletedOutcome,
             GovernedLoopSequentialNodeHandlerResultStatus.Rejected => GovernedLoopSequentialNodeEvidenceKind.DefinitiveRejection,
             GovernedLoopSequentialNodeHandlerResultStatus.NeedsReview => GovernedLoopSequentialNodeEvidenceKind.AmbiguityAttention,
+            GovernedLoopSequentialNodeHandlerResultStatus.ReviewPending => GovernedLoopSequentialNodeEvidenceKind.ReviewRequested,
             _ => GovernedLoopSequentialNodeEvidenceKind.Unknown,
         };
 

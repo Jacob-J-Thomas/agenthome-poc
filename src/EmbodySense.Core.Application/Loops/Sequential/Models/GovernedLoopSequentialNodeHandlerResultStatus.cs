@@ -11,4 +11,6 @@ public enum GovernedLoopSequentialNodeHandlerResultStatus
     Rejected,
     /// <summary>The node stopped for durable review with exact ambiguity evidence.</summary>
     NeedsReview,
+    /// <summary>The node durably parked for an intentional human-review decision before any ambiguous outcome exists.</summary>
+    ReviewPending,
 }

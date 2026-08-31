@@ -12,6 +12,7 @@ using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Execution.Effects;
 using EmbodySense.Core.Common.Loops.Execution.Wait;
 using EmbodySense.Core.Common.Loops.HumanInput;
+using EmbodySense.Core.Common.HumanReview;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.PureNodes;
 
@@ -240,6 +241,18 @@ public sealed class GovernedLoopGraphValidationService
                 path,
                 "The reserved Human Input descriptor key must retain its complete data-only canonical contract.");
         }
+
+        if (GovernedLoopHumanReviewNodeCatalogContract.TryResolve(descriptor.Descriptor, out _)
+            && !GovernedLoopHumanReviewNodeCatalogContract.HasExactCatalogStructure(descriptor))
+        {
+            Add(
+                errors,
+                "catalog.human-review-contract.mismatch",
+                GovernedLoopGraphElementKind.Catalog,
+                id,
+                path,
+                "The reserved Human Review descriptor key must retain its complete canonical structural contract.");
+        }
     }
 
     private static void ValidateParameterContracts(GovernedLoopNodeCatalogDescriptor descriptor, string descriptorPath, List<GovernedLoopGraphValidationError> errors)
@@ -385,6 +398,7 @@ public sealed class GovernedLoopGraphValidationService
             ValidatePureNodeSchemaSemantics(graph, node, errors);
             ValidateTopologyNodeSchemaSemantics(graph, node, descriptor, errors);
             ValidateWaitNodeSemantics(node, descriptor, errors);
+            ValidateHumanReviewNodeSemantics(node, descriptor, errors);
             ValidateHumanInputNodeSemantics(graph, node, descriptor, errors);
             ValidateNodeAuthority(node, descriptor, errors);
         }
@@ -506,6 +520,29 @@ public sealed class GovernedLoopGraphValidationService
                 node.Id,
                 $"graph.nodes[{node.Id}]",
                 "The Wait condition is not one exact canonical UTC timestamp or bounded governed event reference.");
+        }
+    }
+
+    private static void ValidateHumanReviewNodeSemantics(
+        GovernedLoopNodeDefinition node,
+        GovernedLoopNodeCatalogDescriptor admittedDescriptor,
+        List<GovernedLoopGraphValidationError> errors)
+    {
+        if (!GovernedLoopHumanReviewNodeCatalogContract.TryResolve(node.Descriptor, out _)
+            || !GovernedLoopHumanReviewNodeCatalogContract.HasExactCatalogStructure(admittedDescriptor))
+        {
+            return;
+        }
+
+        if (!GovernedLoopHumanReviewNodeCatalogContract.HasExactNodeSemantics(node))
+        {
+            Add(
+                errors,
+                "node.human-review-contract.incompatible",
+                GovernedLoopGraphElementKind.Node,
+                node.Id,
+                $"graph.nodes[{node.Id}]",
+                "A Human Review gate must retain its zero-port, authority-free, server-policy and bounded approval-scope contract.");
         }
     }
 

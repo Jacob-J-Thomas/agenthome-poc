@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Text;
 using System.Text.Json.Nodes;
+using EmbodySense.Core.Application.Loops.GraphValidation;
 using EmbodySense.Core.Application.Loops.Sequential;
 using EmbodySense.Core.Application.Loops.Sequential.Models;
 using EmbodySense.Core.Application.Loops.Admission;
@@ -14,6 +15,7 @@ using EmbodySense.Core.Common.Governance.Tools;
 using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.HumanInput;
 using EmbodySense.Core.Common.HumanInput.Models;
+using EmbodySense.Core.Common.HumanReview;
 using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Inference.Profiles.Models;
 using EmbodySense.Core.Common.Loops.Admission;
@@ -105,6 +107,30 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
         Assert.Equal(first, replay);
         Assert.Equal(loaded.LifecycleVersion, afterReplay.LifecycleVersion);
         Assert.Equal(loaded.Events, afterReplay.Events);
+    }
+
+    [Fact]
+    public async Task Canonical_review_pending_receipt_round_trips_and_replays_without_mutation()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        const string Identity = "review-pending-receipt";
+        var context = CreateHumanReviewContext(Identity);
+        var admitted = await CustomLoopFrontierStoreTests.PersistStrictHumanReviewAdmissionAsync(paths, Identity);
+        var parkedEvent = Assert.Single(admitted.Events, item => item.SequentialNodeEvidence?.Disposition == CustomLoopSequentialNodeDisposition.ReviewPending);
+        var node = Assert.Single(context.Plan.Nodes, item => string.Equals(item.NodeId, parkedEvent.SequentialNodeEvidence?.NodeId, StringComparison.Ordinal));
+        var request = OrderedRequest(context, node, parkedEvent, GovernedLoopSequentialNodeHandlerResultStatus.ReviewPending, admitted.LifecycleVersion);
+
+        using var restarted = new CustomLoopRunStore(paths);
+        var first = await restarted.RetainAsync(request);
+        var replay = await restarted.RetainAsync(request);
+        var afterReplay = Assert.IsType<CustomLoopRunRecord>(await restarted.GetAsync(admitted.Id));
+
+        Assert.Equal(GovernedLoopSequentialNodeHandlerResultStatus.ReviewPending, first.Status);
+        Assert.Equal(parkedEvent.SequentialNodeEvidence?.EvidenceHash, first.EvidenceHash);
+        Assert.Equal(first, replay);
+        Assert.Equal(admitted.LifecycleVersion, afterReplay.LifecycleVersion);
+        Assert.Equal(CustomLoopRunArtifactSerializer.Serialize(admitted), CustomLoopRunArtifactSerializer.Serialize(afterReplay));
     }
 
     [Fact]
@@ -1272,12 +1298,20 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
     internal static SequentialContext CreateContext(GovernedLoopSequentialTriggerOrigin? triggerOrigin = null, string identity = "sequential", bool scheduleTrigger = false)
         => CreateContext(LinearGraph(scheduleTrigger), triggerOrigin, identity, scheduleTrigger);
 
+    internal static SequentialContext CreateHumanReviewContext(string identity)
+        => CreateContext(HumanReviewGraph(), identity: identity);
+
+    internal static SequentialContext CreatePreDispatchEffectContext(string identity, string? workspaceId = null)
+        => CreateContext(HumanReviewOrderedReleaseGraphFixture.PreDispatchEffectGraph(), identity: identity, preDispatchEffect: true, workspaceId: workspaceId);
+
     private static SequentialContext CreateContext(
         GovernedLoopGraphDefinition graph,
         GovernedLoopSequentialTriggerOrigin? triggerOrigin = null,
         string identity = "sequential",
         bool scheduleTrigger = false,
-        CustomLoopContextBlock[]? admissionContextBlocks = null)
+        CustomLoopContextBlock[]? admissionContextBlocks = null,
+        bool preDispatchEffect = false,
+        string? workspaceId = null)
     {
         var revisionArtifact = GovernedLoopRevisionArtifactFactory.Create(
             1,
@@ -1312,9 +1346,10 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
             grantReference,
             AuthorityGrantTestFixture.Actor("user-owner"),
             "web"));
+        var effectiveWorkspaceId = workspaceId ?? GovernedLoopAdmissionTestFixture.WorkspaceId;
         var intent = new GovernedLoopAdmissionIntent(
             1,
-            GovernedLoopAdmissionTestFixture.WorkspaceId,
+            effectiveWorkspaceId,
             request.OperationId,
             request.RequestHash,
             publication,
@@ -1325,21 +1360,42 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
             artifact.ArtifactHash,
             artifact.LayoutHash);
         var execution = GovernedLoopExecutionBinding.Create(1, $"run-{identity}", graph.RevisionReference, 1);
-        var capabilityAdmission = SequentialCapabilityAdmission(artifact.ArtifactHash, scheduleTrigger);
-        var effectiveAuthority = GovernedLoopAdmissionTestFixture.EffectiveAuthority();
+        var capabilityAdmission = preDispatchEffect
+            ? PreDispatchEffectCapabilityAdmission(artifact.ArtifactHash, effectiveWorkspaceId)
+            : SequentialCapabilityAdmission(artifact.ArtifactHash, scheduleTrigger);
+        var effectiveAuthority = preDispatchEffect
+            ? new EmbodySense.Core.Common.Authority.Models.AuthorityCeiling(
+                capabilityAdmission.Pins.Select(pin => pin.DescriptorIdentity).ToArray(),
+                [],
+                1,
+                CapabilitySideEffectClass.LocalReversible,
+                false,
+                false,
+                false)
+            : GovernedLoopAdmissionTestFixture.EffectiveAuthority();
         var grantBoundary = new AuthorityGrantBoundary(_timestamp.AddMinutes(-1), _timestamp.AddHours(1), AuthorityGrantCompletionConstraintKind.None);
         var grantDependencyEvidenceHash = Hash('9');
         var evaluatedAtUtc = _timestamp.AddMinutes(1);
-        var modelRoutingAdmission = ModelRoutingAdmission(
-            graph,
-            intent,
-            execution,
-            grant.Binding.Profile,
-            grantBoundary,
-            grantDependencyEvidenceHash,
-            effectiveAuthority,
-            capabilityAdmission,
-            evaluatedAtUtc);
+        var modelRoutingAdmission = preDispatchEffect
+            ? GovernedLoopAdmissionContractHash.CreateEmptyModelRoutingAdmission(
+                intent,
+                execution,
+                grant.Binding.Profile,
+                grantBoundary,
+                grantDependencyEvidenceHash,
+                effectiveAuthority,
+                capabilityAdmission,
+                evaluatedAtUtc)
+            : ModelRoutingAdmission(
+                graph,
+                intent,
+                execution,
+                grant.Binding.Profile,
+                grantBoundary,
+                grantDependencyEvidenceHash,
+                effectiveAuthority,
+                capabilityAdmission,
+                evaluatedAtUtc);
         var admissionEvidence = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionEvidence(
             1,
             GovernedLoopAdmissionContractHash.ComputeIntentHash(intent),
@@ -1384,14 +1440,18 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
         var anchor = Assert.IsType<GovernedLoopSequentialRunAnchor>(anchorResult.Anchor);
         var plan = Assert.IsType<GovernedLoopSequentialPlan>(planResult.Plan);
 
-        var definition = CustomLoopDefinition.CreateSeed("sequential-loop", "default-role", "step-1", "create-loop", _timestamp);
+        var definition = preDispatchEffect
+            ? Assert.IsType<CustomLoopDefinition>(GovernedLoopSequentialLegacyDefinitionProjector.Project(binding, invocation, plan, artifact).Definition)
+            : CustomLoopDefinition.CreateSeed("sequential-loop", "default-role", "step-1", "create-loop", _timestamp);
         var admitted = WithEvidence(
             Event(1, "event-admitted", CustomLoopRunEventKind.Admitted),
             binding,
             "trigger",
             1,
             CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
-            CustomLoopSequentialNodeDisposition.Completed);
+            CustomLoopSequentialNodeDisposition.Completed,
+            outgoingControlEdgeIdsOverride: preDispatchEffect ? plan.Nodes[0].OutgoingControlEdgeIds.ToArray() : null,
+            selectedControlEdgeIdsOverride: preDispatchEffect ? plan.Nodes[0].OutgoingControlEdgeIds.ToArray() : null);
         if (admissionContextBlocks is not null)
         {
             var padded = admitted with { ContextBlocks = admissionContextBlocks };
@@ -2421,6 +2481,8 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
             DefaultModelRoutingPolicy());
     }
 
+    private static GovernedLoopGraphDefinition HumanReviewGraph() => HumanReviewOrderedReleaseGraphFixture.Graph();
+
     private static GovernedLoopGraphDefinition MaximumHumanInputGraph(GovernedLoopHumanInputNodeConfiguration configuration)
     {
         var role = new ContextualRoleRevisionPin(new ContextualRoleRevisionIdentity("sequential-role", 1), Hash('a'));
@@ -2655,6 +2717,38 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
             new CapabilityDependencyArtifactMetadata(checksum, null));
         var admission = TestCapabilityAdmissionFactory.Create(requirements, _timestamp);
         return admission;
+    }
+
+    private static CapabilityAdmissionSnapshot PreDispatchEffectCapabilityAdmission(string graphArtifactHash, string workspaceId)
+    {
+        Assert.True(CapabilityId.TryParse("org.embodysense/loop-sequential", out var subject, out _));
+        Assert.True(CapabilityId.TryParse(ConversationTurnCapabilityId, out var conversationTurn, out _));
+        Assert.True(CapabilityId.TryParse(HumanReviewOrderedReleaseGraphFixture.WorkspaceCommandCapabilityId, out var workspaceCommand, out _));
+        Assert.True(CapabilityVersionRange.TryParse("*", out var versions, out _));
+        Assert.True(CapabilityIntegrityDigest.TryParse("sha256:" + graphArtifactHash, out var checksum, out _));
+        var requirements = new CapabilityDependencyManifest(
+            1,
+            CapabilityDependencyManifestKind.LoopPackage,
+            subject!,
+            [new CapabilityDependency(conversationTurn!, versions!), new CapabilityDependency(workspaceCommand!, versions!)],
+            [],
+            new CapabilityDependencyArtifactMetadata(checksum, null));
+        var admission = TestCapabilityAdmissionFactory.Create(requirements, _timestamp);
+        var descriptor = HumanReviewOrderedReleaseGraphFixture.WorkspaceCapability();
+        Assert.True(CapabilityDescriptorIdentity.TryCreate(descriptor, out var identity, out var failure), failure is null ? null : string.Join(", ", failure.Errors));
+        var replacement = new CapabilityAdmissionPin(
+            identity!,
+            descriptor.Kind,
+            descriptor.Implementation,
+            descriptor.Provenance,
+            new CapabilityDependencyArtifactMetadata(null, null),
+            descriptor.Purpose);
+        return admission with
+        {
+            WorkspaceScopeId = workspaceId,
+            Pins = admission.Pins.Select(pin => pin.DescriptorIdentity.Id.Equals(workspaceCommand) ? replacement : pin).ToArray(),
+            Evidence = admission.Evidence.Select(item => item.DependencyId.Equals(workspaceCommand) ? item with { SelectedIdentity = identity } : item).ToArray(),
+        };
     }
 
     private static GovernedModelRoutingAdmissionSnapshot ModelRoutingAdmission(
@@ -3175,7 +3269,9 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
     private static GovernedLoopSequentialOrderedNodeEvidenceRequest OrderedRequest(
         SequentialContext context,
         GovernedLoopSequentialPlanNode node,
-        CustomLoopRunEvent runEvent)
+        CustomLoopRunEvent runEvent,
+        GovernedLoopSequentialNodeHandlerResultStatus disposition = GovernedLoopSequentialNodeHandlerResultStatus.Completed,
+        int? orderedLifecycleVersion = null)
     {
         var evidence = Assert.IsType<CustomLoopSequentialNodeEvidence>(runEvent.SequentialNodeEvidence);
         var activation = GovernedLoopNodeExecutionEvidence.CreateActivation(
@@ -3194,8 +3290,8 @@ public sealed class CustomLoopSequentialEvidenceStoreTests
         return new GovernedLoopSequentialOrderedNodeEvidenceRequest(
             1,
             new GovernedLoopSequentialNodeDispatchRequest(1, context.Anchor, context.Plan, node, activation, evidence.Attempt!.Value),
-            GovernedLoopSequentialNodeHandlerResultStatus.Completed,
-            context.Run.LifecycleVersion,
+            disposition,
+            orderedLifecycleVersion ?? context.Run.LifecycleVersion,
             runEvent.Sequence,
             runEvent.EventId);
     }

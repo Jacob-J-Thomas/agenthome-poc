@@ -26,6 +26,7 @@ using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Execution.Models;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Capabilities;
+using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Core.Startup.Loops.Execution.Effects;
 using EmbodySense.Core.Startup.Workspace;
@@ -65,6 +66,7 @@ public sealed class GovernedWorkspaceActionFactoryTests
         using var workspace = new TestWorkspace();
         var fixture = WorkspaceToolAuthorityTestFixture.CreateAction();
         var paths = new WorkspacePaths(workspace.RootPath);
+        using var runs = new CustomLoopRunStore(paths);
         var trust = new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath);
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         Directory.CreateDirectory(workspace.File("shared"));
@@ -88,6 +90,7 @@ public sealed class GovernedWorkspaceActionFactoryTests
             new FixedTimeProvider(WorkspaceToolAuthorityTestFixture.Now.AddMinutes(1)));
         var facade = GovernedLoopEffectAttemptFactory.Create(
             paths,
+            runs,
             trust,
             transaction,
             registry,
@@ -129,6 +132,48 @@ public sealed class GovernedWorkspaceActionFactoryTests
         Assert.Equal(WorkspaceActionResultStatus.Replayed, replayedResult!.Status);
         Assert.Equal(committedResult.AfterEvidenceId, replayedResult.AfterEvidenceId);
         Assert.Equal("replacement", File.ReadAllText(workspace.File("shared", "note.txt")));
+    }
+
+    [Theory]
+    [InlineData(GovernedLoopEffectAttemptExecutionStatus.OperationInProgress, GovernedLoopWorkspaceActionExecutionStatus.OperationInProgress)]
+    [InlineData(GovernedLoopEffectAttemptExecutionStatus.ReconciliationRequired, GovernedLoopWorkspaceActionExecutionStatus.NeedsReview)]
+    public async Task Graph_projection_preserves_exact_effect_ownership_contention_without_weakening_ambiguous_postures(
+        GovernedLoopEffectAttemptExecutionStatus effectStatus,
+        GovernedLoopWorkspaceActionExecutionStatus expectedStatus)
+    {
+        var fixture = WorkspaceToolAuthorityTestFixture.CreateAction();
+        var facade = new GovernedLoopEffectAttemptFacade(
+            new UnusedCatalog(),
+            new CapturingEffectService(effectStatus));
+        var executor = new GovernedLoopWorkspaceActionExecutor(facade);
+        var node = fixture.Plan.Nodes.Single(candidate => string.Equals(candidate.NodeId, WorkspaceToolAuthorityTestFixture.NodeId, StringComparison.Ordinal));
+        var activation = GovernedLoopNodeExecutionEvidence.CreateActivation(
+            node.Ordinal,
+            node.Ordinal,
+            1,
+            node.NodeId,
+            node.Descriptor,
+            node.IncomingControlEdgeIds,
+            node.OutgoingControlEdgeIds,
+            GovernedLoopNodeExecutionStatus.Running,
+            WorkspaceToolAuthorityTestFixture.NodeAttempt,
+            WorkspaceToolAuthorityTestFixture.ServerCorrelationId);
+        var request = new GovernedLoopWorkspaceActionExecutionRequest(
+            new GovernedLoopSequentialNodeDispatchRequest(
+                GovernedLoopSequentialNodeDispatchRequest.CurrentSchemaVersion,
+                fixture.Anchor,
+                fixture.Plan,
+                node,
+                activation,
+                WorkspaceToolAuthorityTestFixture.NodeAttempt),
+            fixture.Artifact,
+            WorkspaceToolAuthorityTestFixture.ServerCorrelationId,
+            fixture.ActionInputJson);
+
+        var result = await executor.ExecuteAsync(request);
+
+        Assert.Equal(expectedStatus, result.Status);
+        Assert.Null(result.CanonicalOutput);
     }
 
     [Fact]
@@ -245,7 +290,7 @@ public sealed class GovernedWorkspaceActionFactoryTests
             [new WorkspaceActionContentSegment(WorkspaceActionContentSegmentKind.LiteralUtf8, value, null)]);
     }
 
-    private sealed class CapturingEffectService : IGovernedLoopEffectAttemptService
+    private sealed class CapturingEffectService(GovernedLoopEffectAttemptExecutionStatus status = GovernedLoopEffectAttemptExecutionStatus.DispatchNotStarted) : IGovernedLoopEffectAttemptService
     {
         public GovernedLoopEffectAttemptRequest? Request { get; private set; }
 
@@ -256,7 +301,7 @@ public sealed class GovernedWorkspaceActionFactoryTests
             cancellationToken.ThrowIfCancellationRequested();
             Request = request;
             return Task.FromResult(new GovernedLoopEffectAttemptExecutionResult(
-                GovernedLoopEffectAttemptExecutionStatus.DispatchNotStarted,
+                status,
                 null,
                 "test stop"));
         }

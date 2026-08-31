@@ -1,6 +1,8 @@
 using EmbodySense.Core.Application.Loops.EffectAttempts;
 using EmbodySense.Core.Application.Loops.EffectAttempts.Models;
 using EmbodySense.Core.Application.Loops.EffectAuthorityEvidence.Models;
+using EmbodySense.Core.Application.HumanReview;
+using EmbodySense.Core.Application.HumanReview.Models;
 using EmbodySense.Core.Application.Loops.Execution.Authority;
 using EmbodySense.Core.Application.Loops.Execution.Authority.Models;
 using EmbodySense.Core.Application.Loops.Execution.Effects.Models;
@@ -16,6 +18,8 @@ using EmbodySense.Core.Common.Authority.Grants;
 using EmbodySense.Core.Common.Authority.Models;
 using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Common.Capabilities;
+using EmbodySense.Core.Common.HumanReview;
+using EmbodySense.Core.Common.HumanReview.Models;
 
 namespace EmbodySense.Core.Application.Loops.Execution.Effects;
 
@@ -25,6 +29,7 @@ public sealed class GovernedLoopEffectAttemptService : IGovernedLoopEffectAttemp
     private readonly IGovernedActuatorCatalogResolver _catalog;
     private readonly IGovernedLoopEffectAttemptStore _store;
     private readonly IGovernedLoopEffectAuthorityDecisionBoundary _authority;
+    private readonly IHumanReviewPreDispatchEffectReleaseEvidenceSource _humanReviewReleases;
     private readonly TimeProvider _timeProvider;
 
     /// <summary>Creates one orchestration service over catalog, persistence, and fresh authority ports.</summary>
@@ -32,11 +37,13 @@ public sealed class GovernedLoopEffectAttemptService : IGovernedLoopEffectAttemp
         IGovernedActuatorCatalogResolver catalog,
         IGovernedLoopEffectAttemptStore store,
         IGovernedLoopEffectAuthorityDecisionBoundary authority,
+        IHumanReviewPreDispatchEffectReleaseEvidenceSource humanReviewReleases,
         TimeProvider? timeProvider = null)
     {
         _catalog = catalog ?? throw new ArgumentNullException(nameof(catalog));
         _store = store ?? throw new ArgumentNullException(nameof(store));
         _authority = authority ?? throw new ArgumentNullException(nameof(authority));
+        _humanReviewReleases = humanReviewReleases ?? throw new ArgumentNullException(nameof(humanReviewReleases));
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
@@ -294,6 +301,15 @@ public sealed class GovernedLoopEffectAttemptService : IGovernedLoopEffectAttemp
     {
         try
         {
+            if (preparation.RequiresGovernedHumanReview)
+            {
+                var releaseStatus = await ReadHumanReviewReleaseAsync(request, current, cancellationToken).ConfigureAwait(false);
+                if (releaseStatus != HumanReviewPreDispatchEffectReleaseEvidenceReadStatus.Current)
+                {
+                    return HumanReviewReleaseFailure(releaseStatus, current);
+                }
+            }
+
             var exact = await ResolveAsync(request, cancellationToken).ConfigureAwait(false);
             if (exact.Status != GovernedActuatorCatalogResolutionStatus.Active
                 || exact.Descriptor is null
@@ -327,6 +343,11 @@ public sealed class GovernedLoopEffectAttemptService : IGovernedLoopEffectAttemp
                         || !GovernedLoopEffectAuthorityDecisionMatcher.IsExactMatch(decision, authorityRequest))
                     {
                         throw new GovernedLoopEffectAttemptEvidenceException("The authority boundary supplied an inexact or repeated dispatch decision.");
+                    }
+                    if (preparation.RequiresGovernedHumanReview
+                        && await ReadHumanReviewReleaseAsync(request, current, authorityToken).ConfigureAwait(false) != HumanReviewPreDispatchEffectReleaseEvidenceReadStatus.Current)
+                    {
+                        throw new GovernedLoopEffectAttemptEvidenceException("Current canonical Human Review release evidence changed before dispatch authority could be attached.");
                     }
                     current = GovernedLoopEffectAttemptContract.AttachDispatchAuthority(current, decision.ContentHash, UtcNowOrThrow(current.Payload.UpdatedAtUtc));
                     var attached = await ExchangeAsync(current.PreviousContentHash!, current, lease, authorityToken).ConfigureAwait(false);
@@ -756,11 +777,8 @@ public sealed class GovernedLoopEffectAttemptService : IGovernedLoopEffectAttemp
         {
             return (null, Result(GovernedLoopEffectAttemptExecutionStatus.InvalidRequest, null, "The caller-supplied authority does not exactly match the server-derived capability requirement."));
         }
-        if (resolved.Descriptor!.Approval == GovernedActuatorApprovalPosture.GovernedApprovalRequired
-            || !resolved.Descriptor.UnattendedEligible)
-        {
-            return (null, Result(GovernedLoopEffectAttemptExecutionStatus.ApprovalRequired, null, "A separate governed approval proof is required before this operation may dispatch."));
-        }
+        var requiresGovernedHumanReview = resolved.Descriptor!.Approval == GovernedActuatorApprovalPosture.GovernedApprovalRequired
+            || !resolved.Descriptor.UnattendedEligible;
 
         return (new GovernedActuatorDispatchPreparation(
             resolved.Capability,
@@ -768,7 +786,8 @@ public sealed class GovernedLoopEffectAttemptService : IGovernedLoopEffectAttemp
             resolved.Operation!,
             schemaInput,
             evidence!,
-            requiredAuthority), null);
+            requiredAuthority,
+            requiresGovernedHumanReview), null);
     }
 
     private static AuthorityCeiling RequiredAuthority(
@@ -862,6 +881,42 @@ public sealed class GovernedLoopEffectAttemptService : IGovernedLoopEffectAttemp
             return false;
         }
     }
+
+    private async Task<HumanReviewPreDispatchEffectReleaseEvidenceReadStatus> ReadHumanReviewReleaseAsync(
+        GovernedLoopEffectAttemptRequest request,
+        GovernedLoopEffectAttempt current,
+        CancellationToken cancellationToken)
+    {
+        if (request.HumanReviewRelease is null)
+        {
+            return HumanReviewPreDispatchEffectReleaseEvidenceReadStatus.Missing;
+        }
+        try
+        {
+            return await _humanReviewReleases.ReadReleasedAsync(
+                new HumanReviewPreDispatchEffectReleaseEvidenceQuery(
+                    request.AdmissionReceipt.Intent.WorkspaceId,
+                    request.AdmissionReceipt.ContentHash,
+                    request.HumanReviewRelease,
+                    current),
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            return HumanReviewPreDispatchEffectReleaseEvidenceReadStatus.Unavailable;
+        }
+    }
+
+    private static GovernedLoopEffectAttemptExecutionResult HumanReviewReleaseFailure(
+        HumanReviewPreDispatchEffectReleaseEvidenceReadStatus status,
+        GovernedLoopEffectAttempt current)
+        => status is HumanReviewPreDispatchEffectReleaseEvidenceReadStatus.Missing or HumanReviewPreDispatchEffectReleaseEvidenceReadStatus.Stale
+            ? Result(GovernedLoopEffectAttemptExecutionStatus.ApprovalRequired, current, "The exact retained effect has no matching current canonical Human Review release evidence.")
+            : Result(GovernedLoopEffectAttemptExecutionStatus.EvidenceUnavailable, current, "Current canonical Human Review release evidence is unavailable or incoherent; dispatch is forbidden.");
 
     private static bool IsCoherentBeginResult(
         GovernedLoopEffectAttemptStoreResult result,

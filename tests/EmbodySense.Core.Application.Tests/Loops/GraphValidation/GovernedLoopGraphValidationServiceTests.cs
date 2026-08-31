@@ -7,6 +7,7 @@ using EmbodySense.Core.Application.Tests.Loops.Sequential;
 using EmbodySense.Core.Application.Tests.Governance.Authority.Grants;
 using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.ContextualRoles.Models;
+using EmbodySense.Core.Common.HumanReview;
 using EmbodySense.Core.Common.HumanInput;
 using EmbodySense.Core.Common.HumanInput.Models;
 using EmbodySense.Core.Common.Loops.Custom;
@@ -143,6 +144,39 @@ public sealed class GovernedLoopGraphValidationServiceTests
         Assert.False(result.IsValid);
         Assert.NotNull(result.Evidence);
         Assert.Contains(result.Errors, error => error.Code == "node.descriptor.not-executable" && error.Element.Id == "infer");
+    }
+
+    [Fact]
+    public async Task ValidateKeepsHumanReviewNodeSemanticsClosedWhenTheExactStructuralDescriptorIsExecutable()
+    {
+        var source = Candidate();
+        var candidate = source with
+        {
+            Nodes = source.Nodes!.Select(node => string.Equals(node!.Id, "infer", StringComparison.Ordinal)
+                ? node with
+                {
+                    Descriptor = GovernedLoopHumanReviewNodeCatalogContract.Descriptor.Descriptor,
+                    Parameters = new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        [GovernedLoopHumanReviewNodeCatalogContract.ReviewPolicyIdParameter] = GovernedLoopHumanReviewNodeCatalogContract.LocalReviewerPolicyId,
+                        [GovernedLoopHumanReviewNodeCatalogContract.ReviewerRoleIdParameter] = GovernedLoopHumanReviewNodeCatalogContract.LocalReviewerRoleId,
+                        [GovernedLoopHumanReviewNodeCatalogContract.ApprovalScopeIdParameter] = "review-scope-one",
+                    },
+                }
+                : node).ToArray(),
+        };
+        GovernedLoopNodeCatalogDescriptor[] descriptors =
+            [
+                .. Descriptors(candidate).Where(descriptor => !GovernedLoopHumanReviewNodeCatalogContract.TryResolve(descriptor.Descriptor, out _)),
+                GovernedLoopHumanReviewNodeCatalogContract.Descriptor with { IsExecutable = true },
+            ];
+
+        var result = await Service(descriptors).ValidateAsync(candidate);
+
+        Assert.Contains(
+            result.Errors,
+            error => error.Code == "node.human-review-contract.incompatible"
+                && error.Element.Id == "infer");
     }
 
     [Fact]

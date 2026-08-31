@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Collections.Immutable;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json.Nodes;
 using EmbodySense.Core.Application.HumanReview;
@@ -1520,6 +1521,51 @@ public sealed class CustomLoopFrontierStoreTests
     }
 
     [Fact]
+    public async Task Durable_event_prefix_rejects_mutated_admission_binding_evidence()
+    {
+        using var workspace = new TestWorkspace();
+        var admitted = await PersistHumanReviewAdmissionAsync(new WorkspacePaths(workspace.RootPath), "event-prefix-admission-binding");
+        var admission = Assert.Single(admitted.Events, item => item.Kind == CustomLoopRunEventKind.HumanReviewRequestAdmitted);
+        var retained = Assert.IsType<HumanReviewAdmissionBindingEvidence>(admission.HumanReviewAdmissionBinding);
+        var candidate = admitted with
+        {
+            Events = admitted.Events.Select(item => item.EventId == admission.EventId
+                ? item with { HumanReviewAdmissionBinding = HumanReviewContractHash.ApplyAdmissionBindingEvidence(retained with { FrontierId = retained.FrontierId + "-substituted" }) }
+                : item).ToArray(),
+        };
+
+        Assert.False(CustomLoopRunValidator.HasExactDurableEventPrefix(admitted, candidate));
+    }
+
+    [Fact]
+    public async Task Validate_update_reports_admission_binding_substitution_as_immutable_event_history_change()
+    {
+        using var workspace = new TestWorkspace();
+        var current = await PersistHumanReviewAdmissionAsync(new WorkspacePaths(workspace.RootPath), "event-equality-admission-binding");
+        var admissionEvent = Assert.Single(current.Events, item => item.Kind == CustomLoopRunEventKind.HumanReviewRequestAdmitted);
+        var retained = Assert.IsType<HumanReviewAdmissionBindingEvidence>(admissionEvent.HumanReviewAdmissionBinding);
+        var substitutedAdmissionBinding = HumanReviewContractHash.ApplyAdmissionBindingEvidence(retained with
+        {
+            ExecutionGeneration = retained.ExecutionGeneration + 1,
+            EvidenceHash = string.Empty,
+        });
+        var candidate = current with
+        {
+            LifecycleVersion = current.LifecycleVersion + 1,
+            UpdatedAtUtc = current.UpdatedAtUtc.AddTicks(1),
+            Events = current.Events.Select(item => item.EventId == admissionEvent.EventId
+                ? item with { HumanReviewAdmissionBinding = substitutedAdmissionBinding }
+                : item).ToArray(),
+        };
+
+        Assert.True(CustomLoopRunValidator.Validate(current).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(current).Errors));
+        Assert.True(CustomLoopRunValidator.Validate(candidate).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(candidate).Errors));
+        var validation = CustomLoopRunValidator.ValidateUpdate(current, candidate);
+        var admissionEventIndex = Array.FindIndex(candidate.Events, item => item.Kind == CustomLoopRunEventKind.HumanReviewRequestAdmitted);
+        Assert.Contains(validation.Errors, error => error.Code == "event_history_changed" && error.Field == $"events[{admissionEventIndex}]");
+    }
+
+    [Fact]
     public async Task Decision_state_requires_exact_durable_versions_and_allows_only_valid_later_prefixes()
     {
         using var workspace = new TestWorkspace();
@@ -1626,23 +1672,45 @@ public sealed class CustomLoopFrontierStoreTests
         Assert.NotNull(state["lifecycleHistory"]);
         Assert.NotNull(state["operationReceipts"]);
         Assert.NotNull(state["acceptedDecisions"]);
+        Assert.NotNull(state["completedReviews"]);
         Assert.Null(state["acceptedTerminalDecision"]);
         Assert.Null(state["continuationReservation"]);
         Assert.Equal(encoded, CustomLoopRunArtifactSerializer.Serialize(CustomLoopRunArtifactSerializer.Deserialize(encoded)));
 
-        foreach (var property in new[] { "evidence", "lifecycleHistory", "operationReceipts", "acceptedDecisions", "acceptedTerminalDecision", "continuationReservation", "continuation" })
+        foreach (var property in new[] { "evidence", "lifecycleHistory", "operationReceipts", "acceptedDecisions", "completedReviews", "acceptedTerminalDecision", "continuationReservation", "continuation" })
         {
             var omitted = JsonNode.Parse(encoded)!.AsObject();
             Assert.True(omitted["run"]!["humanReview"]!.AsObject().Remove(property));
             Assert.Throws<FormatException>(() => Deserialize(omitted));
         }
 
-        foreach (var property in new[] { "evidence", "lifecycleHistory", "operationReceipts", "acceptedDecisions" })
+        foreach (var property in new[] { "evidence", "lifecycleHistory", "operationReceipts", "acceptedDecisions", "completedReviews" })
         {
             var explicitNull = JsonNode.Parse(encoded)!.AsObject();
             explicitNull["run"]!["humanReview"]![property] = null;
             Assert.Throws<FormatException>(() => Deserialize(explicitNull));
         }
+    }
+
+    [Fact]
+    public async Task Validator_rejects_an_incomplete_completed_review_snapshot_without_throwing()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var admitted = await PersistHumanReviewAdmissionAsync(paths, "completed-review-invalid-history");
+        var approved = CreateDecisionState(admitted, HumanReviewDecisionScenario.Approve);
+        var state = Assert.IsType<HumanReviewRunState>(approved.HumanReview);
+        var malformed = state with
+        {
+            LifecycleHistory = ImmutableArray<HumanReviewLifecycle>.Empty,
+            CompletedReviews = ImmutableArray<HumanReviewRunState>.Empty,
+        };
+        var candidate = approved with { HumanReview = state with { CompletedReviews = ImmutableArray.Create(malformed) } };
+
+        var validation = CustomLoopRunValidator.Validate(candidate);
+
+        Assert.False(validation.IsValid);
+        Assert.Contains(validation.Errors, error => error.Code == "invalid_human_review_completed_state");
     }
 
     [Fact]
@@ -1705,6 +1773,80 @@ public sealed class CustomLoopFrontierStoreTests
         using var store = new CustomLoopRunStore(paths);
         var result = await new HumanReviewAdmissionService(store).AdmitAsync(new HumanReviewAdmissionCommand(predecessor.Id, predecessor.LifecycleVersion, request, blocked));
         return Assert.IsType<CustomLoopRunRecord>(result.Run);
+    }
+
+    internal static async Task<CustomLoopRunRecord> PersistStrictHumanReviewAdmissionAsync(WorkspacePaths paths, string identity)
+    {
+        var context = CustomLoopSequentialEvidenceStoreTests.CreateHumanReviewContext(identity);
+        using var store = new CustomLoopRunStore(paths);
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(context.Run)).Status);
+        var active = TransitionToRunning(context.Run, "strict-human-review-running-" + identity);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(active, context.Run.LifecycleVersion)).Status);
+        var node = context.Plan.Nodes[1];
+        var activation = active.Frontier!.Payload.Nodes[1];
+        var parkedAtUtc = active.UpdatedAtUtc.AddMinutes(1);
+        var parkedEvent = CreateStrictHumanReviewParkingEvent(active, context.Binding, node, activation, parkedAtUtc);
+        var transition = GovernedLoopSequentialFrontierMachine.ReviewBlockReady(
+            active.Frontier,
+            context.Binding,
+            context.Plan,
+            node,
+            activation,
+            1,
+            "strict-human-review-attempt-" + identity,
+            parkedEvent.EventId,
+            parkedEvent.SequentialNodeEvidence!.OutcomeArtifactHash,
+            parkedAtUtc);
+        var blocked = Assert.IsType<GovernedLoopFrontierPosture>(transition.Frontier);
+        var request = CreateHumanReviewRequest(active, blocked, parkedAtUtc, identity, canonicalNodeBinding: true);
+        var result = await new HumanReviewAdmissionService(store).AdmitAsync(new HumanReviewAdmissionCommand(active.Id, active.LifecycleVersion, request, blocked, parkedEvent));
+        var admitted = Assert.IsType<CustomLoopRunRecord>(result.Run);
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, result.Status);
+        Assert.True(CustomLoopRunValidator.Validate(admitted).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(admitted).Errors));
+        return admitted;
+    }
+
+    [Fact]
+    public async Task Strict_human_review_atomic_admission_over_its_combined_outcome_and_lifecycle_reservation_fails_closed_without_partial_state()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var context = CustomLoopSequentialEvidenceStoreTests.CreateHumanReviewContext("strict-human-review-reservation");
+        using var store = new CustomLoopRunStore(paths);
+        Assert.Equal(CustomLoopRunStoreStatus.Created, (await store.CreateAsync(context.Run)).Status);
+        var active = TransitionToRunning(context.Run, "strict-human-review-running-reservation");
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, (await store.UpdateAsync(active, context.Run.LifecycleVersion)).Status);
+        var artifactPath = Path.Combine(paths.CustomLoopRunsPath, active.LoopId, active.Id + ".json");
+        var predecessorBytes = await File.ReadAllBytesAsync(artifactPath);
+        var node = context.Plan.Nodes[1];
+        var activation = active.Frontier!.Payload.Nodes[1];
+        var parkedAtUtc = active.UpdatedAtUtc.AddMinutes(1);
+        var oversizedDetail = new string('\u00e9', CustomLoopLimits.MaxRunDetailCharacters);
+        var parkedEvent = CreateStrictHumanReviewParkingEvent(active, context.Binding, node, activation, parkedAtUtc, oversizedDetail);
+        var transition = GovernedLoopSequentialFrontierMachine.ReviewBlockReady(
+            active.Frontier,
+            context.Binding,
+            context.Plan,
+            node,
+            activation,
+            1,
+            "strict-human-review-attempt-reservation",
+            parkedEvent.EventId,
+            parkedEvent.SequentialNodeEvidence!.OutcomeArtifactHash,
+            parkedAtUtc);
+        var blocked = Assert.IsType<GovernedLoopFrontierPosture>(transition.Frontier);
+        var request = CreateHumanReviewRequest(active, blocked, parkedAtUtc, "strict-human-review-reservation", canonicalNodeBinding: true);
+
+        var exception = await Assert.ThrowsAsync<FormatException>(() => new HumanReviewAdmissionService(store).AdmitAsync(new HumanReviewAdmissionCommand(active.Id, active.LifecycleVersion, request, blocked, parkedEvent)));
+
+        Assert.Contains("Human Review parking admission exceeded its atomic attempt-outcome and lifecycle reservation", exception.Message, StringComparison.Ordinal);
+        Assert.Equal(predecessorBytes, await File.ReadAllBytesAsync(artifactPath));
+        using var restarted = new CustomLoopRunStore(paths);
+        var persisted = Assert.IsType<CustomLoopRunRecord>(await restarted.GetAsync(active.Id));
+        Assert.Equal(active.LifecycleVersion, persisted.LifecycleVersion);
+        Assert.Null(persisted.HumanReview);
+        Assert.Equal(active.Frontier.Payload.ContentHash, persisted.Frontier!.Payload.ContentHash);
+        Assert.True(CustomLoopRunValidator.Validate(persisted).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(persisted).Errors));
     }
 
     private static CustomLoopRunRecord CreateDecisionState(CustomLoopRunRecord admitted, params HumanReviewDecisionScenario[] scenarios)
@@ -1918,6 +2060,7 @@ public sealed class CustomLoopFrontierStoreTests
         marker["eventId"] = eventId;
         marker["kind"] = kind;
         marker["humanReviewEvidence"] = null;
+        marker["humanReviewAdmissionBinding"] = null;
         marker["humanReviewDecisionOperation"] = null;
         marker["humanReviewContinuationReservation"] = null;
         events.Add(marker);
@@ -1932,6 +2075,7 @@ public sealed class CustomLoopFrontierStoreTests
             Kind = operation is null ? CustomLoopRunEventKind.HumanReviewContinuationReserved : CustomLoopRunEventKind.HumanReviewDecisionOperationRecorded,
             Detail = operation is null ? "Human Review continuation was reserved." : "Human Review decision operation was recorded.",
             HumanReviewEvidence = evidence,
+            HumanReviewAdmissionBinding = null,
             HumanReviewDecisionOperation = operation,
             HumanReviewContinuationReservation = reservation,
         };
@@ -1995,9 +2139,14 @@ public sealed class CustomLoopFrontierStoreTests
         CustomLoopRunRecord predecessor,
         GovernedLoopFrontierPosture blocked,
         DateTimeOffset createdAtUtc,
-        string identity = "one")
+        string identity = "one",
+        bool canonicalNodeBinding = false)
     {
         var blockedNode = Assert.Single(blocked.Payload.Nodes, node => node.Status == GovernedLoopNodeExecutionStatus.ReviewBlocked);
+        var adapter = Assert.IsType<GovernedLoopSequentialAdapterBinding>(predecessor.SequentialAdapterBinding);
+        var targetHash = canonicalNodeBinding ? adapter.GraphArtifactHash : HumanReviewHash('e');
+        var preconditionHash = canonicalNodeBinding ? adapter.GraphLayoutHash : HumanReviewHash('f');
+        var payloadHash = canonicalNodeBinding ? ComputeHumanReviewNodePayloadHash(adapter, blockedNode.NodeId, "review-scope-one") : HumanReviewHash('1');
         var binding = HumanReviewContractHash.ApplyBinding(new HumanReviewBinding(
             1,
             blocked.WorkspaceId,
@@ -2016,9 +2165,9 @@ public sealed class CustomLoopFrontierStoreTests
             HumanReviewHash('b'),
             HumanReviewHash('c'),
             HumanReviewHash('d'),
-            HumanReviewHash('e'),
-            HumanReviewHash('f'),
-            HumanReviewHash('1'),
+            targetHash,
+            preconditionHash,
+            payloadHash,
             null,
             string.Empty));
         var scope = HumanReviewContractHash.ApplyApprovalScope(new HumanReviewApprovalScope(HumanReviewApprovalScopeKind.Continuation, binding.BindingHash, null, string.Empty));
@@ -2040,6 +2189,9 @@ public sealed class CustomLoopFrontierStoreTests
             HumanReviewContractHash.ApplyProvenance(new HumanReviewProvenance(HumanReviewProvenanceKind.Server, "human-review-store", "request-correlation-" + identity, createdAtUtc, string.Empty)),
             string.Empty));
     }
+
+    private static string ComputeHumanReviewNodePayloadHash(GovernedLoopSequentialAdapterBinding adapter, string nodeId, string approvalScopeId)
+        => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join('\n', "human-review-node-payload-v1", adapter.ContentHash, nodeId, approvalScopeId))));
 
     private static string HumanReviewHash(char character) => new(character, HumanReviewContractLimits.Sha256HexCharacters);
 
@@ -2550,6 +2702,58 @@ public sealed class CustomLoopFrontierStoreTests
             FailureEvidenceHash = failure?.ContentHash,
         });
         return outcomeEvent with { SequentialNodeEvidence = evidence };
+    }
+
+    private static CustomLoopRunEvent CreateStrictHumanReviewParkingEvent(
+        CustomLoopRunRecord run,
+        GovernedLoopSequentialAdapterBinding binding,
+        GovernedLoopSequentialPlanNode node,
+        GovernedLoopNodeExecutionEvidence activation,
+        DateTimeOffset timestampUtc,
+        string? detail = null)
+    {
+        var parked = new CustomLoopRunEvent(
+            run.Events[^1].Sequence + 1,
+            "strict-human-review-parked-" + activation.NodeId,
+            timestampUtc,
+            CustomLoopRunEventKind.NodeOutcomeObserved,
+            activation.CycleIteration ?? run.Checkpoint.Iteration,
+            node.NodeId,
+            1,
+            detail ?? "The exact canonical Human Review node durably parked before its review request became observable.",
+            [],
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null);
+        var evidence = CustomLoopSequentialNodeEvidenceHash.Apply(new CustomLoopSequentialNodeEvidence(
+            CustomLoopSequentialNodeEvidence.CurrentSchemaVersion,
+            CustomLoopSequentialNodeEvidenceKind.ReviewRequested,
+            binding.WorkspaceId,
+            binding.ExecutionBinding.RunId,
+            binding.ExecutionBinding.Revision,
+            binding.ExecutionBinding.ExecutionGeneration,
+            activation.ActivationOrdinal,
+            activation.VisitOrdinal,
+            activation.NodeId,
+            1,
+            activation.CycleId,
+            activation.CycleIteration,
+            null,
+            [],
+            [],
+            null,
+            null,
+            CustomLoopSequentialNodeDisposition.ReviewPending,
+            CustomLoopSequentialOutcomeArtifactHash.Compute(parked),
+            string.Empty));
+        return parked with { SequentialNodeEvidence = evidence };
     }
 
     private static CustomLoopRunEvent CreateRunEvent(

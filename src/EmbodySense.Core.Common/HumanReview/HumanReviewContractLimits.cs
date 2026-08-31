@@ -29,6 +29,9 @@ public static class HumanReviewContractLimits
     public const int MaxAcceptedDecisions = 16;
     /// <summary>The maximum retained lifecycle heads: the initial head, every accepted decision, and one expiry closure.</summary>
     public const int MaxLifecycleHistory = MaxAcceptedDecisions + 2;
+    /// <summary>The maximum number of completed Human Review boundaries retained in one run before another boundary is refused.</summary>
+    /// <remarks>Completed review state is retained as immutable evidence so sequential review nodes cannot erase prior consent or outcomes.</remarks>
+    public const int MaxCompletedReviews = 16;
     /// <summary>The maximum positive node-attempt number.</summary>
     public const int MaxNodeAttempt = 1_000_000;
     /// <summary>The maximum positive activation or visit ordinal.</summary>

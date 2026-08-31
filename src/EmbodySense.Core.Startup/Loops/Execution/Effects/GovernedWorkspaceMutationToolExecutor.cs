@@ -1,4 +1,5 @@
 using EmbodySense.Core.Application.LocalWorkspace;
+using EmbodySense.Core.Application.HumanReview.Models;
 using EmbodySense.Core.Application.Loops.Execution.Effects.Models;
 using EmbodySense.Core.Common.Authority;
 using EmbodySense.Core.Common.Authority.Grants;
@@ -32,6 +33,7 @@ public sealed class GovernedWorkspaceMutationToolExecutor : IGovernedWorkspaceMu
     private readonly CapabilityAdmissionPin _pin;
     private readonly AuthorityCeiling _requiredAuthority;
     private readonly GovernedLoopEffectAttemptFacade _facade;
+    private readonly HumanReviewPreDispatchEffectRelease? _humanReviewRelease;
 
     /// <summary>Creates one exact admitted run/node projection.</summary>
     public GovernedWorkspaceMutationToolExecutor(
@@ -42,7 +44,8 @@ public sealed class GovernedWorkspaceMutationToolExecutor : IGovernedWorkspaceMu
         string nodeId,
         int nodeAttempt,
         string correlationId,
-        CapabilityAdmissionPin pin)
+        CapabilityAdmissionPin pin,
+        HumanReviewPreDispatchEffectRelease? humanReviewRelease = null)
     {
         _facade = facade ?? throw new ArgumentNullException(nameof(facade));
         _admission = admission ?? throw new ArgumentNullException(nameof(admission));
@@ -53,6 +56,7 @@ public sealed class GovernedWorkspaceMutationToolExecutor : IGovernedWorkspaceMu
         _nodeId = nodeId;
         _nodeAttempt = nodeAttempt;
         _correlationId = correlationId;
+        _humanReviewRelease = humanReviewRelease;
     }
 
     /// <inheritdoc />
@@ -121,7 +125,8 @@ public sealed class GovernedWorkspaceMutationToolExecutor : IGovernedWorkspaceMu
                 1,
                 canonical,
                 _requiredAuthority,
-                _correlationId),
+                _correlationId,
+                _humanReviewRelease),
             cancellationToken).ConfigureAwait(false);
     }
 

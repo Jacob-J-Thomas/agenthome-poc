@@ -11,4 +11,6 @@ public enum GovernedLoopSequentialNodeEvidenceKind
     DefinitiveRejection,
     /// <summary>Names retained ambiguity evidence requiring durable review attention.</summary>
     AmbiguityAttention,
+    /// <summary>Names retained evidence that intentionally requested human review before dispatch or continuation.</summary>
+    ReviewRequested,
 }

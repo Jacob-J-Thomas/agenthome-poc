@@ -123,6 +123,7 @@ public static class CustomLoopSequentialNodeEvidenceHash
             CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection => "definitive-rejection",
             CustomLoopSequentialNodeEvidenceKind.AmbiguityAttention => "ambiguity-attention",
             CustomLoopSequentialNodeEvidenceKind.TopologySkipped => "topology-skipped",
+            CustomLoopSequentialNodeEvidenceKind.ReviewRequested => "review-requested",
             _ => throw new ArgumentOutOfRangeException(nameof(kind)),
         };
 
@@ -133,6 +134,7 @@ public static class CustomLoopSequentialNodeEvidenceHash
             CustomLoopSequentialNodeDisposition.Completed => "completed",
             CustomLoopSequentialNodeDisposition.Rejected => "rejected",
             CustomLoopSequentialNodeDisposition.NeedsReview => "needs-review",
+            CustomLoopSequentialNodeDisposition.ReviewPending => "review-pending",
             _ => throw new ArgumentOutOfRangeException(nameof(disposition)),
         };
 

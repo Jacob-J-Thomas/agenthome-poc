@@ -168,6 +168,7 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
             .Concat(GovernedLoopPureNodeCatalogContract.Descriptors)
             .Concat(GovernedLoopTopologyNodeCatalogContract.Descriptors)
             .Concat(GovernedLoopWaitNodeCatalogContract.Descriptors)
+            .Append(GovernedLoopHumanReviewNodeCatalogContract.Descriptor)
             .Append(GovernedLoopHumanInputNodeCatalogContract.Descriptor with { IsExecutable = humanInputExecutable })
             .Concat(GovernedLoopFailNodeCatalogContract.Descriptors)
             .Concat(graphCompatibleCommandActions.Select(candidate => CommandAction(candidate.Registration, candidate.PayloadCharacters, isCommandActionExecutable?.Invoke(candidate.Registration) == true)))
@@ -179,7 +180,7 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
                 })
             .OrderBy(DescriptorKey, StringComparer.Ordinal)
             .ToArray();
-        if (descriptors.Length != 26 + graphCompatibleCommandActions.Length
+        if (descriptors.Length != 27 + graphCompatibleCommandActions.Length
             || descriptors.Select(item => item.Descriptor).Distinct().Count() != descriptors.Length
             || descriptors.Any(item => item.IsExecutable && !GovernedLoopSequentialNodeDescriptors.IsSupported(item.Descriptor)))
         {

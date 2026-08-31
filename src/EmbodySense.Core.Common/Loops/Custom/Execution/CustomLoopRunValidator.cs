@@ -354,7 +354,7 @@ public static class CustomLoopRunValidator
             CustomLoopRunStatus.Running => next is CustomLoopRunStatus.Waiting or CustomLoopRunStatus.PauseRequested or CustomLoopRunStatus.Paused or CustomLoopRunStatus.CancelRequested or CustomLoopRunStatus.Completed or CustomLoopRunStatus.Failed or CustomLoopRunStatus.NeedsReview,
             CustomLoopRunStatus.Waiting => next is CustomLoopRunStatus.Running or CustomLoopRunStatus.Paused or CustomLoopRunStatus.CancelRequested or CustomLoopRunStatus.Cancelled or CustomLoopRunStatus.Failed or CustomLoopRunStatus.NeedsReview,
             CustomLoopRunStatus.PauseRequested => next is CustomLoopRunStatus.Paused or CustomLoopRunStatus.CancelRequested or CustomLoopRunStatus.Completed or CustomLoopRunStatus.Failed or CustomLoopRunStatus.NeedsReview,
-            CustomLoopRunStatus.Paused => next is CustomLoopRunStatus.Running or CustomLoopRunStatus.Waiting or CustomLoopRunStatus.CancelRequested or CustomLoopRunStatus.Cancelled or CustomLoopRunStatus.NeedsReview,
+            CustomLoopRunStatus.Paused => next is CustomLoopRunStatus.Running or CustomLoopRunStatus.Waiting or CustomLoopRunStatus.CancelRequested or CustomLoopRunStatus.Cancelled or CustomLoopRunStatus.Failed or CustomLoopRunStatus.NeedsReview,
             CustomLoopRunStatus.CancelRequested => next is CustomLoopRunStatus.Cancelled or CustomLoopRunStatus.NeedsReview,
             _ => false
         };
@@ -721,7 +721,8 @@ public static class CustomLoopRunValidator
         => (kind, disposition) is
             (CustomLoopSequentialNodeEvidenceKind.CompletedOutcome, CustomLoopSequentialNodeDisposition.Completed)
             or (CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection, CustomLoopSequentialNodeDisposition.Rejected)
-            or (CustomLoopSequentialNodeEvidenceKind.AmbiguityAttention, CustomLoopSequentialNodeDisposition.NeedsReview);
+            or (CustomLoopSequentialNodeEvidenceKind.AmbiguityAttention, CustomLoopSequentialNodeDisposition.NeedsReview)
+            or (CustomLoopSequentialNodeEvidenceKind.ReviewRequested, CustomLoopSequentialNodeDisposition.ReviewPending);
 
     private static void ValidateWaitEvidence(CustomLoopRunRecord run, List<CustomLoopValidationError> errors)
     {
@@ -1501,6 +1502,7 @@ public static class CustomLoopRunValidator
         var controlExpectedLifecycleVersions = new HashSet<int>();
         var sequentialStarts = new HashSet<(int ActivationOrdinal, int Attempt)>();
         var sequentialTerminals = new HashSet<(int ActivationOrdinal, int Attempt)>();
+        var sequentialReviewBlocks = new HashSet<(int ActivationOrdinal, int Attempt)>();
         var latestSequentialVisits = new Dictionary<string, int>(StringComparer.Ordinal);
         var retrySeriesByActivation = new Dictionary<(int ActivationOrdinal, int VisitOrdinal), string>();
         var latestRetryStateBySeries = new Dictionary<string, GovernedLoopRetryState>(StringComparer.Ordinal);
@@ -1572,7 +1574,7 @@ public static class CustomLoopRunValidator
             ValidateToolAuthority(item.ToolAuthority, $"{field}.toolAuthority", run, errors);
             ValidateToolEvidence(item.ToolEvidence, $"{field}.toolEvidence", run, errors);
             ValidatePureNodeOutcome(item, field, run, errors);
-            ValidateSequentialNodeEvidence(item, index, field, run, sequentialStarts, sequentialTerminals, latestSequentialVisits, errors);
+            ValidateSequentialNodeEvidence(item, index, field, run, sequentialStarts, sequentialTerminals, sequentialReviewBlocks, latestSequentialVisits, errors);
             ValidateFailureEvidence(item, field, run, errors);
             ValidateRetryState(item, index, field, run, retrySeriesByActivation, latestRetryStateBySeries, errors);
             ValidateWaitContinuationEvent(item, field, run, errors);
@@ -1607,7 +1609,7 @@ public static class CustomLoopRunValidator
                 Add(errors, "unsupported_exit_decision", $"{field}.exitDecision", "Exit decision must be a supported concrete value when present.");
             }
 
-            if (item.Kind == CustomLoopRunEventKind.NodeOutcomeObserved && item.CanonicalOutput is null)
+            if (item.Kind == CustomLoopRunEventKind.NodeOutcomeObserved && item.CanonicalOutput is null && !IsHumanReviewNodeEvent(run, item) && !IsPreDispatchHumanReviewActionEvent(run, item))
             {
                 Add(errors, "observed_output_required", $"{field}.canonicalOutput", "Node outcome observation must retain the canonical output.");
             }
@@ -1751,6 +1753,7 @@ public static class CustomLoopRunValidator
         CustomLoopRunRecord run,
         HashSet<(int ActivationOrdinal, int Attempt)> starts,
         HashSet<(int ActivationOrdinal, int Attempt)> terminals,
+        HashSet<(int ActivationOrdinal, int Attempt)> reviewBlocks,
         Dictionary<string, int> latestVisits,
         List<CustomLoopValidationError> errors)
     {
@@ -1774,6 +1777,7 @@ public static class CustomLoopRunValidator
                 CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection => CustomLoopSequentialNodeDisposition.Rejected,
                 CustomLoopSequentialNodeEvidenceKind.AmbiguityAttention => CustomLoopSequentialNodeDisposition.NeedsReview,
                 CustomLoopSequentialNodeEvidenceKind.TopologySkipped => CustomLoopSequentialNodeDisposition.Completed,
+                CustomLoopSequentialNodeEvidenceKind.ReviewRequested => CustomLoopSequentialNodeDisposition.ReviewPending,
                 _ => (CustomLoopSequentialNodeDisposition)(-1),
             });
         if (evidence.SchemaVersion != CustomLoopSequentialNodeEvidence.CurrentSchemaVersion
@@ -1859,6 +1863,7 @@ public static class CustomLoopRunValidator
             CustomLoopSequentialNodeEvidenceKind.CompletedOutcome => item.Kind is CustomLoopRunEventKind.Admitted or CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeOutcomeObserved or CustomLoopRunEventKind.ExitDecisionCompleted,
             CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection => item.Kind == CustomLoopRunEventKind.NodeAttemptFailed,
             CustomLoopSequentialNodeEvidenceKind.AmbiguityAttention => item.Kind is CustomLoopRunEventKind.NodeAttemptFailed or CustomLoopRunEventKind.NodeOutcomeObserved or CustomLoopRunEventKind.ExitDecisionCompleted,
+            CustomLoopSequentialNodeEvidenceKind.ReviewRequested => item.Kind == CustomLoopRunEventKind.NodeOutcomeObserved,
             _ => false,
         };
         if (!compatibleTerminalEvent)
@@ -1866,7 +1871,13 @@ public static class CustomLoopRunValidator
             Add(errors, "invalid_sequential_terminal_marker", $"{field}.kind", "The terminal sequential evidence disposition is incompatible with the selected durable admission, completion, observed-outcome, failure, or Exit event.");
         }
 
-        if (!terminals.Add(key))
+        var reviewParking = evidence.Kind == CustomLoopSequentialNodeEvidenceKind.ReviewRequested
+            && (IsHumanReviewNodeEvent(run, item) || IsPreDispatchHumanReviewActionEvent(run, item));
+        if (reviewParking && !reviewBlocks.Add(key))
+        {
+            Add(errors, "duplicate_sequential_human_review_block", $"{field}.sequentialNodeEvidence", "A Human Review activation may retain exactly one durable ReviewBlocked parking record.");
+        }
+        else if (!reviewParking && !terminals.Add(key))
         {
             Add(errors, "duplicate_sequential_node_outcome", $"{field}.sequentialNodeEvidence", "A canonical node attempt may retain exactly one terminal evidence record.");
         }
@@ -1888,7 +1899,9 @@ public static class CustomLoopRunValidator
         }
         else if (!starts.Contains(key)
             && !HasExactRetryExhaustionWithoutDispatch(run.Events, eventIndex, item, evidence)
-            && !HasExactHumanInputTerminalWithoutDispatch(run, item, evidence))
+            && !HasExactHumanInputTerminalWithoutDispatch(run, item, evidence)
+            && !IsHumanReviewNodeEvent(run, item)
+            && !IsPreDispatchHumanReviewActionEvent(run, item))
         {
             Add(errors, "sequential_dispatch_marker_required", $"{field}.sequentialNodeEvidence", "Terminal provider-node evidence requires an earlier exact dispatch-start marker for the same canonical attempt.");
         }
@@ -2115,7 +2128,7 @@ public static class CustomLoopRunValidator
             return false;
         }
 
-        if (evidence.Kind is CustomLoopSequentialNodeEvidenceKind.DispatchStarted or CustomLoopSequentialNodeEvidenceKind.AmbiguityAttention)
+        if (evidence.Kind is CustomLoopSequentialNodeEvidenceKind.DispatchStarted or CustomLoopSequentialNodeEvidenceKind.AmbiguityAttention or CustomLoopSequentialNodeEvidenceKind.ReviewRequested)
         {
             return evidence.ControlOutcome is null && selected.Count == 0 && skipped.Count == 0;
         }
@@ -2130,9 +2143,11 @@ public static class CustomLoopRunValidator
         var sequential = item.SequentialNodeEvidence;
         if (item.FailureEvidence is not { } failure)
         {
-            if (sequential?.FailureEvidenceId is not null
+            if (!IsHumanReviewNodeEvent(run, item)
+                && !IsPreDispatchHumanReviewActionEvent(run, item)
+                && (sequential?.FailureEvidenceId is not null
                 || sequential?.FailureEvidenceHash is not null
-                || sequential?.Kind is CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection or CustomLoopSequentialNodeEvidenceKind.AmbiguityAttention)
+                || sequential?.Kind is CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection or CustomLoopSequentialNodeEvidenceKind.AmbiguityAttention))
             {
                 Add(errors, "failure_evidence_required", $"{field}.failureEvidence", "A failed or review-blocked activation requires one exact immutable classified failure artifact.");
             }
@@ -2297,30 +2312,41 @@ public static class CustomLoopRunValidator
         CustomLoopRunRecord run,
         List<CustomLoopValidationError> errors)
     {
-        if (run.Frontier?.Payload.Nodes.ElementAtOrDefault(evidence.ActivationOrdinal) is not { } activation
-            || activation.ActivationOrdinal != evidence.ActivationOrdinal
-            || activation.VisitOrdinal != evidence.VisitOrdinal
-            || !string.Equals(activation.NodeId, evidence.NodeId, StringComparison.Ordinal)
-            || !string.Equals(activation.CycleId, evidence.CycleId, StringComparison.Ordinal)
-            || activation.CycleIteration != evidence.CycleIteration
-            || !HasCompatibleFrontierAttempt(run.Events, activation, evidence)
-            || evidence.Kind == CustomLoopSequentialNodeEvidenceKind.TopologySkipped && activation.Status != GovernedLoopNodeExecutionStatus.Skipped
-            || evidence.Kind == CustomLoopSequentialNodeEvidenceKind.TopologySkipped
-                && !HasExactGoverningSkipActivation(run.Frontier.Payload.Nodes, activation, evidence)
-            || evidence.ControlOutcome is not null
-                && !evidence.SelectedControlEdgeIds.Concat(evidence.SkippedControlEdgeIds).Order(StringComparer.Ordinal)
-                    .SequenceEqual(activation.OutgoingControlEdgeIds, StringComparer.Ordinal)
-            || evidence.ControlOutcome is { } controlOutcome
-                && !IsHistoricalRetryAttempt(run.Events, activation, evidence)
-                && (activation.Status is not (GovernedLoopNodeExecutionStatus.Ready or GovernedLoopNodeExecutionStatus.Running)
-                && (activation.ControlOutcome != controlOutcome
-                    || !activation.SelectedControlEdgeIds.SequenceEqual(evidence.SelectedControlEdgeIds, StringComparer.Ordinal)
-                    || !activation.SkippedControlEdgeIds.SequenceEqual(evidence.SkippedControlEdgeIds, StringComparer.Ordinal)))
-            || activation.Status == GovernedLoopNodeExecutionStatus.Skipped
-                && (!string.Equals(activation.OutcomeEvidenceId, item.EventId, StringComparison.Ordinal)
-                    || !string.Equals(activation.OutcomeEvidenceHash, evidence.OutcomeArtifactHash, StringComparison.Ordinal)))
+        var activation = run.Frontier?.Payload.Nodes.ElementAtOrDefault(evidence.ActivationOrdinal);
+        var hasExactCoordinates = activation is not null
+            && activation.ActivationOrdinal == evidence.ActivationOrdinal
+            && activation.VisitOrdinal == evidence.VisitOrdinal
+            && string.Equals(activation.NodeId, evidence.NodeId, StringComparison.Ordinal)
+            && string.Equals(activation.CycleId, evidence.CycleId, StringComparison.Ordinal)
+            && activation.CycleIteration == evidence.CycleIteration;
+        var hasCompatibleAttempt = activation is not null && HasCompatibleFrontierAttempt(run.Events, activation, evidence);
+        var hasExactControlRoutes = activation is not null
+            && (evidence.ControlOutcome is null
+                || evidence.SelectedControlEdgeIds.Concat(evidence.SkippedControlEdgeIds).Order(StringComparer.Ordinal)
+                    .SequenceEqual(activation.OutgoingControlEdgeIds, StringComparer.Ordinal));
+        var hasExactTopologySkip = activation is not null
+            && (evidence.Kind != CustomLoopSequentialNodeEvidenceKind.TopologySkipped
+                || activation.Status == GovernedLoopNodeExecutionStatus.Skipped
+                && HasExactGoverningSkipActivation(run.Frontier!.Payload.Nodes, activation, evidence));
+        var hasExactCommittedRoutes = activation is not null
+            && (evidence.ControlOutcome is not { } controlOutcome
+                || IsHistoricalRetryAttempt(run.Events, activation, evidence)
+                || activation.Status is GovernedLoopNodeExecutionStatus.Ready or GovernedLoopNodeExecutionStatus.Running
+                || activation.ControlOutcome == controlOutcome
+                && activation.SelectedControlEdgeIds.SequenceEqual(evidence.SelectedControlEdgeIds, StringComparer.Ordinal)
+                && activation.SkippedControlEdgeIds.SequenceEqual(evidence.SkippedControlEdgeIds, StringComparer.Ordinal));
+        var hasExactSkipOutcome = activation is not null
+            && (activation.Status != GovernedLoopNodeExecutionStatus.Skipped
+                || string.Equals(activation.OutcomeEvidenceId, item.EventId, StringComparison.Ordinal)
+                && string.Equals(activation.OutcomeEvidenceHash, evidence.OutcomeArtifactHash, StringComparison.Ordinal));
+        if (!hasExactCoordinates
+            || !hasCompatibleAttempt
+            || !hasExactTopologySkip
+            || !hasExactControlRoutes
+            || !hasExactCommittedRoutes
+            || !hasExactSkipOutcome)
         {
-            Add(errors, "sequential_node_activation_mismatch", $"{field}.sequentialNodeEvidence.activationOrdinal", "Sequential evidence must identify the exact durable frontier activation, visit, cycle, attempt, and committed route coordinates.");
+            Add(errors, "sequential_node_activation_mismatch", $"{field}.sequentialNodeEvidence.activationOrdinal", $"Sequential evidence must identify the exact durable frontier activation, visit, cycle, attempt, and committed route coordinates. coordinates={hasExactCoordinates}; attempt={hasCompatibleAttempt}; topology={hasExactTopologySkip}; routes={hasExactControlRoutes}; committed={hasExactCommittedRoutes}; skipped={hasExactSkipOutcome}; status={activation?.Status}; currentRetry={activation is not null && IsHistoricalRetryAttempt(run.Events, activation, evidence)}; hasOutcome={evidence.ControlOutcome is not null}.");
         }
     }
 
@@ -2417,6 +2443,7 @@ public static class CustomLoopRunValidator
             var isPureNode = IsPureNodeEvent(run, item);
             var isTopologyNode = IsTopologyNodeEvent(run, item);
             var isWaitNode = IsWaitNodeEvent(run, item);
+            var isHumanReviewNode = IsHumanReviewNodeEvent(run, item);
             var isHumanInputNode = IsHumanInputNodeEvent(run, item);
             var isRecoverableAction = IsRecoverableActionEvent(run, item);
             var isFailNode = IsFailNodeEvent(run, item);
@@ -2478,6 +2505,30 @@ public static class CustomLoopRunValidator
                 return;
             }
 
+            if (isHumanReviewNode)
+            {
+                var isParking = item.Kind == CustomLoopRunEventKind.NodeOutcomeObserved
+                    && evidence.Kind == CustomLoopSequentialNodeEvidenceKind.ReviewRequested
+                    && evidence.Disposition == CustomLoopSequentialNodeDisposition.ReviewPending;
+                var isCompleted = item.Kind == CustomLoopRunEventKind.NodeAttemptCompleted
+                    && evidence.Kind == CustomLoopSequentialNodeEvidenceKind.CompletedOutcome
+                    && evidence.Disposition == CustomLoopSequentialNodeDisposition.Completed;
+                var isRejected = item.Kind == CustomLoopRunEventKind.NodeAttemptFailed
+                    && evidence.Kind == CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection
+                    && evidence.Disposition == CustomLoopSequentialNodeDisposition.Rejected;
+                var hasValidHumanReviewShape = (isParking || isCompleted || isRejected)
+                    && item.PureNodeOutcomeJson is null
+                    && item.FailureEvidence is null;
+                if (!string.Equals(evidence.NodeId, item.StepId, StringComparison.Ordinal)
+                    || item.Iteration != (evidence.CycleIteration ?? 1)
+                    || !hasValidHumanReviewShape)
+                {
+                    Add(errors, "sequential_human_review_node_step_mismatch", $"{field}.sequentialNodeEvidence.nodeId", "Human Review evidence must identify its exact activation and use only the canonical parking, completion, or rejection envelope.");
+                }
+
+                return;
+            }
+
             if (isHumanInputNode)
             {
                 var hasValidHumanInputShape = item.Kind switch
@@ -2501,13 +2552,21 @@ public static class CustomLoopRunValidator
 
             if (isRecoverableAction)
             {
+                var isPreDispatchReviewParking = item.Kind == CustomLoopRunEventKind.NodeOutcomeObserved
+                    && evidence.Kind == CustomLoopSequentialNodeEvidenceKind.ReviewRequested
+                    && evidence.Disposition == CustomLoopSequentialNodeDisposition.ReviewPending
+                    && IsPreDispatchHumanReviewActionEvent(run, item);
+                var isPreDispatchReviewRejection = item.Kind == CustomLoopRunEventKind.NodeAttemptFailed
+                    && evidence.Kind == CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection
+                    && evidence.Disposition == CustomLoopSequentialNodeDisposition.Rejected
+                    && IsPreDispatchHumanReviewActionEvent(run, item);
                 var hasValidActionShape = item.Kind switch
                 {
                     CustomLoopRunEventKind.NodeAttemptStarted => item.TraceReservationUtf8Bytes == CustomLoopLimits.MaxGraphPureNodeOutcomeEvidenceReservationUtf8Bytes,
                     CustomLoopRunEventKind.NodeAttemptCompleted => item.CanonicalOutput is not null && IsRecoverableActionResult(run, item, item.CanonicalOutput),
                     CustomLoopRunEventKind.NodeAttemptFailed => HasPriorSequentialDispatch(run.Events, eventIndex, evidence, CustomLoopRunEventKind.NodeAttemptStarted),
                     _ => false,
-                };
+                } || isPreDispatchReviewParking || isPreDispatchReviewRejection;
                 if (!string.Equals(evidence.NodeId, item.StepId, StringComparison.Ordinal)
                     || item.Iteration != (evidence.CycleIteration ?? 1)
                     || !hasValidActionShape)
@@ -2678,6 +2737,121 @@ public static class CustomLoopRunValidator
         }
 
         return run.Frontier?.Payload.Nodes.ElementAtOrDefault(activationOrdinal)?.Descriptor.Kind == GovernedLoopNodeKind.HumanInput;
+    }
+
+    private static bool IsHumanReviewNodeEvent(CustomLoopRunRecord run, CustomLoopRunEvent item)
+    {
+        var activationOrdinal = item.SequentialNodeEvidence?.ActivationOrdinal;
+        return activationOrdinal is not null
+            && run.Frontier?.Payload.Nodes.ElementAtOrDefault(activationOrdinal.Value)?.Descriptor.Kind == GovernedLoopNodeKind.HumanReview;
+    }
+
+    private static bool IsPreDispatchHumanReviewActionEvent(CustomLoopRunRecord run, CustomLoopRunEvent item)
+    {
+        var request = GetHumanReviewRequestForEvent(run, item);
+        var binding = request?.Binding;
+        var evidence = item.SequentialNodeEvidence;
+        if (request?.Purpose != HumanReviewPurpose.PreDispatchEffect
+            || binding?.EffectAttempt is null
+            || !HumanReviewContractHash.MatchesBinding(binding)
+            || evidence is null
+            || item.Kind is not (CustomLoopRunEventKind.NodeOutcomeObserved or CustomLoopRunEventKind.NodeAttemptFailed)
+            || item.CanonicalOutput is not null
+            || (item.Kind == CustomLoopRunEventKind.NodeOutcomeObserved && item.FailureEvidence is not null)
+            || (item.Kind == CustomLoopRunEventKind.NodeAttemptFailed && item.FailureEvidence is null)
+            || (item.Kind == CustomLoopRunEventKind.NodeOutcomeObserved && (evidence.Kind != CustomLoopSequentialNodeEvidenceKind.ReviewRequested || evidence.Disposition != CustomLoopSequentialNodeDisposition.ReviewPending))
+            || (item.Kind == CustomLoopRunEventKind.NodeAttemptFailed && (evidence.Kind != CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection || evidence.Disposition != CustomLoopSequentialNodeDisposition.Rejected))
+            || !IsRecoverableActionEvent(run, item))
+        {
+            return false;
+        }
+
+        return string.Equals(binding.NodeId, evidence.NodeId, StringComparison.Ordinal)
+            && binding.Attempt == evidence.Attempt
+            && (binding.ActivationOrdinal is null || binding.ActivationOrdinal == evidence.ActivationOrdinal)
+            && (binding.VisitOrdinal is null || binding.VisitOrdinal == evidence.VisitOrdinal)
+            && string.Equals(item.StepId, binding.NodeId, StringComparison.Ordinal)
+            && item.Attempt == binding.Attempt;
+    }
+
+    private static HumanReviewRequest? GetHumanReviewRequestForEvent(CustomLoopRunRecord run, CustomLoopRunEvent item)
+    {
+        if (run.HumanReview is not { Request: { } currentRequest } review)
+        {
+            return null;
+        }
+
+        var requestHash = item.HumanReviewEvidence?.Request?.RequestHash;
+        if (!string.IsNullOrEmpty(requestHash))
+        {
+            var hashMatches = new[] { review }
+                .Concat(review.CompletedReviews.IsDefault ? [] : review.CompletedReviews)
+                .Where(candidate => candidate is not null && string.Equals(candidate.Request.RequestHash, requestHash, StringComparison.Ordinal))
+                .Take(2)
+                .ToArray();
+            return hashMatches.Length == 1 ? hashMatches[0]!.Request : null;
+        }
+
+        // The node-outcome event that parks a pre-dispatch action predates the
+        // Human Review admission event and therefore intentionally has no
+        // HumanReviewEvidence. Resolve it from its immutable activation and
+        // creation-time binding so archived boundaries remain classifiable
+        // after a later review rotates into the current head.
+        var evidence = item.SequentialNodeEvidence;
+        var matches = new[] { review }
+            .Concat(review.CompletedReviews.IsDefault ? [] : review.CompletedReviews)
+            .Where(candidate => candidate is not null && candidate.Request is not null)
+            .Select(candidate => candidate!)
+            .Where(candidate => MatchesRetainedHumanReviewParking(run, candidate.Request, item, evidence))
+            .Take(2)
+            .ToArray();
+        return matches.Length == 1 ? matches[0].Request : null;
+    }
+
+    private static bool MatchesRetainedHumanReviewParking(CustomLoopRunRecord run, HumanReviewRequest request, CustomLoopRunEvent item, CustomLoopSequentialNodeEvidence? evidence)
+    {
+        if (evidence is null
+            || run.SequentialAdapterBinding is not { } adapter
+            || !string.Equals(request.Binding.WorkspaceId, evidence.WorkspaceId, StringComparison.Ordinal)
+            || !string.Equals(request.Binding.RunId, evidence.RunId, StringComparison.Ordinal)
+            || !string.Equals(request.Binding.RunId, run.Id, StringComparison.Ordinal)
+            || !string.Equals(request.Binding.GraphId, evidence.Revision.GraphId, StringComparison.Ordinal)
+            || !string.Equals(request.Binding.RevisionId, evidence.Revision.RevisionId, StringComparison.Ordinal)
+            || !string.Equals(request.Binding.RevisionHash, evidence.Revision.ExecutableHash, StringComparison.Ordinal)
+            || !string.Equals(request.Binding.WorkspaceId, adapter.WorkspaceId, StringComparison.Ordinal)
+            || !string.Equals(request.Binding.RunId, adapter.ExecutionBinding.RunId, StringComparison.Ordinal)
+            || !Equals(adapter.ExecutionBinding.Revision, evidence.Revision)
+            || evidence.ExecutionGeneration != adapter.ExecutionBinding.ExecutionGeneration
+            || !string.Equals(request.Binding.NodeId, evidence.NodeId, StringComparison.Ordinal)
+            || request.Binding.Attempt != evidence.Attempt
+            || request.Binding.ActivationOrdinal is null && request.Binding.VisitOrdinal is null
+            || request.Binding.ActivationOrdinal is { } activation && activation != evidence.ActivationOrdinal
+            || request.Binding.VisitOrdinal is { } visit && visit != evidence.VisitOrdinal
+            || !string.Equals(item.StepId, request.Binding.NodeId, StringComparison.Ordinal)
+            || item.Attempt != request.Binding.Attempt
+            || item.TimestampUtc != request.Timing.CreatedAtUtc)
+        {
+            return false;
+        }
+
+        if (request.Purpose == HumanReviewPurpose.PreDispatchEffect
+            && (request.Binding.EffectAttempt is not { } effectAttempt
+                || !HumanReviewContractHash.MatchesEffectAttempt(effectAttempt)
+                || !string.Equals(request.ApprovalScope.EffectAttemptId, effectAttempt.EffectAttemptId, StringComparison.Ordinal)))
+        {
+            return false;
+        }
+
+        if (request.Purpose != HumanReviewPurpose.PreDispatchEffect && request.Binding.EffectAttempt is not null)
+        {
+            return false;
+        }
+
+        return evidence.Kind == CustomLoopSequentialNodeEvidenceKind.ReviewRequested
+            && evidence.Disposition == CustomLoopSequentialNodeDisposition.ReviewPending
+            && item.Kind == CustomLoopRunEventKind.NodeOutcomeObserved
+            && item.CanonicalOutput is null
+            && item.FailureEvidence is null;
     }
 
     private static bool IsRecoverableActionEvent(CustomLoopRunRecord run, CustomLoopRunEvent item)
@@ -3538,7 +3712,7 @@ public static class CustomLoopRunValidator
         var reviewEventMarkers = run.Events?.Where(item => item?.Kind is CustomLoopRunEventKind.HumanReviewRequestAdmitted or CustomLoopRunEventKind.HumanReviewDecisionOperationRecorded or CustomLoopRunEventKind.HumanReviewContinuationReserved).ToArray() ?? [];
         if (run.HumanReview is null)
         {
-            if (reviewEventMarkers.Length != 0 || run.Events?.Any(item => item is not null && (item.HumanReviewEvidence is not null || item.HumanReviewDecisionOperation is not null || item.HumanReviewContinuationReservation is not null)) == true)
+            if (reviewEventMarkers.Length != 0 || run.Events?.Any(item => item is not null && (item.HumanReviewEvidence is not null || item.HumanReviewAdmissionBinding is not null || item.HumanReviewDecisionOperation is not null || item.HumanReviewContinuationReservation is not null)) == true)
             {
                 Add(errors, "human_review_state_required", "humanReview", "Human Review events require the canonical Human Review state plane.");
             }
@@ -3547,7 +3721,11 @@ public static class CustomLoopRunValidator
         }
 
         var state = run.HumanReview;
-        var statePlaneArraysPresent = !state.OperationReceipts.IsDefault && !state.AcceptedDecisions.IsDefault && !state.LifecycleHistory.IsDefault && !state.DecisionActions.IsDefault;
+        var statePlaneArraysPresent = !state.OperationReceipts.IsDefault
+            && !state.AcceptedDecisions.IsDefault
+            && !state.LifecycleHistory.IsDefault
+            && !state.DecisionActions.IsDefault
+            && !state.CompletedReviews.IsDefault;
         var evidencePresent = !state.Evidence.IsDefault;
         if (!statePlaneArraysPresent)
         {
@@ -3566,9 +3744,11 @@ public static class CustomLoopRunValidator
         {
             Add(errors, "invalid_human_review_request", "humanReview.request", "The canonical Human Review request is required and must be valid.");
         }
-        else if (!MatchesHumanReviewBinding(run, request!))
+        else if (run.Status == CustomLoopRunStatus.Paused && run.Frontier?.Payload.Status == GovernedLoopFrontierStatus.ReviewBlocked
+            ? !MatchesHumanReviewBinding(run, request!)
+            : !HasRetainedHumanReviewAdmissionBinding(run, request!, state))
         {
-            Add(errors, "human_review_request_frontier_mismatch", "humanReview.request.binding", "The Human Review request must bind the retained run and exact current ReviewBlocked frontier.");
+            Add(errors, "human_review_request_frontier_mismatch", "humanReview.request.binding", "The Human Review request must bind its exact immutable ReviewBlocked admission frontier or retained append-only admission evidence.");
         }
 
         var lifecycleValid = lifecycle is not null && requestValid && IsValidHumanReviewLifecycle(request, lifecycle);
@@ -3592,9 +3772,10 @@ public static class CustomLoopRunValidator
             Add(errors, "invalid_human_review_initial_lifecycle", "humanReview.lifecycle", "Atomic admission requires the exact initial pending Human Review lifecycle with no decision.");
         }
 
-        if (run.Status != CustomLoopRunStatus.Paused || run.Frontier?.Payload.Status != GovernedLoopFrontierStatus.ReviewBlocked)
+        if ((run.Status != CustomLoopRunStatus.Paused || run.Frontier?.Payload.Status != GovernedLoopFrontierStatus.ReviewBlocked)
+            && !HasTerminalHumanReviewRelease(state))
         {
-            Add(errors, "human_review_frontier_mismatch", "humanReview", "Human Review requires the nonterminal Paused and exact ReviewBlocked frontier posture.");
+            Add(errors, "human_review_frontier_mismatch", "humanReview", "Human Review requires the nonterminal Paused ReviewBlocked posture until one exact terminal continuation or decision-action release is durably retained.");
         }
 
         if (!statePlaneArraysPresent || !evidencePresent)
@@ -3631,7 +3812,45 @@ public static class CustomLoopRunValidator
             Add(errors, "human_review_event_evidence_mismatch", "events", "Each Human Review event must carry its exact retained evidence and typed receipt or reservation reference.");
         }
 
+        if (!requestValid)
+        {
+            return;
+        }
+
         ValidateHumanReviewDecisionState(request!, state, errors);
+        ValidateCompletedHumanReviewHistory(run, state, errors);
+        var operationIds = new HashSet<string>(StringComparer.Ordinal);
+        var requestOperationIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var reviewState in new[] { state }.Concat(state.CompletedReviews))
+        {
+            if (reviewState is null)
+            {
+                continue;
+            }
+
+            if (reviewState.Request is { } reviewRequest && !requestOperationIds.Add(reviewRequest.RequestOperationId))
+            {
+                Add(errors, "duplicate_human_review_request_operation_identity", "humanReview.request", "An admission operation identity may belong to only one current or archived review boundary.");
+            }
+
+            foreach (var receipt in reviewState.OperationReceipts)
+            {
+                if (receipt is not null && !operationIds.Add(receipt.DecisionOperationId))
+                {
+                    Add(errors, "duplicate_human_review_operation_identity", "humanReview.operationReceipts", "A decision operation identity may belong to only one current or archived review boundary.");
+                }
+            }
+        }
+        var knownRequestHashes = state.CompletedReviews
+            .Where(item => item is not null && item.Request is not null)
+            .Select(item => item.Request.RequestHash)
+            .Append(state.Request.RequestHash)
+            .ToHashSet(StringComparer.Ordinal);
+        if (run.Events?.Any(item => item?.HumanReviewEvidence is { Request: { } reference }
+                && !knownRequestHashes.Contains(reference.RequestHash)) == true)
+        {
+            Add(errors, "unknown_human_review_event_request", "events", "Every Human Review event must reference the current or one retained completed review request.");
+        }
     }
 
     private static bool MatchesHumanReviewBinding(CustomLoopRunRecord run, HumanReviewRequest request)
@@ -3655,6 +3874,152 @@ public static class CustomLoopRunValidator
             && request.Binding.Attempt == blockedNode.Attempt
             && (request.Binding.ActivationOrdinal is null || request.Binding.ActivationOrdinal == blockedNode.ActivationOrdinal)
             && (request.Binding.VisitOrdinal is null || request.Binding.VisitOrdinal == blockedNode.VisitOrdinal);
+    }
+
+    private static bool HasRetainedHumanReviewAdmissionBinding(CustomLoopRunRecord run, HumanReviewRequest request, HumanReviewRunState state)
+    {
+        var admitted = run.Events.Where(item => item is { Kind: CustomLoopRunEventKind.HumanReviewRequestAdmitted, HumanReviewEvidence: not null }
+                && string.Equals(item.HumanReviewEvidence.EvidenceHash, state.Evidence.FirstOrDefault()?.EvidenceHash, StringComparison.Ordinal)
+                && string.Equals(item.HumanReviewEvidence.Request.RequestHash, request.RequestHash, StringComparison.Ordinal))
+            .Take(2)
+            .ToArray();
+        var parked = run.Events.Where(item => item is { Kind: CustomLoopRunEventKind.NodeOutcomeObserved, SequentialNodeEvidence: { } evidence }
+                && item.TimestampUtc == request.Timing.CreatedAtUtc
+                && string.Equals(item.StepId, request.Binding.NodeId, StringComparison.Ordinal)
+                && item.Attempt == request.Binding.Attempt
+                && evidence.Kind == CustomLoopSequentialNodeEvidenceKind.ReviewRequested
+                && evidence.Disposition == CustomLoopSequentialNodeDisposition.ReviewPending
+                && (request.Binding.ActivationOrdinal is null || evidence.ActivationOrdinal == request.Binding.ActivationOrdinal)
+                && (request.Binding.VisitOrdinal is null || evidence.VisitOrdinal == request.Binding.VisitOrdinal))
+            .Take(2)
+            .ToArray();
+        return admitted.Length == 1
+            && parked.Length == 1
+            && parked[0].Sequence < admitted[0].Sequence
+            && MatchesRetainedHumanReviewAdmissionEvidence(run, request, admitted[0], parked[0].SequentialNodeEvidence!)
+            && CustomLoopSequentialNodeEvidenceHash.Matches(parked[0].SequentialNodeEvidence!)
+            && CustomLoopSequentialOutcomeArtifactHash.Matches(parked[0])
+            && MatchesRetainedHumanReviewParking(run, request, parked[0], parked[0].SequentialNodeEvidence);
+    }
+
+    private static bool MatchesRetainedHumanReviewAdmissionEvidence(CustomLoopRunRecord run, HumanReviewRequest request, CustomLoopRunEvent admitted, CustomLoopSequentialNodeEvidence parkedEvidence)
+    {
+        var retained = admitted.HumanReviewAdmissionBinding;
+        var adapter = run.SequentialAdapterBinding;
+        return MatchesHumanReviewAdmissionBindingEvidence(request, retained)
+            && retained is not null
+            && adapter is not null
+            && retained.ExecutionGeneration == parkedEvidence.ExecutionGeneration
+            && retained.ExecutionGeneration == adapter.ExecutionBinding.ExecutionGeneration;
+    }
+
+    private static bool MatchesHumanReviewAdmissionBindingEvidence(HumanReviewRequest request, HumanReviewAdmissionBindingEvidence? retained)
+        => retained is not null
+            && HumanReviewContractHash.MatchesAdmissionBindingEvidence(retained)
+            && string.Equals(retained.BindingHash, request.Binding.BindingHash, StringComparison.Ordinal)
+            && string.Equals(retained.FrontierId, request.Binding.FrontierId, StringComparison.Ordinal)
+            && retained.FrontierVersion == request.Binding.FrontierVersion
+            && string.Equals(retained.FrontierHash, request.Binding.FrontierHash, StringComparison.Ordinal)
+            && Equals(retained.EffectAttempt, request.Binding.EffectAttempt);
+
+    private static bool HasTerminalHumanReviewRelease(HumanReviewRunState state)
+    {
+        if (state.AcceptedTerminalDecision is not { } terminal)
+        {
+            return false;
+        }
+
+        if (terminal.Kind == HumanReviewDecisionKind.Approve
+            && state.ContinuationReservation is { Decision: { } continuationDecision } reservation
+            && SameDecisionReference(continuationDecision, terminal)
+            && state.Continuation is { } continuation
+            && (continuation.Completion?.Reservation is { } completionReservation && string.Equals(completionReservation.ReservationHash, reservation.ReservationHash, StringComparison.Ordinal)
+                || continuation.Retirement?.Reservation is { } retirementReservation && string.Equals(retirementReservation.ReservationHash, reservation.ReservationHash, StringComparison.Ordinal)))
+        {
+            return true;
+        }
+
+        return state.DecisionActions.Any(action => action is { Reservation.Decision: { } actionDecision } && SameDecisionReference(actionDecision, terminal)
+            && (action.Completion?.Reservation is { } completionReservation && string.Equals(completionReservation.ReservationHash, action.Reservation.ReservationHash, StringComparison.Ordinal)
+                || action.Retirement?.Reservation is { } retirementReservation && string.Equals(retirementReservation.ReservationHash, action.Reservation.ReservationHash, StringComparison.Ordinal)));
+    }
+
+    private static void ValidateCompletedHumanReviewHistory(CustomLoopRunRecord run, HumanReviewRunState current, List<CustomLoopValidationError> errors)
+    {
+        if (current.CompletedReviews.Length > HumanReviewContractLimits.MaxCompletedReviews)
+        {
+            Add(errors, "human_review_completed_history_limit", "humanReview.completedReviews", "Completed Human Review state exceeds the bounded schema-1 review-boundary limit.");
+        }
+
+        var requestHashes = new HashSet<string>(StringComparer.Ordinal) { current.Request.RequestHash };
+        for (var index = 0; index < current.CompletedReviews.Length; index++)
+        {
+            var archived = current.CompletedReviews[index];
+            var field = $"humanReview.completedReviews[{index}]";
+            if (archived is null
+                || archived.CompletedReviews.IsDefault
+                || archived.CompletedReviews.Length != 0
+                || archived.Request is null
+                || !requestHashes.Add(archived.Request.RequestHash)
+                || !IsValidHumanReviewRequest(archived.Request)
+                || archived.Lifecycle is null
+                || archived.LifecycleHistory.IsDefault
+                || archived.LifecycleHistory.Length == 0
+                || archived.Evidence.IsDefault
+                || archived.Evidence.Length == 0
+                || archived.OperationReceipts.IsDefault
+                || archived.AcceptedDecisions.IsDefault
+                || archived.DecisionActions.IsDefault)
+            {
+                Add(errors, "invalid_human_review_completed_state", field, "Completed Human Review history entries must be complete, unique, terminal, and independently valid schema-1 snapshots.");
+                continue;
+            }
+
+            if (!HasTerminalHumanReviewRelease(archived))
+            {
+                Add(errors, "nonterminal_human_review_completed_state", field, "Only a fully released terminal Human Review state may enter completed review history.");
+            }
+
+            if (!HasRetainedHumanReviewAdmissionBinding(run, archived.Request, archived))
+            {
+                Add(errors, "invalid_human_review_completed_admission_binding", $"{field}.request.binding", "Completed Human Review history must retain the exact admission and parked-node binding, including all execution coordinates and any effect identity.");
+            }
+
+            if (!IsValidHumanReviewLifecycle(archived.Request, archived.Lifecycle)
+                || !HasValidHumanReviewLifecycleHistory(archived.Request, archived, errors))
+            {
+                Add(errors, "invalid_human_review_completed_lifecycle", $"{field}.lifecycle", "Completed Human Review lifecycle history must remain valid and hash-linked.");
+            }
+
+            var expectedEvidenceCount = archived.OperationReceipts.Length + (archived.ContinuationReservation is null ? 1 : 2);
+            if (archived.Evidence.Length != expectedEvidenceCount)
+            {
+                Add(errors, "invalid_human_review_completed_evidence_count", $"{field}.evidence", "Completed Human Review evidence must retain admission plus one exact artifact per receipt and reservation.");
+            }
+
+            var previousHash = (string?)null;
+            for (var evidenceIndex = 0; evidenceIndex < archived.Evidence.Length; evidenceIndex++)
+            {
+                var evidence = archived.Evidence[evidenceIndex];
+                if (evidence is null
+                    || !IsValidHumanReviewEvidence(archived.Request, evidence)
+                    || evidenceIndex == 0 && evidence.Kind != HumanReviewEvidenceKind.RequestAdmitted
+                    || !string.Equals(evidence.PreviousEvidenceHash, previousHash, StringComparison.Ordinal))
+                {
+                    Add(errors, "invalid_human_review_completed_evidence", $"{field}.evidence[{evidenceIndex}]", "Completed Human Review evidence must preserve its exact append-only hash chain.");
+                    continue;
+                }
+
+                previousHash = evidence.EvidenceHash;
+            }
+
+            if (!HasExactHumanReviewEventEvidenceBindings(run, archived.Request, archived))
+            {
+                Add(errors, "human_review_completed_event_evidence_mismatch", field, "Completed Human Review history must retain exact event bindings for every archived evidence artifact.");
+            }
+
+            ValidateHumanReviewDecisionState(archived.Request, archived, errors);
+        }
     }
 
     private static bool IsValidHumanReviewRequest(HumanReviewRequest request)
@@ -3796,13 +4161,16 @@ public static class CustomLoopRunValidator
     private static bool HasExactHumanReviewEventEvidenceBindings(CustomLoopRunRecord run, HumanReviewRequest request, HumanReviewRunState state)
     {
         if (run.Events.Any(item => item is not null && !HasRequiredHumanReviewEventPayload(item))) return false;
-        var reviewEvents = run.Events.Where(item => item?.HumanReviewEvidence is not null).ToArray();
+        var reviewEvents = run.Events.Where(item => item?.HumanReviewEvidence is { Request: { } reference }
+                && string.Equals(reference.RequestHash, request.RequestHash, StringComparison.Ordinal))
+            .ToArray();
         if (reviewEvents.Length != state.Evidence.Length) return false;
         for (var index = 0; index < state.Evidence.Length; index++)
         {
             var evidence = state.Evidence[index]; var item = reviewEvents[index];
             if (item is null || evidence is null || !IsValidHumanReviewEvidence(request, item.HumanReviewEvidence!) || !string.Equals(item.HumanReviewEvidence?.EvidenceHash, evidence.EvidenceHash, StringComparison.Ordinal) || item.TimestampUtc != evidence.RecordedAtUtc) return false;
-            if (index == 0 && (item.Kind != CustomLoopRunEventKind.HumanReviewRequestAdmitted || item.HumanReviewDecisionOperation is not null || item.HumanReviewContinuationReservation is not null)) return false;
+            if (index == 0 && (item.Kind != CustomLoopRunEventKind.HumanReviewRequestAdmitted || !MatchesHumanReviewAdmissionBindingEvidence(request, item.HumanReviewAdmissionBinding) || item.HumanReviewDecisionOperation is not null || item.HumanReviewContinuationReservation is not null)) return false;
+            if (index > 0 && item.HumanReviewAdmissionBinding is not null) return false;
             if (evidence.DecisionOperation is not null && (item.Kind != CustomLoopRunEventKind.HumanReviewDecisionOperationRecorded || !Equals(item.HumanReviewDecisionOperation, evidence.DecisionOperation) || item.HumanReviewContinuationReservation is not null)) return false;
             if (evidence.ContinuationReservation is not null && (item.Kind != CustomLoopRunEventKind.HumanReviewContinuationReserved || !Equals(item.HumanReviewContinuationReservation, evidence.ContinuationReservation) || item.HumanReviewDecisionOperation is not null)) return false;
             if (evidence.DecisionOperation is null && evidence.ContinuationReservation is null && (item.HumanReviewDecisionOperation is not null || item.HumanReviewContinuationReservation is not null)) return false;
@@ -3813,10 +4181,10 @@ public static class CustomLoopRunValidator
     private static bool HasRequiredHumanReviewEventPayload(CustomLoopRunEvent item)
         => item.Kind switch
         {
-            CustomLoopRunEventKind.HumanReviewRequestAdmitted => item.HumanReviewEvidence is not null && item.HumanReviewDecisionOperation is null && item.HumanReviewContinuationReservation is null,
-            CustomLoopRunEventKind.HumanReviewDecisionOperationRecorded => item.HumanReviewEvidence is not null && item.HumanReviewDecisionOperation is not null && item.HumanReviewContinuationReservation is null,
-            CustomLoopRunEventKind.HumanReviewContinuationReserved => item.HumanReviewEvidence is not null && item.HumanReviewDecisionOperation is null && item.HumanReviewContinuationReservation is not null,
-            _ => true,
+            CustomLoopRunEventKind.HumanReviewRequestAdmitted => item.HumanReviewEvidence is not null && item.HumanReviewAdmissionBinding is not null && item.HumanReviewDecisionOperation is null && item.HumanReviewContinuationReservation is null,
+            CustomLoopRunEventKind.HumanReviewDecisionOperationRecorded => item.HumanReviewEvidence is not null && item.HumanReviewAdmissionBinding is null && item.HumanReviewDecisionOperation is not null && item.HumanReviewContinuationReservation is null,
+            CustomLoopRunEventKind.HumanReviewContinuationReserved => item.HumanReviewEvidence is not null && item.HumanReviewAdmissionBinding is null && item.HumanReviewDecisionOperation is null && item.HumanReviewContinuationReservation is not null,
+            _ => item.HumanReviewAdmissionBinding is null,
         };
 
     private static void ValidateHumanReviewReceiptEvidenceCausality(HumanReviewRunState state, List<CustomLoopValidationError> errors)
@@ -4036,20 +4404,43 @@ public static class CustomLoopRunValidator
             || current.HumanReview.OperationReceipts.IsDefault
             || current.HumanReview.AcceptedDecisions.IsDefault
             || current.HumanReview.DecisionActions.IsDefault
+            || current.HumanReview.CompletedReviews.IsDefault
             || candidate.HumanReview.LifecycleHistory.IsDefault
             || candidate.HumanReview.Evidence.IsDefault
             || candidate.HumanReview.OperationReceipts.IsDefault
             || candidate.HumanReview.AcceptedDecisions.IsDefault
             || candidate.HumanReview.DecisionActions.IsDefault
-            || !string.Equals(current.HumanReview.Request.RequestHash, candidate.HumanReview.Request.RequestHash, StringComparison.Ordinal)
+            || candidate.HumanReview.CompletedReviews.IsDefault)
+        {
+            Add(errors, "human_review_history_changed", "humanReview", "The admitted Human Review request, initial lifecycle, and evidence cannot be removed, extended, or rewritten in this slice.");
+            return;
+        }
+
+        var requestChanged = !string.Equals(current.HumanReview.Request.RequestHash, candidate.HumanReview.Request.RequestHash, StringComparison.Ordinal);
+        if (requestChanged)
+        {
+            if (!CanRotateHumanReview(current.HumanReview, candidate.HumanReview)
+                || candidate.HumanReview.CompletedReviews.Length != current.HumanReview.CompletedReviews.Length + 1
+                || !HumanReviewStatesEqual(current.HumanReview with { CompletedReviews = [] }, candidate.HumanReview.CompletedReviews[^1])
+                || !HasHumanReviewHistoryPrefix(current.HumanReview.CompletedReviews, candidate.HumanReview.CompletedReviews))
+            {
+                Add(errors, "invalid_human_review_rotation", "humanReview", "A new Human Review request may replace the current head only after the prior terminal review is fully released and archived unchanged.");
+            }
+
+            return;
+        }
+
+        var invalidShape = !HasHumanReviewHistoryPrefix(current.HumanReview.CompletedReviews, candidate.HumanReview.CompletedReviews)
+            || candidate.HumanReview.CompletedReviews.Length != current.HumanReview.CompletedReviews.Length
             || candidate.HumanReview.LifecycleHistory.Length < current.HumanReview.LifecycleHistory.Length
             || candidate.HumanReview.Evidence.Length < current.HumanReview.Evidence.Length
             || candidate.HumanReview.OperationReceipts.Length < current.HumanReview.OperationReceipts.Length
             || candidate.HumanReview.AcceptedDecisions.Length < current.HumanReview.AcceptedDecisions.Length
             || candidate.HumanReview.DecisionActions.Length < current.HumanReview.DecisionActions.Length
-            || candidate.HumanReview.DecisionActions.Length > current.HumanReview.DecisionActions.Length + 1)
+            || candidate.HumanReview.DecisionActions.Length > current.HumanReview.DecisionActions.Length + 1;
+        if (invalidShape)
         {
-            Add(errors, "human_review_history_changed", "humanReview", "The admitted Human Review request, initial lifecycle, and evidence cannot be removed, extended, or rewritten in this slice.");
+            Add(errors, "human_review_completed_history_changed", "humanReview.completedReviews", "Completed Human Review snapshots are append-only and immutable.");
             return;
         }
 
@@ -4126,6 +4517,17 @@ public static class CustomLoopRunValidator
 
     }
 
+    private static bool CanRotateHumanReview(HumanReviewRunState current, HumanReviewRunState candidate)
+        => current.AcceptedTerminalDecision is not null
+            && current.CompletedReviews.Length < HumanReviewContractLimits.MaxCompletedReviews
+            && (current.Continuation is { Completion: not null } or { Retirement: not null }
+                || current.DecisionActions.Any(action => action is not null && (action.Completion is not null || action.Retirement is not null)))
+            && !string.Equals(current.Request.RequestHash, candidate.Request.RequestHash, StringComparison.Ordinal);
+
+    private static bool HasHumanReviewHistoryPrefix(IReadOnlyList<HumanReviewRunState> expected, IReadOnlyList<HumanReviewRunState> actual)
+        => expected.Count <= actual.Count
+            && expected.Select((item, index) => item is not null && actual[index] is not null && HumanReviewStatesEqual(item, actual[index])).All(value => value);
+
     private static bool EventsEqual(CustomLoopRunEvent? left, CustomLoopRunEvent? right)
     {
         if (ReferenceEquals(left, right))
@@ -4170,6 +4572,7 @@ public static class CustomLoopRunValidator
             && string.Equals(left.FailureEvidence?.ContentHash, right.FailureEvidence?.ContentHash, StringComparison.Ordinal)
             && string.Equals(left.RetryState?.ContentHash, right.RetryState?.ContentHash, StringComparison.Ordinal)
             && string.Equals(left.HumanReviewEvidence?.EvidenceHash, right.HumanReviewEvidence?.EvidenceHash, StringComparison.Ordinal)
+            && Equals(left.HumanReviewAdmissionBinding, right.HumanReviewAdmissionBinding)
             && Equals(left.HumanReviewDecisionOperation, right.HumanReviewDecisionOperation)
             && Equals(left.HumanReviewContinuationReservation, right.HumanReviewContinuationReservation);
     }
@@ -4298,6 +4701,12 @@ public static class CustomLoopRunValidator
         => ReferenceEquals(left, right)
             || left is not null
             && right is not null
+            && !left.LifecycleHistory.IsDefault
+            && !right.LifecycleHistory.IsDefault
+            && !left.OperationReceipts.IsDefault
+            && !right.OperationReceipts.IsDefault
+            && !left.AcceptedDecisions.IsDefault
+            && !right.AcceptedDecisions.IsDefault
             && string.Equals(left.Request?.RequestHash, right.Request?.RequestHash, StringComparison.Ordinal)
             && string.Equals(left.Lifecycle?.LifecycleHash, right.Lifecycle?.LifecycleHash, StringComparison.Ordinal)
             && !left.Evidence.IsDefault
@@ -4312,13 +4721,33 @@ public static class CustomLoopRunValidator
             && string.Equals(left.Continuation?.StateHash, right.Continuation?.StateHash, StringComparison.Ordinal)
             && !left.DecisionActions.IsDefault
             && !right.DecisionActions.IsDefault
-            && left.DecisionActions.Select(item => item?.StateHash).SequenceEqual(right.DecisionActions.Select(item => item?.StateHash), StringComparer.Ordinal);
+            && left.DecisionActions.Select(item => item?.StateHash).SequenceEqual(right.DecisionActions.Select(item => item?.StateHash), StringComparer.Ordinal)
+            && !left.CompletedReviews.IsDefault
+            && !right.CompletedReviews.IsDefault
+            && left.CompletedReviews.Length == right.CompletedReviews.Length
+            && left.CompletedReviews.Select((item, index) => item is not null && right.CompletedReviews[index] is not null && HumanReviewStatesEqual(item, right.CompletedReviews[index])).All(value => value);
 
     private static bool HasHumanReviewPrefix(HumanReviewRunState? expectedPrefix, HumanReviewRunState? actual)
-        => expectedPrefix is null
-            || actual is not null
-            && string.Equals(expectedPrefix.Request?.RequestHash, actual.Request?.RequestHash, StringComparison.Ordinal)
-            && expectedPrefix.LifecycleHistory.Length <= actual.LifecycleHistory.Length
+    {
+        if (expectedPrefix is null)
+        {
+            return true;
+        }
+
+        if (actual is null || expectedPrefix.Request is null || actual.Request is null)
+        {
+            return false;
+        }
+
+        if (!string.Equals(expectedPrefix.Request.RequestHash, actual.Request.RequestHash, StringComparison.Ordinal))
+        {
+            return !actual.CompletedReviews.IsDefault
+                && actual.CompletedReviews.Length > expectedPrefix.CompletedReviews.Length
+                && HumanReviewStatesEqual(expectedPrefix with { CompletedReviews = [] }, actual.CompletedReviews[^1])
+                && HasHumanReviewHistoryPrefix(expectedPrefix.CompletedReviews, actual.CompletedReviews);
+        }
+
+        return expectedPrefix.LifecycleHistory.Length <= actual.LifecycleHistory.Length
             && !expectedPrefix.Evidence.IsDefault
             && !actual.Evidence.IsDefault
             && expectedPrefix.Evidence.Length <= actual.Evidence.Length
@@ -4328,6 +4757,7 @@ public static class CustomLoopRunValidator
             && expectedPrefix.OperationReceipts.Select((item, index) => string.Equals(item?.ReceiptHash, actual.OperationReceipts[index]?.ReceiptHash, StringComparison.Ordinal)).All(value => value)
             && expectedPrefix.AcceptedDecisions.Length <= actual.AcceptedDecisions.Length
             && expectedPrefix.AcceptedDecisions.Select((item, index) => string.Equals(item?.DecisionHash, actual.AcceptedDecisions[index]?.DecisionHash, StringComparison.Ordinal)).All(value => value)
+            && HasHumanReviewHistoryPrefix(expectedPrefix.CompletedReviews, actual.CompletedReviews)
             && !expectedPrefix.DecisionActions.IsDefault
             && !actual.DecisionActions.IsDefault
             && expectedPrefix.DecisionActions.Length <= actual.DecisionActions.Length
@@ -4339,6 +4769,7 @@ public static class CustomLoopRunValidator
                     expectedPrefix.ContinuationReservation,
                     expectedPrefix.Continuation,
                     actual.Continuation).IsValid);
+    }
 
     private static bool HasWaitEvidencePrefix(
         IReadOnlyList<GovernedLoopWaitExecutionEvidence>? expectedPrefix,

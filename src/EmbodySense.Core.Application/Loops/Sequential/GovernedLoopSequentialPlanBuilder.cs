@@ -7,6 +7,7 @@ using EmbodySense.Core.Application.Loops.Sequential.Models;
 using EmbodySense.Core.Common.Inference.Profiles.Models;
 using EmbodySense.Core.Common.LocalWorkspace.Actions;
 using EmbodySense.Core.Common.CommandActions;
+using EmbodySense.Core.Common.HumanReview;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
@@ -75,6 +76,7 @@ public static class GovernedLoopSequentialPlanBuilder
         var inferenceCount = planNodes.Count(node => Equals(node.Descriptor, GovernedLoopSequentialNodeDescriptors.ProviderInference));
         var hasExecutableNode = inferenceCount >= CustomLoopLimits.MinInferenceSteps
             || planNodes.Any(node => GovernedLoopSequentialNodeDescriptors.IsWait(node.Descriptor)
+                || GovernedLoopSequentialNodeDescriptors.IsHumanReview(node.Descriptor)
                 || GovernedLoopSequentialNodeDescriptors.IsHumanInput(node.Descriptor)
                 || GovernedLoopSequentialNodeDescriptors.IsRecoverableAction(node.Descriptor));
         if (inferenceCount > CustomLoopLimits.MaxInferenceSteps
@@ -419,6 +421,7 @@ public static class GovernedLoopSequentialPlanBuilder
             || GovernedLoopSequentialNodeDescriptors.IsRecoverableAction(descriptor)
             || GovernedLoopSequentialNodeDescriptors.IsPure(descriptor)
             || GovernedLoopSequentialNodeDescriptors.IsWait(descriptor)
+            || GovernedLoopSequentialNodeDescriptors.IsHumanReview(descriptor)
             || GovernedLoopSequentialNodeDescriptors.IsHumanInput(descriptor);
 
     private static bool HasImpossibleJoin(GovernedLoopGraphDefinition graph)
@@ -629,6 +632,7 @@ public static class GovernedLoopSequentialPlanBuilder
                 GovernedLoopNodeKind.Transform or GovernedLoopNodeKind.Validate => IsExactPureNode(node, schemaById),
                 GovernedLoopNodeKind.Condition or GovernedLoopNodeKind.Join => IsExactTopologyNode(node, schemaById),
                 GovernedLoopNodeKind.Wait => IsExactWaitNode(node),
+                GovernedLoopNodeKind.HumanReview => IsExactHumanReviewNode(node),
                 GovernedLoopNodeKind.HumanInput => IsExactHumanInputNode(node, schemaById),
                 GovernedLoopNodeKind.Exit => IsExactExit(node, schemaById),
                 GovernedLoopNodeKind.Fail => GovernedLoopFailNodeCatalogContract.HasExactNodeSemantics(
@@ -840,6 +844,18 @@ public static class GovernedLoopSequentialPlanBuilder
                 new Dictionary<string, string>(StringComparer.Ordinal) { [parameterId] = value }).IsValid;
     }
 
+    private static bool IsExactHumanReviewNode(GovernedLoopNodeDefinition node)
+        => node.AuthorityCeiling.CapabilityIds.Count == 0
+            && node.Ports.Count == 0
+            && node.ModelRoutingPolicy is null
+            && node.AuthoredInputDataClasses is null
+            && node.RetryPolicy is null
+            && node.HumanInputConfiguration is null
+            && GovernedLoopHumanReviewNodeCatalogContract.TryResolve(node.Descriptor, out var contract)
+            && contract is not null
+            && HasExactCatalogParameters(node, contract)
+            && GovernedLoopHumanReviewNodeCatalogContract.HasExactNodeSemantics(node);
+
     private static bool IsExactHumanInputNode(
         GovernedLoopNodeDefinition node,
         IReadOnlyDictionary<string, GovernedLoopValueSchemaDefinition> schemas)
@@ -926,7 +942,9 @@ public static class GovernedLoopSequentialPlanBuilder
                 && integer >= contract.MinimumInteger.Value
                 && integer <= contract.MaximumInteger.Value,
             GovernedLoopParameterValueKind.Number => TryCanonicalNumber(value, out _),
+            GovernedLoopParameterValueKind.Identifier => CustomLoopArtifactIdentifier.IsValid(value),
             GovernedLoopParameterValueKind.JsonPointer => IsJsonPointer(value),
+            GovernedLoopParameterValueKind.Enumeration => contract.AllowedValues.Contains(value, StringComparer.Ordinal),
             _ => false,
         };
     }

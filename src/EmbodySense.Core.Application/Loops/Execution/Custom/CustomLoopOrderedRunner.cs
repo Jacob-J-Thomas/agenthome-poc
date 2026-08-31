@@ -9,6 +9,8 @@ using System.Text;
 using System.Text.Json;
 using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Application.Governance.Tools;
+using EmbodySense.Core.Application.HumanReview;
+using EmbodySense.Core.Application.HumanReview.Models;
 using EmbodySense.Core.Application.HumanInput.Policies;
 using EmbodySense.Core.Application.HumanInput.Policies.Models;
 using EmbodySense.Core.Application.HumanInput.Publication;
@@ -39,6 +41,8 @@ using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.Loops.Execution.Authority;
 using EmbodySense.Core.Common.Loops.Execution.Authority.Models;
 using EmbodySense.Core.Common.Loops.Execution;
+using EmbodySense.Core.Common.Loops.Execution.Effects;
+using EmbodySense.Core.Common.Loops.Execution.Effects.Models;
 using EmbodySense.Core.Common.Loops.Execution.Models;
 using EmbodySense.Core.Common.Loops.Execution.Retry.Models;
 using EmbodySense.Core.Common.Loops.Execution.Wait;
@@ -57,12 +61,15 @@ using EmbodySense.Core.Common.LocalWorkspace.Actions;
 using EmbodySense.Core.Common.Loops.Revisions;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
 using EmbodySense.Core.Common.Loops.PureNodes;
+using EmbodySense.Core.Common.Loops.Admission;
 using EmbodySense.Core.Common.Loops.Sequential;
 using EmbodySense.Core.Common.Loops.Sequential.Models;
 using EmbodySense.Core.Common.CommandActions;
 using EmbodySense.Core.Common.CommandActions.Models;
 using EmbodySense.Core.Common.HumanInput;
 using EmbodySense.Core.Common.HumanInput.Models;
+using EmbodySense.Core.Common.HumanReview;
+using EmbodySense.Core.Common.HumanReview.Models;
 using EmbodySense.Core.Common.Loops.HumanInput;
 using EmbodySense.Core.Common.Loops.HumanInput.Checkpoints;
 using EmbodySense.Core.Common.Loops.HumanInput.Checkpoints.Models;
@@ -120,6 +127,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
     private readonly IGovernedLoopCommandActionExecutor? _commandActionExecutor;
     private readonly IGovernedLoopFailureClassifier _failureClassifier;
     private readonly HumanInputPolicyResolutionService? _humanInputPolicyResolutionService;
+    private readonly IHumanReviewAdmissionService? _humanReviewAdmissionService;
     private readonly IGovernedLoopSequentialHumanInputBindingSource? _humanInputBindingSource;
     private readonly IHumanInputRequestPublicationService? _humanInputRequestPublicationService;
     private readonly ICustomLoopHumanInputCancellationConvergence? _humanInputCancellationConvergence;
@@ -150,6 +158,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
     /// <param name="humanInputBindingSource">The authoritative response source used only to rehydrate exact terminal Human Input data bindings for causal dependent activations. A missing source makes such an activation retryable without dispatch.</param>
     /// <param name="humanInputRequestPublicationService">The canonical checkpoint-to-request-ledger publisher. When Human Input policy resolution is configured, a missing publisher prevents checkpoint creation.</param>
     /// <param name="humanInputCancellationConvergence">The canonical request/run convergence guard required before a checkpoint-backed run can terminalize as cancelled.</param>
+    /// <param name="humanReviewAdmissionService">The exact atomic request-and-frontier admission boundary required to expose a canonical Human Review request.</param>
     public CustomLoopOrderedRunner(
         ICustomLoopRunStore runStore,
         CustomLoopContextResolver contextResolver,
@@ -170,7 +179,8 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         HumanInputPolicyResolutionService? humanInputPolicyResolutionService = null,
         IGovernedLoopSequentialHumanInputBindingSource? humanInputBindingSource = null,
         IHumanInputRequestPublicationService? humanInputRequestPublicationService = null,
-        ICustomLoopHumanInputCancellationConvergence? humanInputCancellationConvergence = null)
+        ICustomLoopHumanInputCancellationConvergence? humanInputCancellationConvergence = null,
+        IHumanReviewAdmissionService? humanReviewAdmissionService = null)
     {
         _runStore = runStore ?? throw new ArgumentNullException(nameof(runStore));
         _contextResolver = contextResolver ?? throw new ArgumentNullException(nameof(contextResolver));
@@ -192,6 +202,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         _humanInputBindingSource = humanInputBindingSource;
         _humanInputRequestPublicationService = humanInputRequestPublicationService;
         _humanInputCancellationConvergence = humanInputCancellationConvergence;
+        _humanReviewAdmissionService = humanReviewAdmissionService;
     }
 
     /// <summary>
@@ -1172,6 +1183,27 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 }
 
                 var started = FindSequentialDispatchStart(run, node, selected.Activation!, selected.Attempt.Value, selected.AttemptOperationId!);
+                if (retained is null
+                    && isRecoverableAction
+                    && HasExactPreDispatchEffectReleaseHandoff(run, node, selected.Activation!, selected.Attempt.Value, selected.AttemptOperationId!))
+                {
+                    var released = await DispatchSelectedSequentialNodeAsync(
+                        context,
+                        run,
+                        node,
+                        selected.Attempt.Value,
+                        selected.AttemptOperationId!,
+                        actor,
+                        dispatchState,
+                        cancellationToken);
+                    if (released.Terminal is not null)
+                    {
+                        return released.Terminal;
+                    }
+
+                    run = released.Run!;
+                    continue;
+                }
                 if (started is null || retained is not null && retained.Sequence <= started.Sequence)
                 {
                     return await TerminateAsync(run, actor, CustomLoopRunStatus.NeedsReview, "canonical_frontier_reconciliation_failed", "The retained terminal node evidence is not causally bound to the exact frontier attempt operation; automatic redispatch is forbidden.");
@@ -1928,6 +1960,18 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 cancellationToken).ConfigureAwait(false);
         }
 
+        if (GovernedLoopSequentialNodeDescriptors.IsHumanReview(node.Descriptor))
+        {
+            return await DispatchAndParkSequentialHumanReviewNodeAsync(
+                context,
+                run,
+                node,
+                attempt,
+                attemptOperationId,
+                actor,
+                cancellationToken).ConfigureAwait(false);
+        }
+
         if (GovernedLoopSequentialNodeDescriptors.IsHumanInput(node.Descriptor))
         {
             return await DispatchAndParkSequentialHumanInputNodeAsync(
@@ -2300,7 +2344,8 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                         activation,
                         attempt),
                     context.Artifact,
-                    attemptOperationId),
+                    attemptOperationId,
+                    TryGetPreDispatchEffectHumanReviewRelease(run, node, activation, attempt, attemptOperationId)),
                 actionToken.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (actionToken.IsCancellationRequested)
@@ -2322,6 +2367,23 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             && CommandActionResultContract.TryParse(canonicalOutput, out var parsed)
                 ? parsed
                 : null;
+        if (result.Status == GovernedLoopCommandActionExecutionStatus.ApprovalRequired)
+        {
+            return await DispatchAndParkSequentialPreDispatchEffectHumanReviewAsync(
+                context,
+                run,
+                node,
+                activation,
+                attempt,
+                attemptOperationId,
+                result.PreparedEffectAttempt,
+                actor,
+                cancellationToken).ConfigureAwait(false);
+        }
+        if (result.Status == GovernedLoopCommandActionExecutionStatus.OperationInProgress)
+        {
+            return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.Conflict, run, result.Detail));
+        }
         if (result.Status == GovernedLoopCommandActionExecutionStatus.Completed
             && parsedResult?.Outcome == CommandActionResultOutcome.Succeeded
             && result.CanonicalOutput is { } completedOutput)
@@ -2599,7 +2661,8 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                         attempt),
                     context.Artifact,
                     attemptOperationId,
-                    inputJson),
+                    inputJson,
+                    TryGetPreDispatchEffectHumanReviewRelease(run, node, activation, attempt, attemptOperationId)),
                 actionToken.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (actionToken.IsCancellationRequested)
@@ -2617,6 +2680,23 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 $"The canonical workspace Action executor failed closed ({SafeExceptionClass(exception)}).");
         }
 
+        if (result.Status == GovernedLoopWorkspaceActionExecutionStatus.ApprovalRequired)
+        {
+            return await DispatchAndParkSequentialPreDispatchEffectHumanReviewAsync(
+                context,
+                run,
+                node,
+                activation,
+                attempt,
+                attemptOperationId,
+                result.PreparedEffectAttempt,
+                actor,
+                cancellationToken).ConfigureAwait(false);
+        }
+        if (result.Status == GovernedLoopWorkspaceActionExecutionStatus.OperationInProgress)
+        {
+            return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.Conflict, run, result.Detail));
+        }
         if (result.Status == GovernedLoopWorkspaceActionExecutionStatus.Completed
             && result.CanonicalOutput is { } output
             && WorkspaceActionResultContract.TryParse(output, out _))
@@ -2914,6 +2994,424 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 ? new RunAdvance(durable, null)
                 : new RunAdvance(null, Result(CustomLoopOrderedRunStatus.InvalidState, durable, "The parked Wait does not compose with the aggregate run lifecycle."));
     }
+
+    private async Task<RunAdvance> DispatchAndParkSequentialPreDispatchEffectHumanReviewAsync(
+        SequentialExecutionContext context,
+        CustomLoopRunRecord run,
+        GovernedLoopSequentialPlanNode node,
+        GovernedLoopNodeExecutionEvidence activation,
+        int attempt,
+        string attemptOperationId,
+        GovernedLoopEffectAttempt? preparedEffect,
+        string actor,
+        CancellationToken cancellationToken)
+    {
+        if (_humanReviewAdmissionService is null)
+        {
+            var unavailable = await TerminateAsync(
+                run,
+                actor,
+                CustomLoopRunStatus.NeedsReview,
+                "human_review_admission_unavailable",
+                "The exact pre-dispatch Human Review admission boundary is unavailable; the prepared effect remains undispatched.",
+                terminalAuditRecorder: context.AuditRecorder).ConfigureAwait(false);
+            return new RunAdvance(unavailable.Run, unavailable);
+        }
+
+        var now = Now(run);
+        var sequentialNode = new SequentialNodeExecutionContext(
+            context.Anchor.AdapterBinding,
+            context.Artifact,
+            context.Plan,
+            node,
+            activation,
+            attempt,
+            attemptOperationId,
+            context.AllowedCapabilityIds,
+            context.AuditRecorder);
+        var reviewBlockedEvent = WithSequentialEvidence(
+            Event(
+                run,
+                now,
+                CustomLoopRunEventKind.NodeOutcomeObserved,
+                "The exact prepared Action effect is durably parked for Human Review before its dispatch boundary.",
+                activation.CycleIteration ?? run.Checkpoint.Iteration,
+                node.NodeId,
+                attempt),
+            sequentialNode,
+            CustomLoopSequentialNodeEvidenceKind.ReviewRequested,
+            CustomLoopSequentialNodeDisposition.ReviewPending);
+        var blocked = GovernedLoopSequentialFrontierMachine.ReviewBlockRunning(
+            run.Frontier,
+            context.Anchor.AdapterBinding,
+            context.Plan,
+            node,
+            activation,
+            attempt,
+            attemptOperationId,
+            reviewBlockedEvent.EventId,
+            CustomLoopSequentialOutcomeArtifactHash.Compute(reviewBlockedEvent),
+            now);
+        if (blocked.Status != GovernedLoopSequentialFrontierTransitionStatus.Applied || blocked.Frontier is null)
+        {
+            var invalid = await TerminateAsync(
+                run,
+                actor,
+                CustomLoopRunStatus.NeedsReview,
+                "human_review_frontier_park_invalid",
+                "The exact prepared Action effect could not enter its immutable ReviewBlocked frontier; no review request was exposed.",
+                terminalAuditRecorder: context.AuditRecorder).ConfigureAwait(false);
+            return new RunAdvance(invalid.Run, invalid);
+        }
+
+        var request = CreatePreDispatchEffectHumanReviewRequest(run, context, node, activation, blocked.Frontier, preparedEffect, now);
+        if (request is null)
+        {
+            var invalid = await TerminateAsync(
+                run,
+                actor,
+                CustomLoopRunStatus.NeedsReview,
+                "human_review_pre_dispatch_request_invalid",
+                "The exact prepared Action effect could not be bound to immutable review evidence; no review request was exposed.",
+                terminalAuditRecorder: context.AuditRecorder).ConfigureAwait(false);
+            return new RunAdvance(invalid.Run, invalid);
+        }
+
+        CustomLoopRunStoreResult admitted;
+        try
+        {
+            admitted = await _humanReviewAdmissionService.AdmitAsync(
+                new HumanReviewAdmissionCommand(run.Id, run.LifecycleVersion, request, blocked.Frontier, reviewBlockedEvent),
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.NeedsReview, run, "The pre-dispatch Human Review admission outcome is unavailable; the prepared effect remains undispatched."));
+        }
+
+        var durable = admitted.Run;
+        if (admitted.Status is not (CustomLoopRunStoreStatus.Updated or CustomLoopRunStoreStatus.AlreadyCreated)
+            || durable is null
+            || durable.Status != CustomLoopRunStatus.Paused
+            || durable.Frontier?.Payload.Status != GovernedLoopFrontierStatus.ReviewBlocked
+            || durable.HumanReview is null
+            || !string.Equals(durable.HumanReview.Request.RequestHash, request.RequestHash, StringComparison.Ordinal))
+        {
+            return new RunAdvance(null, Result(
+                admitted.Status == CustomLoopRunStoreStatus.Conflict ? CustomLoopOrderedRunStatus.Conflict : CustomLoopOrderedRunStatus.InvalidState,
+                durable ?? run,
+                "The exact pre-dispatch Human Review admission did not durably retain its ReviewBlocked frontier and request."));
+        }
+
+        return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.Paused, durable, "The exact prepared Action effect is durably review-blocked before it becomes observable."));
+    }
+
+    private static HumanReviewRequest? CreatePreDispatchEffectHumanReviewRequest(
+        CustomLoopRunRecord run,
+        SequentialExecutionContext context,
+        GovernedLoopSequentialPlanNode node,
+        GovernedLoopNodeExecutionEvidence activation,
+        GovernedLoopFrontierPosture blockedFrontier,
+        GovernedLoopEffectAttempt? preparedEffect,
+        DateTimeOffset now)
+    {
+        try
+        {
+            var adapter = context.Anchor.AdapterBinding;
+            if (activation.Attempt is null
+                || preparedEffect is null
+                || GovernedLoopEffectAttemptContract.Validate(preparedEffect) is not null
+                || preparedEffect.Payload.Phase != GovernedLoopEffectPhase.IntentPrepared
+                || preparedEffect.DispatchAuthorityEvidenceHash is not null
+                || !Equals(preparedEffect.Binding, adapter.ExecutionBinding)
+                || !string.Equals(preparedEffect.NodeId, node.NodeId, StringComparison.Ordinal)
+                || preparedEffect.NodeAttempt != activation.Attempt.Value
+                || string.IsNullOrEmpty(preparedEffect.PreconditionEvidenceHash)
+                || !HumanReviewContractHash.IsSha256(preparedEffect.TargetFingerprint)
+                || !HumanReviewContractHash.IsSha256(preparedEffect.PreconditionEvidenceHash)
+                || !HumanReviewContractHash.IsSha256(preparedEffect.InputFingerprint))
+            {
+                return null;
+            }
+
+            var requestOperationId = CreateHumanReviewIdentity(
+                "human-review-effect-operation-",
+                run.Id,
+                adapter.ExecutionBinding.ExecutionGeneration.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                node.NodeId,
+                activation.ActivationOrdinal.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                activation.VisitOrdinal.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                activation.AttemptOperationId!,
+                preparedEffect.Payload.OperationId,
+                preparedEffect.Payload.EffectGeneration.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            var requestId = CreateHumanReviewIdentity("human-review-effect-request-", requestOperationId);
+            var draftBinding = new HumanReviewBinding(
+                HumanReviewContractLimits.CurrentSchemaVersion,
+                adapter.WorkspaceId,
+                run.Id,
+                adapter.ExecutionBinding.Revision.GraphId,
+                adapter.ExecutionBinding.Revision.RevisionId,
+                adapter.ExecutionBinding.Revision.ExecutableHash,
+                node.NodeId,
+                activation.ActivationOrdinal,
+                null,
+                activation.Attempt.Value,
+                CreateHumanReviewIdentity("human-review-effect-frontier-", requestOperationId),
+                blockedFrontier.Payload.FrontierVersion,
+                blockedFrontier.Payload.ContentHash,
+                HumanReviewAuthorityBindingHash.FromProfile(adapter.AdmissionReceipt.Evidence.GrantProfile.ContentHash),
+                adapter.AdmissionReceipt.Evidence.GrantDependencyEvidenceHash,
+                GovernedLoopAdmissionContractHash.ComputeCapabilityAdmissionReferenceHash(adapter.AdmissionReceipt.Evidence.CapabilityAdmission),
+                adapter.AdmissionReceipt.Evidence.ModelRoutingAdmission.ContentHash,
+                preparedEffect.TargetFingerprint,
+                preparedEffect.PreconditionEvidenceHash!,
+                preparedEffect.InputFingerprint,
+                null,
+                string.Empty);
+            var preparation = HumanReviewEffectReleaseContract.CreatePreparation(draftBinding, preparedEffect);
+            var effectBinding = HumanReviewContractHash.ApplyEffectAttempt(new HumanReviewEffectAttemptBinding(
+                preparedEffect.Payload.EffectId,
+                preparedEffect.Payload.OperationId,
+                preparedEffect.Payload.EffectGeneration,
+                preparedEffect.Payload.IntentHash,
+                preparation.PreparationHash,
+                HumanReviewEffectDispatchCertainty.NotDispatched,
+                string.Empty));
+            var binding = HumanReviewContractHash.ApplyBinding(draftBinding with { EffectAttempt = effectBinding });
+            var scope = HumanReviewContractHash.ApplyApprovalScope(new HumanReviewApprovalScope(HumanReviewApprovalScopeKind.PreDispatchEffect, binding.BindingHash, preparedEffect.Payload.EffectId, string.Empty));
+            return HumanReviewContractHash.ApplyRequest(new HumanReviewRequest(
+                HumanReviewRequest.CurrentSchemaVersion,
+                requestId,
+                requestOperationId,
+                binding,
+                HumanReviewPurpose.PreDispatchEffect,
+                [HumanReviewDecisionKind.Approve, HumanReviewDecisionKind.Reject, HumanReviewDecisionKind.Cancel, HumanReviewDecisionKind.RequestInformation],
+                [new HumanReviewReviewerScope(GovernedLoopHumanReviewNodeCatalogContract.LocalReviewerRoleId, ["pre-dispatch-effect"])],
+                scope,
+                [
+                    HumanReviewContractHash.ApplyPreview(new HumanReviewRedactedPreview(HumanReviewPreviewKind.Action, "Governed Action review", "One prepared Action effect is parked before its dispatch boundary.", string.Empty)),
+                    HumanReviewContractHash.ApplyPreview(new HumanReviewRedactedPreview(HumanReviewPreviewKind.Result, "Pre-dispatch release", "Approval may release only the exact retained undispatched effect.", string.Empty)),
+                    HumanReviewContractHash.ApplyPreview(new HumanReviewRedactedPreview(HumanReviewPreviewKind.Evidence, "Effect binding", "The immutable effect identity and preparation evidence are retained without raw payloads.", string.Empty)),
+                ],
+                new HumanReviewTiming(now, now.AddMinutes(10), now.AddHours(1)),
+                HumanReviewContractHash.ApplyProvenance(new HumanReviewProvenance(HumanReviewProvenanceKind.Server, "human-review-effect", requestOperationId, now, string.Empty)),
+                string.Empty));
+        }
+        catch (ArgumentException)
+        {
+            return null;
+        }
+    }
+
+    private async Task<RunAdvance> DispatchAndParkSequentialHumanReviewNodeAsync(
+        SequentialExecutionContext context,
+        CustomLoopRunRecord run,
+        GovernedLoopSequentialPlanNode node,
+        int attempt,
+        string attemptOperationId,
+        string actor,
+        CancellationToken cancellationToken)
+    {
+        var activation = RequireRunningSequentialActivation(run, node, attempt, attemptOperationId);
+        if (_humanReviewAdmissionService is null)
+        {
+            var unavailable = await TerminateAsync(
+                run,
+                actor,
+                CustomLoopRunStatus.NeedsReview,
+                "human_review_admission_unavailable",
+                "The exact Human Review admission boundary is unavailable; no review request was exposed.",
+                terminalAuditRecorder: context.AuditRecorder).ConfigureAwait(false);
+            return new RunAdvance(unavailable.Run, unavailable);
+        }
+
+        var graphNode = context.Artifact.Graph.Nodes.SingleOrDefault(candidate => string.Equals(candidate.Id, node.NodeId, StringComparison.Ordinal));
+        if (graphNode is null
+            || !Equals(graphNode.Descriptor, node.Descriptor)
+            || !GovernedLoopSequentialNodeDescriptors.IsHumanReview(node.Descriptor)
+            || !GovernedLoopHumanReviewNodeCatalogContract.HasExactNodeSemantics(graphNode))
+        {
+            var invalid = await TerminateAsync(
+                run,
+                actor,
+                CustomLoopRunStatus.NeedsReview,
+                "human_review_configuration_invalid",
+                "The exact admitted Human Review node configuration is unavailable or malformed; no review request was exposed.",
+                terminalAuditRecorder: context.AuditRecorder).ConfigureAwait(false);
+            return new RunAdvance(invalid.Run, invalid);
+        }
+
+        var now = Now(run);
+        var sequentialNode = new SequentialNodeExecutionContext(
+            context.Anchor.AdapterBinding,
+            context.Artifact,
+            context.Plan,
+            node,
+            activation,
+            attempt,
+            attemptOperationId,
+            context.AllowedCapabilityIds,
+            context.AuditRecorder);
+        var reviewBlockedEvent = WithSequentialEvidence(
+            Event(
+                run,
+                now,
+                CustomLoopRunEventKind.NodeOutcomeObserved,
+                "The exact canonical Human Review node durably parked before its review request became observable.",
+                activation.CycleIteration ?? run.Checkpoint.Iteration,
+                node.NodeId,
+                attempt),
+            sequentialNode,
+            CustomLoopSequentialNodeEvidenceKind.ReviewRequested,
+            CustomLoopSequentialNodeDisposition.ReviewPending);
+        var blocked = GovernedLoopSequentialFrontierMachine.ReviewBlockRunning(
+            run.Frontier,
+            context.Anchor.AdapterBinding,
+            context.Plan,
+            node,
+            activation,
+            attempt,
+            attemptOperationId,
+            reviewBlockedEvent.EventId,
+            CustomLoopSequentialOutcomeArtifactHash.Compute(reviewBlockedEvent),
+            now);
+        if (blocked.Status != GovernedLoopSequentialFrontierTransitionStatus.Applied || blocked.Frontier is null)
+        {
+            var invalid = await TerminateAsync(
+                run,
+                actor,
+                CustomLoopRunStatus.NeedsReview,
+                "human_review_frontier_park_invalid",
+                "The exact Running Human Review activation could not enter its immutable ReviewBlocked frontier; no request was exposed.",
+                terminalAuditRecorder: context.AuditRecorder).ConfigureAwait(false);
+            return new RunAdvance(invalid.Run, invalid);
+        }
+
+        var request = CreateHumanReviewRequest(run, context, node, activation, blocked.Frontier, graphNode, now);
+        if (request is null)
+        {
+            var invalid = await TerminateAsync(
+                run,
+                actor,
+                CustomLoopRunStatus.NeedsReview,
+                "human_review_request_invalid",
+                "The exact Human Review request could not be composed from immutable admission and parked-frontier evidence; no request was exposed.",
+                terminalAuditRecorder: context.AuditRecorder).ConfigureAwait(false);
+            return new RunAdvance(invalid.Run, invalid);
+        }
+
+        CustomLoopRunStoreResult admitted;
+        try
+        {
+            admitted = await _humanReviewAdmissionService.AdmitAsync(
+                new HumanReviewAdmissionCommand(run.Id, run.LifecycleVersion, request, blocked.Frontier, reviewBlockedEvent),
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.NeedsReview, run, "The Human Review admission outcome is unavailable; no subsequent node was dispatched."));
+        }
+
+        var durable = admitted.Run;
+        if (admitted.Status is not (CustomLoopRunStoreStatus.Updated or CustomLoopRunStoreStatus.AlreadyCreated)
+            || durable is null
+            || durable.Status != CustomLoopRunStatus.Paused
+            || durable.Frontier?.Payload.Status != GovernedLoopFrontierStatus.ReviewBlocked
+            || durable.HumanReview is null
+            || !string.Equals(durable.HumanReview.Request.RequestHash, request.RequestHash, StringComparison.Ordinal))
+        {
+            return new RunAdvance(null, Result(
+                admitted.Status == CustomLoopRunStoreStatus.Conflict ? CustomLoopOrderedRunStatus.Conflict : CustomLoopOrderedRunStatus.InvalidState,
+                durable ?? run,
+                "The exact Human Review admission did not durably retain the expected immutable ReviewBlocked frontier and request."));
+        }
+
+        return new RunAdvance(null, Result(CustomLoopOrderedRunStatus.Paused, durable, "The exact Human Review request is durably review-blocked before it becomes observable."));
+    }
+
+    private static HumanReviewRequest? CreateHumanReviewRequest(
+        CustomLoopRunRecord run,
+        SequentialExecutionContext context,
+        GovernedLoopSequentialPlanNode node,
+        GovernedLoopNodeExecutionEvidence activation,
+        GovernedLoopFrontierPosture blockedFrontier,
+        GovernedLoopNodeDefinition graphNode,
+        DateTimeOffset now)
+    {
+        try
+        {
+            if (!HumanReviewOrderedNodeBindingContract.TryGetApprovalScopeId(graphNode, out var approvalScopeId)
+                || !HumanReviewOrderedNodeBindingContract.TryGetReviewerRoleId(graphNode, out var reviewerRoleId)
+                || activation.Attempt is null) return null;
+
+            var adapter = context.Anchor.AdapterBinding;
+            var requestOperationId = CreateHumanReviewIdentity(
+                "human-review-operation-",
+                run.Id,
+                adapter.ExecutionBinding.ExecutionGeneration.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                node.NodeId,
+                activation.ActivationOrdinal.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                activation.VisitOrdinal.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                activation.AttemptOperationId!);
+            var requestId = CreateHumanReviewIdentity("human-review-request-", requestOperationId);
+            var binding = HumanReviewContractHash.ApplyBinding(new HumanReviewBinding(
+                HumanReviewContractLimits.CurrentSchemaVersion,
+                adapter.WorkspaceId,
+                run.Id,
+                adapter.ExecutionBinding.Revision.GraphId,
+                adapter.ExecutionBinding.Revision.RevisionId,
+                adapter.ExecutionBinding.Revision.ExecutableHash,
+                node.NodeId,
+                activation.ActivationOrdinal,
+                null,
+                activation.Attempt.Value,
+                CreateHumanReviewIdentity("human-review-frontier-", requestOperationId),
+                blockedFrontier.Payload.FrontierVersion,
+                blockedFrontier.Payload.ContentHash,
+                HumanReviewAuthorityBindingHash.FromProfile(adapter.AdmissionReceipt.Evidence.GrantProfile.ContentHash),
+                adapter.AdmissionReceipt.Evidence.GrantDependencyEvidenceHash,
+                GovernedLoopAdmissionContractHash.ComputeCapabilityAdmissionReferenceHash(adapter.AdmissionReceipt.Evidence.CapabilityAdmission),
+                adapter.AdmissionReceipt.Evidence.ModelRoutingAdmission.ContentHash,
+                adapter.GraphArtifactHash,
+                adapter.GraphLayoutHash,
+                HumanReviewOrderedNodeBindingContract.ComputePayloadHash(adapter, node.NodeId, approvalScopeId!),
+                null,
+                string.Empty));
+            var scope = HumanReviewContractHash.ApplyApprovalScope(new HumanReviewApprovalScope(HumanReviewApprovalScopeKind.Continuation, binding.BindingHash, null, string.Empty));
+            return HumanReviewContractHash.ApplyRequest(new HumanReviewRequest(
+                HumanReviewRequest.CurrentSchemaVersion,
+                requestId,
+                requestOperationId,
+                binding,
+                HumanReviewPurpose.Continuation,
+                [HumanReviewDecisionKind.Approve, HumanReviewDecisionKind.Reject, HumanReviewDecisionKind.Cancel, HumanReviewDecisionKind.RequestInformation],
+                [new HumanReviewReviewerScope(reviewerRoleId!, [approvalScopeId!])],
+                scope,
+                [
+                    HumanReviewContractHash.ApplyPreview(new HumanReviewRedactedPreview(HumanReviewPreviewKind.Action, "Human review", "A governed loop is parked for an authenticated decision.", string.Empty)),
+                    HumanReviewContractHash.ApplyPreview(new HumanReviewRedactedPreview(HumanReviewPreviewKind.Result, "Continuation", "Only the exact retained continuation may advance after review.", string.Empty)),
+                    HumanReviewContractHash.ApplyPreview(new HumanReviewRedactedPreview(HumanReviewPreviewKind.Evidence, "Scope", "The immutable graph review scope is retained without raw payloads.", string.Empty)),
+                ],
+                new HumanReviewTiming(now, now.AddMinutes(10), now.AddHours(1)),
+                HumanReviewContractHash.ApplyProvenance(new HumanReviewProvenance(HumanReviewProvenanceKind.Server, "human-review-node", requestOperationId, now, string.Empty)),
+                string.Empty));
+        }
+        catch (ArgumentException)
+        {
+            return null;
+        }
+    }
+
+    private static string CreateHumanReviewIdentity(string prefix, params string[] coordinates)
+        => prefix + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join('\n', coordinates))));
 
     private async Task<RunAdvance> DispatchAndParkSequentialHumanInputNodeAsync(
         SequentialExecutionContext context,
@@ -6115,6 +6613,14 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             return advance;
         }
 
+        if (handler.WasInvoked
+            && advance?.Terminal is { Status: CustomLoopOrderedRunStatus.Conflict }
+            && stoppedPureRun is not null
+            && FindSequentialNodeEvidence(stoppedPureRun, node, activation, attempt) is null)
+        {
+            return advance;
+        }
+
         var current = advance?.Run ?? advance?.Terminal?.Run;
         if (current is null)
         {
@@ -8461,6 +8967,92 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         return new RunAdvance(persisted.Run, Result(CustomLoopOrderedRunStatus.Paused, persisted.Run, "The run is Paused at a committed checkpoint; no later attempt was dispatched."));
     }
 
+    private static bool HasExactPreDispatchEffectReleaseHandoff(
+        CustomLoopRunRecord run,
+        GovernedLoopSequentialPlanNode node,
+        GovernedLoopNodeExecutionEvidence activation,
+        int attempt,
+        string attemptOperationId)
+    {
+        var review = run.HumanReview;
+        var request = review?.Request;
+        var receipt = review?.Continuation?.Completion?.ReleaseReceipt;
+        return request?.Purpose == HumanReviewPurpose.PreDispatchEffect
+            && request.Binding.EffectAttempt is not null
+            && HumanReviewContractHash.MatchesEffectAttempt(request.Binding.EffectAttempt)
+            && receipt is not null
+            && receipt.Kind == HumanReviewContinuationReleaseKind.PreDispatchEffect
+            && receipt.Disposition == HumanReviewContinuationReleaseDisposition.Released
+            && receipt.EffectReceiptHash is not null
+            && string.Equals(receipt.FrontierReceiptHash, run.Frontier?.Payload.ContentHash, StringComparison.Ordinal)
+            && string.Equals(request.Binding.NodeId, node.NodeId, StringComparison.Ordinal)
+            && request.Binding.Attempt == attempt
+            && (request.Binding.ActivationOrdinal is null || request.Binding.ActivationOrdinal == activation.ActivationOrdinal)
+            && (request.Binding.VisitOrdinal is null || request.Binding.VisitOrdinal == activation.VisitOrdinal)
+            && activation.Status == GovernedLoopNodeExecutionStatus.Running
+            && activation.Attempt == attempt
+            && string.Equals(activation.AttemptOperationId, attemptOperationId, StringComparison.Ordinal)
+            && run.Events.LastOrDefault() is { Kind: CustomLoopRunEventKind.LifecycleChanged } lifecycle
+            && string.Equals(lifecycle.EventId, receipt.ReleaseOperationId, StringComparison.Ordinal);
+    }
+
+    private static bool IsSupersededPreDispatchReviewParkingEvidence(
+        CustomLoopRunRecord run,
+        CustomLoopRunEvent item,
+        GovernedLoopSequentialPlanNode node,
+        GovernedLoopNodeExecutionEvidence activation,
+        int attempt)
+    {
+        var review = run.HumanReview;
+        var request = review?.Request;
+        var continuation = review?.Continuation;
+        var receipt = continuation?.Completion?.ReleaseReceipt;
+        return item.SequentialNodeEvidence is
+        {
+            Kind: CustomLoopSequentialNodeEvidenceKind.ReviewRequested,
+            Disposition: CustomLoopSequentialNodeDisposition.ReviewPending,
+        }
+            && request?.Purpose == HumanReviewPurpose.PreDispatchEffect
+            && request.Binding.EffectAttempt is not null
+            && HumanReviewContractHash.MatchesEffectAttempt(request.Binding.EffectAttempt)
+            && receipt is
+            {
+                Kind: HumanReviewContinuationReleaseKind.PreDispatchEffect,
+                Disposition: HumanReviewContinuationReleaseDisposition.Released,
+                EffectReceiptHash: not null,
+            }
+            && string.Equals(receipt.FrontierReceiptHash, run.Frontier?.Payload.ContentHash, StringComparison.Ordinal)
+            && string.Equals(request.Binding.NodeId, node.NodeId, StringComparison.Ordinal)
+            && request.Binding.Attempt == attempt
+            && (request.Binding.ActivationOrdinal is null || request.Binding.ActivationOrdinal == activation.ActivationOrdinal)
+            && (request.Binding.VisitOrdinal is null || request.Binding.VisitOrdinal == activation.VisitOrdinal)
+            && activation.Status == GovernedLoopNodeExecutionStatus.Running
+            && activation.Attempt == attempt
+            && HumanReviewContinuationContractValidator.ValidateState(request, review!.ContinuationReservation, continuation).IsValid
+            && run.Events.Any(candidate => candidate.Kind == CustomLoopRunEventKind.LifecycleChanged
+                && string.Equals(candidate.EventId, receipt.ReleaseOperationId, StringComparison.Ordinal)
+                && candidate.Sequence > item.Sequence);
+    }
+
+    private static HumanReviewPreDispatchEffectRelease? TryGetPreDispatchEffectHumanReviewRelease(
+        CustomLoopRunRecord run,
+        GovernedLoopSequentialPlanNode node,
+        GovernedLoopNodeExecutionEvidence activation,
+        int attempt,
+        string attemptOperationId)
+    {
+        if (!HasExactPreDispatchEffectReleaseHandoff(run, node, activation, attempt, attemptOperationId))
+        {
+            return null;
+        }
+
+        var request = run.HumanReview!.Request;
+        var receipt = run.HumanReview.Continuation!.Completion!.ReleaseReceipt;
+        return HumanReviewContinuationContractValidator.ValidateState(request, run.HumanReview.ContinuationReservation, run.HumanReview.Continuation).IsValid
+            ? new HumanReviewPreDispatchEffectRelease(request, receipt)
+            : null;
+    }
+
     private static bool HasCommittedUndispatchedPauseBoundary(CustomLoopRunRecord run)
     {
         var checkpointSequence = run.Checkpoint.LastCommittedSequence;
@@ -9743,7 +10335,28 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             && CustomLoopSequentialNodeEvidenceHash.Matches(evidence)
             && CustomLoopSequentialOutcomeArtifactHash.Matches(item)
             && SequentialEvidenceEventMatchesNode(item, node.Descriptor.Kind)).ToArray();
-        return matches.Length == 1 ? matches[0] : null;
+        return SelectExactSequentialOutcome(matches, node.Descriptor.Kind);
+    }
+
+    private static CustomLoopRunEvent? SelectExactSequentialOutcome(
+        IReadOnlyList<CustomLoopRunEvent> matches,
+        EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind nodeKind)
+    {
+        if (matches.Count == 1) return matches[0];
+        if (nodeKind == EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.HumanReview
+            && matches.Count == 2
+            && matches[0].SequentialNodeEvidence is { } firstEvidence
+            && matches[1].SequentialNodeEvidence is { } secondEvidence
+            && firstEvidence.Kind == CustomLoopSequentialNodeEvidenceKind.ReviewRequested
+            && firstEvidence.Disposition == CustomLoopSequentialNodeDisposition.ReviewPending
+            && secondEvidence.Kind != CustomLoopSequentialNodeEvidenceKind.ReviewRequested
+            && secondEvidence.Disposition != CustomLoopSequentialNodeDisposition.ReviewPending
+            && matches[0].Sequence < matches[1].Sequence)
+        {
+            return matches[1];
+        }
+
+        return null;
     }
 
     private static bool EvidenceMatchesActivation(
@@ -9776,7 +10389,8 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         => (kind, disposition) is
             (CustomLoopSequentialNodeEvidenceKind.CompletedOutcome, CustomLoopSequentialNodeDisposition.Completed)
             or (CustomLoopSequentialNodeEvidenceKind.DefinitiveRejection, CustomLoopSequentialNodeDisposition.Rejected)
-            or (CustomLoopSequentialNodeEvidenceKind.AmbiguityAttention, CustomLoopSequentialNodeDisposition.NeedsReview);
+            or (CustomLoopSequentialNodeEvidenceKind.AmbiguityAttention, CustomLoopSequentialNodeDisposition.NeedsReview)
+            or (CustomLoopSequentialNodeEvidenceKind.ReviewRequested, CustomLoopSequentialNodeDisposition.ReviewPending);
 
     private static GovernedLoopFrontierPosture? ProjectTerminalFrontier(
         CustomLoopRunRecord run,
@@ -11570,6 +12184,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             CustomLoopSequentialNodeDisposition.Completed => GovernedLoopSequentialNodeHandlerResultStatus.Completed,
             CustomLoopSequentialNodeDisposition.Rejected => GovernedLoopSequentialNodeHandlerResultStatus.Rejected,
             CustomLoopSequentialNodeDisposition.NeedsReview => GovernedLoopSequentialNodeHandlerResultStatus.NeedsReview,
+            CustomLoopSequentialNodeDisposition.ReviewPending => GovernedLoopSequentialNodeHandlerResultStatus.ReviewPending,
             _ => GovernedLoopSequentialNodeHandlerResultStatus.Unknown,
         };
 
@@ -11581,6 +12196,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             GovernedLoopSequentialNodeDispatchStatus.Completed => disposition == GovernedLoopSequentialNodeHandlerResultStatus.Completed,
             GovernedLoopSequentialNodeDispatchStatus.Rejected => disposition == GovernedLoopSequentialNodeHandlerResultStatus.Rejected,
             GovernedLoopSequentialNodeDispatchStatus.NeedsReview => disposition == GovernedLoopSequentialNodeHandlerResultStatus.NeedsReview,
+            GovernedLoopSequentialNodeDispatchStatus.ReviewPending => disposition == GovernedLoopSequentialNodeHandlerResultStatus.ReviewPending,
             _ => false,
         };
 
@@ -11639,9 +12255,10 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             && evidence.ExecutionGeneration == binding.ExecutionBinding.ExecutionGeneration
             && CustomLoopSequentialNodeEvidenceHash.Matches(evidence)
             && CustomLoopSequentialOutcomeArtifactHash.Matches(item)
+            && !IsSupersededPreDispatchReviewParkingEvidence(run, item, node, activation, attempt)
             && SequentialEvidenceEventMatchesNode(item, node.Descriptor.Kind))
             .ToArray();
-        return matches.Length == 1 ? matches[0] : null;
+        return SelectExactSequentialOutcome(matches, node.Descriptor.Kind);
     }
 
     private static bool HasSequentialTerminalCandidate(
@@ -11669,14 +12286,17 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
                 or EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Validate
                 or EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Condition
                 or EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Join
-                or EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Action
                 or EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Wait
                 or EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.HumanInput
                 => runEvent.Kind is CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeAttemptFailed,
+            EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Action
+                => runEvent.Kind is CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeAttemptFailed or CustomLoopRunEventKind.NodeOutcomeObserved,
             EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Exit
                 => runEvent.Kind is CustomLoopRunEventKind.ExitDecisionCompleted or CustomLoopRunEventKind.NodeOutcomeObserved or CustomLoopRunEventKind.NodeAttemptFailed,
             EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.Fail
                 => runEvent.Kind == CustomLoopRunEventKind.NodeAttemptFailed,
+            EmbodySense.Core.Common.Loops.Models.Custom.Graph.GovernedLoopNodeKind.HumanReview
+                => runEvent.Kind is CustomLoopRunEventKind.NodeAttemptCompleted or CustomLoopRunEventKind.NodeOutcomeObserved,
             _ => false,
         };
 

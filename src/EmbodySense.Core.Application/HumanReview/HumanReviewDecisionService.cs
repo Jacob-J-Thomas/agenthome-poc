@@ -82,7 +82,14 @@ public sealed class HumanReviewDecisionService : IHumanReviewDecisionService
                 return Result(HumanReviewDecisionServiceStatus.Unavailable);
             }
 
-            if (!HumanReviewContractSnapshot.TryCaptureRequest(state.Request, out var requestSnapshot, out _) || requestSnapshot is null)
+            var operationMatches = FindOperationMatches(state, proposal.DecisionOperationId);
+            if (operationMatches.Length > 1)
+            {
+                return Result(HumanReviewDecisionServiceStatus.Invalid);
+            }
+
+            var operationOwner = operationMatches.Length == 1 ? operationMatches[0].Request : state.Request;
+            if (!HumanReviewContractSnapshot.TryCaptureRequest(operationOwner, out var requestSnapshot, out _) || requestSnapshot is null)
             {
                 return Result(HumanReviewDecisionServiceStatus.Invalid);
             }
@@ -99,11 +106,11 @@ public sealed class HumanReviewDecisionService : IHumanReviewDecisionService
                 return Result(HumanReviewDecisionServiceStatus.Denied);
             }
 
-            var permitted = IsEligible(state.Request, proposal, authorization);
+            var permitted = IsEligible(operationOwner, proposal, authorization);
             // TODO(#553): Enforce or explicitly narrow cross-run operation uniqueness once Phase 4 owns a canonical global index: https://github.com/Jacob-J-Thomas/agenthome-poc/issues/553
-            var existing = state.OperationReceipts.SingleOrDefault(item => string.Equals(item.DecisionOperationId, proposal.DecisionOperationId, StringComparison.Ordinal));
-            if (existing is not null)
+            if (operationMatches.Length == 1)
             {
+                var existing = operationMatches[0].Receipt;
                 // Authorization is intentionally re-evaluated before a durable replay can be disclosed.
                 return !permitted
                         ? Result(HumanReviewDecisionServiceStatus.Denied)
@@ -147,7 +154,7 @@ public sealed class HumanReviewDecisionService : IHumanReviewDecisionService
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                var recovered = await TryRecoverExactOperationAsync(command.RunId, state.Request.RequestHash, proposal, permitted);
+                var recovered = await TryRecoverExactOperationAsync(command.RunId, operationOwner.RequestHash, proposal, permitted);
                 if (recovered is not null)
                 {
                     return recovered;
@@ -159,7 +166,7 @@ public sealed class HumanReviewDecisionService : IHumanReviewDecisionService
             {
                 if (attempt + 1 == MaximumAttempts)
                 {
-                    var recovered = await TryRecoverExactOperationAsync(command.RunId, state.Request.RequestHash, proposal, permitted);
+                    var recovered = await TryRecoverExactOperationAsync(command.RunId, operationOwner.RequestHash, proposal, permitted);
                     if (recovered is not null)
                     {
                         return recovered;
@@ -185,7 +192,7 @@ public sealed class HumanReviewDecisionService : IHumanReviewDecisionService
 
                 if (attempt + 1 == MaximumAttempts)
                 {
-                    var recovered = await TryRecoverExactOperationAsync(command.RunId, state.Request.RequestHash, proposal, permitted);
+                    var recovered = await TryRecoverExactOperationAsync(command.RunId, operationOwner.RequestHash, proposal, permitted);
                     return recovered ?? Result(HumanReviewDecisionServiceStatus.Unavailable);
                 }
 
@@ -539,19 +546,21 @@ public sealed class HumanReviewDecisionService : IHumanReviewDecisionService
         try
         {
             var durable = await _runs.GetAsync(runId, CancellationToken.None);
-            if (durable is null || !IsCanonicalReviewBlockedRun(durable, out var state) || !string.Equals(state.Request.RequestHash, requestHash, StringComparison.Ordinal))
+            if (durable is null || !IsCanonicalReviewBlockedRun(durable, out var state))
             {
                 return null;
             }
 
-            var receipt = state.OperationReceipts.SingleOrDefault(item => string.Equals(item.DecisionOperationId, proposal.DecisionOperationId, StringComparison.Ordinal));
-            if (receipt is null || !string.Equals(receipt.ProposalHash, proposal.ProposalHash, StringComparison.Ordinal))
+            var operationMatches = FindOperationMatches(state, proposal.DecisionOperationId);
+            if (operationMatches.Length != 1
+                || !string.Equals(operationMatches[0].Request.RequestHash, requestHash, StringComparison.Ordinal)
+                || !string.Equals(operationMatches[0].Receipt.ProposalHash, proposal.ProposalHash, StringComparison.Ordinal))
             {
                 return null;
             }
 
             return permitted
-                ? Result(HumanReviewDecisionServiceStatus.Replayed, CopyReceipt(receipt))
+                ? Result(HumanReviewDecisionServiceStatus.Replayed, CopyReceipt(operationMatches[0].Receipt))
                 : Result(HumanReviewDecisionServiceStatus.Denied);
         }
         catch
@@ -559,6 +568,18 @@ public sealed class HumanReviewDecisionService : IHumanReviewDecisionService
             return null;
         }
     }
+
+    private static (HumanReviewRequest Request, HumanReviewDecisionOperationReceipt Receipt)[] FindOperationMatches(HumanReviewRunState state, string operationId)
+        => new[] { state }
+            .Concat(state.CompletedReviews.IsDefault ? [] : state.CompletedReviews)
+            .Where(candidate => candidate is not null)
+            .SelectMany(candidate => candidate!.OperationReceipts.IsDefault
+                ? []
+                : candidate.OperationReceipts
+                    .Where(receipt => receipt is not null && string.Equals(receipt.DecisionOperationId, operationId, StringComparison.Ordinal))
+                    .Select(receipt => (candidate.Request, Receipt: receipt!)))
+            .Take(2)
+            .ToArray();
 
     private static bool TryGetExactCommittedReceipt(CustomLoopRunRecord expectedCandidate, CustomLoopRunRecord? committed, HumanReviewDecisionOperationReceipt expected, out HumanReviewDecisionOperationReceipt receipt)
     {

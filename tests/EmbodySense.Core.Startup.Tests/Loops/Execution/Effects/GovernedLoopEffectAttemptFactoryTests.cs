@@ -16,6 +16,7 @@ using EmbodySense.Core.Common.Loops.Execution.Effects.Models;
 using EmbodySense.Core.Common.Loops.Execution.Models;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Capabilities;
+using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Core.Startup.Loops.Execution.Effects;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Tests.Support;
@@ -28,6 +29,8 @@ public sealed class GovernedLoopEffectAttemptFactoryTests
     public async Task Inert_factory_prevents_dispatch_when_current_catalog_truth_is_unavailable()
     {
         using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        using var runs = new CustomLoopRunStore(paths);
         var fixture = GovernedLoopEffectAttemptTestFixture.Create();
         var catalog = new ProbeCatalogStore(fixture) { Unavailable = true };
         var operation = new ProbeOperation(fixture.Descriptor);
@@ -35,7 +38,8 @@ public sealed class GovernedLoopEffectAttemptFactoryTests
         Assert.True(CapabilityVersion.TryParse("1.0.0", out var hostVersion, out _));
         Assert.True(CapabilityPlatform.TryParse("linux/x64", out var hostPlatform, out _));
         var facade = GovernedLoopEffectAttemptFactory.Create(
-            new WorkspacePaths(workspace.RootPath),
+            paths,
+            runs,
             catalog,
             new GovernedActuatorOperationRegistry([operation]),
             authority,
@@ -57,6 +61,8 @@ public sealed class GovernedLoopEffectAttemptFactoryTests
     public async Task Inert_factory_executes_one_probe_and_replays_committed_evidence_after_restart()
     {
         using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        using var runs = new CustomLoopRunStore(paths);
         var fixture = GovernedLoopEffectAttemptTestFixture.Create();
         var catalog = new ProbeCatalogStore(fixture);
         var operation = new ProbeOperation(fixture.Descriptor);
@@ -64,7 +70,8 @@ public sealed class GovernedLoopEffectAttemptFactoryTests
         Assert.True(CapabilityVersion.TryParse("1.0.0", out var hostVersion, out _));
         Assert.True(CapabilityPlatform.TryParse("linux/x64", out var hostPlatform, out _));
         var facade = GovernedLoopEffectAttemptFactory.Create(
-            new WorkspacePaths(workspace.RootPath),
+            paths,
+            runs,
             catalog,
             new GovernedActuatorOperationRegistry([operation]),
             authority,
@@ -84,7 +91,8 @@ public sealed class GovernedLoopEffectAttemptFactoryTests
         var replayCatalog = new ProbeCatalogStore(fixture) { Unavailable = true };
         var replayOperation = new ProbeOperation(fixture.Descriptor);
         var replayFacade = GovernedLoopEffectAttemptFactory.Create(
-            new WorkspacePaths(workspace.RootPath),
+            paths,
+            runs,
             replayCatalog,
             new GovernedActuatorOperationRegistry([replayOperation]),
             new UnusedAuthorityBoundary(),
@@ -106,11 +114,13 @@ public sealed class GovernedLoopEffectAttemptFactoryTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
+        using var runs = new CustomLoopRunStore(paths);
         var trust = new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath);
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
         var transaction = new CapabilityAuthorityTransaction(paths);
         var facade = GovernedLoopEffectAttemptFactory.Create(
             paths,
+            runs,
             trust,
             transaction,
             new GovernedActuatorOperationRegistry([]),
@@ -128,12 +138,14 @@ public sealed class GovernedLoopEffectAttemptFactoryTests
         using var workspace = new TestWorkspace();
         using var otherWorkspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
+        using var runs = new CustomLoopRunStore(paths);
         var trust = new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath);
         var transaction = new CapabilityAuthorityTransaction(paths);
         var unrelatedTransaction = new CapabilityAuthorityTransaction(new WorkspacePaths(otherWorkspace.RootPath));
 
         var exception = Assert.Throws<ArgumentException>(() => GovernedLoopEffectAttemptFactory.Create(
             paths,
+            runs,
             trust,
             transaction,
             new GovernedActuatorOperationRegistry([]),
@@ -148,16 +160,18 @@ public sealed class GovernedLoopEffectAttemptFactoryTests
     {
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
+        using var runs = new CustomLoopRunStore(paths);
         var trust = new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath);
         var transaction = new CapabilityAuthorityTransaction(paths);
         var registry = new GovernedActuatorOperationRegistry([]);
         var authority = new UnusedAuthorityBoundary(transaction);
 
-        Assert.Throws<ArgumentNullException>(() => GovernedLoopEffectAttemptFactory.Create(null!, trust, transaction, registry, authority));
-        Assert.Throws<ArgumentNullException>(() => GovernedLoopEffectAttemptFactory.Create(paths, null!, transaction, registry, authority));
-        Assert.Throws<ArgumentNullException>(() => GovernedLoopEffectAttemptFactory.Create(paths, trust, null!, registry, authority));
-        Assert.Throws<ArgumentNullException>(() => GovernedLoopEffectAttemptFactory.Create(paths, trust, transaction, null!, authority));
-        Assert.Throws<ArgumentNullException>(() => GovernedLoopEffectAttemptFactory.Create(paths, trust, transaction, registry, null!));
+        Assert.Throws<ArgumentNullException>(() => GovernedLoopEffectAttemptFactory.Create(null!, runs, trust, transaction, registry, authority));
+        Assert.Throws<ArgumentNullException>(() => GovernedLoopEffectAttemptFactory.Create(paths, null!, trust, transaction, registry, authority));
+        Assert.Throws<ArgumentNullException>(() => GovernedLoopEffectAttemptFactory.Create(paths, runs, null!, transaction, registry, authority));
+        Assert.Throws<ArgumentNullException>(() => GovernedLoopEffectAttemptFactory.Create(paths, runs, trust, null!, registry, authority));
+        Assert.Throws<ArgumentNullException>(() => GovernedLoopEffectAttemptFactory.Create(paths, runs, trust, transaction, null!, authority));
+        Assert.Throws<ArgumentNullException>(() => GovernedLoopEffectAttemptFactory.Create(paths, runs, trust, transaction, registry, null!));
     }
 
     private sealed class UnusedAuthorityBoundary(ICapabilityAuthorityTransaction? authorityTransaction = null) : IGovernedLoopEffectAuthorityDecisionBoundary

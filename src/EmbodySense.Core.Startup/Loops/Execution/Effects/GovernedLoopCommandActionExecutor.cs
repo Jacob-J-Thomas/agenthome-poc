@@ -77,7 +77,8 @@ public sealed class GovernedLoopCommandActionExecutor : IGovernedLoopCommandActi
                     1,
                     command.CanonicalInput,
                     command.RequiredAuthority,
-                    request.AttemptOperationId),
+                    request.AttemptOperationId,
+                    request.HumanReviewRelease),
                 cancellationToken).ConfigureAwait(false);
             if (result.Status is GovernedLoopEffectAttemptExecutionStatus.Committed or GovernedLoopEffectAttemptExecutionStatus.Replayed
                 && result.Attempt is { Payload.OutcomeEvidenceId: { } outcomeEvidenceId } attempt
@@ -110,8 +111,18 @@ public sealed class GovernedLoopCommandActionExecutor : IGovernedLoopCommandActi
                     or GovernedLoopEffectAttemptExecutionStatus.AuthorityStopped
                     or GovernedLoopEffectAttemptExecutionStatus.Conflict
                     or GovernedLoopEffectAttemptExecutionStatus.Backpressured
-                    or GovernedLoopEffectAttemptExecutionStatus.ApprovalRequired
                     => Rejected($"The structured command Action stopped before launch with posture `{result.Status}`."),
+                GovernedLoopEffectAttemptExecutionStatus.ApprovalRequired
+                    => new GovernedLoopCommandActionExecutionResult(
+                        GovernedLoopCommandActionExecutionStatus.ApprovalRequired,
+                        null,
+                        "The exact prepared command Action effect is durably parked for governed Human Review.",
+                        result.Attempt),
+                GovernedLoopEffectAttemptExecutionStatus.OperationInProgress
+                    => new GovernedLoopCommandActionExecutionResult(
+                        GovernedLoopCommandActionExecutionStatus.OperationInProgress,
+                        null,
+                        "Another executor owns the exact command Action effect attempt."),
                 _ => Review($"The structured command Action requires reconciliation with posture `{result.Status}`."),
             };
         }
