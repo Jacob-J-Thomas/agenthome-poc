@@ -71,6 +71,7 @@ public sealed class HumanReviewOrderedReleaseService : IHumanReviewContinuationR
         var run = await ReadAsync(action.RunId, cancellationToken).ConfigureAwait(false);
         if (run is null) return Continuation(HumanReviewContinuationReleaseStatus.Unavailable);
         if (TryContinuationReplay(run, action, out var replay)) return await ReplayContinuationAsync(run, action, replay!, cancellationToken).ConfigureAwait(false);
+        if (HasArchivedContinuationIdentity(run, action)) return Continuation(HumanReviewContinuationReleaseStatus.Invalid);
         if (!TryGetContinuation(run, action, out var review, out var state, out var claim)) return Continuation(HumanReviewContinuationReleaseStatus.Invalid);
 
         var currentReview = review!;
@@ -211,6 +212,7 @@ public sealed class HumanReviewOrderedReleaseService : IHumanReviewContinuationR
         var run = await ReadAsync(intent.RunId, cancellationToken).ConfigureAwait(false);
         if (run is null) return Action(HumanReviewDecisionActionReleaseStatus.Unavailable);
         if (TryDecisionReplay(run, intent, out var replay)) return await ReplayDecisionActionAsync(run, intent, replay!, cancellationToken).ConfigureAwait(false);
+        if (HasArchivedDecisionIdentity(run, intent)) return Action(HumanReviewDecisionActionReleaseStatus.Invalid);
         if (!TryGetDecisionAction(run, intent, out var review, out var decisionAction, out var claim)) return Action(HumanReviewDecisionActionReleaseStatus.Invalid);
         var context = await ResolveContextAsync(run, cancellationToken).ConfigureAwait(false);
         if (context is null) return Action(HumanReviewDecisionActionReleaseStatus.Unavailable);
@@ -782,7 +784,9 @@ public sealed class HumanReviewOrderedReleaseService : IHumanReviewContinuationR
 
     private static bool TryContinuationReplay(CustomLoopRunRecord run, HumanReviewContinuationActionIntent action, out HumanReviewContinuationCompletion? completion)
     {
-        var review = run.HumanReview;
+        var reviews = ReviewStates(run).Where(value => value.ContinuationReservation is { } reservation
+            && Equals(action.Reservation, new HumanReviewContinuationReservationReference(reservation.ReservationId, reservation.ReservationHash))).Take(2).ToArray();
+        var review = reviews.Length == 1 ? reviews[0] : null;
         var state = review?.Continuation;
         completion = state?.Completion;
         var receipt = completion?.ReleaseReceipt;
@@ -821,8 +825,9 @@ public sealed class HumanReviewOrderedReleaseService : IHumanReviewContinuationR
 
     private static bool TryDecisionReplay(CustomLoopRunRecord run, HumanReviewDecisionActionIntent intent, out HumanReviewDecisionActionCompletion? completion)
     {
-        var review = run.HumanReview;
-        var action = review?.DecisionActions.SingleOrDefault(item => item is not null && Equals(Reference(item.Reservation), intent.Reservation));
+        var matches = ReviewStates(run).SelectMany(review => review.DecisionActions.Where(value => value is not null && Equals(Reference(value.Reservation), intent.Reservation)).Select(value => (Review: review, Action: value!))).Take(2).ToArray();
+        var review = matches.Length == 1 ? matches[0].Review : null;
+        var action = matches.Length == 1 ? matches[0].Action : null;
         completion = action?.Completion;
         var terminal = ExactReviewTerminal(run, review?.Request, CustomLoopRunEventKind.NodeAttemptFailed);
         var expectedResult = intent.Decision.Kind switch
@@ -849,6 +854,26 @@ public sealed class HumanReviewOrderedReleaseService : IHumanReviewContinuationR
             && string.Equals(completion.ResultHash, expectedResult, StringComparison.Ordinal)
             && MatchesRetainedFrontier(run, completion.FrontierReceiptHash, intent.ActionOperationId)
             && string.Equals(intent.ActionOperationId, Id("action-operation", intent.Reservation.ReservationHash), StringComparison.Ordinal);
+    }
+
+    private static bool HasArchivedContinuationIdentity(CustomLoopRunRecord run, HumanReviewContinuationActionIntent action)
+        => run.HumanReview?.CompletedReviews.Any(review => review is not null
+            && review.ContinuationReservation is { } reservation
+            && Equals(action.Reservation, new HumanReviewContinuationReservationReference(reservation.ReservationId, reservation.ReservationHash))) == true;
+
+    private static bool HasArchivedDecisionIdentity(CustomLoopRunRecord run, HumanReviewDecisionActionIntent intent)
+        => run.HumanReview?.CompletedReviews.Any(review => review is not null
+            && review.DecisionActions.Any(action => action is not null && Equals(intent.Reservation, Reference(action.Reservation)))) == true;
+
+    private static IEnumerable<HumanReviewRunState> ReviewStates(CustomLoopRunRecord run)
+    {
+        if (run.HumanReview is not { } current) yield break;
+        yield return current;
+        if (current.CompletedReviews.IsDefault) yield break;
+        foreach (var archived in current.CompletedReviews)
+        {
+            if (archived is not null) yield return archived;
+        }
     }
 
     private static CustomLoopRunEvent? ExactReviewTerminal(CustomLoopRunRecord run, HumanReviewRequest? request, CustomLoopRunEventKind kind)

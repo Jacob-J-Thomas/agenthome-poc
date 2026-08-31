@@ -179,9 +179,27 @@ public sealed class HumanReviewAdmissionService : IHumanReviewAdmissionService
             return false;
         }
 
-        return review.Continuation is { Completion: not null } or { Retirement: not null }
-            || review.DecisionActions.Any(action => action is not null && (action.Completion is not null || action.Retirement is not null));
+        if (review.AcceptedTerminalDecision.Kind == HumanReviewDecisionKind.Approve
+            && review.ContinuationReservation is { Decision: { } continuationDecision } reservation
+            && SameDecisionReference(continuationDecision, review.AcceptedTerminalDecision)
+            && review.Continuation is { } continuation
+            && (continuation.Completion?.Reservation is { } completionReservation && string.Equals(completionReservation.ReservationHash, reservation.ReservationHash, StringComparison.Ordinal)
+                || continuation.Retirement?.Reservation is { } retirementReservation && string.Equals(retirementReservation.ReservationHash, reservation.ReservationHash, StringComparison.Ordinal)))
+        {
+            return true;
+        }
+
+        return review.DecisionActions.Any(action => action is { Reservation.Decision: { } actionDecision }
+            && SameDecisionReference(actionDecision, review.AcceptedTerminalDecision)
+            && (action.Completion?.Reservation is { } completionReservation && string.Equals(completionReservation.ReservationHash, action.Reservation.ReservationHash, StringComparison.Ordinal)
+                || action.Retirement?.Reservation is { } retirementReservation && string.Equals(retirementReservation.ReservationHash, action.Reservation.ReservationHash, StringComparison.Ordinal)));
     }
+
+    private static bool SameDecisionReference(HumanReviewDecisionReference left, HumanReviewDecision right)
+        => string.Equals(left.DecisionId, right.DecisionId, StringComparison.Ordinal)
+            && string.Equals(left.DecisionOperationId, right.DecisionOperationId, StringComparison.Ordinal)
+            && left.Kind == right.Kind
+            && string.Equals(left.DecisionHash, right.DecisionHash, StringComparison.Ordinal);
 
     private static bool IsCanonical(CustomLoopRunRecord run)
     {

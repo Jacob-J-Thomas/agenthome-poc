@@ -269,6 +269,7 @@ public sealed class HumanReviewContinuationConsumer : IHumanReviewContinuationCo
         {
             var run = candidate.Run;
             if (run is null || !CustomLoopRunValidator.Validate(run).IsValid || run.HumanReview is not { } review
+                || HasArchivedIdentity(run, candidate, exactDecision)
                 || run.Status != CustomLoopRunStatus.Paused || run.Frontier?.Payload.Status != GovernedLoopFrontierStatus.ReviewBlocked
                 || run.SequentialAdapterBinding is not { } adapterBinding || !GovernedLoopSequentialContractValidator.Validate(adapterBinding).IsValid
                 || candidate.GraphArtifact is not { } graphArtifact || !MatchesGraph(adapterBinding, graphArtifact)
@@ -357,6 +358,26 @@ public sealed class HumanReviewContinuationConsumer : IHumanReviewContinuationCo
         catch
         {
             return false;
+        }
+    }
+
+    private static bool HasArchivedIdentity(CustomLoopRunRecord run, HumanReviewContinuationCandidate candidate, HumanReviewDecisionReference? exactDecision)
+    {
+        try
+        {
+            if (run.HumanReview is not { } current || current.CompletedReviews.IsDefault) return false;
+            var request = candidate.Continuation?.Wake.Request;
+            var reservation = candidate.Continuation?.Wake.Reservation;
+            return current.CompletedReviews.Any(archived => archived is not null
+                && (request is not null && string.Equals(request.RequestHash, archived.Request.RequestHash, StringComparison.Ordinal)
+                    || reservation is not null && archived.ContinuationReservation is { } retainedReservation
+                        && string.Equals(reservation.ReservationHash, retainedReservation.ReservationHash, StringComparison.Ordinal)
+                    || exactDecision is not null && (archived.AcceptedDecisions.Any(value => SameDecisionReference(exactDecision, value))
+                        || archived.DecisionActions.Any(value => value is not null && Equals(exactDecision, value.Reservation.Decision)))));
+        }
+        catch
+        {
+            return true;
         }
     }
 

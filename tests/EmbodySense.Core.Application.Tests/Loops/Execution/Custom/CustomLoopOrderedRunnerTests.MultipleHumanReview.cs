@@ -131,14 +131,55 @@ public sealed partial class CustomLoopOrderedRunnerTests
         Assert.Equal(HumanReviewLifecycleStatus.Pending, second.Lifecycle.Status);
         Assert.True(CustomLoopRunValidator.Validate(store.Current).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(store.Current).Errors));
 
-        var secondDecision = await new HumanReviewDecisionService(
+        var archivedReplay = await new HumanReviewDecisionService(
             store,
             new HumanReviewDecisionTestAuthorizer { ReviewerRoleId = "governed-reviewer", ScopeIds = ["review-scope-one"] },
+            new HumanReviewDecisionTestClock(store.Current.UpdatedAtUtc.AddMinutes(1))).DecideAsync(
+                new HumanReviewDecisionCommand(store.Current.Id, store.Current.LifecycleVersion, "approve-first-review", HumanReviewDecisionKind.Approve, null));
+        Assert.Equal(HumanReviewDecisionServiceStatus.Replayed, archivedReplay.Status);
+        Assert.Equal(firstRequest.RequestHash, archivedReplay.Receipt?.Request.RequestHash);
+
+        var archivedReuse = await new HumanReviewDecisionService(
+            store,
+            new HumanReviewDecisionTestAuthorizer { ReviewerRoleId = "governed-reviewer", ScopeIds = ["review-scope-one"] },
+            new HumanReviewDecisionTestClock(store.Current.UpdatedAtUtc.AddMinutes(1))).DecideAsync(
+                new HumanReviewDecisionCommand(store.Current.Id, store.Current.LifecycleVersion, "approve-first-review", HumanReviewDecisionKind.Reject, null));
+        Assert.Equal(HumanReviewDecisionServiceStatus.Conflict, archivedReuse.Status);
+        Assert.Equal(HumanReviewDecisionKind.Approve, Assert.Single(Assert.IsType<HumanReviewRunState>(store.Current.HumanReview).CompletedReviews).AcceptedTerminalDecision?.Kind);
+
+        var replayedRelease = await release.ReleaseAsync(action, completion);
+        Assert.Equal(HumanReviewContinuationReleaseStatus.Completed, replayedRelease.Status);
+        Assert.Equal(completion.ReleaseReceipt.ReleaseOperationId, replayedRelease.Completion?.ReleaseReceipt.ReleaseOperationId);
+        Assert.Equal(second.Request.RequestHash, Assert.IsType<HumanReviewRunState>(store.Current.HumanReview).Request.RequestHash);
+
+        var secondDecision = await new HumanReviewDecisionService(
+            store,
+            new HumanReviewDecisionTestAuthorizer { ReviewerRoleId = "governed-reviewer", ScopeIds = ["review-scope-two"] },
             new HumanReviewDecisionTestClock(store.Current.UpdatedAtUtc.AddMinutes(1))).DecideAsync(
                 new HumanReviewDecisionCommand(store.Current.Id, store.Current.LifecycleVersion, "approve-second-review", HumanReviewDecisionKind.Approve, null));
         Assert.Equal(HumanReviewDecisionServiceStatus.Accepted, secondDecision.Status);
         Assert.Equal(firstRequest.RequestHash, Assert.Single(Assert.IsType<HumanReviewRunState>(store.Current.HumanReview).CompletedReviews).Request.RequestHash);
         Assert.True(CustomLoopRunValidator.Validate(store.Current).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(store.Current).Errors));
+
+        var archivedParkingIndex = Array.FindIndex(store.Current.Events.ToArray(), item => item.SequentialNodeEvidence?.Kind == CustomLoopSequentialNodeEvidenceKind.ReviewRequested && string.Equals(item.SequentialNodeEvidence.NodeId, "human-review-one", StringComparison.Ordinal));
+        Assert.True(archivedParkingIndex >= 0);
+        var archivedParking = store.Current.Events[archivedParkingIndex];
+        var substitutedParking = archivedParking with { StepId = "human-review-two", SequentialNodeEvidence = null };
+        substitutedParking = substitutedParking with
+        {
+            SequentialNodeEvidence = CustomLoopSequentialNodeEvidenceHash.Apply(archivedParking.SequentialNodeEvidence! with
+            {
+                NodeId = "human-review-two",
+                OutcomeArtifactHash = CustomLoopSequentialOutcomeArtifactHash.Compute(substitutedParking),
+                EvidenceHash = string.Empty,
+            }),
+        };
+        var malformedEvents = store.Current.Events.ToArray();
+        malformedEvents[archivedParkingIndex] = substitutedParking;
+        var malformedArchive = store.Current with { Events = malformedEvents };
+        var malformedValidation = CustomLoopRunValidator.Validate(malformedArchive);
+        Assert.False(malformedValidation.IsValid);
+        Assert.Contains(malformedValidation.Errors, error => error.Code == "invalid_human_review_completed_admission_binding");
     }
 
     private static GovernedLoopGraphRevisionArtifact TwoHumanReviewArtifact(ContextualRoleRevisionPin role)
@@ -146,7 +187,7 @@ public sealed partial class CustomLoopOrderedRunnerTests
             [
                 GovernedLoopSequentialApplicationTestFixture.Trigger("trigger"),
                 HumanReviewNode("human-review-one", "review-scope-one"),
-                HumanReviewNode("human-review-two", "review-scope-one"),
+                HumanReviewNode("human-review-two", "review-scope-two"),
                 GovernedLoopSequentialApplicationTestFixture.Exit("exit"),
                 new GovernedLoopNodeDefinition("fail", GovernedLoopSequentialNodeDescriptors.FailTerminal, [], GovernedLoopAuthorityCeiling.Create([]), new Dictionary<string, string>(StringComparer.Ordinal), null, null, null, null),
             ],

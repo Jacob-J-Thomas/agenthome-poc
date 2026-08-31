@@ -39,6 +39,15 @@ public sealed class HumanReviewContinuationRunStore : IHumanReviewContinuationPu
         var current = read.Run;
         if (current is null) return Result(HumanReviewContinuationMutationStatus.NotFound);
         if (!TryGetApprovedReview(current, runId, out var review)) return Result(HumanReviewContinuationMutationStatus.Invalid);
+        var located = continuation.Wake is null ? [] : FindApprovedReviews(current, runId, continuation.Wake.Reservation);
+        if (located.Length > 1) return Result(HumanReviewContinuationMutationStatus.Invalid, current);
+        if (located.Length == 1 && located[0].Archived)
+        {
+            var archivedReview = located[0].Review;
+            return archivedReview.Continuation is not null && IsInitialPublication(archivedReview, continuation) && IsContinuationDescendant(continuation, archivedReview.Continuation)
+                ? Result(HumanReviewContinuationMutationStatus.Replayed, current)
+                : Result(HumanReviewContinuationMutationStatus.Conflict, current);
+        }
 
         if (review.Continuation is not null)
         {
@@ -48,9 +57,9 @@ public sealed class HumanReviewContinuationRunStore : IHumanReviewContinuationPu
                 : Result(HumanReviewContinuationMutationStatus.Conflict, current);
         }
 
-        if (!IsInitialPublication(review, continuation)) return Result(HumanReviewContinuationMutationStatus.Invalid, current);
+        if (continuation.Wake is not { } wake || !IsInitialPublication(review, continuation)) return Result(HumanReviewContinuationMutationStatus.Invalid, current);
         if (current.LifecycleVersion != expectedLifecycleVersion) return Result(HumanReviewContinuationMutationStatus.Conflict, current);
-        return await UpdateAsync(current, review with { Continuation = continuation }, continuation.Wake.PublishedAtUtc, cancellationToken).ConfigureAwait(false);
+        return await UpdateAsync(current, review with { Continuation = continuation }, wake.PublishedAtUtc, cancellationToken).ConfigureAwait(false);
     }
 
     async Task<HumanReviewContinuationStoreMutationResult> IHumanReviewContinuationPublicationStore.PublishAsync(
@@ -78,12 +87,18 @@ public sealed class HumanReviewContinuationRunStore : IHumanReviewContinuationPu
         var current = read.Run;
         if (current is null) return Result(HumanReviewContinuationMutationStatus.NotFound);
         if (!TryGetApprovedReview(current, runId, out var review) || review.Continuation is not { } continuation) return Result(HumanReviewContinuationMutationStatus.Invalid);
-
-        if (continuation.Completion is not null || continuation.Retirement is not null)
+        var located = FindApprovedReviews(current, runId, new HumanReviewContinuationReservationReference(claim.Reservation.ReservationId, claim.Reservation.ReservationHash));
+        if (located.Length > 1) return Result(HumanReviewContinuationMutationStatus.Invalid, current);
+        if (located.Length == 1 && located[0].Archived)
         {
-            return Result(HumanReviewContinuationMutationStatus.Conflict, current);
+            var archivedContinuation = located[0].Review.Continuation;
+            var retainedClaim = archivedContinuation?.Claims.FirstOrDefault(value => string.Equals(value?.ClaimId, claim.ClaimId, StringComparison.Ordinal));
+            return retainedClaim is not null && HumanReviewContinuationReplayClassifier.ClassifyClaim(retainedClaim, claim) == HumanReviewContinuationReplayDisposition.ExactReplay
+                ? Result(HumanReviewContinuationMutationStatus.Replayed, current)
+                : Result(HumanReviewContinuationMutationStatus.Conflict, current);
         }
 
+        if (continuation.Completion is not null || continuation.Retirement is not null) return Result(HumanReviewContinuationMutationStatus.Conflict, current);
         var active = continuation.Claims.IsDefaultOrEmpty ? null : continuation.Claims[^1];
         if (active is not null && string.Equals(active.ClaimId, claim.ClaimId, StringComparison.Ordinal))
         {
@@ -114,6 +129,15 @@ public sealed class HumanReviewContinuationRunStore : IHumanReviewContinuationPu
         var current = read.Run;
         if (current is null) return Result(HumanReviewContinuationMutationStatus.NotFound);
         if (!TryGetApprovedReview(current, runId, out var review) || review.Continuation is not { } continuation) return Result(HumanReviewContinuationMutationStatus.Invalid);
+        var located = FindApprovedReviews(current, runId, new HumanReviewContinuationReservationReference(completion.Reservation.ReservationId, completion.Reservation.ReservationHash));
+        if (located.Length > 1) return Result(HumanReviewContinuationMutationStatus.Invalid, current);
+        if (located.Length == 1 && located[0].Archived)
+        {
+            var archivedCompletion = located[0].Review.Continuation?.Completion;
+            return archivedCompletion is not null && HumanReviewContinuationReplayClassifier.ClassifyCompletion(archivedCompletion, completion) == HumanReviewContinuationReplayDisposition.ExactReplay
+                ? Result(HumanReviewContinuationMutationStatus.Replayed, current)
+                : Result(HumanReviewContinuationMutationStatus.Conflict, current);
+        }
 
         if (continuation.Completion is not null)
         {
@@ -149,6 +173,15 @@ public sealed class HumanReviewContinuationRunStore : IHumanReviewContinuationPu
         var current = read.Run;
         if (current is null) return Result(HumanReviewContinuationMutationStatus.NotFound);
         if (!TryGetApprovedReview(current, runId, out var review) || review.Continuation is not { } continuation) return Result(HumanReviewContinuationMutationStatus.Invalid);
+        var located = FindApprovedReviews(current, runId, new HumanReviewContinuationReservationReference(retirement.Reservation.ReservationId, retirement.Reservation.ReservationHash));
+        if (located.Length > 1) return Result(HumanReviewContinuationMutationStatus.Invalid, current);
+        if (located.Length == 1 && located[0].Archived)
+        {
+            var archivedRetirement = located[0].Review.Continuation?.Retirement;
+            return archivedRetirement is not null && HumanReviewContinuationReplayClassifier.ClassifyRetirement(archivedRetirement, retirement) == HumanReviewContinuationReplayDisposition.ExactReplay
+                ? Result(HumanReviewContinuationMutationStatus.Replayed, current)
+                : Result(HumanReviewContinuationMutationStatus.Conflict, current);
+        }
 
         if (continuation.Claims.IsDefaultOrEmpty
             || !Equals(new HumanReviewContinuationClaimReference(continuation.Claims[^1].ClaimId, continuation.Claims[^1].ClaimHash), claim))
@@ -271,6 +304,40 @@ public sealed class HumanReviewContinuationRunStore : IHumanReviewContinuationPu
             return false;
         }
     }
+
+    private static (HumanReviewRunState Review, bool Archived)[] FindApprovedReviews(CustomLoopRunRecord run, string runId, HumanReviewContinuationReservationReference reservation)
+    {
+        try
+        {
+            if (!string.Equals(run.Id, runId, StringComparison.Ordinal) || run.HumanReview is not { } current || !CustomLoopRunValidator.Validate(run).IsValid)
+            {
+                return [];
+            }
+
+            var reviews = new List<(HumanReviewRunState Review, bool Archived)>();
+            if (MatchesReservation(current, reservation)) reviews.Add((current, false));
+            if (!current.CompletedReviews.IsDefault)
+            {
+                foreach (var archived in current.CompletedReviews)
+                {
+                    if (archived is not null && MatchesReservation(archived, reservation)) reviews.Add((archived, true));
+                    if (reviews.Count > 1) break;
+                }
+            }
+
+            return [.. reviews];
+        }
+        catch
+        {
+            return [];
+        }
+    }
+
+    private static bool MatchesReservation(HumanReviewRunState review, HumanReviewContinuationReservationReference reservation)
+        => review.ContinuationReservation is { } retained
+            && string.Equals(retained.ReservationId, reservation.ReservationId, StringComparison.Ordinal)
+            && string.Equals(retained.ReservationHash, reservation.ReservationHash, StringComparison.Ordinal)
+            && retained.Decision.Kind == HumanReviewDecisionKind.Approve;
 
     private static bool IsInitialPublication(HumanReviewRunState review, HumanReviewContinuationState continuation)
         => continuation.Claims.IsEmpty

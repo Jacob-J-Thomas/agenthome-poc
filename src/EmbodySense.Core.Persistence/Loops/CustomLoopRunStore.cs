@@ -17,6 +17,7 @@ using EmbodySense.Core.Application.Loops.Sleep;
 using EmbodySense.Core.Application.Loops.TraceRetention;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using EmbodySense.Core.Common.HumanReview.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Execution.Models;
 using EmbodySense.Core.Common.Loops.Execution.Retry;
@@ -3352,10 +3353,24 @@ public sealed class CustomLoopRunStore :
             return false;
         }
 
-        return prior.AcceptedTerminalDecision is not null
-            && (prior.Continuation is { Completion: not null } or { Retirement: not null }
-                || prior.DecisionActions.Any(action => action is not null && (action.Completion is not null || action.Retirement is not null)));
+        return prior.AcceptedTerminalDecision is { } terminal
+            && ((terminal.Kind == HumanReviewDecisionKind.Approve
+                && prior.ContinuationReservation is { Decision: { } continuationDecision } reservation
+                && SameDecisionReference(continuationDecision, terminal)
+                && prior.Continuation is { } continuation
+                && (continuation.Completion?.Reservation is { } completionReservation && string.Equals(completionReservation.ReservationHash, reservation.ReservationHash, StringComparison.Ordinal)
+                    || continuation.Retirement?.Reservation is { } retirementReservation && string.Equals(retirementReservation.ReservationHash, reservation.ReservationHash, StringComparison.Ordinal)))
+                || prior.DecisionActions.Any(action => action is { Reservation.Decision: { } actionDecision }
+                    && SameDecisionReference(actionDecision, terminal)
+                    && (action.Completion?.Reservation is { } completionReservation && string.Equals(completionReservation.ReservationHash, action.Reservation.ReservationHash, StringComparison.Ordinal)
+                        || action.Retirement?.Reservation is { } retirementReservation && string.Equals(retirementReservation.ReservationHash, action.Reservation.ReservationHash, StringComparison.Ordinal))));
     }
+
+    private static bool SameDecisionReference(HumanReviewDecisionReference left, HumanReviewDecision right)
+        => string.Equals(left.DecisionId, right.DecisionId, StringComparison.Ordinal)
+            && string.Equals(left.DecisionOperationId, right.DecisionOperationId, StringComparison.Ordinal)
+            && left.Kind == right.Kind
+            && string.Equals(left.DecisionHash, right.DecisionHash, StringComparison.Ordinal);
 
     private static bool IsRetryStateAtomicEvent(CustomLoopRunEvent item)
     {
