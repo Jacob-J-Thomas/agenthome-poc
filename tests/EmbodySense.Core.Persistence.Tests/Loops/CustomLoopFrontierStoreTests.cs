@@ -1538,6 +1538,71 @@ public sealed class CustomLoopFrontierStoreTests
     }
 
     [Fact]
+    public async Task Validate_update_reports_admission_binding_substitution_as_immutable_event_history_change()
+    {
+        using var workspace = new TestWorkspace();
+        var current = await PersistHumanReviewAdmissionAsync(new WorkspacePaths(workspace.RootPath), "event-equality-admission-binding");
+        var currentState = Assert.IsType<HumanReviewRunState>(current.HumanReview);
+        var currentRequest = currentState.Request;
+        var substitutedBinding = HumanReviewContractHash.ApplyBinding(currentRequest.Binding with
+        {
+            FrontierId = currentRequest.Binding.FrontierId + "-substituted",
+            BindingHash = string.Empty,
+        });
+        var substitutedScope = HumanReviewContractHash.ApplyApprovalScope(currentRequest.ApprovalScope with
+        {
+            BindingHash = substitutedBinding.BindingHash,
+            ScopeHash = string.Empty,
+        });
+        var substitutedRequest = HumanReviewContractHash.ApplyRequest(currentRequest with
+        {
+            Binding = substitutedBinding,
+            ApprovalScope = substitutedScope,
+            RequestHash = string.Empty,
+        });
+        var substitutedRequestReference = new HumanReviewRequestReference(substitutedRequest.RequestId, substitutedRequest.RequestHash);
+        var substitutedLifecycle = HumanReviewContractHash.ApplyLifecycle(currentState.Lifecycle with
+        {
+            Request = substitutedRequestReference,
+            LifecycleHash = string.Empty,
+        });
+        var substitutedEvidence = HumanReviewContractHash.ApplyEvidence(currentState.Evidence[0] with
+        {
+            Request = substitutedRequestReference,
+            EvidenceHash = string.Empty,
+        });
+        var admissionEvent = Assert.Single(current.Events, item => item.Kind == CustomLoopRunEventKind.HumanReviewRequestAdmitted);
+        var retained = Assert.IsType<HumanReviewAdmissionBindingEvidence>(admissionEvent.HumanReviewAdmissionBinding);
+        var substitutedAdmissionBinding = HumanReviewContractHash.ApplyAdmissionBindingEvidence(retained with
+        {
+            BindingHash = substitutedBinding.BindingHash,
+            FrontierId = substitutedBinding.FrontierId,
+            EvidenceHash = string.Empty,
+        });
+        var candidate = current with
+        {
+            LifecycleVersion = current.LifecycleVersion + 1,
+            UpdatedAtUtc = current.UpdatedAtUtc.AddTicks(1),
+            HumanReview = currentState with
+            {
+                Request = substitutedRequest,
+                Lifecycle = substitutedLifecycle,
+                LifecycleHistory = [substitutedLifecycle],
+                Evidence = [substitutedEvidence],
+            },
+            Events = current.Events.Select(item => item.EventId == admissionEvent.EventId
+                ? item with { HumanReviewEvidence = substitutedEvidence, HumanReviewAdmissionBinding = substitutedAdmissionBinding }
+                : item).ToArray(),
+        };
+
+        Assert.True(CustomLoopRunValidator.Validate(current).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(current).Errors));
+        Assert.True(CustomLoopRunValidator.Validate(candidate).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(candidate).Errors));
+        var validation = CustomLoopRunValidator.ValidateUpdate(current, candidate);
+        var admissionEventIndex = Array.FindIndex(candidate.Events, item => item.Kind == CustomLoopRunEventKind.HumanReviewRequestAdmitted);
+        Assert.Contains(validation.Errors, error => error.Code == "event_history_changed" && error.Field == $"events[{admissionEventIndex}]");
+    }
+
+    [Fact]
     public async Task Decision_state_requires_exact_durable_versions_and_allows_only_valid_later_prefixes()
     {
         using var workspace = new TestWorkspace();
