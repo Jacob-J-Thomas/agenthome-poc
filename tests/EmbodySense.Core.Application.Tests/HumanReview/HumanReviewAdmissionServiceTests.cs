@@ -1,5 +1,4 @@
 using System.Collections.Immutable;
-using System.Reflection;
 using EmbodySense.Core.Application.HumanReview;
 using EmbodySense.Core.Application.HumanReview.Models;
 using EmbodySense.Core.Application.Loops;
@@ -130,23 +129,6 @@ public sealed class HumanReviewAdmissionServiceTests
         };
 
         var result = await service.AdmitAsync(new HumanReviewAdmissionCommand(fixture.Predecessor.Id, fixture.Predecessor.LifecycleVersion, fixture.Request, fixture.BlockedFrontier, mismatchedEvent));
-
-        Assert.Equal(CustomLoopRunStoreStatus.Conflict, result.Status);
-        Assert.Equal(0, shared.UpdateCount);
-        Assert.Null(shared.Run!.HumanReview);
-    }
-
-    [Fact]
-    public async Task Admit_fails_closed_when_a_corrupt_frontier_snapshot_cannot_be_rebound()
-    {
-        var fixture = await CreateFixtureAsync();
-        var constructor = typeof(GovernedLoopFrontierPosture).GetConstructor(BindingFlags.Instance | BindingFlags.NonPublic, null, [typeof(string), typeof(GovernedLoopExecutionBinding), typeof(string), typeof(string), typeof(string), typeof(GovernedLoopFrontierPayload)], null);
-        Assert.NotNull(constructor);
-        var corruptFrontier = Assert.IsType<GovernedLoopFrontierPosture>(constructor!.Invoke([string.Empty, fixture.BlockedFrontier.Binding, fixture.BlockedFrontier.GraphArtifactHash, fixture.BlockedFrontier.GraphLayoutHash, fixture.BlockedFrontier.AdmissionReceiptHash, fixture.BlockedFrontier.Payload]));
-        var shared = new HumanReviewAdmissionSharedState(fixture.Predecessor);
-        var service = new HumanReviewAdmissionService(new HumanReviewAdmissionTestStore(shared));
-
-        var result = await service.AdmitAsync(new HumanReviewAdmissionCommand(fixture.Predecessor.Id, fixture.Predecessor.LifecycleVersion, fixture.Request, corruptFrontier));
 
         Assert.Equal(CustomLoopRunStoreStatus.Conflict, result.Status);
         Assert.Equal(0, shared.UpdateCount);

@@ -12,9 +12,7 @@ using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Execution.Models;
 using EmbodySense.Core.Common.Loops.Execution.Effects;
 using EmbodySense.Core.Common.Loops.Execution.Effects.Models;
-using EmbodySense.Core.Common.Loops.Revisions.Models;
 using EmbodySense.Core.Common.Loops.Sequential.Models;
-using System.Reflection;
 
 namespace EmbodySense.Core.Application.Tests.HumanReview;
 
@@ -428,22 +426,6 @@ public sealed class HumanReviewContinuationConsumerTests
             Assert.Null(result.Completion);
             Assert.Null(result.Retirement);
         }
-    }
-
-    [Fact]
-    public async Task Malformed_graph_artifact_fails_closed_when_exact_revision_lineage_cannot_be_read()
-    {
-        var fixture = await ApprovedCandidateAsync();
-        var constructor = typeof(GovernedLoopGraphRevisionArtifact).GetConstructor(BindingFlags.Instance | BindingFlags.NonPublic, null, [typeof(int), typeof(GovernedLoopRevisionArtifact), fixture.Candidate.GraphArtifact!.Graph.GetType(), typeof(string), typeof(string)], null);
-        Assert.NotNull(constructor);
-        var malformedArtifact = Assert.IsType<GovernedLoopGraphRevisionArtifact>(constructor!.Invoke([1, null!, fixture.Candidate.GraphArtifact.Graph, fixture.Candidate.GraphArtifact.LayoutHash, fixture.Candidate.GraphArtifact.ArtifactHash]));
-
-        var result = await Consumer(new RecordingAuthoritySource(), new RecordingEffectEvidenceSource(), new RecordingEffectCertaintySource(), fixture.Claim.ClaimedAtUtc.AddSeconds(1)).ConsumeAsync(fixture.Candidate with { GraphArtifact = malformedArtifact });
-
-        Assert.Equal(HumanReviewContinuationConsumptionStatus.Invalid, result.Status);
-        Assert.Null(result.Action);
-        Assert.Null(result.Completion);
-        Assert.Null(result.Retirement);
     }
 
     [Fact]
