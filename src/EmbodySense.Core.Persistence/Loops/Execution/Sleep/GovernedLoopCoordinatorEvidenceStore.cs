@@ -16,7 +16,7 @@ namespace EmbodySense.Core.Persistence.Loops.Execution.Sleep;
 /// replaced; a successor requires exact prior hashes plus either exclusive-lease expiry or the exact same owner's
 /// durable stopped lifecycle while that owner still holds the lease.
 /// </remarks>
-public sealed class GovernedLoopCoordinatorEvidenceStore : IGovernedLoopCoordinatorEvidencePort
+public sealed class GovernedLoopCoordinatorEvidenceStore : IGovernedLoopCoordinatorEvidencePort, IGovernedLoopCoordinatorRepairPort
 {
     private const int SchemaVersion = 1;
     private const int MaximumConfiguredCoordinators = 256;
@@ -79,6 +79,197 @@ public sealed class GovernedLoopCoordinatorEvidenceStore : IGovernedLoopCoordina
     }
 
     /// <inheritdoc />
+    public async Task<GovernedLoopCoordinatorRepairReadResult?> ReadAsync(
+        string coordinatorId,
+        string failedOwnershipHash,
+        CancellationToken cancellationToken = default)
+    {
+        if (!GovernedLoopCoordinatorEvidenceContract.IsValidCoordinatorId(coordinatorId) || !IsCanonicalHash(failedOwnershipHash))
+        {
+            return RepairRead(GovernedLoopCoordinatorRepairReadStatus.Corrupt);
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        try
+        {
+            using var mutationLock = await _guard.AcquireMutationLockAsync(_observer, cancellationToken).ConfigureAwait(false);
+            var (catalog, _) = await LoadAsync(mutationLock, cancellationToken).ConfigureAwait(false);
+            var entry = Find(catalog, coordinatorId);
+            var repair = entry?.Repairs.SingleOrDefault(item => string.Equals(item.FailedOwnership.ContentHash, failedOwnershipHash, StringComparison.Ordinal));
+            return repair is null
+                ? RepairRead(GovernedLoopCoordinatorRepairReadStatus.NotFound)
+                : RepairRead(GovernedLoopCoordinatorRepairReadStatus.Found, repair);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception) when (IsCorrupt(exception))
+        {
+            return RepairRead(GovernedLoopCoordinatorRepairReadStatus.Corrupt);
+        }
+        catch (Exception exception) when (IsUnavailable(exception))
+        {
+            return RepairRead(GovernedLoopCoordinatorRepairReadStatus.Unavailable);
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task<GovernedLoopCoordinatorRepairMutationResult?> AppendAsync(
+        GovernedLoopCoordinatorRepairDisposition disposition,
+        CancellationToken cancellationToken = default)
+    {
+        if (!GovernedLoopSleepContractValidator.Validate(disposition).IsValid)
+        {
+            return RepairMutation(GovernedLoopCoordinatorRepairMutationStatus.Corrupt);
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        try
+        {
+            using var mutationLock = await _guard.AcquireMutationLockAsync(_observer, cancellationToken).ConfigureAwait(false);
+            var (catalog, identity) = await LoadAsync(mutationLock, cancellationToken).ConfigureAwait(false);
+            var entry = Find(catalog, disposition.CoordinatorId);
+            if (entry is null)
+            {
+                return RepairMutation(GovernedLoopCoordinatorRepairMutationStatus.Conflict);
+            }
+
+            var sameOperation = entry.Repairs.SingleOrDefault(item => string.Equals(item.OperationId, disposition.OperationId, StringComparison.Ordinal));
+            if (sameOperation is not null)
+            {
+                return sameOperation == disposition
+                    ? RepairMutation(GovernedLoopCoordinatorRepairMutationStatus.Duplicate, sameOperation)
+                    : RepairMutation(GovernedLoopCoordinatorRepairMutationStatus.Conflict);
+            }
+
+            var sameFailedOwnership = entry.Repairs.SingleOrDefault(item => string.Equals(
+                item.FailedOwnership.ContentHash,
+                disposition.FailedOwnership.ContentHash,
+                StringComparison.Ordinal));
+            if (sameFailedOwnership is not null)
+            {
+                return RepairMutation(GovernedLoopCoordinatorRepairMutationStatus.Conflict);
+            }
+
+            if (!MatchesFailedEvidence(entry, disposition))
+            {
+                return RepairMutation(GovernedLoopCoordinatorRepairMutationStatus.Conflict);
+            }
+
+            var compacted = CompactHeartbeats(entry, requiredSlots: 1, retireCurrentHead: false);
+            if (compacted is null)
+            {
+                return RepairMutation(GovernedLoopCoordinatorRepairMutationStatus.Conflict);
+            }
+
+            var replacement = new GovernedLoopCoordinatorEvidenceStoreEntry(
+                compacted.CoordinatorId,
+                compacted.Ownerships,
+                compacted.Lifecycles,
+                compacted.HeartbeatRetirements,
+                compacted.Heartbeats,
+                compacted.Failures,
+                ReadOnly(compacted.Repairs.Append(disposition)));
+            _ = await WriteReplacementAsync(catalog, entry, replacement, identity, mutationLock, cancellationToken).ConfigureAwait(false);
+            return RepairMutation(GovernedLoopCoordinatorRepairMutationStatus.Appended, disposition);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception) when (IsCorrupt(exception))
+        {
+            return RepairMutation(GovernedLoopCoordinatorRepairMutationStatus.Corrupt);
+        }
+        catch (Exception exception) when (IsUnavailable(exception))
+        {
+            return RepairMutation(GovernedLoopCoordinatorRepairMutationStatus.Unavailable);
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task<GovernedLoopCoordinatorAcquisitionResult?> TryAcquireAfterRepairAsync(
+        GovernedLoopCoordinatorRepairAcquisitionRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        if (!GovernedLoopCoordinatorEvidenceContract.IsValid(request))
+        {
+            return Acquisition(GovernedLoopCoordinatorAcquisitionStatus.Corrupt);
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        try
+        {
+            using var mutationLock = await _guard.AcquireMutationLockAsync(_observer, cancellationToken).ConfigureAwait(false);
+            var (catalog, identity) = await LoadAsync(mutationLock, cancellationToken).ConfigureAwait(false);
+            var acquisition = request.Acquisition;
+            var entry = Find(catalog, acquisition.ProposedOwnership.CoordinatorId);
+            if (entry is null)
+            {
+                return Acquisition(GovernedLoopCoordinatorAcquisitionStatus.Conflict);
+            }
+            if (ContainsAcquisition(entry, acquisition))
+            {
+                return Acquisition(GovernedLoopCoordinatorAcquisitionStatus.Duplicate, Snapshot(entry));
+            }
+            if (!entry.Repairs.Any(item => item == request.Repair) || !MatchesFailedEvidence(entry, request.Repair))
+            {
+                return Acquisition(GovernedLoopCoordinatorAcquisitionStatus.Conflict, Snapshot(entry));
+            }
+            if (acquisition.ProposedOwnership.AcquiredAtUtc < request.Repair.RecordedAtUtc)
+            {
+                return Acquisition(GovernedLoopCoordinatorAcquisitionStatus.Corrupt);
+            }
+
+            var currentOwnership = entry.Ownerships[^1];
+            var currentHeartbeat = LatestHeartbeat(entry, currentOwnership);
+            if (!string.Equals(currentOwnership.ContentHash, acquisition.ExpectedOwnershipHash, StringComparison.Ordinal)
+                || !string.Equals(currentHeartbeat.ContentHash, acquisition.ExpectedHeartbeatHash, StringComparison.Ordinal))
+            {
+                return Acquisition(GovernedLoopCoordinatorAcquisitionStatus.Conflict, Snapshot(entry));
+            }
+            if (acquisition.ProposedOwnership.AcquiredAtUtc < currentHeartbeat.LeaseExpiresAtUtc)
+            {
+                return Acquisition(GovernedLoopCoordinatorAcquisitionStatus.LeaseNotExpired, Snapshot(entry));
+            }
+            if (!GovernedLoopSleepContractValidator.ValidateRepairHandoff(currentOwnership, currentHeartbeat, acquisition.ProposedOwnership).IsValid)
+            {
+                return Acquisition(GovernedLoopCoordinatorAcquisitionStatus.Corrupt);
+            }
+
+            var compacted = CompactHeartbeats(entry, requiredSlots: 4, retireCurrentHead: true);
+            if (compacted is null)
+            {
+                return Acquisition(GovernedLoopCoordinatorAcquisitionStatus.Conflict, Snapshot(entry));
+            }
+
+            var replacement = new GovernedLoopCoordinatorEvidenceStoreEntry(
+                compacted.CoordinatorId,
+                ReadOnly(compacted.Ownerships.Append(acquisition.ProposedOwnership)),
+                ReadOnly(compacted.Lifecycles.Append(acquisition.StartingLifecycle)),
+                compacted.HeartbeatRetirements,
+                ReadOnly(compacted.Heartbeats.Append(acquisition.InitialHeartbeat)),
+                compacted.Failures,
+                compacted.Repairs);
+            replacement = await WriteReplacementAsync(catalog, entry, replacement, identity, mutationLock, cancellationToken).ConfigureAwait(false);
+            return Acquisition(GovernedLoopCoordinatorAcquisitionStatus.Acquired, Snapshot(replacement));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception) when (IsCorrupt(exception))
+        {
+            return Acquisition(GovernedLoopCoordinatorAcquisitionStatus.Corrupt);
+        }
+        catch (Exception exception) when (IsUnavailable(exception))
+        {
+            return Acquisition(GovernedLoopCoordinatorAcquisitionStatus.Unavailable);
+        }
+    }
+
+    /// <inheritdoc />
     public async Task<GovernedLoopCoordinatorAcquisitionResult?> TryAcquireAsync(
         GovernedLoopCoordinatorAcquisitionRequest request,
         CancellationToken cancellationToken = default)
@@ -113,7 +304,8 @@ public sealed class GovernedLoopCoordinatorEvidenceStore : IGovernedLoopCoordina
                     Array.AsReadOnly([request.StartingLifecycle]),
                     Array.AsReadOnly<GovernedLoopCoordinatorHeartbeatRetirement>([]),
                     Array.AsReadOnly([request.InitialHeartbeat]),
-                    Array.AsReadOnly<GovernedLoopCoordinatorFailure>([]));
+                    Array.AsReadOnly<GovernedLoopCoordinatorFailure>([]),
+                    Array.AsReadOnly<GovernedLoopCoordinatorRepairDisposition>([]));
                 var candidate = new GovernedLoopCoordinatorEvidenceStoreCatalog(
                     SchemaVersion,
                     checked(catalog.Generation + 1),
@@ -173,7 +365,8 @@ public sealed class GovernedLoopCoordinatorEvidenceStore : IGovernedLoopCoordina
                 ReadOnly(compacted.Lifecycles.Append(request.StartingLifecycle)),
                 compacted.HeartbeatRetirements,
                 ReadOnly(compacted.Heartbeats.Append(request.InitialHeartbeat)),
-                compacted.Failures);
+                compacted.Failures,
+                compacted.Repairs);
             replacement = await WriteReplacementAsync(catalog, entry, replacement, identity, mutationLock, cancellationToken).ConfigureAwait(false);
             return Acquisition(GovernedLoopCoordinatorAcquisitionStatus.Acquired, Snapshot(replacement));
         }
@@ -258,7 +451,8 @@ public sealed class GovernedLoopCoordinatorEvidenceStore : IGovernedLoopCoordina
                 compacted.Lifecycles,
                 compacted.HeartbeatRetirements,
                 ReadOnly(compacted.Heartbeats.Append(request.ProposedHeartbeat)),
-                compacted.Failures);
+                compacted.Failures,
+                compacted.Repairs);
             replacement = await WriteReplacementAsync(catalog, entry, replacement, identity, mutationLock, cancellationToken).ConfigureAwait(false);
             return HeartbeatResult(GovernedLoopCoordinatorHeartbeatMutationStatus.Renewed, Snapshot(replacement));
         }
@@ -325,7 +519,8 @@ public sealed class GovernedLoopCoordinatorEvidenceStore : IGovernedLoopCoordina
                 ReadOnly(compacted.Lifecycles.Append(request.ProposedLifecycle)),
                 compacted.HeartbeatRetirements,
                 compacted.Heartbeats,
-                compacted.Failures);
+                compacted.Failures,
+                compacted.Repairs);
             replacement = await WriteReplacementAsync(catalog, entry, replacement, identity, mutationLock, cancellationToken).ConfigureAwait(false);
             return LifecycleResult(GovernedLoopCoordinatorLifecycleMutationStatus.Appended, Snapshot(replacement));
         }
@@ -400,7 +595,8 @@ public sealed class GovernedLoopCoordinatorEvidenceStore : IGovernedLoopCoordina
                 compacted.Lifecycles,
                 compacted.HeartbeatRetirements,
                 compacted.Heartbeats,
-                ReadOnly(compacted.Failures.Append(request.ProposedFailure)));
+                ReadOnly(compacted.Failures.Append(request.ProposedFailure)),
+                compacted.Repairs);
             replacement = await WriteReplacementAsync(catalog, entry, replacement, identity, mutationLock, cancellationToken).ConfigureAwait(false);
             return FailureResult(GovernedLoopCoordinatorFailureMutationStatus.Appended, Snapshot(replacement));
         }
@@ -540,11 +736,29 @@ public sealed class GovernedLoopCoordinatorEvidenceStore : IGovernedLoopCoordina
         GovernedLoopCoordinatorOwnership ownership)
         => entry.Failures.LastOrDefault(item => SameOwnership(item.Ownership, ownership));
 
+    private static bool MatchesFailedEvidence(
+        GovernedLoopCoordinatorEvidenceStoreEntry entry,
+        GovernedLoopCoordinatorRepairDisposition disposition)
+    {
+        var ownership = entry.Ownerships[^1];
+        var lifecycle = LatestLifecycle(entry, ownership);
+        var heartbeat = LatestHeartbeat(entry, ownership);
+        var failure = LatestFailure(entry, ownership);
+        return lifecycle.Status == GovernedLoopCoordinatorStatus.Failed
+            && lifecycle.TerminalAtUtc is not null
+            && ownership == disposition.FailedOwnership
+            && failure is not null
+            && string.Equals(lifecycle.ContentHash, disposition.TerminalLifecycleHash, StringComparison.Ordinal)
+            && disposition.RecordedAtUtc >= heartbeat.LeaseExpiresAtUtc
+            && string.Equals(heartbeat.ContentHash, disposition.LatestHeartbeatHash, StringComparison.Ordinal)
+            && string.Equals(failure.ContentHash, disposition.LatestFailureHash, StringComparison.Ordinal);
+    }
+
     private static bool SameOwnership(GovernedLoopCoordinatorOwnership first, GovernedLoopCoordinatorOwnership second)
         => string.Equals(first.ContentHash, second.ContentHash, StringComparison.Ordinal);
 
     private static int EvidenceCount(GovernedLoopCoordinatorEvidenceStoreEntry entry)
-        => checked(entry.Ownerships.Count + entry.Lifecycles.Count + entry.HeartbeatRetirements.Count + entry.Heartbeats.Count + entry.Failures.Count);
+        => checked(entry.Ownerships.Count + entry.Lifecycles.Count + entry.HeartbeatRetirements.Count + entry.Heartbeats.Count + entry.Failures.Count + entry.Repairs.Count);
 
     private GovernedLoopCoordinatorEvidenceStoreEntry? CompactHeartbeats(
         GovernedLoopCoordinatorEvidenceStoreEntry entry,
@@ -585,7 +799,8 @@ public sealed class GovernedLoopCoordinatorEvidenceStore : IGovernedLoopCoordina
                 entry.Lifecycles,
                 ReadOnly(retirements.OrderBy(item => item.Ownership.OwnershipEpoch)),
                 ReadOnly(heartbeats),
-                entry.Failures);
+                entry.Failures,
+                entry.Repairs);
             if (EvidenceCount(compacted) <= _maximumEvidenceItems - requiredSlots && (fits is null || fits(compacted)))
             {
                 return compacted;
@@ -658,6 +873,20 @@ public sealed class GovernedLoopCoordinatorEvidenceStore : IGovernedLoopCoordina
         GovernedLoopCoordinatorFailureMutationStatus status,
         GovernedLoopCoordinatorSnapshot? snapshot = null)
         => new(status, snapshot);
+
+    private static GovernedLoopCoordinatorRepairReadResult RepairRead(
+        GovernedLoopCoordinatorRepairReadStatus status,
+        GovernedLoopCoordinatorRepairDisposition? disposition = null)
+        => new(status, disposition);
+
+    private static GovernedLoopCoordinatorRepairMutationResult RepairMutation(
+        GovernedLoopCoordinatorRepairMutationStatus status,
+        GovernedLoopCoordinatorRepairDisposition? disposition = null)
+        => new(status, disposition);
+
+    private static bool IsCanonicalHash(string? value)
+        => value is { Length: GovernedLoopSleepContractLimits.Sha256HexCharacters }
+            && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
 
     private static bool IsCorrupt(Exception exception)
         => exception is GovernedLoopSleepStoreLimitException

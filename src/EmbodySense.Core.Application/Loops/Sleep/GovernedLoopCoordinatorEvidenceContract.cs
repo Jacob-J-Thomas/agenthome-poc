@@ -72,6 +72,18 @@ public static class GovernedLoopCoordinatorEvidenceContract
             && IsMutationSnapshotShapeValid(result.Status is not GovernedLoopCoordinatorAcquisitionStatus.Corrupt
                 and not GovernedLoopCoordinatorAcquisitionStatus.Unavailable, result.Snapshot);
 
+    /// <summary>Gets whether one repair-bound acquisition names exact retained failed evidence and a normal fenced successor.</summary>
+    public static bool IsValid(GovernedLoopCoordinatorRepairAcquisitionRequest? request)
+        => request is not null
+            && GovernedLoopSleepContractValidator.Validate(request.Repair).IsValid
+            && IsValid(request.Acquisition)
+            && request.Acquisition.PriorEvidenceExpectation == GovernedLoopCoordinatorPriorEvidenceExpectation.Existing
+            && string.Equals(request.Acquisition.ProposedOwnership.CoordinatorId, request.Repair.CoordinatorId, StringComparison.Ordinal)
+            && string.Equals(request.Acquisition.ExpectedOwnershipHash, request.Repair.FailedOwnership.ContentHash, StringComparison.Ordinal)
+            && string.Equals(request.Acquisition.ExpectedHeartbeatHash, request.Repair.LatestHeartbeatHash, StringComparison.Ordinal)
+            && request.Acquisition.ProposedOwnership.OwnershipEpoch == request.Repair.FailedOwnership.OwnershipEpoch + 1
+            && request.Acquisition.ProposedOwnership.AcquiredAtUtc >= request.Repair.RecordedAtUtc;
+
     /// <summary>Gets whether one heartbeat request is an exact fenced contiguous successor.</summary>
     public static bool IsValid(GovernedLoopCoordinatorHeartbeatMutationRequest? request)
         => request is not null

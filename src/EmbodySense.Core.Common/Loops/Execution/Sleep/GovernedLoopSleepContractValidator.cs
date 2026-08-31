@@ -1,4 +1,5 @@
 using EmbodySense.Core.Common.Loops.Custom;
+using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.Loops.Execution.Sleep.Models;
 using EmbodySense.Core.Common.Loops.Revisions;
 
@@ -7,6 +8,102 @@ namespace EmbodySense.Core.Common.Loops.Execution.Sleep;
 /// <summary>Validates bounded schema-1 sleep, wake, and local-coordinator evidence without executing work.</summary>
 public static class GovernedLoopSleepContractValidator
 {
+    /// <summary>Validates one exact coordinator-repair readiness evidence object.</summary>
+    public static GovernedLoopSleepValidationResult Validate(GovernedLoopCoordinatorRepairReadiness? readiness)
+    {
+        var errors = new List<GovernedLoopSleepValidationError>();
+        if (readiness is null)
+        {
+            Add(errors, GovernedLoopSleepValidationErrorCode.Required, "readiness");
+            return GovernedLoopSleepValidationResult.FromErrors(errors);
+        }
+
+        if (readiness.SchemaVersion != GovernedLoopCoordinatorRepairReadiness.CurrentSchemaVersion)
+        {
+            Add(errors, GovernedLoopSleepValidationErrorCode.UnsupportedSchemaVersion, "schemaVersion");
+        }
+        if (!IsWorkspaceId(readiness.WorkspaceId))
+        {
+            Add(errors, GovernedLoopSleepValidationErrorCode.InvalidIdentity, "workspaceId");
+        }
+        if (!CustomLoopArtifactIdentifier.IsValid(readiness.CoordinatorId, GovernedLoopSleepContractLimits.MaxIdentifierCharacters))
+        {
+            Add(errors, GovernedLoopSleepValidationErrorCode.InvalidIdentity, "coordinatorId");
+        }
+        if (!IsUtc(readiness.EvaluatedAtUtc))
+        {
+            Add(errors, GovernedLoopSleepValidationErrorCode.InvalidTimestamp, "evaluatedAtUtc");
+        }
+        if (!GovernedLoopSleepContractHash.Matches(readiness))
+        {
+            Add(errors, GovernedLoopSleepValidationErrorCode.IntegrityMismatch, "contentHash");
+        }
+        return GovernedLoopSleepValidationResult.FromErrors(errors);
+    }
+
+    /// <summary>Validates one immutable repair authorization against its exact failed evidence.</summary>
+    public static GovernedLoopSleepValidationResult Validate(GovernedLoopCoordinatorRepairDisposition? disposition)
+    {
+        var errors = new List<GovernedLoopSleepValidationError>();
+        if (disposition is null)
+        {
+            Add(errors, GovernedLoopSleepValidationErrorCode.Required, "disposition");
+            return GovernedLoopSleepValidationResult.FromErrors(errors);
+        }
+
+        if (disposition.SchemaVersion != GovernedLoopCoordinatorRepairDisposition.CurrentSchemaVersion)
+        {
+            Add(errors, GovernedLoopSleepValidationErrorCode.UnsupportedSchemaVersion, "schemaVersion");
+        }
+        if (!IsWorkspaceId(disposition.WorkspaceId))
+        {
+            Add(errors, GovernedLoopSleepValidationErrorCode.InvalidIdentity, "workspaceId");
+        }
+        if (!CustomLoopArtifactIdentifier.IsValid(disposition.CoordinatorId, GovernedLoopSleepContractLimits.MaxIdentifierCharacters))
+        {
+            Add(errors, GovernedLoopSleepValidationErrorCode.InvalidIdentity, "coordinatorId");
+        }
+        if (!CustomLoopArtifactIdentifier.IsValid(disposition.OperationId, GovernedLoopSleepContractLimits.MaxIdentifierCharacters))
+        {
+            Add(errors, GovernedLoopSleepValidationErrorCode.InvalidIdentity, "operationId");
+        }
+        if (!CustomLoopArtifactIdentifier.IsValid(disposition.ActorId, GovernedLoopSleepContractLimits.MaxIdentifierCharacters))
+        {
+            Add(errors, GovernedLoopSleepValidationErrorCode.InvalidIdentity, "actorId");
+        }
+        if (!Validate(disposition.FailedOwnership).IsValid)
+        {
+            Add(errors, GovernedLoopSleepValidationErrorCode.InvalidComposition, "failedOwnership");
+        }
+        if (!IsCanonicalHash(disposition.TerminalLifecycleHash))
+        {
+            Add(errors, GovernedLoopSleepValidationErrorCode.InvalidHash, "terminalLifecycleHash");
+        }
+        if (!IsCanonicalHash(disposition.LatestHeartbeatHash))
+        {
+            Add(errors, GovernedLoopSleepValidationErrorCode.InvalidHash, "latestHeartbeatHash");
+        }
+        if (!IsCanonicalHash(disposition.LatestFailureHash))
+        {
+            Add(errors, GovernedLoopSleepValidationErrorCode.InvalidHash, "latestFailureHash");
+        }
+        if (!Validate(disposition.DependencyReadiness).IsValid
+            || !string.Equals(disposition.WorkspaceId, disposition.DependencyReadiness.WorkspaceId, StringComparison.Ordinal)
+            || !string.Equals(disposition.CoordinatorId, disposition.DependencyReadiness.CoordinatorId, StringComparison.Ordinal)
+            || !GovernedLoopCoordinatorRepairReadinessContract.IsReady(disposition.DependencyReadiness))
+        {
+            Add(errors, GovernedLoopSleepValidationErrorCode.BindingMismatch, "dependencyReadiness");
+        }
+        if (!IsUtc(disposition.RecordedAtUtc) || disposition.RecordedAtUtc < disposition.DependencyReadiness.EvaluatedAtUtc)
+        {
+            Add(errors, GovernedLoopSleepValidationErrorCode.InvalidTimestamp, "recordedAtUtc");
+        }
+        if (!GovernedLoopSleepContractHash.Matches(disposition))
+        {
+            Add(errors, GovernedLoopSleepValidationErrorCode.IntegrityMismatch, "contentHash");
+        }
+        return GovernedLoopSleepValidationResult.FromErrors(errors);
+    }
     /// <summary>Validates one complete immutable sleeping checkpoint.</summary>
     public static GovernedLoopSleepValidationResult Validate(GovernedLoopSleepCheckpoint? checkpoint)
     {
@@ -200,6 +297,37 @@ public static class GovernedLoopSleepContractValidator
             }
 
             ValidateOwnershipTransition(current, next, errors);
+            if (heartbeatIsCurrent && next.AcquiredAtUtc < currentHeartbeat.LeaseExpiresAtUtc)
+            {
+                Add(errors, GovernedLoopSleepValidationErrorCode.IllegalTransition, "$.next.acquiredAtUtc");
+            }
+        }
+
+        return Result(errors);
+    }
+
+    /// <summary>
+    /// Validates a repair-authorized ownership successor after the failed generation's exclusive lease has expired.
+    /// Unlike an ordinary peer handoff, an exact retained repair may restart the same process owner at a new epoch.
+    /// </summary>
+    public static GovernedLoopSleepValidationResult ValidateRepairHandoff(
+        GovernedLoopCoordinatorOwnership? current,
+        GovernedLoopCoordinatorHeartbeat? currentHeartbeat,
+        GovernedLoopCoordinatorOwnership? next)
+    {
+        var errors = new List<GovernedLoopSleepValidationError>();
+        ValidateOwnership(current, "$.current", errors);
+        ValidateHeartbeat(currentHeartbeat, "$.currentHeartbeat", errors);
+        ValidateOwnership(next, "$.next", errors);
+        if (current is not null && currentHeartbeat is not null && next is not null && errors.Count == 0)
+        {
+            var heartbeatIsCurrent = SameOwnership(current, currentHeartbeat.Ownership);
+            if (!heartbeatIsCurrent)
+            {
+                Add(errors, GovernedLoopSleepValidationErrorCode.BindingMismatch, "$.currentHeartbeat.ownership");
+            }
+
+            ValidateOwnershipTransition(current, next, errors, requireNewOwner: false);
             if (heartbeatIsCurrent && next.AcquiredAtUtc < currentHeartbeat.LeaseExpiresAtUtc)
             {
                 Add(errors, GovernedLoopSleepValidationErrorCode.IllegalTransition, "$.next.acquiredAtUtc");
@@ -769,14 +897,15 @@ public static class GovernedLoopSleepContractValidator
     private static void ValidateOwnershipTransition(
         GovernedLoopCoordinatorOwnership current,
         GovernedLoopCoordinatorOwnership next,
-        List<GovernedLoopSleepValidationError> errors)
+        List<GovernedLoopSleepValidationError> errors,
+        bool requireNewOwner = true)
     {
         if (!string.Equals(current.CoordinatorId, next.CoordinatorId, StringComparison.Ordinal))
         {
             Add(errors, GovernedLoopSleepValidationErrorCode.ImmutableEvidenceChanged, "$.next.coordinatorId");
         }
 
-        if (string.Equals(current.OwnerId, next.OwnerId, StringComparison.Ordinal))
+        if (requireNewOwner && string.Equals(current.OwnerId, next.OwnerId, StringComparison.Ordinal))
         {
             Add(errors, GovernedLoopSleepValidationErrorCode.IllegalTransition, "$.next.ownerId");
         }
@@ -847,6 +976,13 @@ public static class GovernedLoopSleepContractValidator
     }
 
     private static bool IsUtc(DateTimeOffset value) => value != default && value.Offset == TimeSpan.Zero;
+
+    private static bool IsWorkspaceId(string? value)
+        => ContextualRoleWorkspaceId.IsValid(value);
+
+    private static bool IsCanonicalHash(string? value)
+        => value is { Length: GovernedLoopSleepContractLimits.Sha256HexCharacters }
+            && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
 
     private static void Add(
         List<GovernedLoopSleepValidationError> errors,

@@ -154,6 +154,10 @@ public sealed class GovernedLoopCoordinatorContractTests
 
         Assert.True(GovernedLoopSleepContractValidator.ValidateTransition(current, next).IsValid);
         Assert.True(GovernedLoopSleepContractValidator.ValidateHandoff(current, heartbeat, next).IsValid);
+        Assert.True(GovernedLoopSleepContractValidator.ValidateRepairHandoff(current, heartbeat, repeatedOwner).IsValid);
+        Assert.False(GovernedLoopSleepContractValidator.ValidateRepairHandoff(current, heartbeat, beforeExpiry).IsValid);
+        Assert.False(GovernedLoopSleepContractValidator.ValidateRepairHandoff(current, heartbeat, epochGap).IsValid);
+        Assert.False(GovernedLoopSleepContractValidator.ValidateRepairHandoff(current, heartbeat, otherCoordinator).IsValid);
         Assert.Equal(
             new GovernedLoopSleepValidationErrorCodePath(
                 GovernedLoopSleepValidationErrorCode.IllegalTransition,

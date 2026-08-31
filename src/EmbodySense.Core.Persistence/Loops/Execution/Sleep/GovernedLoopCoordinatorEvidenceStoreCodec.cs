@@ -13,13 +13,15 @@ internal static class GovernedLoopCoordinatorEvidenceStoreCodec
     private const int SchemaVersion = 1;
     private const int MaximumDepth = 12;
     private static readonly string[] _catalogProperties = ["entries", "generation", "schemaVersion"];
-    private static readonly string[] _entryProperties = ["coordinatorId", "failures", "heartbeatRetirements", "heartbeats", "lifecycles", "ownerships"];
+    private static readonly string[] _entryProperties = ["coordinatorId", "failures", "heartbeatRetirements", "heartbeats", "lifecycles", "ownerships", "repairs"];
     private static readonly string[] _ownershipProperties = ["acquiredAtUtc", "contentHash", "coordinatorId", "ownerId", "ownershipEpoch", "schemaVersion"];
     private static readonly string[] _lifecycleProperties = ["contentHash", "lifecycleVersion", "ownershipHash", "schemaVersion", "status", "terminalAtUtc", "updatedAtUtc"];
     private static readonly string[] _heartbeatProperties = ["contentHash", "heartbeatSequence", "leaseExpiresAtUtc", "ownershipHash", "recordedAtUtc", "schemaVersion"];
     private static readonly string[] _heartbeatRetirementProperties = ["chainHash", "contentHash", "initialHeartbeatHash", "ownershipHash", "retiredCount", "retiredThroughHeartbeatHash", "retiredThroughLeaseExpiresAtUtc", "retiredThroughRecordedAtUtc", "retiredThroughSequence", "schemaVersion"];
     private static readonly string[] _failureProperties = ["contentHash", "detailEvidenceReference", "failureSequence", "kind", "occurredAtUtc", "ownershipHash", "schemaVersion"];
-    private static readonly string[] _evidenceArrayProperties = ["ownerships", "lifecycles", "heartbeatRetirements", "heartbeats", "failures"];
+    private static readonly string[] _repairProperties = ["actorId", "contentHash", "coordinatorId", "dependencyReadiness", "failedOwnershipHash", "latestFailureHash", "latestHeartbeatHash", "operationId", "recordedAtUtc", "schemaVersion", "terminalLifecycleHash", "workspaceId"];
+    private static readonly string[] _repairReadinessProperties = ["contentHash", "coordinatorId", "evaluatedAtUtc", "humanInputReady", "scheduleReady", "schemaVersion", "triggerReady", "wakeReady", "workspaceId"];
+    private static readonly string[] _evidenceArrayProperties = ["ownerships", "lifecycles", "heartbeatRetirements", "heartbeats", "failures", "repairs"];
 
     public static byte[] Serialize(
         GovernedLoopCoordinatorEvidenceStoreCatalog catalog,
@@ -160,13 +162,15 @@ internal static class GovernedLoopCoordinatorEvidenceStoreCodec
         var heartbeatRetirements = ParseArray(element, "heartbeatRetirements", item => ParseHeartbeatRetirement(item, ownershipByHash));
         var heartbeats = ParseArray(element, "heartbeats", item => ParseHeartbeat(item, ownershipByHash));
         var failures = ParseArray(element, "failures", item => ParseFailure(item, ownershipByHash));
+        var repairs = ParseArray(element, "repairs", item => ParseRepair(item, ownershipByHash));
         var entry = new GovernedLoopCoordinatorEvidenceStoreEntry(
             coordinatorId!,
             Array.AsReadOnly(ownerships.ToArray()),
             Array.AsReadOnly(lifecycles.ToArray()),
             Array.AsReadOnly(heartbeatRetirements.ToArray()),
             Array.AsReadOnly(heartbeats.ToArray()),
-            Array.AsReadOnly(failures.ToArray()));
+            Array.AsReadOnly(failures.ToArray()),
+            Array.AsReadOnly(repairs.ToArray()));
         ValidateEntry(entry, maximumEvidenceItems);
         return entry;
     }
@@ -340,6 +344,71 @@ internal static class GovernedLoopCoordinatorEvidenceStoreCodec
             contentHash!);
     }
 
+    private static GovernedLoopCoordinatorRepairDisposition ParseRepair(
+        JsonElement element,
+        IReadOnlyDictionary<string, GovernedLoopCoordinatorOwnership> ownerships)
+    {
+        if (!IsExactObject(element, _repairProperties)
+            || !TryInt32(element, "schemaVersion", out var schemaVersion)
+            || !TryString(element, "workspaceId", out var workspaceId)
+            || !TryString(element, "coordinatorId", out var coordinatorId)
+            || !TryString(element, "operationId", out var operationId)
+            || !TryString(element, "actorId", out var actorId)
+            || !TryString(element, "failedOwnershipHash", out var failedOwnershipHash)
+            || !ownerships.TryGetValue(failedOwnershipHash!, out var failedOwnership)
+            || !TryString(element, "terminalLifecycleHash", out var terminalLifecycleHash)
+            || !TryString(element, "latestHeartbeatHash", out var latestHeartbeatHash)
+            || !TryString(element, "latestFailureHash", out var latestFailureHash)
+            || !TryUtc(element, "recordedAtUtc", out var recordedAtUtc)
+            || !TryString(element, "contentHash", out var contentHash)
+            || !element.TryGetProperty("dependencyReadiness", out var readinessElement))
+        {
+            throw Invalid();
+        }
+
+        return new GovernedLoopCoordinatorRepairDisposition(
+            schemaVersion,
+            workspaceId!,
+            coordinatorId!,
+            operationId!,
+            actorId!,
+            failedOwnership,
+            terminalLifecycleHash!,
+            latestHeartbeatHash!,
+            latestFailureHash!,
+            ParseRepairReadiness(readinessElement),
+            recordedAtUtc,
+            contentHash!);
+    }
+
+    private static GovernedLoopCoordinatorRepairReadiness ParseRepairReadiness(JsonElement element)
+    {
+        if (!IsExactObject(element, _repairReadinessProperties)
+            || !TryInt32(element, "schemaVersion", out var schemaVersion)
+            || !TryString(element, "workspaceId", out var workspaceId)
+            || !TryString(element, "coordinatorId", out var coordinatorId)
+            || !TryBoolean(element, "scheduleReady", out var scheduleReady)
+            || !TryBoolean(element, "triggerReady", out var triggerReady)
+            || !TryBoolean(element, "wakeReady", out var wakeReady)
+            || !TryBoolean(element, "humanInputReady", out var humanInputReady)
+            || !TryUtc(element, "evaluatedAtUtc", out var evaluatedAtUtc)
+            || !TryString(element, "contentHash", out var contentHash))
+        {
+            throw Invalid();
+        }
+
+        return new GovernedLoopCoordinatorRepairReadiness(
+            schemaVersion,
+            workspaceId!,
+            coordinatorId!,
+            scheduleReady,
+            triggerReady,
+            wakeReady,
+            humanInputReady,
+            evaluatedAtUtc,
+            contentHash!);
+    }
+
     private static List<T> ParseArray<T>(JsonElement element, string property, Func<JsonElement, T> parser)
     {
         var array = element.GetProperty(property);
@@ -365,10 +434,14 @@ internal static class GovernedLoopCoordinatorEvidenceStoreCodec
             || entry.HeartbeatRetirements.Select(item => item.Ownership.ContentHash).Distinct(StringComparer.Ordinal).Count() != entry.HeartbeatRetirements.Count
             || entry.Heartbeats.Select(item => item.ContentHash).Distinct(StringComparer.Ordinal).Count() != entry.Heartbeats.Count
             || entry.Failures.Select(item => item.ContentHash).Distinct(StringComparer.Ordinal).Count() != entry.Failures.Count
+            || entry.Repairs.Select(item => item.ContentHash).Distinct(StringComparer.Ordinal).Count() != entry.Repairs.Count
+            || entry.Repairs.Select(item => item.OperationId).Distinct(StringComparer.Ordinal).Count() != entry.Repairs.Count
+            || entry.Repairs.Select(item => item.FailedOwnership.ContentHash).Distinct(StringComparer.Ordinal).Count() != entry.Repairs.Count
             || !OwnershipOrderIsMonotonic(entry.Lifecycles.Select(item => item.Ownership))
             || !OwnershipOrderIsMonotonic(entry.HeartbeatRetirements.Select(item => item.Ownership))
             || !OwnershipOrderIsMonotonic(entry.Heartbeats.Select(item => item.Ownership))
-            || !OwnershipOrderIsMonotonic(entry.Failures.Select(item => item.Ownership)))
+            || !OwnershipOrderIsMonotonic(entry.Failures.Select(item => item.Ownership))
+            || !OwnershipOrderIsMonotonic(entry.Repairs.Select(item => item.FailedOwnership)))
         {
             throw Invalid();
         }
@@ -387,6 +460,7 @@ internal static class GovernedLoopCoordinatorEvidenceStoreCodec
             var retirement = entry.HeartbeatRetirements.SingleOrDefault(item => SameOwner(item.Ownership, ownership));
             var heartbeats = entry.Heartbeats.Where(item => SameOwner(item.Ownership, ownership)).ToArray();
             var failures = entry.Failures.Where(item => SameOwner(item.Ownership, ownership)).ToArray();
+            var repairs = entry.Repairs.Where(item => SameOwner(item.FailedOwnership, ownership)).ToArray();
             if (lifecycles.Length == 0
                 || retirement is null && heartbeats.Length == 0
                 || index == entry.Ownerships.Count - 1 && heartbeats.Length == 0
@@ -399,6 +473,7 @@ internal static class GovernedLoopCoordinatorEvidenceStoreCodec
                 || !lifecycles.All(item => GovernedLoopSleepContractValidator.ValidateComposition(ownership, item).IsValid)
                 || !heartbeats.All(item => GovernedLoopSleepContractValidator.ValidateComposition(ownership, item).IsValid)
                 || !failures.All(item => GovernedLoopSleepContractValidator.ValidateComposition(ownership, item).IsValid)
+                || !repairs.All(item => RepairIsValid(entry, ownership, item))
                 || !TransitionsAreValid(lifecycles, GovernedLoopSleepContractValidator.ValidateTransition)
                 || !TransitionsAreValid(heartbeats, GovernedLoopSleepContractValidator.ValidateTransition)
                 || !TransitionsAreValid(failures, GovernedLoopSleepContractValidator.ValidateTransition)
@@ -413,14 +488,11 @@ internal static class GovernedLoopCoordinatorEvidenceStoreCodec
                 var previousLifecycle = entry.Lifecycles.Last(item => SameOwner(item.Ownership, previous));
                 var previousHeartbeat = entry.Heartbeats.LastOrDefault(item => SameOwner(item.Ownership, previous))
                     ?? ToHeartbeat(entry.HeartbeatRetirements.Single(item => SameOwner(item.Ownership, previous)));
-                var transitionIsValid = string.Equals(previous.OwnerId, ownership.OwnerId, StringComparison.Ordinal)
-                    && previousLifecycle.Status == GovernedLoopCoordinatorStatus.Stopped
-                    ? GovernedLoopSleepContractValidator.ValidateTerminalSameOwnerRestart(
-                        previous,
-                        previousLifecycle,
-                        previousHeartbeat,
-                        ownership).IsValid
-                    : GovernedLoopSleepContractValidator.ValidateHandoff(previous, previousHeartbeat, ownership).IsValid;
+                var repair = entry.Repairs.SingleOrDefault(item => SameOwner(item.FailedOwnership, previous));
+                var transitionIsValid = repair is not null
+                    ? ownership.AcquiredAtUtc >= repair.RecordedAtUtc
+                        && GovernedLoopSleepContractValidator.ValidateRepairHandoff(previous, previousHeartbeat, ownership).IsValid
+                    : ValidateUnrepairedHandoff(previous, previousLifecycle, previousHeartbeat, ownership);
                 if (!transitionIsValid)
                 {
                     throw Invalid();
@@ -431,11 +503,46 @@ internal static class GovernedLoopCoordinatorEvidenceStoreCodec
         if (entry.Lifecycles.Any(item => !entry.Ownerships.Any(owner => SameOwner(owner, item.Ownership)))
             || entry.HeartbeatRetirements.Any(item => !entry.Ownerships.Any(owner => SameOwner(owner, item.Ownership)))
             || entry.Heartbeats.Any(item => !entry.Ownerships.Any(owner => SameOwner(owner, item.Ownership)))
-            || entry.Failures.Any(item => !entry.Ownerships.Any(owner => SameOwner(owner, item.Ownership))))
+            || entry.Failures.Any(item => !entry.Ownerships.Any(owner => SameOwner(owner, item.Ownership)))
+            || entry.Repairs.Any(item => !entry.Ownerships.Any(owner => SameOwner(owner, item.FailedOwnership))))
         {
             throw Invalid();
         }
     }
+
+    private static bool RepairIsValid(
+        GovernedLoopCoordinatorEvidenceStoreEntry entry,
+        GovernedLoopCoordinatorOwnership ownership,
+        GovernedLoopCoordinatorRepairDisposition repair)
+    {
+        var lifecycle = entry.Lifecycles.LastOrDefault(item => SameOwner(item.Ownership, ownership));
+        var heartbeat = entry.Heartbeats.LastOrDefault(item => SameOwner(item.Ownership, ownership))
+            ?? entry.HeartbeatRetirements.Where(item => SameOwner(item.Ownership, ownership)).Select(ToHeartbeat).SingleOrDefault();
+        var failure = entry.Failures.LastOrDefault(item => SameOwner(item.Ownership, ownership));
+        return GovernedLoopSleepContractValidator.Validate(repair).IsValid
+            && string.Equals(repair.CoordinatorId, entry.CoordinatorId, StringComparison.Ordinal)
+            && repair.FailedOwnership == ownership
+            && lifecycle is { Status: GovernedLoopCoordinatorStatus.Failed, TerminalAtUtc: not null }
+            && heartbeat is not null
+            && failure is not null
+            && string.Equals(repair.TerminalLifecycleHash, lifecycle.ContentHash, StringComparison.Ordinal)
+            && string.Equals(repair.LatestHeartbeatHash, heartbeat.ContentHash, StringComparison.Ordinal)
+            && string.Equals(repair.LatestFailureHash, failure.ContentHash, StringComparison.Ordinal);
+    }
+
+    private static bool ValidateUnrepairedHandoff(
+        GovernedLoopCoordinatorOwnership previous,
+        GovernedLoopCoordinatorLifecycle previousLifecycle,
+        GovernedLoopCoordinatorHeartbeat previousHeartbeat,
+        GovernedLoopCoordinatorOwnership ownership)
+        => string.Equals(previous.OwnerId, ownership.OwnerId, StringComparison.Ordinal)
+            && previousLifecycle.Status == GovernedLoopCoordinatorStatus.Stopped
+            ? GovernedLoopSleepContractValidator.ValidateTerminalSameOwnerRestart(
+                previous,
+                previousLifecycle,
+                previousHeartbeat,
+                ownership).IsValid
+            : GovernedLoopSleepContractValidator.ValidateHandoff(previous, previousHeartbeat, ownership).IsValid;
 
     private static bool RetirementIsValid(GovernedLoopCoordinatorHeartbeatRetirement retirement)
     {
@@ -512,6 +619,13 @@ internal static class GovernedLoopCoordinatorEvidenceStoreCodec
         }
 
         writer.WriteEndArray();
+        writer.WriteStartArray("repairs");
+        foreach (var repair in entry.Repairs)
+        {
+            WriteRepair(writer, repair);
+        }
+
+        writer.WriteEndArray();
         writer.WriteEndObject();
     }
 
@@ -581,6 +695,40 @@ internal static class GovernedLoopCoordinatorEvidenceStoreCodec
         writer.WriteEndObject();
     }
 
+    private static void WriteRepair(Utf8JsonWriter writer, GovernedLoopCoordinatorRepairDisposition repair)
+    {
+        writer.WriteStartObject();
+        writer.WriteString("actorId", repair.ActorId);
+        writer.WriteString("contentHash", repair.ContentHash);
+        writer.WriteString("coordinatorId", repair.CoordinatorId);
+        writer.WritePropertyName("dependencyReadiness");
+        WriteRepairReadiness(writer, repair.DependencyReadiness);
+        writer.WriteString("failedOwnershipHash", repair.FailedOwnership.ContentHash);
+        writer.WriteString("latestFailureHash", repair.LatestFailureHash);
+        writer.WriteString("latestHeartbeatHash", repair.LatestHeartbeatHash);
+        writer.WriteString("operationId", repair.OperationId);
+        WriteUtc(writer, "recordedAtUtc", repair.RecordedAtUtc);
+        writer.WriteNumber("schemaVersion", repair.SchemaVersion);
+        writer.WriteString("terminalLifecycleHash", repair.TerminalLifecycleHash);
+        writer.WriteString("workspaceId", repair.WorkspaceId);
+        writer.WriteEndObject();
+    }
+
+    private static void WriteRepairReadiness(Utf8JsonWriter writer, GovernedLoopCoordinatorRepairReadiness readiness)
+    {
+        writer.WriteStartObject();
+        writer.WriteString("contentHash", readiness.ContentHash);
+        writer.WriteString("coordinatorId", readiness.CoordinatorId);
+        WriteUtc(writer, "evaluatedAtUtc", readiness.EvaluatedAtUtc);
+        writer.WriteBoolean("humanInputReady", readiness.HumanInputReady);
+        writer.WriteBoolean("scheduleReady", readiness.ScheduleReady);
+        writer.WriteNumber("schemaVersion", readiness.SchemaVersion);
+        writer.WriteBoolean("triggerReady", readiness.TriggerReady);
+        writer.WriteBoolean("wakeReady", readiness.WakeReady);
+        writer.WriteString("workspaceId", readiness.WorkspaceId);
+        writer.WriteEndObject();
+    }
+
     private static bool IsExactObject(JsonElement element, IReadOnlyCollection<string> expected)
         => element.ValueKind == JsonValueKind.Object
             && element.EnumerateObject().Count() == expected.Count
@@ -616,6 +764,14 @@ internal static class GovernedLoopCoordinatorEvidenceStoreCodec
         return element.TryGetProperty(property, out var candidate)
             && candidate.ValueKind == JsonValueKind.Number
             && candidate.TryGetInt32(out value);
+    }
+
+    private static bool TryBoolean(JsonElement element, string property, out bool value)
+    {
+        value = default;
+        return element.TryGetProperty(property, out var candidate)
+            && candidate.ValueKind is JsonValueKind.True or JsonValueKind.False
+            && (value = candidate.GetBoolean()) == candidate.GetBoolean();
     }
 
     private static bool TryInt64(JsonElement element, string property, out long value)

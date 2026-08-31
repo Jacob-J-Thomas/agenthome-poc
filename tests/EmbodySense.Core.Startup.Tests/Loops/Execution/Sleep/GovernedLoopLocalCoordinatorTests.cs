@@ -363,6 +363,90 @@ public sealed class GovernedLoopLocalCoordinatorTests
     }
 
     [Fact]
+    public async Task Completed_failed_session_is_reaped_and_repaired_in_one_explicit_start_operation()
+    {
+        var evidence = new RepairableCoordinatorEvidencePort();
+        var clock = Clock();
+        var work = new ScriptedLocalWorkRunner
+        {
+            Handler = static (_, _) => Task.FromResult<GovernedLoopLocalWorkResult?>(
+                new GovernedLoopLocalWorkResult(GovernedLoopLocalWorkResultStatus.Corrupt, "failed-work"))
+        };
+        var dependencies = new StaticCoordinatorRepairDependencyPort();
+        await using var coordinator = Coordinator(
+            evidence,
+            work,
+            clock,
+            "owner-a",
+            repairDependencies: dependencies,
+            workspaceId: "workspace-sha256:" + new string('a', 64));
+
+        Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Started, (await coordinator.StartAsync()).Status);
+        await WaitUntilAsync(() => evidence.Snapshot?.LatestLifecycle.Status == GovernedLoopCoordinatorStatus.Failed);
+        await Task.Delay(20);
+        var failed = evidence.Snapshot!;
+        clock.Advance(TimeSpan.FromMinutes(3));
+        Assert.Equal(GovernedLoopCoordinatorRepairMutationStatus.Appended, (await evidence.AppendAsync(Repair(failed)))!.Status);
+        work.Handler = static (_, _) => Task.FromResult<GovernedLoopLocalWorkResult?>(
+            new GovernedLoopLocalWorkResult(GovernedLoopLocalWorkResultStatus.Empty, "no-work"));
+
+        var repaired = await coordinator.StartAfterRepairAsync();
+
+        Assert.True(
+            repaired.Status == GovernedLoopLocalCoordinatorStartStatus.Started,
+            $"Expected repaired start; status={repaired.Status}, dependencyReads={dependencies.ReadCalls}, repairAcquisitions={evidence.RepairAcquisitionCalls}.");
+        Assert.Equal(failed.Ownership.OwnershipEpoch + 1, repaired.Snapshot!.Ownership.OwnershipEpoch);
+        Assert.Equal(1, evidence.RepairAcquisitionCalls);
+        Assert.Equal(GovernedLoopLocalCoordinatorStopStatus.Stopped, (await coordinator.StopAsync()).Status);
+    }
+
+    [Fact]
+    public async Task Durably_failed_uncompleted_session_repair_waits_then_reacquires_once()
+    {
+        var evidence = new RepairableCoordinatorEvidencePort { BlockFailedLifecycleAfterCommit = true };
+        var clock = Clock();
+        var work = new ScriptedLocalWorkRunner
+        {
+            Handler = static (_, _) => Task.FromResult<GovernedLoopLocalWorkResult?>(
+                new GovernedLoopLocalWorkResult(GovernedLoopLocalWorkResultStatus.Corrupt, "failed-work"))
+        };
+        var dependencies = new StaticCoordinatorRepairDependencyPort();
+        await using var coordinator = Coordinator(
+            evidence,
+            work,
+            clock,
+            "owner-a",
+            repairDependencies: dependencies,
+            workspaceId: "workspace-sha256:" + new string('a', 64));
+
+        try
+        {
+            Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Started, (await coordinator.StartAsync()).Status);
+            await evidence.FailedLifecyclePersisted.WaitAsync(TimeSpan.FromSeconds(5));
+            var failed = evidence.Snapshot!;
+            clock.Advance(TimeSpan.FromMinutes(3));
+            Assert.Equal(GovernedLoopCoordinatorRepairMutationStatus.Appended, (await evidence.AppendAsync(Repair(failed)))!.Status);
+            work.Handler = static (_, _) => Task.FromResult<GovernedLoopLocalWorkResult?>(
+                new GovernedLoopLocalWorkResult(GovernedLoopLocalWorkResultStatus.Empty, "no-work"));
+
+            var repaired = coordinator.StartAfterRepairAsync();
+
+            Assert.False(repaired.IsCompleted);
+            evidence.ReleaseFailedLifecycle();
+            var result = await repaired;
+
+            Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Started, result.Status);
+            Assert.Equal(failed.Ownership.OwnershipEpoch + 1, result.Snapshot!.Ownership.OwnershipEpoch);
+            Assert.Equal(1, evidence.RepairAcquisitionCalls);
+            Assert.Equal(GovernedLoopLocalCoordinatorStopStatus.Stopped, (await coordinator.StopAsync()).Status);
+        }
+        finally
+        {
+            evidence.ReleaseFailedLifecycle();
+        }
+    }
+
+    [Fact]
     public async Task Durably_failed_uncompleted_session_never_reports_ready_already_running_posture()
     {
         var evidence = new RecordingCoordinatorEvidencePort();
@@ -1460,6 +1544,85 @@ public sealed class GovernedLoopLocalCoordinatorTests
     }
 
     [Fact]
+    public async Task Failed_coordinator_restarts_only_after_a_retained_exact_repair_and_one_fenced_acquisition()
+    {
+        var evidence = new RepairableCoordinatorEvidencePort();
+        var clock = Clock();
+        var failingWork = new ScriptedLocalWorkRunner
+        {
+            Handler = static (_, _) => Task.FromResult<GovernedLoopLocalWorkResult?>(
+                new GovernedLoopLocalWorkResult(GovernedLoopLocalWorkResultStatus.Corrupt, "failed-work"))
+        };
+        await using (var failed = Coordinator(evidence, failingWork, clock, "owner-a"))
+        {
+            Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Started, (await failed.StartAsync()).Status);
+            await WaitUntilAsync(() => evidence.Snapshot?.LatestLifecycle.Status == GovernedLoopCoordinatorStatus.Failed);
+            Assert.Equal(GovernedLoopLocalCoordinatorStopStatus.Failed, (await failed.StopAsync()).Status);
+        }
+
+        clock.Advance(TimeSpan.FromMinutes(3));
+        await using (var unapproved = Coordinator(evidence, new ScriptedLocalWorkRunner(), clock, "owner-b"))
+        {
+            Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Failed, (await unapproved.StartAsync()).Status);
+        }
+
+        var failedSnapshot = evidence.Snapshot!;
+        var repair = Repair(failedSnapshot);
+        Assert.Equal(GovernedLoopCoordinatorRepairMutationStatus.Appended, (await evidence.AppendAsync(repair))!.Status);
+        var dependencies = new StaticCoordinatorRepairDependencyPort();
+        await using var repaired = Coordinator(
+            evidence,
+            new ScriptedLocalWorkRunner(),
+            clock,
+            "owner-b",
+            repairDependencies: dependencies,
+            workspaceId: "workspace-sha256:" + new string('a', 64));
+
+        var started = await repaired.StartAsync();
+
+        Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Started, started.Status);
+        Assert.Equal(1, dependencies.ReadCalls);
+        Assert.Equal(1, evidence.RepairAcquisitionCalls);
+        Assert.Equal(failedSnapshot.Ownership.OwnershipEpoch + 1, started.Snapshot!.Ownership.OwnershipEpoch);
+        Assert.Equal(GovernedLoopLocalCoordinatorStopStatus.Stopped, (await repaired.StopAsync()).Status);
+    }
+
+    [Fact]
+    public async Task Retained_repair_never_restarts_when_current_all_family_readiness_is_unavailable()
+    {
+        var evidence = new RepairableCoordinatorEvidencePort();
+        var clock = Clock();
+        var failingWork = new ScriptedLocalWorkRunner
+        {
+            Handler = static (_, _) => Task.FromResult<GovernedLoopLocalWorkResult?>(
+                new GovernedLoopLocalWorkResult(GovernedLoopLocalWorkResultStatus.Corrupt, "failed-work"))
+        };
+        await using (var failed = Coordinator(evidence, failingWork, clock, "owner-a"))
+        {
+            await failed.StartAsync();
+            await WaitUntilAsync(() => evidence.Snapshot?.LatestLifecycle.Status == GovernedLoopCoordinatorStatus.Failed);
+            await failed.StopAsync();
+        }
+
+        clock.Advance(TimeSpan.FromMinutes(3));
+        Assert.Equal(GovernedLoopCoordinatorRepairMutationStatus.Appended, (await evidence.AppendAsync(Repair(evidence.Snapshot!)))!.Status);
+        var dependencies = new StaticCoordinatorRepairDependencyPort { Ready = false };
+        await using var candidate = Coordinator(
+            evidence,
+            new ScriptedLocalWorkRunner(),
+            clock,
+            "owner-b",
+            repairDependencies: dependencies,
+            workspaceId: "workspace-sha256:" + new string('a', 64));
+
+        var result = await candidate.StartAsync();
+
+        Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Unavailable, result.Status);
+        Assert.Equal(1, dependencies.ReadCalls);
+        Assert.Equal(0, evidence.RepairAcquisitionCalls);
+    }
+
+    [Fact]
     public async Task Lifecycle_version_exhaustion_fails_closed_during_public_stop()
     {
         var evidence = new RecordingCoordinatorEvidencePort();
@@ -1589,7 +1752,9 @@ public sealed class GovernedLoopLocalCoordinatorTests
         TimeSpan? heartbeat = null,
         TimeSpan? lease = null,
         int perFamily = 1,
-        IGovernedLoopLocalCoordinatorBoundaryObserver? boundaryObserver = null)
+        IGovernedLoopLocalCoordinatorBoundaryObserver? boundaryObserver = null,
+        IGovernedLoopCoordinatorRepairDependencyPort? repairDependencies = null,
+        string? workspaceId = null)
         => new(
             evidence,
             work,
@@ -1601,7 +1766,9 @@ public sealed class GovernedLoopLocalCoordinatorTests
                 MaximumItemsPerFamilyPerCycle = perFamily
             },
             clock,
-            boundaryObserver);
+            boundaryObserver,
+            repairDependencies,
+            workspaceId);
 
     private static GovernedLoopLocalCoordinatorOptions Options(string ownerId)
         => new(
@@ -1614,6 +1781,35 @@ public sealed class GovernedLoopLocalCoordinatorTests
 
     private static SteppingCoordinatorTimeProvider Clock()
         => new(_now, TimeSpan.FromMilliseconds(5));
+
+    private static GovernedLoopCoordinatorRepairDisposition Repair(GovernedLoopCoordinatorSnapshot failed)
+    {
+        var workspaceId = "workspace-sha256:" + new string('a', 64);
+        var recordedAtUtc = failed.LatestHeartbeat.LeaseExpiresAtUtc;
+        var readiness = GovernedLoopSleepContractHash.Apply(new GovernedLoopCoordinatorRepairReadiness(
+            1,
+            workspaceId,
+            failed.Ownership.CoordinatorId,
+            true,
+            true,
+            true,
+            true,
+            recordedAtUtc,
+            string.Empty));
+        return GovernedLoopSleepContractHash.Apply(new GovernedLoopCoordinatorRepairDisposition(
+            1,
+            workspaceId,
+            failed.Ownership.CoordinatorId,
+            "repair-operation",
+            "operator-1",
+            failed.Ownership,
+            failed.LatestLifecycle.ContentHash,
+            failed.LatestHeartbeat.ContentHash,
+            failed.LatestFailureHash!,
+            readiness,
+            recordedAtUtc,
+            string.Empty));
+    }
 
     private static async Task WaitUntilAsync(Func<bool> condition)
     {

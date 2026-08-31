@@ -607,6 +607,49 @@ public sealed class GovernedLoopCoordinatorEvidenceStoreTests
     }
 
     [Fact]
+    public async Task Two_process_repair_append_has_one_durable_disposition_and_one_exact_replay()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new GovernedLoopCoordinatorEvidenceStore(paths);
+        var initial = Acquisition();
+        Assert.Equal(GovernedLoopCoordinatorAcquisitionStatus.Acquired, (await store.TryAcquireAsync(initial))!.Status);
+        var failure = GovernedLoopSleepContractTestFixture.Failure(
+            ownership: initial.ProposedOwnership,
+            occurredAtUtc: initial.InitialHeartbeat.RecordedAtUtc.AddSeconds(1));
+        Assert.Equal(
+            GovernedLoopCoordinatorFailureMutationStatus.Appended,
+            (await store.AppendFailureAsync(new(
+                initial.ProposedOwnership,
+                initial.ProposedOwnership.ContentHash,
+                GovernedLoopCoordinatorPriorFailureExpectation.None,
+                0,
+                null,
+                failure)))!.Status);
+        var failed = GovernedLoopSleepContractTestFixture.Lifecycle(
+            GovernedLoopCoordinatorStatus.Failed,
+            2,
+            initial.ProposedOwnership,
+            failure.OccurredAtUtc.AddSeconds(1));
+        Assert.Equal(
+            GovernedLoopCoordinatorLifecycleMutationStatus.Appended,
+            (await store.AppendLifecycleAsync(new(
+                initial.ProposedOwnership,
+                initial.ProposedOwnership.ContentHash,
+                initial.StartingLifecycle.LifecycleVersion,
+                initial.StartingLifecycle.ContentHash,
+                failed)))!.Status);
+
+        var results = await RunCrossProcessRaceAsync(workspace.RootPath, "repair", "operator-1", "operator-1");
+
+        Assert.Single(results, status => status == GovernedLoopCoordinatorRepairMutationStatus.Appended.ToString());
+        Assert.Single(results, status => status == GovernedLoopCoordinatorRepairMutationStatus.Duplicate.ToString());
+        var snapshot = (await store.ReadAsync(initial.ProposedOwnership.CoordinatorId))!.Snapshot!;
+        var repair = await store.ReadAsync(snapshot.Ownership.CoordinatorId, snapshot.Ownership.ContentHash);
+        Assert.Equal(GovernedLoopCoordinatorRepairReadStatus.Found, repair!.Status);
+    }
+
+    [Fact]
     public async Task Cross_process_coordinator_store_host()
     {
         var workspace = Environment.GetEnvironmentVariable(CrossProcessWorkspace);
@@ -624,7 +667,35 @@ public sealed class GovernedLoopCoordinatorEvidenceStoreTests
         var ownerId = Environment.GetEnvironmentVariable(CrossProcessOwnerId)!;
         var store = new GovernedLoopCoordinatorEvidenceStore(new WorkspacePaths(workspace));
         string status;
-        if (string.Equals(mode, "stale", StringComparison.Ordinal))
+        if (string.Equals(mode, "repair", StringComparison.Ordinal))
+        {
+            var snapshot = (await store.ReadAsync("background-coordinator"))!.Snapshot!;
+            var readiness = GovernedLoopSleepContractHash.Apply(new GovernedLoopCoordinatorRepairReadiness(
+                1,
+                "workspace-sha256:" + new string('a', 64),
+                snapshot.Ownership.CoordinatorId,
+                true,
+                true,
+                true,
+                true,
+                snapshot.LatestHeartbeat.LeaseExpiresAtUtc,
+                string.Empty));
+            var repair = GovernedLoopSleepContractHash.Apply(new GovernedLoopCoordinatorRepairDisposition(
+                1,
+                readiness.WorkspaceId,
+                snapshot.Ownership.CoordinatorId,
+                "repair-operation",
+                ownerId,
+                snapshot.Ownership,
+                snapshot.LatestLifecycle.ContentHash,
+                snapshot.LatestHeartbeat.ContentHash,
+                snapshot.LatestFailureHash!,
+                readiness,
+                snapshot.LatestHeartbeat.LeaseExpiresAtUtc,
+                string.Empty));
+            status = (await store.AppendAsync(repair))!.Status.ToString();
+        }
+        else if (string.Equals(mode, "stale", StringComparison.Ordinal))
         {
             var ownership = GovernedLoopSleepContractTestFixture.Ownership(
                 ownerId: ownerId,

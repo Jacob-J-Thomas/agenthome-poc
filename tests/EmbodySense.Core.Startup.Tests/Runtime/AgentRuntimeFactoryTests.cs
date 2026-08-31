@@ -23,6 +23,7 @@ using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
 using EmbodySense.Core.Common.Loops.Execution.Retry.Models;
 using EmbodySense.Core.Startup.Loops.Execution.Models;
+using EmbodySense.Core.Startup.Loops.Execution.Sleep.Models;
 using EmbodySense.Core.Startup.Governance;
 using EmbodySense.Core.Startup.Inference.Profiles;
 using EmbodySense.Core.Startup.HumanInput.Models;
@@ -416,6 +417,110 @@ public sealed class AgentRuntimeFactoryTests
         Assert.False(typedStart.RetryAllowed);
         Assert.False(legacyStart.Available);
         Assert.Equal("Failed", legacyStart.Status);
+    }
+
+    [Fact]
+    public async Task Coordinator_repair_is_unavailable_without_an_authenticated_current_operator_provider()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+
+        await using var runtime = await CreateRuntimeAsync(workspace);
+        var preview = await runtime.GovernedLoopCoordinatorRepair.PreviewAsync(
+            new GovernedLoopCoordinatorRepairPreviewRequest("local-background", "repair-local-background"));
+
+        Assert.Equal(GovernedLoopCoordinatorRepairPreviewStatus.Unavailable, preview.Status);
+        Assert.Null(preview.Disposition);
+    }
+
+    [Theory]
+    [InlineData(AgentRuntimeGovernedLoopCoordinatorRepairAuthorityStatus.Denied, "authenticated-operator", false, GovernedLoopCoordinatorRepairPreviewStatus.Unauthorized)]
+    [InlineData(AgentRuntimeGovernedLoopCoordinatorRepairAuthorityStatus.Unavailable, "authenticated-operator", false, GovernedLoopCoordinatorRepairPreviewStatus.Unavailable)]
+    [InlineData(AgentRuntimeGovernedLoopCoordinatorRepairAuthorityStatus.Ready, null, false, GovernedLoopCoordinatorRepairPreviewStatus.Corrupt)]
+    [InlineData(AgentRuntimeGovernedLoopCoordinatorRepairAuthorityStatus.Ready, "authenticated-operator", true, GovernedLoopCoordinatorRepairPreviewStatus.Corrupt)]
+    public async Task Coordinator_repair_preview_fails_closed_for_nonready_or_malformed_current_operator_authority(
+        AgentRuntimeGovernedLoopCoordinatorRepairAuthorityStatus authorityStatus,
+        string? actorId,
+        bool returnNull,
+        GovernedLoopCoordinatorRepairPreviewStatus expectedStatus)
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var authority = new GovernedLoopCoordinatorRepairTestAuthorityProvider(actorId, authorityStatus) { ReturnNull = returnNull };
+
+        await using var runtime = await CreateRuntimeAsync(workspace, coordinatorRepairAuthorityProvider: authority);
+        var preview = await runtime.GovernedLoopCoordinatorRepair.PreviewAsync(
+            new GovernedLoopCoordinatorRepairPreviewRequest("local-background", "repair-local-background"));
+
+        Assert.Equal(expectedStatus, preview.Status);
+        Assert.Null(preview.Disposition);
+    }
+
+    [Fact]
+    public async Task Coordinator_repair_facade_previews_exact_failure_and_starts_one_fenced_successor()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new GovernedLoopCoordinatorEvidenceStore(paths);
+        var acquired = await store.TryAcquireAsync(ExpiredPeerAcquisition());
+        var initial = Assert.IsType<GovernedLoopCoordinatorSnapshot>(acquired!.Snapshot);
+        var occurredAtUtc = initial.LatestHeartbeat.RecordedAtUtc.AddTicks(1);
+        var failure = GovernedLoopSleepContractHash.Apply(new GovernedLoopCoordinatorFailure(
+            GovernedLoopCoordinatorFailure.CurrentSchemaVersion,
+            1,
+            initial.Ownership,
+            GovernedLoopCoordinatorFailureKind.CorruptState,
+            "test-failed-coordinator",
+            occurredAtUtc,
+            string.Empty));
+        Assert.Equal(
+            GovernedLoopCoordinatorFailureMutationStatus.Appended,
+            (await store.AppendFailureAsync(new GovernedLoopCoordinatorFailureMutationRequest(
+                initial.Ownership,
+                initial.Ownership.ContentHash,
+                GovernedLoopCoordinatorPriorFailureExpectation.None,
+                0,
+                null,
+                failure)))!.Status);
+        var failedAtUtc = occurredAtUtc.AddTicks(1);
+        var failed = GovernedLoopSleepContractHash.Apply(initial.LatestLifecycle with
+        {
+            LifecycleVersion = initial.LatestLifecycle.LifecycleVersion + 1,
+            Status = GovernedLoopCoordinatorStatus.Failed,
+            UpdatedAtUtc = failedAtUtc,
+            TerminalAtUtc = failedAtUtc,
+            ContentHash = string.Empty
+        });
+        Assert.Equal(
+            GovernedLoopCoordinatorLifecycleMutationStatus.Appended,
+            (await store.AppendLifecycleAsync(new GovernedLoopCoordinatorLifecycleMutationRequest(
+                initial.Ownership,
+                initial.Ownership.ContentHash,
+                initial.LatestLifecycle.LifecycleVersion,
+                initial.LatestLifecycle.ContentHash,
+                failed)))!.Status);
+
+        await using var runtime = await CreateRuntimeAsync(
+            workspace,
+            coordinatorRepairAuthorityProvider: new GovernedLoopCoordinatorRepairTestAuthorityProvider("authenticated-operator"));
+        var preview = await runtime.GovernedLoopCoordinatorRepair.PreviewAsync(
+            new GovernedLoopCoordinatorRepairPreviewRequest("local-background", "repair-local-background"));
+        var submitted = await runtime.GovernedLoopCoordinatorRepair.SubmitAsync(
+            new GovernedLoopCoordinatorRepairSubmitRequest(preview.Disposition!));
+        var durable = await store.ReadAsync("local-background");
+
+        Assert.Equal(GovernedLoopCoordinatorRepairPreviewStatus.Ready, preview.Status);
+        Assert.Equal(initial.Ownership, preview.Disposition!.FailedOwnership);
+        Assert.Equal("authenticated-operator", preview.Disposition.ActorId);
+        Assert.Equal(failed.ContentHash, preview.Disposition.TerminalLifecycleHash);
+        Assert.Equal(failure.ContentHash, preview.Disposition.LatestFailureHash);
+        Assert.Equal(GovernedLoopCoordinatorRepairExecutionStatus.Repaired, submitted.Status);
+        Assert.Equal(GovernedLoopCoordinatorRepairSubmitStatus.Accepted, submitted.Submission.Status);
+        Assert.Equal(GovernedLoopCoordinatorReadStatus.Found, durable!.Status);
+        Assert.Equal(2, durable.Snapshot!.Ownership.OwnershipEpoch);
+        Assert.Equal(GovernedLoopCoordinatorStatus.Running, durable.Snapshot.LatestLifecycle.Status);
+        Assert.Equal(AgentRuntimeGovernedLoopBackgroundStopStatus.Stopped, (await runtime.StopGovernedLoopLocalBackgroundAsync()).Status);
     }
 
     [Fact]
@@ -4016,7 +4121,8 @@ public sealed class AgentRuntimeFactoryTests
         IAgentRuntimeAuthenticatedWakeVerifier? verifier = null,
         IAgentRuntimeHumanInputAuthorityProvider? humanInputAuthorityProvider = null,
         CommandActionRuntimeProvider? commandActionRuntimeProvider = null,
-        IReadOnlyList<ModelProfileRuntimeProvider>? additionalModelProfileProviders = null)
+        IReadOnlyList<ModelProfileRuntimeProvider>? additionalModelProfileProviders = null,
+        IAgentRuntimeGovernedLoopCoordinatorRepairAuthorityProvider? coordinatorRepairAuthorityProvider = null)
     {
         var executablePath = codexPath ?? await CreateFakeCodexExecutableAsync(workspace);
         var status = CreateCompatibleRuntimeStatus(executablePath);
@@ -4034,6 +4140,11 @@ public sealed class AgentRuntimeFactoryTests
         if (humanInputAuthorityProvider is not null)
         {
             factory = factory.WithHumanInputAuthorityProvider(humanInputAuthorityProvider);
+        }
+
+        if (coordinatorRepairAuthorityProvider is not null)
+        {
+            factory = factory.WithGovernedLoopCoordinatorRepairAuthorityProvider(coordinatorRepairAuthorityProvider);
         }
 
         return await factory.CreateAsync(

@@ -875,6 +875,9 @@ public sealed class GovernedLoopLocalWorkRunnerTests
         var invalidFamily = Runner(source);
         var throwingClock = new SteppingCoordinatorTimeProvider(_now, TimeSpan.Zero) { ThrowOnNext = true };
         var unavailableClock = Runner(source, timeProvider: throwingClock);
+        var unavailableReadinessClock = Runner(
+            source,
+            timeProvider: new SteppingCoordinatorTimeProvider(_now, TimeSpan.Zero) { ThrowOnNext = true });
         var corruptClock = Runner(
             source,
             timeProvider: new SteppingCoordinatorTimeProvider(_now.ToOffset(TimeSpan.FromHours(1)), TimeSpan.Zero));
@@ -882,11 +885,34 @@ public sealed class GovernedLoopLocalWorkRunnerTests
         var familyResult = await invalidFamily.RunOnceAsync((GovernedLoopLocalWorkFamily)999);
         var clockResult = await unavailableClock.RunOnceAsync(GovernedLoopLocalWorkFamily.Schedule);
         var corruptClockResult = await corruptClock.RunOnceAsync(GovernedLoopLocalWorkFamily.Schedule);
+        var readinessFamilyResult = await invalidFamily.ProbeReadinessAsync((GovernedLoopLocalWorkFamily)999);
+        var readinessClockResult = await unavailableReadinessClock.ProbeReadinessAsync(GovernedLoopLocalWorkFamily.Schedule);
 
         Assert.Equal(GovernedLoopLocalWorkResultStatus.Corrupt, familyResult!.Status);
         Assert.Equal(GovernedLoopLocalWorkResultStatus.Unavailable, clockResult!.Status);
         Assert.Equal(GovernedLoopLocalWorkResultStatus.Corrupt, corruptClockResult!.Status);
+        Assert.Equal(GovernedLoopLocalWorkResultStatus.Corrupt, readinessFamilyResult!.Status);
+        Assert.Equal(GovernedLoopLocalWorkResultStatus.Unavailable, readinessClockResult!.Status);
         Assert.Equal(0, source.Calls);
+    }
+
+    [Fact]
+    public async Task Readiness_probe_accepts_healthy_pending_schedule_and_wake_work_without_actuating_it()
+    {
+        Assert.True(ScheduleId.TryParse("schedule-1", out var scheduleId));
+        var wake = new GovernedLoopWakeRequest(new string('a', 64), new string('b', 64));
+        var source = Source(
+            GovernedLoopBackgroundWorkReadStatus.Found,
+            [scheduleId!],
+            [wake]);
+        var runner = Runner(source);
+
+        var schedule = await runner.ProbeReadinessAsync(GovernedLoopLocalWorkFamily.Schedule);
+        var wakeResult = await runner.ProbeReadinessAsync(GovernedLoopLocalWorkFamily.Wake);
+
+        Assert.Equal(GovernedLoopLocalWorkResultStatus.Empty, schedule!.Status);
+        Assert.Equal(GovernedLoopLocalWorkResultStatus.Empty, wakeResult!.Status);
+        Assert.Equal(2, source.Calls);
     }
 
     private static GovernedLoopLocalWorkRunner Runner(

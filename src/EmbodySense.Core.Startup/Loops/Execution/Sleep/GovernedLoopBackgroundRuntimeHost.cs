@@ -17,7 +17,7 @@ namespace EmbodySense.Core.Startup.Loops.Execution.Sleep;
 /// second background composition. Wait recovery remains a dependency because unfinished Wait work must be recovered
 /// before new work can acquire durable coordinator ownership.
 /// </remarks>
-internal sealed class GovernedLoopBackgroundRuntimeHost : ICustomLoopExecutionActivation, IAsyncDisposable
+internal sealed class GovernedLoopBackgroundRuntimeHost : ICustomLoopExecutionActivation, IGovernedLoopCoordinatorRepairStartupPort, IAsyncDisposable
 {
     private static readonly TimeSpan _cycleInterval = TimeSpan.FromMilliseconds(100);
     // The canonical Wait host may share a constrained Windows runner with the full verification
@@ -62,7 +62,10 @@ internal sealed class GovernedLoopBackgroundRuntimeHost : ICustomLoopExecutionAc
         _coordinatorBoundaryObserver = coordinatorBoundaryObserver;
     }
 
-    internal void BindBackgroundWork(IGovernedLoopLocalWorkRunner work)
+    internal void BindBackgroundWork(
+        IGovernedLoopLocalWorkRunner work,
+        IGovernedLoopCoordinatorRepairDependencyPort? repairDependencies = null,
+        string? workspaceId = null)
     {
         ArgumentNullException.ThrowIfNull(work);
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
@@ -84,7 +87,9 @@ internal sealed class GovernedLoopBackgroundRuntimeHost : ICustomLoopExecutionAc
                 _ownershipLeaseDuration,
                 MaximumItemsPerFamilyPerCycle),
             _timeProvider,
-            _coordinatorBoundaryObserver);
+            _coordinatorBoundaryObserver,
+            repairDependencies,
+            workspaceId);
     }
 
     public async Task<CustomLoopExecutionActivationResult> ActivateAsync(
@@ -102,6 +107,12 @@ internal sealed class GovernedLoopBackgroundRuntimeHost : ICustomLoopExecutionAc
     internal Task<AgentRuntimeGovernedLoopBackgroundStartResult> StartAsync(
         CancellationToken cancellationToken = default)
         => ActivateCoreAsync(cancellationToken);
+
+    string IGovernedLoopCoordinatorRepairStartupPort.CoordinatorId => CoordinatorId;
+
+    Task<AgentRuntimeGovernedLoopBackgroundStartResult> IGovernedLoopCoordinatorRepairStartupPort.StartAfterRepairAsync(
+        CancellationToken cancellationToken)
+        => ActivateCoreAsync(cancellationToken, startAfterRepair: true);
 
     internal long ActivationSequence => Volatile.Read(ref _activationSequence);
 
@@ -225,7 +236,8 @@ internal sealed class GovernedLoopBackgroundRuntimeHost : ICustomLoopExecutionAc
     }
 
     private async Task<AgentRuntimeGovernedLoopBackgroundStartResult> ActivateCoreAsync(
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool startAfterRepair = false)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         await _activationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -267,7 +279,9 @@ internal sealed class GovernedLoopBackgroundRuntimeHost : ICustomLoopExecutionAc
                     return PublishActivation(recoveryFailure);
                 }
 
-                var start = await coordinator.StartAsync(cancellationToken).ConfigureAwait(false);
+                var start = startAfterRepair
+                    ? await coordinator.StartAfterRepairAsync(cancellationToken).ConfigureAwait(false)
+                    : await coordinator.StartAsync(cancellationToken).ConfigureAwait(false);
                 return PublishActivation(MapStartResult(start));
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
