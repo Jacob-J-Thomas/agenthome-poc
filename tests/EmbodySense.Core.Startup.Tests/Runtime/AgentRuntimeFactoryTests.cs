@@ -123,7 +123,7 @@ using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Startup.Tests.Runtime;
 
-public sealed class AgentRuntimeFactoryTests
+public sealed partial class AgentRuntimeFactoryTests
 {
     internal static async Task CreateAsync_exposes_authoring_that_observes_the_runtime_materialized_nonterminal_run_until_runtime_disposal()
     {
