@@ -23,12 +23,13 @@ public sealed class GovernedLoopSchedulePayloadSourceTests
         Assert.Throws<ArgumentNullException>(() => new GovernedLoopSchedulePayloadSource(null!, null!));
         Assert.Throws<ArgumentNullException>(() => new GovernedLoopSchedulePayloadSource(new ScriptedScheduleStore(), null!));
 
-        var context = ScheduleCurrentEvidenceTestContext.Create();
         Assert.True(ScheduleId.TryParse("daily-reflection", out var scheduleId));
         Assert.Equal("payload/daily-reflection", GovernedLoopSchedulePayloadSource.CreateReference(scheduleId!));
         Assert.Throws<ArgumentNullException>(() => GovernedLoopSchedulePayloadSource.CreateReference(null!));
 
-        var source = new GovernedLoopSchedulePayloadSource(new ScriptedScheduleStore(), new ScriptedGovernedLoopGraphRevisionStore());
+        var store = new ScriptedScheduleStore();
+        var graphStore = new ScriptedGovernedLoopGraphRevisionStore();
+        var source = new GovernedLoopSchedulePayloadSource(store, graphStore);
         foreach (var reference in new[] { null, string.Empty, "payload", "Payload/daily-reflection", "payload/not-a-schedule" })
         {
             var resolution = await source.ResolveAsync(reference!);
@@ -42,7 +43,8 @@ public sealed class GovernedLoopSchedulePayloadSourceTests
     {
         var context = ScheduleCurrentEvidenceTestContext.Create();
         var store = new ScriptedScheduleStore();
-        var source = new GovernedLoopSchedulePayloadSource(store, new ScriptedGovernedLoopGraphRevisionStore());
+        var graphStore = new ScriptedGovernedLoopGraphRevisionStore();
+        var source = new GovernedLoopSchedulePayloadSource(store, graphStore);
         var reference = context.Definition.Payload.GovernedReference;
 
         foreach (var (status, expected) in new[]
@@ -64,10 +66,12 @@ public sealed class GovernedLoopSchedulePayloadSourceTests
         cancellation.Cancel();
         store.ReadBehavior = (_, token) => Task.FromCanceled<ScheduleStoreReadResult>(token);
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => source.ResolveAsync(reference, cancellation.Token));
+        Assert.Equal(6, store.ReadCallCount);
+        Assert.Equal(0, graphStore.ReadArtifactCallCount);
     }
 
     [Fact]
-    public async Task Canonical_definition_and_graph_evidence_must_match_exactly()
+    public async Task Canonical_payload_and_graph_revision_mismatches_fail_closed()
     {
         var context = ScheduleCurrentEvidenceTestContext.Create();
         var store = new ScriptedScheduleStore();
@@ -83,6 +87,8 @@ public sealed class GovernedLoopSchedulePayloadSourceTests
             },
             null));
         Assert.Equal(ScheduleGovernedPayloadResolutionStatus.Corrupt, (await source.ResolveAsync(reference)).Status);
+        Assert.Equal(1, store.ReadCallCount);
+        Assert.Equal(0, graphStore.ReadArtifactCallCount);
 
         store.ReadBehavior = (_, _) => Task.FromResult(new ScheduleStoreReadResult(ScheduleStoreReadStatus.Found, context.Definition, null));
         var alternateRevision = GovernedLoopRevisionReference.Create(
@@ -109,6 +115,8 @@ public sealed class GovernedLoopSchedulePayloadSourceTests
             1,
             context.BindingResolution.Artifact));
         Assert.Equal(ScheduleGovernedPayloadResolutionStatus.Corrupt, (await source.ResolveAsync(reference)).Status);
+        Assert.Equal(2, store.ReadCallCount);
+        Assert.Equal(1, graphStore.ReadArtifactCallCount);
 
         store.ReadBehavior = (_, _) => Task.FromResult(new ScheduleStoreReadResult(ScheduleStoreReadStatus.Found, context.Definition, null));
         foreach (var (status, expected) in new[]
@@ -122,14 +130,20 @@ public sealed class GovernedLoopSchedulePayloadSourceTests
             graphStore.ReadArtifactBehavior = (_, _) => Task.FromResult(new GovernedLoopGraphRevisionArtifactReadResult(status, 1, null));
             Assert.Equal(expected, (await source.ResolveAsync(reference)).Status);
         }
+        Assert.Equal(6, store.ReadCallCount);
+        Assert.Equal(5, graphStore.ReadArtifactCallCount);
 
         graphStore.ReadArtifactBehavior = (_, _) => throw new InvalidOperationException("artifact read failed");
         Assert.Equal(ScheduleGovernedPayloadResolutionStatus.Unavailable, (await source.ResolveAsync(reference)).Status);
+        Assert.Equal(7, store.ReadCallCount);
+        Assert.Equal(6, graphStore.ReadArtifactCallCount);
 
         using var cancellation = new CancellationTokenSource();
         cancellation.Cancel();
         graphStore.ReadArtifactBehavior = (_, token) => Task.FromCanceled<GovernedLoopGraphRevisionArtifactReadResult>(token);
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => source.ResolveAsync(reference, cancellation.Token));
+        Assert.Equal(8, store.ReadCallCount);
+        Assert.Equal(7, graphStore.ReadArtifactCallCount);
     }
 
     [Fact]

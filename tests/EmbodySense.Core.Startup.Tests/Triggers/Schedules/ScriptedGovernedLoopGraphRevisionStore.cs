@@ -9,6 +9,8 @@ namespace EmbodySense.Core.Startup.Tests.Triggers.Schedules;
 
 internal sealed class ScriptedGovernedLoopGraphRevisionStore : IGovernedLoopGraphRevisionStore
 {
+    internal int ReadArtifactCallCount { get; private set; }
+
     internal Func<GovernedLoopRevisionReference, CancellationToken, Task<GovernedLoopGraphRevisionArtifactReadResult>> ReadArtifactBehavior { get; set; }
         = (_, _) => Task.FromResult(new GovernedLoopGraphRevisionArtifactReadResult(GovernedLoopRevisionStoreReadStatus.NotFound, 1, null));
 
@@ -18,7 +20,10 @@ internal sealed class ScriptedGovernedLoopGraphRevisionStore : IGovernedLoopGrap
     public Task<GovernedLoopGraphRevisionArtifactReadResult> ReadArtifactAsync(
         GovernedLoopRevisionReference revision,
         CancellationToken cancellationToken = default)
-        => ReadArtifactBehavior(revision, cancellationToken);
+    {
+        ReadArtifactCallCount++;
+        return ReadArtifactBehavior(revision, cancellationToken);
+    }
 
     public Task<GovernedLoopGraphRevisionMutationReadResult> ReadForMutationAsync(
         string graphId,
