@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Reflection;
 using EmbodySense.Core.Application.HumanReview;
 using EmbodySense.Core.Application.HumanReview.Models;
 using EmbodySense.Core.Application.Loops;
@@ -86,6 +87,84 @@ public sealed class HumanReviewAdmissionServiceTests
         Assert.Equal(CustomLoopRunStoreStatus.Conflict, result.Status);
         Assert.Equal(0, shared.UpdateCount);
         Assert.Null(shared.Run!.HumanReview);
+    }
+
+    [Fact]
+    public async Task Admit_returns_not_found_when_the_canonical_run_has_disappeared()
+    {
+        var fixture = await CreateFixtureAsync();
+        var shared = new HumanReviewAdmissionSharedState(fixture.Predecessor) { Run = null };
+        var service = new HumanReviewAdmissionService(new HumanReviewAdmissionTestStore(shared));
+
+        var result = await service.AdmitAsync(new HumanReviewAdmissionCommand(fixture.Predecessor.Id, fixture.Predecessor.LifecycleVersion, fixture.Request, fixture.BlockedFrontier));
+
+        Assert.Equal(CustomLoopRunStoreStatus.NotFound, result.Status);
+        Assert.Equal(0, shared.UpdateCount);
+    }
+
+    [Fact]
+    public async Task Admit_rejects_a_request_with_a_tampered_integrity_hash_before_rebuilding_the_frontier()
+    {
+        var fixture = await CreateFixtureAsync();
+        var shared = new HumanReviewAdmissionSharedState(fixture.Predecessor);
+        var service = new HumanReviewAdmissionService(new HumanReviewAdmissionTestStore(shared));
+        var tampered = fixture.Request with { RequestHash = Hash('z') };
+
+        var result = await service.AdmitAsync(new HumanReviewAdmissionCommand(fixture.Predecessor.Id, fixture.Predecessor.LifecycleVersion, tampered, fixture.BlockedFrontier));
+
+        Assert.Equal(CustomLoopRunStoreStatus.Conflict, result.Status);
+        Assert.Equal(0, shared.UpdateCount);
+        Assert.Null(shared.Run!.HumanReview);
+    }
+
+    [Fact]
+    public async Task Admit_rejects_a_review_blocked_event_that_does_not_match_the_exact_blocked_activation()
+    {
+        var fixture = await CreateFixtureAsync();
+        var shared = new HumanReviewAdmissionSharedState(fixture.Predecessor);
+        var service = new HumanReviewAdmissionService(new HumanReviewAdmissionTestStore(shared));
+        var mismatchedEvent = fixture.Predecessor.Events[^1] with
+        {
+            Kind = CustomLoopRunEventKind.NodeOutcomeObserved,
+            StepId = "different-node",
+        };
+
+        var result = await service.AdmitAsync(new HumanReviewAdmissionCommand(fixture.Predecessor.Id, fixture.Predecessor.LifecycleVersion, fixture.Request, fixture.BlockedFrontier, mismatchedEvent));
+
+        Assert.Equal(CustomLoopRunStoreStatus.Conflict, result.Status);
+        Assert.Equal(0, shared.UpdateCount);
+        Assert.Null(shared.Run!.HumanReview);
+    }
+
+    [Fact]
+    public async Task Admit_fails_closed_when_a_corrupt_frontier_snapshot_cannot_be_rebound()
+    {
+        var fixture = await CreateFixtureAsync();
+        var constructor = typeof(GovernedLoopFrontierPosture).GetConstructor(BindingFlags.Instance | BindingFlags.NonPublic, null, [typeof(string), typeof(GovernedLoopExecutionBinding), typeof(string), typeof(string), typeof(string), typeof(GovernedLoopFrontierPayload)], null);
+        Assert.NotNull(constructor);
+        var corruptFrontier = Assert.IsType<GovernedLoopFrontierPosture>(constructor!.Invoke([string.Empty, fixture.BlockedFrontier.Binding, fixture.BlockedFrontier.GraphArtifactHash, fixture.BlockedFrontier.GraphLayoutHash, fixture.BlockedFrontier.AdmissionReceiptHash, fixture.BlockedFrontier.Payload]));
+        var shared = new HumanReviewAdmissionSharedState(fixture.Predecessor);
+        var service = new HumanReviewAdmissionService(new HumanReviewAdmissionTestStore(shared));
+
+        var result = await service.AdmitAsync(new HumanReviewAdmissionCommand(fixture.Predecessor.Id, fixture.Predecessor.LifecycleVersion, fixture.Request, corruptFrontier));
+
+        Assert.Equal(CustomLoopRunStoreStatus.Conflict, result.Status);
+        Assert.Equal(0, shared.UpdateCount);
+        Assert.Null(shared.Run!.HumanReview);
+    }
+
+    [Fact]
+    public async Task Admit_fails_closed_when_the_current_run_shape_throws_during_validation()
+    {
+        var fixture = await CreateFixtureAsync();
+        var malformed = fixture.Predecessor with { ExecutionClock = null! };
+        var shared = new HumanReviewAdmissionSharedState(malformed);
+        var service = new HumanReviewAdmissionService(new HumanReviewAdmissionTestStore(shared));
+
+        var result = await service.AdmitAsync(new HumanReviewAdmissionCommand(malformed.Id, malformed.LifecycleVersion, fixture.Request, fixture.BlockedFrontier));
+
+        Assert.Equal(CustomLoopRunStoreStatus.Conflict, result.Status);
+        Assert.Equal(0, shared.UpdateCount);
     }
 
     [Fact]
