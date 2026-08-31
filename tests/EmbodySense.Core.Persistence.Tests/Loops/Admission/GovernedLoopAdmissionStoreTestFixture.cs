@@ -158,7 +158,7 @@ internal static class GovernedLoopAdmissionStoreTestFixture
     {
         if (mode == "writer")
         {
-            return Verification.CancellationHostProcess.Start(
+            return Verification.CancellationHostProcess.StartAppHost(
                 "governed-loop-admission-writer",
                 workspace,
                 trustRoot,
