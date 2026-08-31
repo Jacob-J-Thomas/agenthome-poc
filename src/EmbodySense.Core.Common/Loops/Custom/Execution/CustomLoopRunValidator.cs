@@ -4572,6 +4572,7 @@ public static class CustomLoopRunValidator
             && string.Equals(left.FailureEvidence?.ContentHash, right.FailureEvidence?.ContentHash, StringComparison.Ordinal)
             && string.Equals(left.RetryState?.ContentHash, right.RetryState?.ContentHash, StringComparison.Ordinal)
             && string.Equals(left.HumanReviewEvidence?.EvidenceHash, right.HumanReviewEvidence?.EvidenceHash, StringComparison.Ordinal)
+            && Equals(left.HumanReviewAdmissionBinding, right.HumanReviewAdmissionBinding)
             && Equals(left.HumanReviewDecisionOperation, right.HumanReviewDecisionOperation)
             && Equals(left.HumanReviewContinuationReservation, right.HumanReviewContinuationReservation);
     }

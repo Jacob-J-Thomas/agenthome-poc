@@ -1521,6 +1521,23 @@ public sealed class CustomLoopFrontierStoreTests
     }
 
     [Fact]
+    public async Task Durable_event_prefix_rejects_mutated_admission_binding_evidence()
+    {
+        using var workspace = new TestWorkspace();
+        var admitted = await PersistHumanReviewAdmissionAsync(new WorkspacePaths(workspace.RootPath), "event-prefix-admission-binding");
+        var admission = Assert.Single(admitted.Events, item => item.Kind == CustomLoopRunEventKind.HumanReviewRequestAdmitted);
+        var retained = Assert.IsType<HumanReviewAdmissionBindingEvidence>(admission.HumanReviewAdmissionBinding);
+        var candidate = admitted with
+        {
+            Events = admitted.Events.Select(item => item.EventId == admission.EventId
+                ? item with { HumanReviewAdmissionBinding = HumanReviewContractHash.ApplyAdmissionBindingEvidence(retained with { FrontierId = retained.FrontierId + "-substituted" }) }
+                : item).ToArray(),
+        };
+
+        Assert.False(CustomLoopRunValidator.HasExactDurableEventPrefix(admitted, candidate));
+    }
+
+    [Fact]
     public async Task Decision_state_requires_exact_durable_versions_and_allows_only_valid_later_prefixes()
     {
         using var workspace = new TestWorkspace();
@@ -2015,6 +2032,7 @@ public sealed class CustomLoopFrontierStoreTests
         marker["eventId"] = eventId;
         marker["kind"] = kind;
         marker["humanReviewEvidence"] = null;
+        marker["humanReviewAdmissionBinding"] = null;
         marker["humanReviewDecisionOperation"] = null;
         marker["humanReviewContinuationReservation"] = null;
         events.Add(marker);
@@ -2029,6 +2047,7 @@ public sealed class CustomLoopFrontierStoreTests
             Kind = operation is null ? CustomLoopRunEventKind.HumanReviewContinuationReserved : CustomLoopRunEventKind.HumanReviewDecisionOperationRecorded,
             Detail = operation is null ? "Human Review continuation was reserved." : "Human Review decision operation was recorded.",
             HumanReviewEvidence = evidence,
+            HumanReviewAdmissionBinding = null,
             HumanReviewDecisionOperation = operation,
             HumanReviewContinuationReservation = reservation,
         };
