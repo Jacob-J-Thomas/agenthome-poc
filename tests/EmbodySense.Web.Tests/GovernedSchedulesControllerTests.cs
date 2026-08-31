@@ -50,6 +50,39 @@ public sealed class GovernedSchedulesControllerTests
         }
     }
 
+    [Fact]
+    public async Task Schedule_api_maps_runtime_acquisition_failures_to_bounded_service_unavailable()
+    {
+        using var workspace = new TestWorkspace();
+        var missingCodexPath = workspace.File("missing-codex");
+        await using var app = CreateApp(workspace, missingCodexPath, out var options);
+        await app.StartAsync();
+
+        try
+        {
+            using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
+            var token = app.Services.GetRequiredService<WebSessionSecurity>().Token;
+
+            Assert.Equal(HttpStatusCode.OK, (await SendAsync(client, HttpMethod.Post, "/api/workspace/init", token)).StatusCode);
+
+            var read = await SendAsync(client, HttpMethod.Get, "/api/governed-schedules/detail?scheduleId=INVALID", token);
+            var create = await SendAsync(client, HttpMethod.Post, "/api/governed-schedules/create", token, CreateInput());
+
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, read.StatusCode);
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, create.StatusCode);
+            var readBody = await read.Content.ReadAsStringAsync();
+            var createBody = await create.Content.ReadAsStringAsync();
+            Assert.Contains("governed_schedule_runtime_unavailable", readBody, StringComparison.Ordinal);
+            Assert.Contains("governed_schedule_runtime_unavailable", createBody, StringComparison.Ordinal);
+            Assert.DoesNotContain(missingCodexPath, readBody, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain(missingCodexPath, createBody, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            await app.StopAsync();
+        }
+    }
+
     private static object CreateInput(string operationId = "schedule-missing-graph")
         => new
         {

@@ -40,7 +40,14 @@ public sealed class GovernedSchedulesController : ControllerBase
             return WorkspaceNotInitialized();
         }
 
-        return ProjectRead(await _host.ReadGovernedLoopScheduleAsync(scheduleId, cancellationToken));
+        try
+        {
+            return ProjectRead(await _host.ReadGovernedLoopScheduleAsync(scheduleId, cancellationToken));
+        }
+        catch (Exception exception) when (IsRuntimeAcquisitionFailure(exception))
+        {
+            return RuntimeUnavailable();
+        }
     }
 
     /// <summary>Creates or exactly replays one immutable canonical schedule from bounded authoring intent.</summary>
@@ -61,7 +68,14 @@ public sealed class GovernedSchedulesController : ControllerBase
             return BadRequest(new { error = "governed_schedule_authoring_required", detail = "Bounded schedule authoring intent is required." });
         }
 
-        return ProjectCreate(await _host.CreateGovernedLoopScheduleAsync(input, cancellationToken));
+        try
+        {
+            return ProjectCreate(await _host.CreateGovernedLoopScheduleAsync(input, cancellationToken));
+        }
+        catch (Exception exception) when (IsRuntimeAcquisitionFailure(exception))
+        {
+            return RuntimeUnavailable();
+        }
     }
 
     private static ActionResult<GovernedLoopScheduleAuthoringResponse> ProjectRead(GovernedLoopScheduleAuthoringResponse response)
@@ -87,5 +101,11 @@ public sealed class GovernedSchedulesController : ControllerBase
     private ObjectResult WorkspaceNotInitialized()
         => Conflict(new { error = "workspace_not_initialized", detail = "Initialize the workspace before authoring governed schedules." });
 
+    private ObjectResult RuntimeUnavailable()
+        => StatusCode(StatusCodes.Status503ServiceUnavailable, new { error = "governed_schedule_runtime_unavailable", detail = "The retained runtime or canonical schedule host is unavailable. Retry after runtime health is restored." });
+
     private bool IsWorkspaceInitialized() => _host.GetStatus().Initialized;
+
+    private static bool IsRuntimeAcquisitionFailure(Exception exception)
+        => exception is IOException or UnauthorizedAccessException or FormatException or InvalidOperationException;
 }
