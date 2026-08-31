@@ -48,24 +48,18 @@ internal static class GovernedLoopAdmissionStoreTestFixture
         long generation,
         bool admitted = true)
     {
+        if (admitted)
+        {
+            return GovernedLoopAdmissionCrossProcessWriterHost.CreateMutation(paths, operationId, requestHash, generation);
+        }
+
         var workspaceId = WorkspaceId(paths);
         var intent = GovernedLoopAdmissionTestFixture.Intent(
             workspaceId: workspaceId,
             operationId: operationId,
             requestHash: GovernedLoopAdmissionTestFixture.Hash(requestHash));
-        GovernedLoopAdmissionTerminalOutcome outcome;
-        if (admitted)
-        {
-            var capabilityAdmission = GovernedLoopAdmissionTestFixture.CapabilityAdmission() with { WorkspaceScopeId = workspaceId };
-            var evidence = GovernedLoopAdmissionTestFixture.Evidence(intent, capabilityAdmission: capabilityAdmission);
-            var receipt = GovernedLoopAdmissionTestFixture.Receipt(intent, evidence);
-            outcome = GovernedLoopAdmissionTestFixture.AdmittedOutcome(intent, receipt);
-        }
-        else
-        {
-            var rejection = GovernedLoopAdmissionTestFixture.Rejection(intent);
-            outcome = GovernedLoopAdmissionTestFixture.RejectedOutcome(intent, rejection);
-        }
+        var rejection = GovernedLoopAdmissionTestFixture.Rejection(intent);
+        var outcome = GovernedLoopAdmissionTestFixture.RejectedOutcome(intent, rejection);
 
         Assert.True(GovernedLoopAdmissionValidator.Validate(outcome).IsValid);
         return new GovernedLoopAdmissionStoreMutation(
@@ -162,6 +156,18 @@ internal static class GovernedLoopAdmissionStoreTestFixture
         string output,
         string operation)
     {
+        if (mode == "writer")
+        {
+            return Verification.CancellationHostProcess.Start(
+                "governed-loop-admission-writer",
+                workspace,
+                trustRoot,
+                gate,
+                ready,
+                output,
+                operation);
+        }
+
         var startInfo = new ProcessStartInfo("dotnet")
         {
             WorkingDirectory = Path.GetTempPath(),
@@ -210,6 +216,12 @@ internal static class GovernedLoopAdmissionStoreTestFixture
         var ready = Environment.GetEnvironmentVariable(CrossProcessReady)!;
         var output = Environment.GetEnvironmentVariable(CrossProcessOutput)!;
         var operation = Environment.GetEnvironmentVariable(CrossProcessOperation)!;
+        if (mode == "writer")
+        {
+            await GovernedLoopAdmissionCrossProcessWriterHost.RunAsync(workspace, trustRoot, gate, ready, output, operation);
+            return;
+        }
+
         await File.WriteAllTextAsync(ready, "ready");
         await WaitForGateAsync(gate);
         GovernedLoopAdmissionStoreOptions? options = usesExpectedTerminationHost

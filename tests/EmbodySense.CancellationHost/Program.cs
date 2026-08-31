@@ -22,6 +22,7 @@ using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.CancellationHost.Credentials;
 using EmbodySense.CancellationHost.CodexAppServer;
 using EmbodySense.CancellationHost.Persistence;
+using EmbodySense.Tests.Support;
 using System.Collections.Immutable;
 using System.Text;
 using System.Text.Json;
@@ -44,6 +45,11 @@ if (args is ["human-review-admission-process-loss", var humanReviewWorkspaceRoot
 if (args is ["human-review-admission-race", var humanReviewRaceWorkspaceRoot, var humanReviewRaceRunId, var humanReviewRaceIdentity, var humanReviewRaceReadyPath, var humanReviewRaceReleasePath, var humanReviewRaceResultPath])
 {
     return await HumanReviewAdmissionRaceHost.RunAsync(humanReviewRaceWorkspaceRoot, humanReviewRaceRunId, humanReviewRaceIdentity, humanReviewRaceReadyPath, humanReviewRaceReleasePath, humanReviewRaceResultPath);
+}
+
+if (args is ["governed-loop-admission-writer", var writerWorkspace, var writerTrustRoot, var writerGate, var writerReady, var writerOutput, var writerOperation])
+{
+    return await GovernedLoopAdmissionCrossProcessWriterHost.RunAsync(writerWorkspace, writerTrustRoot, writerGate, writerReady, writerOutput, writerOperation);
 }
 
 if (args is ["human-review-decision-process-loss", var humanReviewDecisionWorkspaceRoot, var humanReviewDecisionRunId, var humanReviewDecisionPublicationBoundary])

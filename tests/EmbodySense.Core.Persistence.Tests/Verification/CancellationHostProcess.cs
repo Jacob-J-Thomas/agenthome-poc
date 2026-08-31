@@ -13,26 +13,25 @@ internal static class CancellationHostProcess
 
     private static ProcessStartInfo CreateStartInfo(string[] arguments)
     {
-        var outputDirectory = new DirectoryInfo(AppContext.BaseDirectory);
-        var targetFramework = outputDirectory.Name;
-        var configuration = outputDirectory.Parent?.Name
-            ?? throw new DirectoryNotFoundException("The active test build configuration could not be resolved.");
-        var hostAssembly = Path.Combine(
-            FindRepositoryRoot(),
-            "tests",
-            "EmbodySense.CancellationHost",
-            "bin",
-            configuration,
-            targetFramework,
-            "EmbodySense.CancellationHost.dll");
-        if (!File.Exists(hostAssembly))
+        var fixtureDirectory = Path.Combine(AppContext.BaseDirectory, "CancellationHost");
+        var executableName = OperatingSystem.IsWindows() ? "EmbodySense.CancellationHost.exe" : "EmbodySense.CancellationHost";
+        var hostExecutable = Path.Combine(fixtureDirectory, executableName);
+        foreach (var requiredFileName in new[]
         {
-            throw new FileNotFoundException(
-                $"The cancellation host assembly was not built at `{hostAssembly}`.",
-                hostAssembly);
+            executableName,
+            "EmbodySense.CancellationHost.dll",
+            "EmbodySense.CancellationHost.deps.json",
+            "EmbodySense.CancellationHost.runtimeconfig.json"
+        })
+        {
+            var requiredPath = Path.Combine(fixtureDirectory, requiredFileName);
+            if (!File.Exists(requiredPath))
+            {
+                throw new FileNotFoundException("The authenticated cancellation-host fixture bundle is incomplete.", requiredPath);
+            }
         }
 
-        var startInfo = new ProcessStartInfo("dotnet")
+        var startInfo = new ProcessStartInfo(hostExecutable)
         {
             WorkingDirectory = Path.GetTempPath(),
             RedirectStandardInput = true,
@@ -41,8 +40,6 @@ internal static class CancellationHostProcess
             UseShellExecute = false,
             CreateNoWindow = true,
         };
-        startInfo.ArgumentList.Add("exec");
-        startInfo.ArgumentList.Add(hostAssembly);
         foreach (var argument in arguments)
         {
             startInfo.ArgumentList.Add(argument);
@@ -50,17 +47,5 @@ internal static class CancellationHostProcess
 
         startInfo.Environment["DOTNET_ROLL_FORWARD"] = "Major";
         return startInfo;
-    }
-
-    private static string FindRepositoryRoot()
-    {
-        var directory = new DirectoryInfo(AppContext.BaseDirectory);
-        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "EmbodySense.sln")))
-        {
-            directory = directory.Parent;
-        }
-
-        return directory?.FullName
-            ?? throw new DirectoryNotFoundException("The repository root could not be located from the test output directory.");
     }
 }

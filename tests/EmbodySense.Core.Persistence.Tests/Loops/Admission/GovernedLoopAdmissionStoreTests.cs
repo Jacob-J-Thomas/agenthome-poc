@@ -18,6 +18,7 @@ using static EmbodySense.Core.Persistence.Tests.Loops.Admission.GovernedLoopAdmi
 
 namespace EmbodySense.Core.Persistence.Tests.Loops.Admission;
 
+[Collection(Verification.ProcessEnvironmentCollection.Name)]
 public sealed class GovernedLoopAdmissionStoreTests
 {
     [Fact]

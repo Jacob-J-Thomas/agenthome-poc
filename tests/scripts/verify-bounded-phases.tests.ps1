@@ -26,9 +26,12 @@ $verificationDocumentationPath = Join-Path $repoRoot "docs\VERIFICATION.md"
 $maximumTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Loops\CustomLoopRunArtifactMaximumShapeTests.cs"
 $retentionTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Loops\CustomLoopTraceRetentionStoreTests.cs"
 $coverageChildProcessPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Verification\CoverageChildProcessAssembly.cs"
+$cancellationHostProcessPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Verification\CancellationHostProcess.cs"
+$persistenceTestProjectPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\EmbodySense.Core.Persistence.Tests.csproj"
 $admissionStoreTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Loops\Admission\GovernedLoopAdmissionStoreTests.cs"
 $admissionStoreFixturePath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Loops\Admission\GovernedLoopAdmissionStoreTestFixture.cs"
 $admissionStoreHostTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Loops\Admission\GovernedLoopAdmissionStoreCrossProcessHostTests.cs"
+$admissionWriterHostPath = Join-Path $repoRoot "tests\Shared\GovernedLoopAdmissionCrossProcessWriterHost.cs"
 $persistenceEnvironmentCollectionPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Verification\ProcessEnvironmentCollection.cs"
 $persistenceCapabilityCatalogTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Capabilities\FileCapabilityCatalogTrustProviderTests.cs"
 $startupRuntimeCollectionPath = Join-Path $repoRoot "tests\EmbodySense.Core.Startup.Tests\Loops\Execution\LoopRuntimeIntegrationCollection.cs"
@@ -172,9 +175,12 @@ $verificationDocumentation = Get-Content -LiteralPath $verificationDocumentation
 $maximumTest = Get-Content -LiteralPath $maximumTestPath -Raw
 $retentionTest = Get-Content -LiteralPath $retentionTestPath -Raw
 $coverageChildProcess = Get-Content -LiteralPath $coverageChildProcessPath -Raw
+$cancellationHostProcess = Get-Content -LiteralPath $cancellationHostProcessPath -Raw
+$persistenceTestProject = Get-Content -LiteralPath $persistenceTestProjectPath -Raw
 $admissionStoreTest = Get-Content -LiteralPath $admissionStoreTestPath -Raw
 $admissionStoreFixture = Get-Content -LiteralPath $admissionStoreFixturePath -Raw
 $admissionStoreHostTest = Get-Content -LiteralPath $admissionStoreHostTestPath -Raw
+$admissionWriterHost = Get-Content -LiteralPath $admissionWriterHostPath -Raw
 $persistenceEnvironmentCollection = Get-Content -LiteralPath $persistenceEnvironmentCollectionPath -Raw
 $persistenceCapabilityCatalogTest = Get-Content -LiteralPath $persistenceCapabilityCatalogTestPath -Raw
 $startupRuntimeCollection = Get-Content -LiteralPath $startupRuntimeCollectionPath -Raw
@@ -216,10 +222,18 @@ Assert-Contains -Actual $verifyScript -Expected 'EMBODYSENSE_COVERAGE_CHILD_ASSE
 Assert-Contains -Actual $verifyScript -Expected 'Assert-VerificationDirectoryManifest -Expected $isolation.PristineManifest -Directory $isolation.PristineDirectory' -Message "Every verifier run must re-hash the immutable pristine source after all child processes exit."
 Assert-Contains -Actual $coverageChildProcess -Expected 'AddExpectedTerminationVstestArguments' -Message "Intentional process-loss cases must retain an exact VSTest testhost path instead of a custom executable helper."
 Assert-Contains -Actual $coverageChildProcess -Expected 'startInfo.ArgumentList.Add(isolatedPath);' -Message "Expected-termination VSTest must read the immutable pristine test assembly directly."
+Assert-Contains -Actual $admissionStoreTest -Expected '[Collection(Verification.ProcessEnvironmentCollection.Name)]' -Message "Admission-store qualification must retain the class-wide process fence while its coverage-bearing writer children execute."
 Assert-Contains -Actual $admissionStoreFixture -Expected '"crash-proof" or "crash-primary" or "crash-trust" => true' -Message "Only the three admitted abrupt-loss modes may omit an impossible child coverage report."
-Assert-Contains -Actual $admissionStoreFixture -Expected '"writer" => false' -Message "Successful cross-process writers must retain the report-producing coverage path."
+Assert-Contains -Actual $admissionStoreFixture -Expected '"writer" => false' -Message "Successful cross-process writers must remain distinct from intentional crash workers."
+Assert-Contains -Actual $admissionStoreFixture -Expected 'if (mode == "writer")' -Message "Successful cross-process writers must use the direct apphost route."
+Assert-Contains -Actual $admissionStoreFixture -Expected '"governed-loop-admission-writer"' -Message "Successful cross-process writers must invoke the shared apphost operation."
 Assert-Contains -Actual $admissionStoreFixture -Expected 'AddExpectedTerminationVstestArguments(startInfo, typeof(GovernedLoopAdmissionStoreCrossProcessHostTests).Assembly.Location, CrossProcessHostTestName)' -Message "The crash-only route must execute the exact isolated xUnit worker identity."
 Assert-Contains -Actual $admissionStoreHostTest -Expected 'public Task Cross_process_admission_store_host() => RunCrossProcessHostAsync();' -Message "The isolated child worker must remain discoverable in canonical inventory."
+Assert-Contains -Actual $admissionWriterHost -Expected 'await File.WriteAllTextAsync(ready, "ready");' -Message "The apphost writer must preserve the existing readiness handshake."
+Assert-Contains -Actual $persistenceTestProject -Expected '<Import Project="..\EmbodySense.CancellationHost\CancellationHostTestFixture.targets" />' -Message "Persistence qualification must carry the authenticated cancellation-host bundle into every isolated lane."
+Assert-Contains -Actual $cancellationHostProcess -Expected 'var fixtureDirectory = Path.Combine(AppContext.BaseDirectory, "CancellationHost");' -Message "Cancellation children must execute only from the authenticated isolated fixture bundle."
+Assert-Contains -Actual $cancellationHostProcess -Expected '"EmbodySense.CancellationHost.runtimeconfig.json"' -Message "Cancellation-host launch must fail closed when any runtime bundle component is missing."
+Assert-Contains -Actual $cancellationHostProcess -Expected 'var startInfo = new ProcessStartInfo(hostExecutable)' -Message "Cancellation children must use the platform apphost instead of an additional dotnet exec process."
 Assert-Contains -Actual $verifyScript -Expected 'Resolve-VerificationPhysicalTempRoot -RunnerTemp $env:RUNNER_TEMP -SystemTempPath ([IO.Path]::GetTempPath())' -Message "Hosted verification must select the runner-owned ephemeral volume with a local fallback."
 Assert-Contains -Actual $verifyScript -Expected 'Get-VerificationLaneFixturePath -PhysicalTempRoot $verificationPhysicalTempRoot' -Message "Lane fixture isolation must remain short, disjoint, and outside retained repository artifacts."
 Assert-Contains -Actual $verifyScript -Expected 'EMBODYSENSE_CAPABILITY_CATALOG_TRUST_ROOT = Join-Path $laneFixtureRoot "catalog-trust"' -Message "Every project lane must receive a disjoint process-scoped catalog trust root."
