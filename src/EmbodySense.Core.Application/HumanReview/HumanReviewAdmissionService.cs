@@ -55,13 +55,29 @@ public sealed class HumanReviewAdmissionService : IHumanReviewAdmissionService
             return CustomLoopRunStoreResult.VersionConflict(current, command.ExpectedLifecycleVersion);
         }
 
+        var rotateCompletedReview = false;
+        ImmutableArray<HumanReviewRunState> completedReviews = ImmutableArray<HumanReviewRunState>.Empty;
         if (current.HumanReview is { } existing)
         {
-            return string.Equals(existing.Request.RequestHash, request.RequestHash, StringComparison.Ordinal)
+            if (string.Equals(existing.Request.RequestHash, request.RequestHash, StringComparison.Ordinal)
                 && current.Frontier is { } retained
-                && string.Equals(retained.Payload.ContentHash, blockedFrontier.Payload.ContentHash, StringComparison.Ordinal)
-                ? CustomLoopRunStoreResult.AlreadyCreated(current)
-                : CustomLoopRunStoreResult.VersionConflict(current, command.ExpectedLifecycleVersion);
+                && string.Equals(retained.Payload.ContentHash, blockedFrontier.Payload.ContentHash, StringComparison.Ordinal))
+            {
+                return CustomLoopRunStoreResult.AlreadyCreated(current);
+            }
+
+            if (string.Equals(existing.Request.RequestHash, request.RequestHash, StringComparison.Ordinal))
+            {
+                return CustomLoopRunStoreResult.VersionConflict(current, command.ExpectedLifecycleVersion);
+            }
+
+            if (!CanRotateCompletedReview(current, existing))
+            {
+                return CustomLoopRunStoreResult.VersionConflict(current, command.ExpectedLifecycleVersion);
+            }
+
+            rotateCompletedReview = true;
+            completedReviews = existing.CompletedReviews.Add(existing with { CompletedReviews = ImmutableArray<HumanReviewRunState>.Empty });
         }
 
         var atUtc = blockedFrontier.Payload.UpdatedAtUtc;
@@ -137,7 +153,10 @@ public sealed class HumanReviewAdmissionService : IHumanReviewAdmissionService
             Status = CustomLoopRunStatus.Paused,
             Frontier = blockedFrontier,
             ExecutionClock = StopClock(current.ExecutionClock, atUtc),
-            HumanReview = new HumanReviewRunState(request, lifecycle, ImmutableArray.Create(evidence)),
+            HumanReview = new HumanReviewRunState(request, lifecycle, ImmutableArray.Create(evidence))
+            {
+                CompletedReviews = rotateCompletedReview ? completedReviews : ImmutableArray<HumanReviewRunState>.Empty,
+            },
             Events = lifecycleEvent is null
                 ? command.ReviewBlockedEvent is null ? [.. current.Events, runEvent] : [.. current.Events, command.ReviewBlockedEvent, runEvent]
                 : command.ReviewBlockedEvent is null ? [.. current.Events, lifecycleEvent, runEvent] : [.. current.Events, command.ReviewBlockedEvent, lifecycleEvent, runEvent]
@@ -148,6 +167,20 @@ public sealed class HumanReviewAdmissionService : IHumanReviewAdmissionService
         }
 
         return await _runs.UpdateAsync(next, current.LifecycleVersion, cancellationToken);
+    }
+
+    private static bool CanRotateCompletedReview(CustomLoopRunRecord run, HumanReviewRunState review)
+    {
+        if (run.IsTerminal
+            || run.Frontier?.Payload.Status == GovernedLoopFrontierStatus.ReviewBlocked
+            || review.AcceptedTerminalDecision is null
+            || review.CompletedReviews.Length >= HumanReviewContractLimits.MaxCompletedReviews)
+        {
+            return false;
+        }
+
+        return review.Continuation is { Completion: not null } or { Retirement: not null }
+            || review.DecisionActions.Any(action => action is not null && (action.Completion is not null || action.Retirement is not null));
     }
 
     private static bool IsCanonical(CustomLoopRunRecord run)

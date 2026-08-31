@@ -4,7 +4,7 @@ using EmbodySense.Core.Common.HumanReview.Models;
 
 namespace EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 
-/// <summary>Persists one immutable Human Review request, its initial lifecycle head, and append-only admission evidence inside the canonical run artifact.</summary>
+/// <summary>Persists the current immutable Human Review request plus bounded completed review snapshots and append-only evidence inside the canonical run artifact.</summary>
 /// <param name="Request">The exact immutable request bound to the parked frontier.</param>
 /// <param name="Lifecycle">The initial pending lifecycle head.</param>
 /// <param name="Evidence">The ordered append-only review evidence chain.</param>
@@ -42,4 +42,12 @@ public sealed record HumanReviewRunState(
     /// <remarks>These chains are disjoint from approval continuation state and cannot contain approval or effect-release evidence.</remarks>
     [JsonRequired]
     public ImmutableArray<HumanReviewDecisionActionState> DecisionActions { get; init; } = ImmutableArray<HumanReviewDecisionActionState>.Empty;
+
+    /// <summary>Gets the bounded append-only terminal review snapshots retained before the current review boundary.</summary>
+    /// <remarks>
+    /// Each entry is a complete terminal state with an empty <see cref="CompletedReviews"/> collection. The current request
+    /// remains the only mutable review head; completed entries are retained for replay, audit, and exact sequential re-entry.
+    /// </remarks>
+    [JsonRequired]
+    public ImmutableArray<HumanReviewRunState> CompletedReviews { get; init; } = ImmutableArray<HumanReviewRunState>.Empty;
 }

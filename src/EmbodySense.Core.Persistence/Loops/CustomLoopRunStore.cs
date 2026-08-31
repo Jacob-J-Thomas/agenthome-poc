@@ -3106,6 +3106,7 @@ public sealed class CustomLoopRunStore :
         var lifecycleEvents = appended.Count(IsLifecycleControlEvent);
         var retryStateEvents = appended.Count(item => item.Kind == CustomLoopRunEventKind.RetryStateChanged);
         var humanReviewAdmission = IsHumanReviewAdmission(current, candidate, appended);
+        var humanReviewRotation = IsHumanReviewRotation(current, candidate);
         var humanInputCheckpointPublication = candidate.HumanInputWaitingCheckpoints.Count == current.HumanInputWaitingCheckpoints.Count + 1
             && appended.All(IsLifecycleControlEvent)
             && lifecycleEvents <= 1;
@@ -3160,7 +3161,7 @@ public sealed class CustomLoopRunStore :
                     : "A mixed node-attempt outcome append exceeded its reserved maximum serialized footprint.");
         }
 
-        if (humanReviewAdmission && delta > checked(CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes + lifecycleControlBudget))
+        if (humanReviewAdmission && !humanReviewRotation && delta > checked(CustomLoopLimits.MaxAttemptEvidenceReservationUtf8Bytes + lifecycleControlBudget))
         {
             throw new FormatException("A Human Review parking admission exceeded its atomic attempt-outcome and lifecycle reservation.");
         }
@@ -3318,8 +3319,8 @@ public sealed class CustomLoopRunStore :
 
     private static bool IsHumanReviewAdmission(CustomLoopRunRecord current, CustomLoopRunRecord candidate, IReadOnlyList<CustomLoopRunEvent> appended)
     {
-        return current.HumanReview is null
-            && candidate.HumanReview is not null
+        return candidate.HumanReview is not null
+            && (current.HumanReview is null || IsHumanReviewRotation(current, candidate))
             && appended.Count(item => item.Kind == CustomLoopRunEventKind.HumanReviewRequestAdmitted) == 1
             && appended.Count(item => item is
             {
@@ -3335,6 +3336,25 @@ public sealed class CustomLoopRunStore :
                     Disposition: CustomLoopSequentialNodeDisposition.ReviewPending,
                 },
             }) == 1;
+    }
+
+    private static bool IsHumanReviewRotation(CustomLoopRunRecord current, CustomLoopRunRecord candidate)
+    {
+        if (current.HumanReview is not { } prior
+            || candidate.HumanReview is not { } next
+            || string.Equals(prior.Request.RequestHash, next.Request.RequestHash, StringComparison.Ordinal)
+            || next.CompletedReviews.Length != prior.CompletedReviews.Length + 1
+            || next.CompletedReviews[^1] is not { } archived
+            || archived.CompletedReviews.Length != 0
+            || !string.Equals(archived.Request.RequestHash, prior.Request.RequestHash, StringComparison.Ordinal)
+            || !string.Equals(archived.Lifecycle.LifecycleHash, prior.Lifecycle.LifecycleHash, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return prior.AcceptedTerminalDecision is not null
+            && (prior.Continuation is { Completion: not null } or { Retirement: not null }
+                || prior.DecisionActions.Any(action => action is not null && (action.Completion is not null || action.Retirement is not null)));
     }
 
     private static bool IsRetryStateAtomicEvent(CustomLoopRunEvent item)

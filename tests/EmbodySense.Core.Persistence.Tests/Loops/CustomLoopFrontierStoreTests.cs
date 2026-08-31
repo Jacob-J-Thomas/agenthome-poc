@@ -1627,23 +1627,45 @@ public sealed class CustomLoopFrontierStoreTests
         Assert.NotNull(state["lifecycleHistory"]);
         Assert.NotNull(state["operationReceipts"]);
         Assert.NotNull(state["acceptedDecisions"]);
+        Assert.NotNull(state["completedReviews"]);
         Assert.Null(state["acceptedTerminalDecision"]);
         Assert.Null(state["continuationReservation"]);
         Assert.Equal(encoded, CustomLoopRunArtifactSerializer.Serialize(CustomLoopRunArtifactSerializer.Deserialize(encoded)));
 
-        foreach (var property in new[] { "evidence", "lifecycleHistory", "operationReceipts", "acceptedDecisions", "acceptedTerminalDecision", "continuationReservation", "continuation" })
+        foreach (var property in new[] { "evidence", "lifecycleHistory", "operationReceipts", "acceptedDecisions", "completedReviews", "acceptedTerminalDecision", "continuationReservation", "continuation" })
         {
             var omitted = JsonNode.Parse(encoded)!.AsObject();
             Assert.True(omitted["run"]!["humanReview"]!.AsObject().Remove(property));
             Assert.Throws<FormatException>(() => Deserialize(omitted));
         }
 
-        foreach (var property in new[] { "evidence", "lifecycleHistory", "operationReceipts", "acceptedDecisions" })
+        foreach (var property in new[] { "evidence", "lifecycleHistory", "operationReceipts", "acceptedDecisions", "completedReviews" })
         {
             var explicitNull = JsonNode.Parse(encoded)!.AsObject();
             explicitNull["run"]!["humanReview"]![property] = null;
             Assert.Throws<FormatException>(() => Deserialize(explicitNull));
         }
+    }
+
+    [Fact]
+    public async Task Validator_rejects_an_incomplete_completed_review_snapshot_without_throwing()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var admitted = await PersistHumanReviewAdmissionAsync(paths, "completed-review-invalid-history");
+        var approved = CreateDecisionState(admitted, HumanReviewDecisionScenario.Approve);
+        var state = Assert.IsType<HumanReviewRunState>(approved.HumanReview);
+        var malformed = state with
+        {
+            LifecycleHistory = ImmutableArray<HumanReviewLifecycle>.Empty,
+            CompletedReviews = ImmutableArray<HumanReviewRunState>.Empty,
+        };
+        var candidate = approved with { HumanReview = state with { CompletedReviews = ImmutableArray.Create(malformed) } };
+
+        var validation = CustomLoopRunValidator.Validate(candidate);
+
+        Assert.False(validation.IsValid);
+        Assert.Contains(validation.Errors, error => error.Code == "invalid_human_review_completed_state");
     }
 
     [Fact]

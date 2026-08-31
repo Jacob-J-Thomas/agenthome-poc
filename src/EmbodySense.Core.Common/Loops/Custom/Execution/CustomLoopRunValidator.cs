@@ -2748,7 +2748,7 @@ public static class CustomLoopRunValidator
 
     private static bool IsPreDispatchHumanReviewActionEvent(CustomLoopRunRecord run, CustomLoopRunEvent item)
     {
-        var request = run.HumanReview?.Request;
+        var request = GetHumanReviewRequestForEvent(run, item);
         var binding = request?.Binding;
         var evidence = item.SequentialNodeEvidence;
         if (request?.Purpose != HumanReviewPurpose.PreDispatchEffect
@@ -2772,6 +2772,45 @@ public static class CustomLoopRunValidator
             && (binding.VisitOrdinal is null || binding.VisitOrdinal == evidence.VisitOrdinal)
             && string.Equals(item.StepId, binding.NodeId, StringComparison.Ordinal)
             && item.Attempt == binding.Attempt;
+    }
+
+    private static HumanReviewRequest? GetHumanReviewRequestForEvent(CustomLoopRunRecord run, CustomLoopRunEvent item)
+    {
+        if (run.HumanReview is not { Request: { } currentRequest } review)
+        {
+            return null;
+        }
+
+        var requestHash = item.HumanReviewEvidence?.Request?.RequestHash;
+        if (!string.IsNullOrEmpty(requestHash))
+        {
+            if (string.Equals(currentRequest.RequestHash, requestHash, StringComparison.Ordinal))
+            {
+                return currentRequest;
+            }
+
+            return (review.CompletedReviews.IsDefault ? [] : review.CompletedReviews)
+                .FirstOrDefault(candidate => candidate is not null && string.Equals(candidate.Request.RequestHash, requestHash, StringComparison.Ordinal))
+                ?.Request;
+        }
+
+        // The node-outcome event that parks a pre-dispatch action predates the
+        // Human Review admission event and therefore intentionally has no
+        // HumanReviewEvidence. Resolve it from its immutable activation and
+        // creation-time binding so archived boundaries remain classifiable
+        // after a later review rotates into the current head.
+        var evidence = item.SequentialNodeEvidence;
+        return new[] { review }
+            .Concat(review.CompletedReviews.IsDefault ? [] : review.CompletedReviews)
+            .Where(candidate => candidate is not null && candidate.Request is not null)
+            .Select(candidate => candidate!)
+            .FirstOrDefault(candidate => candidate.Request.Purpose == HumanReviewPurpose.PreDispatchEffect
+                && candidate.Request.Timing.CreatedAtUtc == item.TimestampUtc
+                && string.Equals(candidate.Request.Binding.NodeId, item.StepId, StringComparison.Ordinal)
+                && candidate.Request.Binding.Attempt == item.Attempt
+                && (candidate.Request.Binding.ActivationOrdinal is null || evidence?.ActivationOrdinal == candidate.Request.Binding.ActivationOrdinal)
+                && (candidate.Request.Binding.VisitOrdinal is null || evidence?.VisitOrdinal == candidate.Request.Binding.VisitOrdinal))
+            ?.Request;
     }
 
     private static bool IsRecoverableActionEvent(CustomLoopRunRecord run, CustomLoopRunEvent item)
@@ -3641,7 +3680,11 @@ public static class CustomLoopRunValidator
         }
 
         var state = run.HumanReview;
-        var statePlaneArraysPresent = !state.OperationReceipts.IsDefault && !state.AcceptedDecisions.IsDefault && !state.LifecycleHistory.IsDefault && !state.DecisionActions.IsDefault;
+        var statePlaneArraysPresent = !state.OperationReceipts.IsDefault
+            && !state.AcceptedDecisions.IsDefault
+            && !state.LifecycleHistory.IsDefault
+            && !state.DecisionActions.IsDefault
+            && !state.CompletedReviews.IsDefault;
         var evidencePresent = !state.Evidence.IsDefault;
         if (!statePlaneArraysPresent)
         {
@@ -3728,7 +3771,23 @@ public static class CustomLoopRunValidator
             Add(errors, "human_review_event_evidence_mismatch", "events", "Each Human Review event must carry its exact retained evidence and typed receipt or reservation reference.");
         }
 
+        if (!requestValid)
+        {
+            return;
+        }
+
         ValidateHumanReviewDecisionState(request!, state, errors);
+        ValidateCompletedHumanReviewHistory(run, state, errors);
+        var knownRequestHashes = state.CompletedReviews
+            .Where(item => item is not null && item.Request is not null)
+            .Select(item => item.Request.RequestHash)
+            .Append(state.Request.RequestHash)
+            .ToHashSet(StringComparer.Ordinal);
+        if (run.Events?.Any(item => item?.HumanReviewEvidence is { Request: { } reference }
+                && !knownRequestHashes.Contains(reference.RequestHash)) == true)
+        {
+            Add(errors, "unknown_human_review_event_request", "events", "Every Human Review event must reference the current or one retained completed review request.");
+        }
     }
 
     private static bool MatchesHumanReviewBinding(CustomLoopRunRecord run, HumanReviewRequest request)
@@ -3757,7 +3816,8 @@ public static class CustomLoopRunValidator
     private static bool HasRetainedHumanReviewAdmissionBinding(CustomLoopRunRecord run, HumanReviewRequest request, HumanReviewRunState state)
     {
         var admitted = run.Events.Where(item => item is { Kind: CustomLoopRunEventKind.HumanReviewRequestAdmitted, HumanReviewEvidence: not null }
-                && string.Equals(item.HumanReviewEvidence.EvidenceHash, state.Evidence.FirstOrDefault()?.EvidenceHash, StringComparison.Ordinal))
+                && string.Equals(item.HumanReviewEvidence.EvidenceHash, state.Evidence.FirstOrDefault()?.EvidenceHash, StringComparison.Ordinal)
+                && string.Equals(item.HumanReviewEvidence.Request.RequestHash, request.RequestHash, StringComparison.Ordinal))
             .Take(2)
             .ToArray();
         var parked = run.Events.Where(item => item is { Kind: CustomLoopRunEventKind.NodeOutcomeObserved, SequentialNodeEvidence: { } evidence }
@@ -3779,7 +3839,81 @@ public static class CustomLoopRunValidator
 
     private static bool HasTerminalHumanReviewRelease(HumanReviewRunState state)
         => state.Continuation?.Completion is not null
-            || state.DecisionActions.Any(action => action?.Completion is not null);
+            || state.Continuation?.Retirement is not null
+            || state.DecisionActions.Any(action => action?.Completion is not null || action?.Retirement is not null);
+
+    private static void ValidateCompletedHumanReviewHistory(CustomLoopRunRecord run, HumanReviewRunState current, List<CustomLoopValidationError> errors)
+    {
+        if (current.CompletedReviews.Length > HumanReviewContractLimits.MaxCompletedReviews)
+        {
+            Add(errors, "human_review_completed_history_limit", "humanReview.completedReviews", "Completed Human Review state exceeds the bounded schema-1 review-boundary limit.");
+        }
+
+        var requestHashes = new HashSet<string>(StringComparer.Ordinal) { current.Request.RequestHash };
+        for (var index = 0; index < current.CompletedReviews.Length; index++)
+        {
+            var archived = current.CompletedReviews[index];
+            var field = $"humanReview.completedReviews[{index}]";
+            if (archived is null
+                || archived.CompletedReviews.IsDefault
+                || archived.CompletedReviews.Length != 0
+                || archived.Request is null
+                || !requestHashes.Add(archived.Request.RequestHash)
+                || !IsValidHumanReviewRequest(archived.Request)
+                || archived.Lifecycle is null
+                || archived.LifecycleHistory.IsDefault
+                || archived.LifecycleHistory.Length == 0
+                || archived.Evidence.IsDefault
+                || archived.Evidence.Length == 0
+                || archived.OperationReceipts.IsDefault
+                || archived.AcceptedDecisions.IsDefault
+                || archived.DecisionActions.IsDefault)
+            {
+                Add(errors, "invalid_human_review_completed_state", field, "Completed Human Review history entries must be complete, unique, terminal, and independently valid schema-1 snapshots.");
+                continue;
+            }
+
+            if (!HasTerminalHumanReviewRelease(archived))
+            {
+                Add(errors, "nonterminal_human_review_completed_state", field, "Only a fully released terminal Human Review state may enter completed review history.");
+            }
+
+            if (!IsValidHumanReviewLifecycle(archived.Request, archived.Lifecycle)
+                || !HasValidHumanReviewLifecycleHistory(archived.Request, archived, errors))
+            {
+                Add(errors, "invalid_human_review_completed_lifecycle", $"{field}.lifecycle", "Completed Human Review lifecycle history must remain valid and hash-linked.");
+            }
+
+            var expectedEvidenceCount = archived.OperationReceipts.Length + (archived.ContinuationReservation is null ? 1 : 2);
+            if (archived.Evidence.Length != expectedEvidenceCount)
+            {
+                Add(errors, "invalid_human_review_completed_evidence_count", $"{field}.evidence", "Completed Human Review evidence must retain admission plus one exact artifact per receipt and reservation.");
+            }
+
+            var previousHash = (string?)null;
+            for (var evidenceIndex = 0; evidenceIndex < archived.Evidence.Length; evidenceIndex++)
+            {
+                var evidence = archived.Evidence[evidenceIndex];
+                if (evidence is null
+                    || !IsValidHumanReviewEvidence(archived.Request, evidence)
+                    || evidenceIndex == 0 && evidence.Kind != HumanReviewEvidenceKind.RequestAdmitted
+                    || !string.Equals(evidence.PreviousEvidenceHash, previousHash, StringComparison.Ordinal))
+                {
+                    Add(errors, "invalid_human_review_completed_evidence", $"{field}.evidence[{evidenceIndex}]", "Completed Human Review evidence must preserve its exact append-only hash chain.");
+                    continue;
+                }
+
+                previousHash = evidence.EvidenceHash;
+            }
+
+            if (!HasExactHumanReviewEventEvidenceBindings(run, archived.Request, archived))
+            {
+                Add(errors, "human_review_completed_event_evidence_mismatch", field, "Completed Human Review history must retain exact event bindings for every archived evidence artifact.");
+            }
+
+            ValidateHumanReviewDecisionState(archived.Request, archived, errors);
+        }
+    }
 
     private static bool IsValidHumanReviewRequest(HumanReviewRequest request)
     {
@@ -3920,7 +4054,9 @@ public static class CustomLoopRunValidator
     private static bool HasExactHumanReviewEventEvidenceBindings(CustomLoopRunRecord run, HumanReviewRequest request, HumanReviewRunState state)
     {
         if (run.Events.Any(item => item is not null && !HasRequiredHumanReviewEventPayload(item))) return false;
-        var reviewEvents = run.Events.Where(item => item?.HumanReviewEvidence is not null).ToArray();
+        var reviewEvents = run.Events.Where(item => item?.HumanReviewEvidence is { Request: { } reference }
+                && string.Equals(reference.RequestHash, request.RequestHash, StringComparison.Ordinal))
+            .ToArray();
         if (reviewEvents.Length != state.Evidence.Length) return false;
         for (var index = 0; index < state.Evidence.Length; index++)
         {
@@ -4160,20 +4296,43 @@ public static class CustomLoopRunValidator
             || current.HumanReview.OperationReceipts.IsDefault
             || current.HumanReview.AcceptedDecisions.IsDefault
             || current.HumanReview.DecisionActions.IsDefault
+            || current.HumanReview.CompletedReviews.IsDefault
             || candidate.HumanReview.LifecycleHistory.IsDefault
             || candidate.HumanReview.Evidence.IsDefault
             || candidate.HumanReview.OperationReceipts.IsDefault
             || candidate.HumanReview.AcceptedDecisions.IsDefault
             || candidate.HumanReview.DecisionActions.IsDefault
-            || !string.Equals(current.HumanReview.Request.RequestHash, candidate.HumanReview.Request.RequestHash, StringComparison.Ordinal)
+            || candidate.HumanReview.CompletedReviews.IsDefault)
+        {
+            Add(errors, "human_review_history_changed", "humanReview", "The admitted Human Review request, initial lifecycle, and evidence cannot be removed, extended, or rewritten in this slice.");
+            return;
+        }
+
+        var requestChanged = !string.Equals(current.HumanReview.Request.RequestHash, candidate.HumanReview.Request.RequestHash, StringComparison.Ordinal);
+        if (requestChanged)
+        {
+            if (!CanRotateHumanReview(current.HumanReview, candidate.HumanReview)
+                || candidate.HumanReview.CompletedReviews.Length != current.HumanReview.CompletedReviews.Length + 1
+                || !HumanReviewStatesEqual(current.HumanReview with { CompletedReviews = [] }, candidate.HumanReview.CompletedReviews[^1])
+                || !HasHumanReviewHistoryPrefix(current.HumanReview.CompletedReviews, candidate.HumanReview.CompletedReviews))
+            {
+                Add(errors, "invalid_human_review_rotation", "humanReview", "A new Human Review request may replace the current head only after the prior terminal review is fully released and archived unchanged.");
+            }
+
+            return;
+        }
+
+        var invalidShape = !HasHumanReviewHistoryPrefix(current.HumanReview.CompletedReviews, candidate.HumanReview.CompletedReviews)
+            || candidate.HumanReview.CompletedReviews.Length != current.HumanReview.CompletedReviews.Length
             || candidate.HumanReview.LifecycleHistory.Length < current.HumanReview.LifecycleHistory.Length
             || candidate.HumanReview.Evidence.Length < current.HumanReview.Evidence.Length
             || candidate.HumanReview.OperationReceipts.Length < current.HumanReview.OperationReceipts.Length
             || candidate.HumanReview.AcceptedDecisions.Length < current.HumanReview.AcceptedDecisions.Length
             || candidate.HumanReview.DecisionActions.Length < current.HumanReview.DecisionActions.Length
-            || candidate.HumanReview.DecisionActions.Length > current.HumanReview.DecisionActions.Length + 1)
+            || candidate.HumanReview.DecisionActions.Length > current.HumanReview.DecisionActions.Length + 1;
+        if (invalidShape)
         {
-            Add(errors, "human_review_history_changed", "humanReview", "The admitted Human Review request, initial lifecycle, and evidence cannot be removed, extended, or rewritten in this slice.");
+            Add(errors, "human_review_completed_history_changed", "humanReview.completedReviews", "Completed Human Review snapshots are append-only and immutable.");
             return;
         }
 
@@ -4249,6 +4408,17 @@ public static class CustomLoopRunValidator
         }
 
     }
+
+    private static bool CanRotateHumanReview(HumanReviewRunState current, HumanReviewRunState candidate)
+        => current.AcceptedTerminalDecision is not null
+            && current.CompletedReviews.Length < HumanReviewContractLimits.MaxCompletedReviews
+            && (current.Continuation is { Completion: not null } or { Retirement: not null }
+                || current.DecisionActions.Any(action => action is not null && (action.Completion is not null || action.Retirement is not null)))
+            && !string.Equals(current.Request.RequestHash, candidate.Request.RequestHash, StringComparison.Ordinal);
+
+    private static bool HasHumanReviewHistoryPrefix(IReadOnlyList<HumanReviewRunState> expected, IReadOnlyList<HumanReviewRunState> actual)
+        => expected.Count <= actual.Count
+            && expected.Select((item, index) => item is not null && actual[index] is not null && HumanReviewStatesEqual(item, actual[index])).All(value => value);
 
     private static bool EventsEqual(CustomLoopRunEvent? left, CustomLoopRunEvent? right)
     {
@@ -4422,6 +4592,12 @@ public static class CustomLoopRunValidator
         => ReferenceEquals(left, right)
             || left is not null
             && right is not null
+            && !left.LifecycleHistory.IsDefault
+            && !right.LifecycleHistory.IsDefault
+            && !left.OperationReceipts.IsDefault
+            && !right.OperationReceipts.IsDefault
+            && !left.AcceptedDecisions.IsDefault
+            && !right.AcceptedDecisions.IsDefault
             && string.Equals(left.Request?.RequestHash, right.Request?.RequestHash, StringComparison.Ordinal)
             && string.Equals(left.Lifecycle?.LifecycleHash, right.Lifecycle?.LifecycleHash, StringComparison.Ordinal)
             && !left.Evidence.IsDefault
@@ -4436,13 +4612,33 @@ public static class CustomLoopRunValidator
             && string.Equals(left.Continuation?.StateHash, right.Continuation?.StateHash, StringComparison.Ordinal)
             && !left.DecisionActions.IsDefault
             && !right.DecisionActions.IsDefault
-            && left.DecisionActions.Select(item => item?.StateHash).SequenceEqual(right.DecisionActions.Select(item => item?.StateHash), StringComparer.Ordinal);
+            && left.DecisionActions.Select(item => item?.StateHash).SequenceEqual(right.DecisionActions.Select(item => item?.StateHash), StringComparer.Ordinal)
+            && !left.CompletedReviews.IsDefault
+            && !right.CompletedReviews.IsDefault
+            && left.CompletedReviews.Length == right.CompletedReviews.Length
+            && left.CompletedReviews.Select((item, index) => item is not null && right.CompletedReviews[index] is not null && HumanReviewStatesEqual(item, right.CompletedReviews[index])).All(value => value);
 
     private static bool HasHumanReviewPrefix(HumanReviewRunState? expectedPrefix, HumanReviewRunState? actual)
-        => expectedPrefix is null
-            || actual is not null
-            && string.Equals(expectedPrefix.Request?.RequestHash, actual.Request?.RequestHash, StringComparison.Ordinal)
-            && expectedPrefix.LifecycleHistory.Length <= actual.LifecycleHistory.Length
+    {
+        if (expectedPrefix is null)
+        {
+            return true;
+        }
+
+        if (actual is null || expectedPrefix.Request is null || actual.Request is null)
+        {
+            return false;
+        }
+
+        if (!string.Equals(expectedPrefix.Request.RequestHash, actual.Request.RequestHash, StringComparison.Ordinal))
+        {
+            return !actual.CompletedReviews.IsDefault
+                && actual.CompletedReviews.Length > expectedPrefix.CompletedReviews.Length
+                && HumanReviewStatesEqual(expectedPrefix with { CompletedReviews = [] }, actual.CompletedReviews[^1])
+                && HasHumanReviewHistoryPrefix(expectedPrefix.CompletedReviews, actual.CompletedReviews);
+        }
+
+        return expectedPrefix.LifecycleHistory.Length <= actual.LifecycleHistory.Length
             && !expectedPrefix.Evidence.IsDefault
             && !actual.Evidence.IsDefault
             && expectedPrefix.Evidence.Length <= actual.Evidence.Length
@@ -4452,6 +4648,7 @@ public static class CustomLoopRunValidator
             && expectedPrefix.OperationReceipts.Select((item, index) => string.Equals(item?.ReceiptHash, actual.OperationReceipts[index]?.ReceiptHash, StringComparison.Ordinal)).All(value => value)
             && expectedPrefix.AcceptedDecisions.Length <= actual.AcceptedDecisions.Length
             && expectedPrefix.AcceptedDecisions.Select((item, index) => string.Equals(item?.DecisionHash, actual.AcceptedDecisions[index]?.DecisionHash, StringComparison.Ordinal)).All(value => value)
+            && HasHumanReviewHistoryPrefix(expectedPrefix.CompletedReviews, actual.CompletedReviews)
             && !expectedPrefix.DecisionActions.IsDefault
             && !actual.DecisionActions.IsDefault
             && expectedPrefix.DecisionActions.Length <= actual.DecisionActions.Length
@@ -4463,6 +4660,7 @@ public static class CustomLoopRunValidator
                     expectedPrefix.ContinuationReservation,
                     expectedPrefix.Continuation,
                     actual.Continuation).IsValid);
+    }
 
     private static bool HasWaitEvidencePrefix(
         IReadOnlyList<GovernedLoopWaitExecutionEvidence>? expectedPrefix,
