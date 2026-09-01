@@ -1116,6 +1116,75 @@ test("governed graph workspace uses the server catalog and submits no caller-own
   );
 });
 
+test("schedule authoring requires the exact visible published Graph ID and a clean graph workspace", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  server.on("GET", "/api/governed-graphs/catalog", () => ({
+    status: 200,
+    body: createGovernedGraphCatalog(),
+  }));
+  server.on(
+    "GET",
+    "/api/governed-graphs/detail?graphId=published-graph",
+    () => ({
+      status: 200,
+      body: governedGraphRead(
+        governedGraphLifecycle("published", 4),
+        governedGraphArtifact(
+          governedGraphLifecycle("published", 4),
+          "Published graph",
+        ),
+      ),
+    }),
+  );
+  server.on("POST", "/api/governed-schedules/create", () => ({
+    status: 200,
+    body: {
+      status: "confirmation-required",
+      authorityPreviewHash: "a".repeat(64),
+    },
+  }));
+  const app = await loadLoopBuilder({ server });
+
+  await app.elements.governedGraphTab.click();
+  app.elements.governedGraphId.value = "published-graph";
+  await app.elements.governedGraphId.input();
+  await app.elements.governedGraphLoadButton.click();
+  assert.equal(app.elements.governedScheduleSubmitButton.disabled, false);
+
+  app.elements.governedGraphId.value = "other-graph";
+  await app.elements.governedGraphId.input();
+  await app.elements.governedScheduleSubmitButton.click();
+  assert.equal(
+    server.calls.some(
+      (call) =>
+        call.method === "POST" && call.url === "/api/governed-schedules/create",
+    ),
+    false,
+  );
+  assert.match(
+    app.elements.governedScheduleResult.textContent,
+    /publish and refresh one exact graph revision/i,
+  );
+
+  app.elements.governedGraphId.value = "published-graph";
+  await app.elements.governedGraphId.input();
+  await app.elements.governedGraphLoadButton.click();
+  app.elements.governedGraphDisplayName.value = "Unsaved graph edit";
+  await app.elements.governedGraphDisplayName.input();
+  await app.elements.governedScheduleSubmitButton.click();
+  assert.equal(
+    server.calls.some(
+      (call) =>
+        call.method === "POST" && call.url === "/api/governed-schedules/create",
+    ),
+    false,
+  );
+  assert.match(
+    app.elements.governedScheduleResult.textContent,
+    /publish and refresh one exact graph revision/i,
+  );
+});
+
 test("governed graph workspace disables and archives the exact published revision", async () => {
   const server = new FakeFetchServer(createCatalog());
   let lifecycle = governedGraphLifecycle("published", 4);

@@ -190,15 +190,21 @@ export function createGovernedGraphWorkspace({
     scheduleSelector() {
       const lifecycle = aggregate?.lifecycle;
       const publication = lifecycle?.publishedRevision;
+      const visibleGraphId = elements.graphId.value;
       if (
         !publication?.revision?.graphId ||
         !publication?.revision?.revisionId ||
         !Number.isSafeInteger(lifecycle?.lifecycleVersion) ||
-        lifecycle.lifecycleVersion < 1
+        lifecycle.lifecycleVersion < 1 ||
+        authoritativeHydrationStale ||
+        dirty ||
+        pendingMutation ||
+        visibleGraphId !== publication.revision.graphId ||
+        durableGraphSelection !== visibleGraphId
       )
         return null;
       return Object.freeze({
-        graphId: publication.revision.graphId,
+        graphId: visibleGraphId,
         revisionId: publication.revision.revisionId,
         lifecycleVersion: lifecycle.lifecycleVersion,
       });

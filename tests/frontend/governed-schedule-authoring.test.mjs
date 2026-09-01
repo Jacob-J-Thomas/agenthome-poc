@@ -217,6 +217,91 @@ test("immutable replacement rereads canonical posture and never enables a succes
   assert.equal(view.elements.prepareEdit.disabled, false);
 });
 
+test("immutable replacement paginates canonical posture until both exact schedules are present", async () => {
+  const view = createView();
+  const calls = [];
+  const predecessor = authoredSchedule("schedule-old", true, 5);
+  const successor = authoredSchedule("schedule-new", false, 1);
+  let predecessorEnabled = true;
+  let successorEnabled = false;
+  let createCount = 0;
+  let posturePage = 0;
+  const authoring = createGovernedScheduleAuthoring({
+    document: view.document,
+    operationId: (kind) => `operation-${kind}`,
+    selectedGraph,
+    requestJson: async (url, options) => {
+      calls.push({ url, options });
+      if (url === "/api/governed-schedules/detail?scheduleId=schedule-old")
+        return { status: "found", schedule: predecessor };
+      if (url === "/api/governed-schedules/create") {
+        createCount += 1;
+        return createCount === 1
+          ? {
+              status: "confirmation-required",
+              authorityPreviewHash: "b".repeat(64),
+            }
+          : { status: "created", detail: "Created.", schedule: successor };
+      }
+      if (url.startsWith(postureUrl)) {
+        const currentPage = posturePage++ % 2;
+        const response = posture(
+          currentPage === 0
+            ? schedulePosture(
+                "schedule-old",
+                predecessorEnabled,
+                predecessorEnabled ? 5 : 6,
+              )
+            : schedulePosture(
+                "schedule-new",
+                successorEnabled,
+                successorEnabled ? 2 : 1,
+              ),
+        );
+        response.snapshot.schedules.hasMore = currentPage === 0;
+        response.snapshot.schedules.continuationCursor =
+          currentPage === 0 ? "schedule-new-page" : null;
+        return response;
+      }
+      if (url === "/api/loop-operations/control") {
+        const request = JSON.parse(options.body);
+        if (request.kind === "disable-schedule") predecessorEnabled = false;
+        if (request.kind === "enable-schedule") successorEnabled = true;
+        return { status: "applied" };
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    },
+  });
+  authoring.setInteractive(true);
+
+  view.elements.inspectId.value = "schedule-old";
+  await view.elements.inspect.click();
+  await view.elements.prepareEdit.click();
+  await view.elements.submit.click();
+  await view.elements.submit.click();
+
+  assert.deepEqual(
+    calls
+      .filter((call) => call.url.startsWith(postureUrl))
+      .map((call) => call.url),
+    [
+      postureUrl,
+      `${postureUrl}&afterScheduleId=schedule-new-page`,
+      postureUrl,
+      `${postureUrl}&afterScheduleId=schedule-new-page`,
+      postureUrl,
+      `${postureUrl}&afterScheduleId=schedule-new-page`,
+    ],
+  );
+  assert.deepEqual(
+    calls
+      .filter((call) => call.url === "/api/loop-operations/control")
+      .map((call) => JSON.parse(call.options.body).kind),
+    ["disable-schedule", "enable-schedule"],
+  );
+  assert.match(view.elements.result.textContent, /Replacement complete/i);
+});
+
 test("stale or response-lost replacement controls leave the disabled successor recoverable and never issue enable", async () => {
   const view = createView();
   const calls = [];

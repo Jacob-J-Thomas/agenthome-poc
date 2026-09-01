@@ -14,6 +14,8 @@ const validSelector = (value) =>
   Number.isSafeInteger(value.lifecycleVersion) &&
   value.lifecycleVersion > 0;
 
+const maximumScheduleReconciliationPages = 100;
+
 export function createGovernedScheduleAuthoring({
   document,
   requestJson,
@@ -295,7 +297,10 @@ export function createGovernedScheduleAuthoring({
     if (!predecessor) return;
     elements.result.textContent =
       "Rereading canonical operational posture before continuing the replacement…";
-    const initial = await readOperationalSnapshot();
+    const initial = await readOperationalSnapshot([
+      predecessor.scheduleId,
+      successor.scheduleId,
+    ]);
     const currentPredecessor = findSchedule(initial, predecessor.scheduleId);
     const currentSuccessor = findSchedule(initial, successor.scheduleId);
     if (!currentPredecessor || !currentSuccessor) {
@@ -334,7 +339,10 @@ export function createGovernedScheduleAuthoring({
 
     elements.result.textContent =
       "Predecessor control returned; rereading canonical posture before enabling the successor…";
-    const afterDisable = await readOperationalSnapshot();
+    const afterDisable = await readOperationalSnapshot([
+      predecessor.scheduleId,
+      successor.scheduleId,
+    ]);
     const disabledPredecessor = findSchedule(
       afterDisable,
       predecessor.scheduleId,
@@ -362,7 +370,10 @@ export function createGovernedScheduleAuthoring({
     );
     if (!enabled) return;
 
-    const complete = await readOperationalSnapshot();
+    const complete = await readOperationalSnapshot([
+      predecessor.scheduleId,
+      successor.scheduleId,
+    ]);
     const finalPredecessor = findSchedule(complete, predecessor.scheduleId);
     const finalSuccessor = findSchedule(complete, successor.scheduleId);
     if (
@@ -411,20 +422,67 @@ export function createGovernedScheduleAuthoring({
     }
   }
 
-  async function readOperationalSnapshot() {
-    const response = await requestJson(
-      "/api/loop-operations/posture?maximumQueueEntries=1&maximumSchedules=50&maximumWakes=1&maximumRuns=1",
+  async function readOperationalSnapshot(requiredScheduleIds = []) {
+    const required = new Set(
+      requiredScheduleIds.filter(
+        (scheduleId) => typeof scheduleId === "string" && scheduleId,
+      ),
     );
-    const snapshot = postureSnapshot(response);
-    if (!snapshot)
-      throw new Error("Canonical schedule posture is unavailable.");
-    return snapshot;
+    let afterScheduleId = null;
+    let merged = null;
+    for (let page = 0; page < maximumScheduleReconciliationPages; page++) {
+      const response = await requestJson(
+        `/api/loop-operations/posture?maximumQueueEntries=1&maximumSchedules=50&maximumWakes=1&maximumRuns=1${afterScheduleId ? `&afterScheduleId=${encodeURIComponent(afterScheduleId)}` : ""}`,
+      );
+      const snapshot = postureSnapshot(response);
+      if (!snapshot)
+        throw new Error("Canonical schedule posture is unavailable.");
+      if (
+        merged &&
+        merged.controlAuthorityEvidenceHash !==
+          snapshot.controlAuthorityEvidenceHash
+      )
+        throw new Error(
+          "Canonical schedule posture changed while its exact pages were being reconciled.",
+        );
+      const schedules = snapshot.schedules;
+      if (!Array.isArray(schedules?.items))
+        throw new Error("Canonical schedule posture pagination is invalid.");
+      merged = merged
+        ? {
+            ...merged,
+            schedules: {
+              ...merged.schedules,
+              ...schedules,
+              items: [...merged.schedules.items, ...schedules.items],
+            },
+          }
+        : snapshot;
+      if (
+        required.size === 0 ||
+        [...required].every((scheduleId) => findSchedule(merged, scheduleId))
+      )
+        return merged;
+      if (!schedules.hasMore) return merged;
+      const nextCursor = schedules.continuationCursor;
+      if (
+        typeof nextCursor !== "string" ||
+        !nextCursor ||
+        nextCursor === afterScheduleId
+      )
+        throw new Error("Canonical schedule posture pagination is invalid.");
+      afterScheduleId = nextCursor;
+    }
+    throw new Error(
+      "Canonical schedule posture exceeded the bounded reconciliation page limit.",
+    );
   }
 
   function findSchedule(snapshot, scheduleId) {
-    return (snapshot?.schedules?.items ?? []).find(
-      (candidate) => candidate.scheduleId === scheduleId,
+    const matches = (snapshot?.schedules?.items ?? []).filter(
+      (candidate) => candidate?.scheduleId === scheduleId,
     );
+    return matches.length === 1 ? matches[0] : null;
   }
 
   function sameStateRevision(postureSchedule, snapshotSchedule) {
