@@ -30,6 +30,7 @@ const responseKinds = new Set([
 ]);
 const structuredFieldKinds = new Set(["text", "choice"]);
 const privacyClasses = new Set(["private", "sensitive"]);
+const conflictFamilies = new Set(["lifecycle", "response"]);
 const responsePolicies = new Set([
   "first-valid",
   "quorum",
@@ -46,6 +47,7 @@ const terminalStatuses = new Set([
   "superseded",
   "answered",
 ]);
+const conflictTokenPattern = /^[a-z][a-z0-9-]{0,119}$/;
 
 /** Normalizes server enum spellings without accepting caller-provided paths. */
 export function normalizeHumanInputStatus(value) {
@@ -127,6 +129,13 @@ export function projectHumanInputPosture(value) {
     value.withdrawnResponseCount,
   ];
   if (counts.some((count) => !boundedCount(count))) return null;
+  const latestConflict = projectHumanInputConflict(value.latestConflict);
+  if (
+    value.latestConflict !== null &&
+    value.latestConflict !== undefined &&
+    !latestConflict
+  )
+    return null;
   const supersedesRequestId = value.supersedesRequestId ?? null;
   const supersededByRequestId = value.supersededByRequestId ?? null;
   if (
@@ -151,7 +160,31 @@ export function projectHumanInputPosture(value) {
     activeResponseCount: counts[2],
     withdrawnResponseCount: counts[3],
     isAnswered: value.isAnswered === true,
-    latestConflict: null,
+    latestConflict,
+  });
+}
+
+function projectHumanInputConflict(value) {
+  if (!value || typeof value !== "object") return null;
+  const operationId = value.operationId;
+  const operationFamily = normalizeHumanInputStatus(value.operationFamily);
+  const operationKind = normalizeHumanInputStatus(value.operationKind);
+  const failureCode = normalizeHumanInputStatus(value.failureCode);
+  const recordedAtUtc = validTimestamp(value.recordedAtUtc);
+  if (
+    !isIdentifier(operationId) ||
+    !conflictFamilies.has(operationFamily) ||
+    !conflictTokenPattern.test(operationKind) ||
+    !conflictTokenPattern.test(failureCode) ||
+    !recordedAtUtc
+  )
+    return null;
+  return Object.freeze({
+    operationId,
+    operationFamily,
+    operationKind,
+    failureCode,
+    recordedAtUtc,
   });
 }
 
@@ -172,6 +205,16 @@ export function projectHumanInputPresentation(value) {
   );
   const eligibleRespondentCount = value.eligibleRespondentCount;
   const requiredResponseCount = value.requiredResponseCount ?? null;
+  const responsePolicyCountValid =
+    responsePolicyKind === "quorum"
+      ? Number.isSafeInteger(requiredResponseCount) &&
+        requiredResponseCount >= 2 &&
+        requiredResponseCount <= eligibleRespondentCount
+      : responsePolicyKind === "merge"
+        ? Number.isSafeInteger(requiredResponseCount) &&
+          requiredResponseCount >= 1 &&
+          requiredResponseCount <= eligibleRespondentCount
+        : requiredResponseCount === null;
   if (
     !isIdentifier(requestVersionId) ||
     !sha256Pattern.test(requestHash ?? "") ||
@@ -182,8 +225,7 @@ export function projectHumanInputPresentation(value) {
     !responsePolicies.has(responsePolicyKind) ||
     !continuationPolicies.has(continuationPolicyKind) ||
     !boundedEligibleCount(eligibleRespondentCount) ||
-    (requiredResponseCount !== null &&
-      !boundedEligibleCount(requiredResponseCount))
+    !responsePolicyCountValid
   )
     return null;
   const timing = projectTiming(value.timing);
@@ -299,6 +341,7 @@ export function createHumanInputSurface({
     items: [],
     operationNumber: 0,
     operations: new Map(),
+    operationFeedback: null,
     responseDraft: null,
     refreshPromise: null,
     selectedPosture: null,
@@ -352,7 +395,7 @@ export function createHumanInputSurface({
     } catch (error) {
       state.items = [];
       renderList({ status: statusFromError(error), items: [], cursor: null });
-      clearDetail();
+      clearDetail(true);
       return null;
     } finally {
       setBusy(false);
@@ -432,6 +475,9 @@ export function createHumanInputSurface({
   function selectRequest(requestId) {
     const selected = state.items.find((item) => item.requestId === requestId);
     if (!selected) return Promise.resolve(false);
+    clearActionDrafts();
+    clearOperationFeedback();
+    setSupersedeStatus("", "");
     state.selectedPosture = selected;
     state.candidate = null;
     state.responseDraft = null;
@@ -609,7 +655,7 @@ export function createHumanInputSurface({
           body: JSON.stringify(payload),
         },
       );
-      setResponseStatus(
+      setOperationFeedback(
         humanInputOutcomeMessage(response?.status),
         ["committed", "replayed"].includes(
           normalizeHumanInputStatus(response?.status),
@@ -619,7 +665,7 @@ export function createHumanInputSurface({
       );
       await refresh(requestId);
     } catch (error) {
-      setResponseStatus(
+      setOperationFeedback(
         humanInputOutcomeMessage(null, error?.status ?? null),
         "error",
       );
@@ -710,7 +756,7 @@ export function createHumanInputSurface({
     clearCollection(elements.responseEditor);
     elements.prompt.textContent = "";
     elements.responseSchema.textContent = "";
-    setResponseStatus("", "");
+    renderOperationFeedback();
     configureControls(posture, false);
   }
 
@@ -733,6 +779,7 @@ export function createHumanInputSurface({
       : "human-input-status error";
     if (!ready) {
       configureControls(selected, false);
+      renderOperationFeedback();
       return;
     }
     renderSummary(posture);
@@ -756,6 +803,7 @@ export function createHumanInputSurface({
         maximumPromptCharacters,
       );
     configureControls(posture, true);
+    renderOperationFeedback();
   }
 
   function renderSummary(posture) {
@@ -768,6 +816,9 @@ export function createHumanInputSurface({
         `${formatTimestamp(posture.presentation.timing.requestedAtUtc)} – ${formatTimestamp(posture.presentation.timing.expiresAtUtc)}`,
       ],
       ["Responses retained", posture.acceptedResponseCount],
+      ["Supersedes request", posture.supersedesRequestId ?? "None"],
+      ["Superseded by request", posture.supersededByRequestId ?? "None"],
+      ["Latest conflict", latestConflictSummary(posture.latestConflict)],
       ["Updated", formatTimestamp(posture.updatedAtUtc)],
     ])
       appendDefinition(elements.summary, label, value);
@@ -873,7 +924,7 @@ export function createHumanInputSurface({
       elements.responseSection.hidden = !detailReady;
   }
 
-  function clearDetail() {
+  function clearDetail(preserveOperationFeedback = false) {
     state.selectedPosture = null;
     state.editor = null;
     state.candidate = null;
@@ -888,13 +939,12 @@ export function createHumanInputSurface({
     if (elements.title) elements.title.textContent = "Request detail";
     if (elements.identity) elements.identity.textContent = "";
     if (elements.lifecycleStatus) elements.lifecycleStatus.textContent = "";
-    if (elements.explanation) elements.explanation.value = "";
-    if (elements.supersedePurpose) elements.supersedePurpose.value = "";
-    if (elements.supersedePrompt) elements.supersedePrompt.value = "";
+    clearActionDrafts();
+    if (!preserveOperationFeedback) clearOperationFeedback();
     setSupersedeStatus("", "");
     if (elements.empty) elements.empty.hidden = false;
     if (elements.detailPanel) elements.detailPanel.hidden = true;
-    setResponseStatus("", "");
+    renderOperationFeedback();
   }
 
   function setBusy(busy) {
@@ -922,6 +972,29 @@ export function createHumanInputSurface({
     elements.responseStatus.className = tone
       ? `human-input-response-status ${tone}`
       : "human-input-response-status";
+  }
+
+  function setOperationFeedback(message, tone) {
+    state.operationFeedback = Object.freeze({
+      message: boundedHumanInputText(message),
+      tone: tone || "",
+    });
+    renderOperationFeedback();
+  }
+
+  function renderOperationFeedback() {
+    const feedback = state.operationFeedback;
+    setResponseStatus(feedback?.message ?? "", feedback?.tone ?? "");
+  }
+
+  function clearOperationFeedback() {
+    state.operationFeedback = null;
+  }
+
+  function clearActionDrafts() {
+    if (elements.explanation) elements.explanation.value = "";
+    if (elements.supersedePurpose) elements.supersedePurpose.value = "";
+    if (elements.supersedePrompt) elements.supersedePrompt.value = "";
   }
 
   function setSupersedeStatus(message, tone) {
@@ -985,9 +1058,7 @@ export function createHumanInputSurface({
   function canSupersede(posture) {
     return (
       posture.status === "pending" &&
-      ["first-valid", "quorum"].includes(
-        posture.presentation.responsePolicyKind,
-      )
+      responsePolicies.has(posture.presentation.responsePolicyKind)
     );
   }
 
@@ -1142,7 +1213,8 @@ function projectResponseSchema(value) {
     )
       return null;
     const fields = value.structuredFields.map(projectStructuredField);
-    return fields.some((field) => field === null)
+    return fields.some((field) => field === null) ||
+      new Set(fields.map((field) => field?.fieldId)).size !== fields.length
       ? null
       : Object.freeze({ kind, structuredFields: Object.freeze(fields) });
   }
@@ -1183,7 +1255,8 @@ function projectChoices(value) {
       displayText: choice.displayText,
     });
   });
-  return choices.some((choice) => choice === null)
+  return choices.some((choice) => choice === null) ||
+    new Set(choices.map((choice) => choice?.choiceId)).size !== choices.length
     ? null
     : Object.freeze(choices);
 }
@@ -1320,6 +1393,11 @@ function formatTimestamp(value) {
   return Number.isNaN(date.valueOf())
     ? "time unavailable"
     : date.toLocaleString();
+}
+
+function latestConflictSummary(conflict) {
+  if (!conflict) return "None";
+  return `${formatToken(conflict.operationFamily)} · ${formatToken(conflict.operationKind)} · ${formatToken(conflict.failureCode)} · operation ${boundedHumanInputText(conflict.operationId, 120)} · ${formatTimestamp(conflict.recordedAtUtc)}`;
 }
 
 function boundedInputValue(element, maximum) {

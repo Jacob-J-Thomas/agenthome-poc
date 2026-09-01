@@ -87,6 +87,131 @@ test("Human Input projection keeps only the bounded recipient aggregate and cont
     }).status,
     "invalid",
   );
+  const conflicted = projectHumanInputPosture(
+    posture({
+      supersedesRequestId: "request-input-old",
+      supersededByRequestId: "request-input-new",
+      latestConflict: {
+        operationId: "operation-conflict",
+        operationFamily: "Response",
+        operationKind: "SelectionConflict",
+        failureCode: "SelectionConflict",
+        recordedAtUtc: "2026-09-01T12:30:00Z",
+        value: "must not cross the boundary",
+      },
+    }),
+  );
+  assert.equal(conflicted.latestConflict.operationFamily, "response");
+  assert.equal(conflicted.latestConflict.operationKind, "selection-conflict");
+  assert.equal(conflicted.latestConflict.failureCode, "selection-conflict");
+  assert.equal(Object.hasOwn(conflicted.latestConflict, "value"), false);
+  assert.equal(
+    projectHumanInputPosture(
+      posture({
+        latestConflict: {
+          operationId: "operation-conflict",
+          operationFamily: "Response",
+          operationKind: "SelectionConflict",
+          failureCode: "contains spaces",
+          recordedAtUtc: "2026-09-01T12:30:00Z",
+        },
+      }),
+    ),
+    null,
+  );
+  assert.equal(
+    projectHumanInputPosture(
+      posture({
+        presentation: {
+          ...posture().presentation,
+          responseSchema: {
+            kind: "choice",
+            choices: [
+              { choiceId: "same-choice", displayText: "First" },
+              { choiceId: "same-choice", displayText: "Second" },
+            ],
+          },
+        },
+      }),
+    ),
+    null,
+  );
+  assert.equal(
+    projectHumanInputPosture(
+      posture({
+        presentation: {
+          ...posture().presentation,
+          responseSchema: {
+            kind: "structured",
+            structuredFields: [
+              {
+                fieldId: "same-field",
+                kind: "text",
+                required: true,
+                maxTextCharacters: 100,
+              },
+              {
+                fieldId: "same-field",
+                kind: "text",
+                required: false,
+                maxTextCharacters: 100,
+              },
+            ],
+          },
+        },
+      }),
+    ),
+    null,
+  );
+  assert.equal(
+    projectHumanInputPosture(
+      posture({
+        presentation: {
+          ...posture().presentation,
+          responsePolicyKind: "first-valid",
+          requiredResponseCount: 1,
+        },
+      }),
+    ),
+    null,
+  );
+  assert.equal(
+    projectHumanInputPosture(
+      posture({
+        presentation: {
+          ...posture().presentation,
+          responsePolicyKind: "quorum",
+          requiredResponseCount: null,
+        },
+      }),
+    ),
+    null,
+  );
+  assert.equal(
+    projectHumanInputPosture(
+      posture({
+        presentation: {
+          ...posture().presentation,
+          eligibleRespondentCount: 2,
+          responsePolicyKind: "quorum",
+          requiredResponseCount: 2,
+        },
+      }),
+    ).presentation.requiredResponseCount,
+    2,
+  );
+  assert.equal(
+    projectHumanInputPosture(
+      posture({
+        presentation: {
+          ...posture().presentation,
+          responsePolicyKind: "merge",
+          requiredResponseCount: null,
+        },
+      }),
+    ),
+    null,
+  );
   assert.equal(boundedHumanInputText("x".repeat(2000), 1024).length, 1024);
 });
 
@@ -113,6 +238,10 @@ test("Human Input answer is typed, exact-version-bound, retryable, and free of a
   control.value = "private response value";
   await clickAndFlush(fixture.elements.humanInputResponseSubmitButton);
   assert.equal(fixture.elements.humanInputResponseSubmitButton.disabled, false);
+  assert.match(
+    fixture.elements.humanInputResponseStatus.textContent,
+    /recorded/i,
+  );
   await clickAndFlush(fixture.elements.humanInputResponseSubmitButton);
 
   const answers = calls.filter((call) => call.url.endsWith("/answer"));
@@ -167,6 +296,10 @@ test("Human Input lifecycle controls and supersede keep operation identity separ
     /commit/i,
   );
   await clickAndFlush(fixture.elements.humanInputSupersedeButton);
+  assert.match(
+    fixture.elements.humanInputResponseStatus.textContent,
+    /already recorded/i,
+  );
   await clickAndFlush(fixture.elements.humanInputRejectButton);
 
   const prepare = calls.find((call) => call.url.endsWith("/supersede/prepare"));
@@ -182,6 +315,153 @@ test("Human Input lifecycle controls and supersede keep operation identity separ
   assert.equal(prepareBody.successor.responsePolicy.orderedRoleIds, null);
   assert.equal(Object.hasOwn(prepareBody, "actor"), false);
   assert.match(humanInputOutcomeMessage("replayed"), /already recorded/i);
+});
+
+test("Human Input conflict and transport error feedback survive canonical rereads", async () => {
+  for (const outcome of ["conflict", "error"]) {
+    const fixture = createFixture();
+    const current = posture({
+      latestConflict: {
+        operationId: "operation-conflict",
+        operationFamily: "Response",
+        operationKind: "Submit",
+        failureCode: "SelectionConflict",
+        recordedAtUtc: "2026-09-01T12:30:00Z",
+      },
+    });
+    const requestJson = async (url, options = {}) => {
+      if (url === "/api/human-input?maximumCount=50")
+        return { status: "ready", requests: [current], nextCursor: null };
+      if (url === "/api/human-input/request-input-1") return current;
+      if (options.method === "POST") {
+        if (outcome === "error") throw new Error("transport unavailable");
+        return { status: "conflict" };
+      }
+      throw new Error("unexpected request");
+    };
+    const surface = createHumanInputSurface({
+      document: fixture.document,
+      requestJson,
+    });
+    await surface.activate();
+    fixture.elements.humanInputResponseEditor.children[0].children[1].value =
+      "bounded response";
+    await clickAndFlush(fixture.elements.humanInputResponseSubmitButton);
+    assert.match(
+      fixture.elements.humanInputResponseStatus.textContent,
+      outcome === "conflict"
+        ? /changed|conflicted/i
+        : /temporarily unavailable/i,
+    );
+    assert.match(
+      fixture.elements.humanInputSummary.textContent,
+      /selection conflict/i,
+    );
+  }
+});
+
+test("Human Input supersede remains available for every canonical response policy", async () => {
+  for (const [responsePolicyKind, requiredResponseCount] of [
+    ["first-valid", null],
+    ["quorum", 2],
+    ["named-roles", null],
+    ["merge", 1],
+    ["manual-selection", null],
+  ]) {
+    const fixture = createFixture();
+    const current = posture({
+      presentation: {
+        ...posture().presentation,
+        eligibleRespondentCount: 2,
+        responsePolicyKind,
+        requiredResponseCount,
+      },
+    });
+    const surface = createHumanInputSurface({
+      document: fixture.document,
+      requestJson: async (url) => {
+        if (url === "/api/human-input?maximumCount=50")
+          return { status: "ready", requests: [current], nextCursor: null };
+        if (url === "/api/human-input/request-input-1") return current;
+        throw new Error("unexpected request");
+      },
+    });
+    await surface.activate();
+    assert.equal(
+      fixture.elements.humanInputSupersedeButton.disabled,
+      false,
+      responsePolicyKind,
+    );
+  }
+});
+
+test("Human Input selection clears prior request drafts and keeps feedback scoped", async () => {
+  const fixture = createFixture();
+  const first = posture({
+    requestId: "request-input-1",
+    supersedesRequestId: "request-input-old",
+    latestConflict: {
+      operationId: "operation-conflict",
+      operationFamily: "Response",
+      operationKind: "Submit",
+      failureCode: "SelectionConflict",
+      recordedAtUtc: "2026-09-01T12:30:00Z",
+    },
+  });
+  const second = posture({
+    requestId: "request-input-2",
+    presentation: {
+      ...posture().presentation,
+      requestVersionId: "version-input-2",
+      purpose: "Second bounded purpose.",
+      prompt: "Second bounded prompt.",
+    },
+    currentRequest: {
+      schemaVersion: 1,
+      requestId: "request-input-2",
+      requestVersionId: "version-input-2",
+      requestHash: hash,
+    },
+  });
+  const requestJson = async (url) => {
+    if (url === "/api/human-input?maximumCount=50")
+      return { status: "ready", requests: [first, second], nextCursor: null };
+    if (url.endsWith("request-input-1")) return first;
+    if (url.endsWith("request-input-2")) return second;
+    throw new Error("unexpected request");
+  };
+  const surface = createHumanInputSurface({
+    document: fixture.document,
+    requestJson,
+  });
+  await surface.activate();
+  assert.match(
+    fixture.elements.humanInputSummary.textContent,
+    /request-input-old/,
+  );
+  assert.match(
+    fixture.elements.humanInputSummary.textContent,
+    /selection conflict/i,
+  );
+  fixture.elements.humanInputExplanation.value = "private explanation";
+  fixture.elements.humanInputSupersedePurpose.value =
+    "private successor purpose";
+  fixture.elements.humanInputSupersedePrompt.value = "private successor prompt";
+  await surface.selectRequest("request-input-2");
+  assert.equal(fixture.elements.humanInputExplanation.value, "");
+  assert.equal(
+    fixture.elements.humanInputSupersedePurpose.value,
+    "Second bounded purpose.",
+  );
+  assert.equal(
+    fixture.elements.humanInputSupersedePrompt.value,
+    "Second bounded prompt.",
+  );
+  assert.doesNotMatch(
+    fixture.elements.humanInputSummary.textContent,
+    /request-input-old/,
+  );
+  assert.equal(fixture.elements.humanInputResponseStatus.textContent, "");
 });
 
 test("Human Input pagination rejects cycles and aggregate overflow", async () => {
