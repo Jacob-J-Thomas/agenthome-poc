@@ -8,6 +8,7 @@
     <link rel="stylesheet" href="/styles.css?v=shared-loop-builder-v3" />
     <link rel="stylesheet" href="/loop-builder.css?v=governed-graph-v4" />
     <link rel="stylesheet" href="/human-review.css?v=human-review-v1" />
+    <link rel="stylesheet" href="/human-input.css?v=human-input-v1" />
   </head>
   <body>
     <div id="appShell" class="app-shell">
@@ -57,6 +58,19 @@
           >
             <span class="rail-glyph" aria-hidden="true">&#10003;</span
             ><span>Reviews</span>
+          </button>
+          <button
+            id="humanInputNav"
+            class="rail-button"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="humanInputView"
+            data-app-view="human-input"
+            data-testid="human-input-nav"
+          >
+            <span class="rail-glyph" aria-hidden="true">&#9998;</span
+            ><span>Input</span>
           </button>
           <a id="capabilitiesNav" class="rail-button" href="/capabilities.html">
             <span class="rail-glyph" aria-hidden="true">&#9711;</span
@@ -1333,6 +1347,265 @@
           </section>
 
           <section
+            id="humanInputView"
+            class="app-view human-input-view"
+            role="tabpanel"
+            aria-labelledby="humanInputNav"
+            hidden
+          >
+            <div class="human-input-shell">
+              <aside
+                class="human-input-catalog"
+                aria-label="Human Input catalog"
+              >
+                <header class="human-input-catalog-header">
+                  <div>
+                    <p class="eyebrow">Durable data collection</p>
+                    <h1>Human Input</h1>
+                  </div>
+                  <button
+                    id="humanInputRefreshButton"
+                    class="secondary-button"
+                    type="button"
+                    data-testid="human-input-refresh"
+                  >
+                    Refresh
+                  </button>
+                </header>
+                <p
+                  id="humanInputListStatus"
+                  class="human-input-status"
+                  role="status"
+                  aria-live="polite"
+                >
+                  Loading durable data requests…
+                </p>
+                <div
+                  id="humanInputList"
+                  class="human-input-list"
+                  role="listbox"
+                  aria-label="Durable Human Input requests"
+                  aria-describedby="humanInputListStatus"
+                ></div>
+              </aside>
+
+              <section
+                class="human-input-detail"
+                aria-label="Human Input detail"
+              >
+                <div id="humanInputEmpty" class="human-input-empty">
+                  <p class="eyebrow">Canonical request state</p>
+                  <h2>Select a data request</h2>
+                  <p>
+                    Choose a durable request to inspect its bounded prompt,
+                    schema, recipient count, and continuation posture.
+                  </p>
+                </div>
+                <article
+                  id="humanInputDetailPanel"
+                  class="human-input-detail-panel"
+                  hidden
+                >
+                  <header class="human-input-detail-header">
+                    <div>
+                      <p id="humanInputPurpose" class="eyebrow">Human Input</p>
+                      <h2 id="humanInputTitle">Request detail</h2>
+                      <p
+                        id="humanInputIdentity"
+                        class="human-input-identity"
+                      ></p>
+                    </div>
+                    <button
+                      id="humanInputDetailRefreshButton"
+                      class="secondary-button"
+                      type="button"
+                      data-testid="human-input-detail-refresh"
+                    >
+                      Reread canonical state
+                    </button>
+                  </header>
+                  <p
+                    id="humanInputDetailStatus"
+                    class="human-input-status"
+                    role="status"
+                    aria-live="polite"
+                  ></p>
+                  <dl id="humanInputSummary" class="human-input-summary"></dl>
+
+                  <section
+                    class="human-input-section"
+                    aria-labelledby="humanInputPromptTitle"
+                  >
+                    <div class="human-input-section-heading">
+                      <h3 id="humanInputPromptTitle">Data request</h3>
+                      <span class="human-input-redaction-note"
+                        >Server-redacted</span
+                      >
+                    </div>
+                    <p id="humanInputPrompt" class="human-input-prompt"></p>
+                    <pre
+                      id="humanInputResponseSchema"
+                      class="human-input-schema"
+                      aria-label="Response schema"
+                    ></pre>
+                  </section>
+
+                  <section
+                    class="human-input-section"
+                    aria-labelledby="humanInputPrivacyTitle"
+                  >
+                    <div class="human-input-section-heading">
+                      <h3 id="humanInputPrivacyTitle">
+                        Privacy and continuation
+                      </h3>
+                      <span class="human-input-redaction-note"
+                        >No routing details</span
+                      >
+                    </div>
+                    <dl
+                      id="humanInputPrivacySummary"
+                      class="human-input-subsummary"
+                    ></dl>
+                  </section>
+
+                  <section
+                    id="humanInputResponseSection"
+                    class="human-input-response-section"
+                    aria-labelledby="humanInputResponseTitle"
+                  >
+                    <div class="human-input-section-heading">
+                      <div>
+                        <h3 id="humanInputResponseTitle">Response</h3>
+                        <p>
+                          Submit data only for the exact request version shown
+                          above.
+                        </p>
+                      </div>
+                      <span
+                        id="humanInputLifecycleStatus"
+                        class="human-input-state-chip"
+                      ></span>
+                    </div>
+                    <p
+                      id="humanInputResponseStatus"
+                      class="human-input-response-status"
+                      role="status"
+                      aria-live="assertive"
+                    ></p>
+                    <form
+                      id="humanInputResponseForm"
+                      autocomplete="off"
+                      novalidate
+                    >
+                      <div
+                        id="humanInputResponseEditor"
+                        class="human-input-response-editor"
+                      ></div>
+                      <label class="human-input-explanation-field">
+                        <span>Optional explanation</span>
+                        <textarea
+                          id="humanInputExplanation"
+                          autocomplete="off"
+                          maxlength="1000"
+                          rows="2"
+                          aria-describedby="humanInputResponseStatus"
+                        ></textarea>
+                      </label>
+                      <button
+                        id="humanInputResponseSubmitButton"
+                        class="primary-button"
+                        type="submit"
+                        data-testid="human-input-response-submit"
+                      >
+                        Submit response
+                      </button>
+                    </form>
+                  </section>
+
+                  <section
+                    id="humanInputSupersedeSection"
+                    class="human-input-section human-input-supersede"
+                    aria-labelledby="humanInputSupersedeTitle"
+                  >
+                    <div class="human-input-section-heading">
+                      <div>
+                        <h3 id="humanInputSupersedeTitle">Supersede request</h3>
+                        <p>
+                          A successor candidate stays opaque and memory-only
+                          until commit.
+                        </p>
+                      </div>
+                    </div>
+                    <label>
+                      <span>Successor purpose</span>
+                      <input
+                        id="humanInputSupersedePurpose"
+                        autocomplete="off"
+                        maxlength="240"
+                      />
+                    </label>
+                    <label>
+                      <span>Successor prompt</span>
+                      <textarea
+                        id="humanInputSupersedePrompt"
+                        autocomplete="off"
+                        maxlength="4000"
+                        rows="3"
+                      ></textarea>
+                    </label>
+                    <p
+                      id="humanInputSupersedeStatus"
+                      class="human-input-response-status"
+                      role="status"
+                      aria-live="polite"
+                    ></p>
+                    <button
+                      id="humanInputSupersedeButton"
+                      class="secondary-button"
+                      type="button"
+                      data-testid="human-input-supersede"
+                    >
+                      Prepare successor
+                    </button>
+                  </section>
+
+                  <section
+                    class="human-input-actions-section"
+                    aria-labelledby="humanInputActionsTitle"
+                  >
+                    <div class="human-input-section-heading">
+                      <div>
+                        <h3 id="humanInputActionsTitle">Lifecycle</h3>
+                        <p>Lifecycle controls never authorize an effect.</p>
+                      </div>
+                    </div>
+                    <div class="human-input-actions">
+                      <button
+                        id="humanInputRejectButton"
+                        class="danger-button"
+                        type="button"
+                        data-human-input-action="reject"
+                        data-testid="human-input-reject"
+                      >
+                        Reject request
+                      </button>
+                      <button
+                        id="humanInputCancelButton"
+                        class="secondary-button"
+                        type="button"
+                        data-human-input-action="cancel"
+                        data-testid="human-input-cancel"
+                      >
+                        Cancel request
+                      </button>
+                    </div>
+                  </section>
+                </article>
+              </section>
+            </div>
+          </section>
+
+          <section
             id="configurationView"
             class="app-view configuration-view"
             role="tabpanel"
@@ -1449,5 +1722,6 @@
     <script src="/app.js?v=shared-loop-builder-v3" type="module"></script>
     <script src="/loop-builder.js?v=governed-graph-v4" type="module"></script>
     <script src="/human-review.js?v=human-review-v1" type="module"></script>
+    <script src="/human-input.js?v=human-input-v1" type="module"></script>
   </body>
 </html>

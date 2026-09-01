@@ -57,6 +57,7 @@ const elements = {
   configurationView: document.getElementById("configurationView"),
   appTabs: Array.from(document.querySelectorAll("[data-app-view]")),
   chatView: document.getElementById("chatView"),
+  humanInputView: document.getElementById("humanInputView"),
   humanReviewView: document.getElementById("humanReviewView"),
   initButton: document.getElementById("initButton"),
   loopsView: document.getElementById("loopsView"),
@@ -104,7 +105,13 @@ function isConfigurationTabName(value) {
 
 function selectAppView(view, sourceTab = null) {
   const previousAppView = activeAppView;
-  activeAppView = ["chat", "loops", "reviews", "configuration"].includes(view)
+  activeAppView = [
+    "chat",
+    "loops",
+    "reviews",
+    "human-input",
+    "configuration",
+  ].includes(view)
     ? view
     : "chat";
   if (previousAppView === "loops" && activeAppView !== "loops") {
@@ -112,12 +119,15 @@ function selectAppView(view, sourceTab = null) {
   }
   elements.chatView.hidden = activeAppView !== "chat";
   elements.loopsView.hidden = activeAppView !== "loops";
+  elements.humanInputView.hidden = activeAppView !== "human-input";
   elements.humanReviewView.hidden = activeAppView !== "reviews";
   elements.configurationView.hidden = activeAppView !== "configuration";
   if (activeAppView === "loops") {
     void window.embodySenseLoopBuilder?.activate();
   } else if (activeAppView === "reviews") {
     void window.embodySenseHumanReview?.activate();
+  } else if (activeAppView === "human-input") {
+    void window.embodySenseHumanInput?.activate();
   }
 
   let selectedTab = null;
@@ -152,7 +162,9 @@ function selectAppView(view, sourceTab = null) {
         ? "Loops"
         : activeAppView === "reviews"
           ? "Reviews"
-          : "Chat";
+          : activeAppView === "human-input"
+            ? "Human Input"
+            : "Chat";
   }
 
   if (sourceTab && window.history?.replaceState) {
@@ -429,6 +441,7 @@ async function runSessionRecoveryAttempt(generation) {
       );
     renderApprovals(pendingApprovals);
     void window.embodySenseHumanReview?.sessionRecovered?.();
+    void window.embodySenseHumanInput?.sessionRecovered?.();
     candidateEvents.promote();
     sessionRecoveryAttempts = 0;
     applyConnectedState();
@@ -2343,8 +2356,10 @@ selectAppView(
     ? "loops"
     : requestedView === "reviews"
       ? "reviews"
-      : isConfigurationTabName(requestedView)
-        ? "configuration"
-        : "chat",
+      : requestedView === "human-input"
+        ? "human-input"
+        : isConfigurationTabName(requestedView)
+          ? "configuration"
+          : "chat",
 );
 boot().catch((error) => appendMessage("error", error.message));
