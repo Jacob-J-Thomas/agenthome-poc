@@ -11,6 +11,7 @@ using EmbodySense.Core.Startup.Inference.Profiles.Models;
 using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Runtime.Models;
 using EmbodySense.Core.Startup.Workspace;
+using EmbodySense.Core.Startup.HumanInput.Models;
 using EmbodySense.Core.Startup.HumanReview;
 using EmbodySense.Core.Startup.HumanReview.Models;
 using EmbodySense.Web.Models;
@@ -841,6 +842,86 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         finally
         {
             await EndCustomRuntimeOperationAsync();
+        }
+    }
+
+    /// <summary>Reads one bounded detached Human Input posture page through the retained runtime.</summary>
+    /// <param name="request">The bounded page request.</param>
+    /// <param name="cancellationToken">Cancels runtime acquisition or the read.</param>
+    /// <returns>The canonical redacted posture page.</returns>
+    internal async Task<HumanInputRequestPosturePage> ListHumanInputAsync(HumanInputRequestPosturePageRequest request, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var runtime = await BeginCustomRuntimeOperationAsync(cancellationToken);
+        try
+        {
+            return await runtime.HumanInput.ListAsync(request, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            await EndCustomRuntimeOperationAsync().ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>Reads one exact detached Human Input posture through the retained runtime.</summary>
+    /// <param name="requestId">The exact request identifier.</param>
+    /// <param name="cancellationToken">Cancels runtime acquisition or the read.</param>
+    /// <returns>The canonical redacted posture result.</returns>
+    internal async Task<HumanInputRequestPostureReadResult> ReadHumanInputAsync(string requestId, CancellationToken cancellationToken)
+    {
+        var runtime = await BeginCustomRuntimeOperationAsync(cancellationToken);
+        try
+        {
+            return await runtime.HumanInput.ReadAsync(requestId, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            await EndCustomRuntimeOperationAsync().ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>Submits one lifecycle intent through the retained Startup Human Input facade.</summary>
+    internal async Task<HumanInputOperationResult> SubmitHumanInputLifecycleAsync(HumanInputSurfaceLifecycleOperationInput input, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        var runtime = await BeginCustomRuntimeOperationAsync(cancellationToken);
+        try
+        {
+            return await runtime.HumanInput.SubmitSurfaceLifecycleAsync(input, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            await EndCustomRuntimeOperationAsync().ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>Submits one response intent through the retained Startup Human Input facade.</summary>
+    internal async Task<HumanInputOperationResult> SubmitHumanInputResponseAsync(HumanInputSurfaceResponseOperationInput input, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        var runtime = await BeginCustomRuntimeOperationAsync(cancellationToken);
+        try
+        {
+            return await runtime.HumanInput.SubmitSurfaceResponseAsync(input, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            await EndCustomRuntimeOperationAsync().ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>Prepares one bounded supersede candidate through the retained Startup facade.</summary>
+    internal async Task<HumanInputSupersedePreparationResult> PrepareHumanInputSupersedeAsync(HumanInputSupersedePreparationInput input, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        var runtime = await BeginCustomRuntimeOperationAsync(cancellationToken);
+        try
+        {
+            return await runtime.HumanInput.PrepareSupersedeAsync(input, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            await EndCustomRuntimeOperationAsync().ConfigureAwait(false);
         }
     }
 

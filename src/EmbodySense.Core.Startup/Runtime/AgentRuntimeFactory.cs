@@ -106,6 +106,7 @@ public sealed class AgentRuntimeFactory
     private readonly ICapabilityCatalogTrustProvider _capabilityTrustProvider;
     private readonly IAgentRuntimeAuthenticatedWakeVerifier? _authenticatedWakeVerifier;
     private readonly IAgentRuntimeHumanInputAuthorityProvider? _humanInputAuthorityProvider;
+    private readonly IHumanInputSupersedeCandidateRegistry? _humanInputSupersedeCandidateRegistry;
     private readonly IHumanReviewDecisionAuthorizationProvider? _humanReviewDecisionAuthorizationProvider;
     private readonly IAgentRuntimeGovernedLoopCoordinatorRepairAuthorityProvider? _governedLoopCoordinatorRepairAuthorityProvider;
     private readonly IGovernedModelPrimaryExecutionBoundaryObserver? _governedModelExecutionObserver;
@@ -198,6 +199,7 @@ public sealed class AgentRuntimeFactory
             _governedLoopLocalCoordinatorBoundaryObserver,
             _governedLoopCoordinatorRepairAuthorityProvider,
             _humanReviewDecisionAuthorizationProvider,
+            _humanInputSupersedeCandidateRegistry,
             _customLoopApprovalPrompt);
     }
 
@@ -222,6 +224,31 @@ public sealed class AgentRuntimeFactory
             _governedLoopLocalCoordinatorBoundaryObserver,
             _governedLoopCoordinatorRepairAuthorityProvider,
             _humanReviewDecisionAuthorizationProvider,
+            _humanInputSupersedeCandidateRegistry,
+            _customLoopApprovalPrompt);
+    }
+
+    /// <summary>Returns an equivalent factory with one bounded Web supersede-candidate registry.</summary>
+    /// <param name="registry">The Startup-owned short-lived registry that retains no durable lifecycle authority.</param>
+    /// <returns>A factory preserving all existing runtime composition and the supplied candidate registry.</returns>
+    public AgentRuntimeFactory WithHumanInputSupersedeCandidateRegistry(IHumanInputSupersedeCandidateRegistry registry)
+    {
+        ArgumentNullException.ThrowIfNull(registry);
+        return new AgentRuntimeFactory(
+            _approvalPrompt,
+            _conversationPublicationObserver,
+            _codexRuntimeStatus,
+            _capabilityTrustProvider,
+            _governedModelExecutionObserver,
+            _additionalModelProfileProviders,
+            _authenticatedWakeVerifier,
+            _humanInputAuthorityProvider,
+            _commandActionRuntimeProvider,
+            _customLoopRunStoreProvider,
+            _governedLoopLocalCoordinatorBoundaryObserver,
+            _governedLoopCoordinatorRepairAuthorityProvider,
+            _humanReviewDecisionAuthorizationProvider,
+            registry,
             _customLoopApprovalPrompt);
     }
 
@@ -246,6 +273,7 @@ public sealed class AgentRuntimeFactory
             _governedLoopLocalCoordinatorBoundaryObserver,
             _governedLoopCoordinatorRepairAuthorityProvider,
             provider,
+            _humanInputSupersedeCandidateRegistry,
             _customLoopApprovalPrompt);
     }
 
@@ -271,6 +299,7 @@ public sealed class AgentRuntimeFactory
             _governedLoopLocalCoordinatorBoundaryObserver,
             provider,
             _humanReviewDecisionAuthorizationProvider,
+            _humanInputSupersedeCandidateRegistry,
             _customLoopApprovalPrompt);
     }
 
@@ -294,6 +323,7 @@ public sealed class AgentRuntimeFactory
             _governedLoopLocalCoordinatorBoundaryObserver,
             _governedLoopCoordinatorRepairAuthorityProvider,
             _humanReviewDecisionAuthorizationProvider,
+            _humanInputSupersedeCandidateRegistry,
             _customLoopApprovalPrompt);
     }
 
@@ -319,6 +349,7 @@ public sealed class AgentRuntimeFactory
             _governedLoopLocalCoordinatorBoundaryObserver,
             _governedLoopCoordinatorRepairAuthorityProvider,
             _humanReviewDecisionAuthorizationProvider,
+            _humanInputSupersedeCandidateRegistry,
             _customLoopApprovalPrompt);
     }
 
@@ -344,6 +375,7 @@ public sealed class AgentRuntimeFactory
             observer,
             _governedLoopCoordinatorRepairAuthorityProvider,
             _humanReviewDecisionAuthorizationProvider,
+            _humanInputSupersedeCandidateRegistry,
             _customLoopApprovalPrompt);
     }
 
@@ -369,6 +401,7 @@ public sealed class AgentRuntimeFactory
             _governedLoopLocalCoordinatorBoundaryObserver,
             _governedLoopCoordinatorRepairAuthorityProvider,
             _humanReviewDecisionAuthorizationProvider,
+            _humanInputSupersedeCandidateRegistry,
             CanonicalGovernedLoopApprovalPrompt.Instance);
     }
 
@@ -386,6 +419,7 @@ public sealed class AgentRuntimeFactory
         IGovernedLoopLocalCoordinatorBoundaryObserver? governedLoopLocalCoordinatorBoundaryObserver = null,
         IAgentRuntimeGovernedLoopCoordinatorRepairAuthorityProvider? governedLoopCoordinatorRepairAuthorityProvider = null,
         IHumanReviewDecisionAuthorizationProvider? humanReviewDecisionAuthorizationProvider = null,
+        IHumanInputSupersedeCandidateRegistry? humanInputSupersedeCandidateRegistry = null,
         IToolApprovalPrompt? customLoopApprovalPrompt = null)
     {
         ArgumentNullException.ThrowIfNull(approvalPrompt);
@@ -406,6 +440,7 @@ public sealed class AgentRuntimeFactory
         _capabilityTrustProvider = capabilityTrustProvider ?? FileCapabilityCatalogTrustProvider.CreateDefault();
         _authenticatedWakeVerifier = authenticatedWakeVerifier;
         _humanInputAuthorityProvider = humanInputAuthorityProvider;
+        _humanInputSupersedeCandidateRegistry = humanInputSupersedeCandidateRegistry;
         _humanReviewDecisionAuthorizationProvider = humanReviewDecisionAuthorizationProvider;
         _governedLoopCoordinatorRepairAuthorityProvider = governedLoopCoordinatorRepairAuthorityProvider;
         _governedModelExecutionObserver = governedModelExecutionObserver;
@@ -545,6 +580,14 @@ public sealed class AgentRuntimeFactory
                 governedBindingSource,
                 capabilityAuthority);
             var humanInputResponses = new HumanInputRequestStore(paths, _capabilityTrustProvider, authorityTransaction: capabilityAuthority);
+            var humanInputCandidateRegistry = _humanInputSupersedeCandidateRegistry ?? new HumanInputSupersedeCandidateRegistry();
+            var humanInputCandidatePreparer = new HumanInputSupersedeCandidatePreparer(
+                (IHumanInputRequestCatalog)humanInputResponses,
+                governedGrantResolver,
+                humanInputCandidateRegistry,
+                workspaceId,
+                actor,
+                operationalClock);
             var humanInputCancellationConvergence = new CustomLoopHumanInputCancellationConvergenceService(
                 customRunStore,
                 customControlOperations,
@@ -811,7 +854,8 @@ public sealed class AgentRuntimeFactory
                 governedGrantResolver,
                 capabilityAuthority,
                 operationalClock,
-                humanInputAuthorityProvider);
+                humanInputAuthorityProvider,
+                humanInputCandidatePreparer);
             var humanInputBindingSource = new HumanInputResponseContinuationBindingSource(humanInputResponses);
             var humanInputRecovery = new HumanInputResponseContinuationRecoveryStore(customRunStore);
             var humanInputReadiness = new HumanInputContinuationReadinessSignal();
