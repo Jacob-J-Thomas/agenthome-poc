@@ -1422,6 +1422,67 @@ test("Human Review fails closed when detail evidence is bound to another request
   assert.equal(versionFixture.elements.humanReviewApproveButton.disabled, true);
 });
 
+test("Human Review keeps every action fail-closed after an unavailable or mismatched decision reread", async () => {
+  for (const failure of ["unavailable", "mismatched"]) {
+    const fixture = createFixture();
+    let decisionSubmitted = false;
+    let postCount = 0;
+    const requestJson = async (url, options = {}) => {
+      if (url === "/api/human-reviews?maximumCount=50")
+        return {
+          status: "ready",
+          items: [summary()],
+          continuationCursor: null,
+        };
+      if (url.endsWith("/evidence"))
+        return { status: "ready", evidence: [], effectEvidence: null };
+      if (url.endsWith("/posture"))
+        return { status: "ready", posture: { lifecycleStatus: "pending" } };
+      if (options.method === "POST") {
+        postCount++;
+        decisionSubmitted = true;
+        throw new Error("simulated response loss");
+      }
+      if (decisionSubmitted && failure === "unavailable")
+        throw Object.assign(new Error("detail unavailable"), { status: 503 });
+      const selectedSummary =
+        decisionSubmitted && failure === "mismatched"
+          ? summary({ lifecycleVersion: 4 })
+          : summary();
+      return {
+        status: "ready",
+        detail: {
+          summary: selectedSummary,
+          previews: [],
+          decisions: [],
+          evidence: [],
+          runtime: { lifecycleStatus: selectedSummary.lifecycleStatus },
+          effectEvidence: null,
+        },
+      };
+    };
+    const surface = createHumanReviewSurface({
+      document: fixture.document,
+      requestJson,
+    });
+
+    await surface.activate();
+    assert.equal(fixture.elements.humanReviewApproveButton.disabled, false);
+    await clickAndFlush(fixture.elements.humanReviewApproveButton);
+    for (const button of [
+      fixture.elements.humanReviewApproveButton,
+      fixture.elements.humanReviewRejectButton,
+      fixture.elements.humanReviewCancelButton,
+      fixture.elements.humanReviewRequestInformationButton,
+    ]) {
+      assert.equal(button.disabled, true);
+      assert.equal(button.attributes.get("aria-disabled"), "true");
+      await clickAndFlush(button);
+    }
+    assert.equal(postCount, 1);
+  }
+});
+
 test("Human Review does not fall back to detail effect evidence when canonical evidence is unavailable", async () => {
   for (const evidenceFailure of ["unavailable", "conflict"]) {
     const fixture = createFixture();

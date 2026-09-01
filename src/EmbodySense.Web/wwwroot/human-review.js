@@ -89,6 +89,14 @@ const terminalLifecycleStatuses = new Set([
   "superseded",
   "conflicted",
 ]);
+const approvalBlockedEffectStatuses = new Set([
+  "ambiguous",
+  "dispatched",
+  "corrupt",
+  "stale",
+  "unavailable",
+  "invalid",
+]);
 
 export function normalizeHumanReviewStatus(value) {
   return String(value ?? "")
@@ -485,7 +493,13 @@ export function createHumanReviewSurface({
   async function decide(action, button) {
     const normalizedAction = humanReviewActionPath(action);
     const summary = state.selectedSummary;
-    if (!normalizedAction || !summary || state.actionInFlight) return;
+    if (
+      !normalizedAction ||
+      !summary ||
+      state.actionInFlight ||
+      !canDecideHumanReview(summary, normalizedAction)
+    )
+      return;
     const detail =
       normalizedAction === "request-information"
         ? boundedHumanReviewText(
@@ -578,19 +592,15 @@ export function createHumanReviewSurface({
       await refresh(summary.runId);
     } finally {
       state.actionInFlight = false;
-      setActionButtonsDisabled(false);
       button?.removeAttribute("aria-busy");
-      if (
-        state.selectedSummary &&
-        state.detail?.status === "ready" &&
-        state.detail.value?.status === "ready"
-      )
+      if (state.selectedSummary)
         configureActions(
           state.selectedSummary,
           state.evidenceProjection?.effectEvidence,
-          true,
+          isExactHumanReviewDetailReady(state.selectedSummary),
           state.evidenceReady,
         );
+      else setActionButtonsDisabled(true);
     }
   }
 
@@ -1082,14 +1092,7 @@ export function createHumanReviewSurface({
     const lifecycle = normalizeHumanReviewStatus(summary.lifecycleStatus);
     const requested = new Set(summary.requestedDecisions);
     const effectStatus = normalizeHumanReviewStatus(effectEvidence?.status);
-    const approvalBlocked = [
-      "ambiguous",
-      "dispatched",
-      "corrupt",
-      "stale",
-      "unavailable",
-      "invalid",
-    ].includes(effectStatus);
+    const approvalBlocked = approvalBlockedEffectStatuses.has(effectStatus);
     const pending = !terminalLifecycleStatuses.has(lifecycle);
     let hasReplayableOperation = false;
     for (const [action, button] of actionButtons()) {
@@ -1135,6 +1138,40 @@ export function createHumanReviewSurface({
         "This review is terminal. The durable decision history remains available for rereading.",
         "warning",
       );
+  }
+
+  function isExactHumanReviewDetailReady(summary) {
+    const detail = state.detail?.status === "ready" ? state.detail.value : null;
+    const detailSummary =
+      detail?.status === "ready"
+        ? projectHumanReviewSummary(detail.detail?.summary)
+        : null;
+    return (
+      detail?.status === "ready" &&
+      detail.detail !== null &&
+      detailSummary !== null &&
+      sameHumanReviewIdentity(summary, detailSummary)
+    );
+  }
+
+  function canDecideHumanReview(summary, action) {
+    if (!isExactHumanReviewDetailReady(summary)) return false;
+    const lifecycle = normalizeHumanReviewStatus(summary.lifecycleStatus);
+    const pending = !terminalLifecycleStatuses.has(lifecycle);
+    const replayable =
+      !pending && findReplayableHumanReviewOperation(summary, action) !== null;
+    if (
+      (!pending && !replayable) ||
+      !summary.requestedDecisions.includes(action)
+    )
+      return false;
+    if (action !== "approve" || replayable) return true;
+    const effectStatus = normalizeHumanReviewStatus(
+      state.evidenceProjection?.effectEvidence?.status,
+    );
+    return (
+      state.evidenceReady && !approvalBlockedEffectStatuses.has(effectStatus)
+    );
   }
 
   function findReplayableHumanReviewOperation(summary, action) {
