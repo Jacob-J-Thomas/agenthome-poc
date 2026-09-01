@@ -22,6 +22,9 @@ using CommonGovernedLoopFrontierStatus = EmbodySense.Core.Common.Loops.Execution
 using StartupCustomLoopRunStatus = EmbodySense.Core.Startup.HumanReview.Models.CustomLoopRunStatus;
 using StartupFrontierStatus = EmbodySense.Core.Startup.HumanReview.Models.GovernedLoopFrontierStatus;
 using CommonHumanReviewTiming = EmbodySense.Core.Common.HumanReview.Models.HumanReviewTiming;
+using CommonEffectAttemptBinding = EmbodySense.Core.Common.HumanReview.Models.HumanReviewEffectAttemptBinding;
+using CommonEffectDispatchCertainty = EmbodySense.Core.Common.HumanReview.Models.HumanReviewEffectDispatchCertainty;
+using CommonApprovalScopeKind = EmbodySense.Core.Common.HumanReview.Models.HumanReviewApprovalScopeKind;
 
 namespace EmbodySense.Core.Startup.Tests.Runtime;
 
@@ -187,6 +190,30 @@ public sealed partial class AgentRuntimeFactoryTests
         Assert.Equal(HumanReviewReadStatus.NotFound, posture.Status);
     }
 
+    [Fact]
+    public async Task Public_human_review_facade_keeps_a_missing_pre_dispatch_attempt_fail_closed()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var blueprint = await HumanReviewRecoveryCanonicalRunFactory.CreateApprovedRunAsync("run-public-facade-effect-missing", "admission-public-facade-effect-missing");
+        blueprint = blueprint with { HumanReview = blueprint.HumanReview! with { Request = CreatePreDispatchRequest(blueprint.HumanReview.Request) } };
+        await PersistPendingHumanReviewAsync(workspace, blueprint);
+        var executablePath = await CreateFakeCodexExecutableAsync(workspace);
+        await using var runStoreProvider = new CustomLoopRunStoreProvider(workspace.RootPath);
+        var factory = AgentRuntimeFactory.ForFileCapabilityTrustRoot(new RejectingApprovalPrompt(), workspace.ServerStatePath, CreateCompatibleRuntimeStatus(executablePath))
+            .WithCustomLoopRunStoreProvider(runStoreProvider);
+        await using var runtime = await factory.CreateAsync("test-model", workspace.RootPath, executablePath, "read-only", AgentRuntimeSurface.Web);
+
+        var detail = await runtime.HumanReview.ReadAsync(blueprint.Id);
+        var evidence = await runtime.HumanReview.ReadEvidenceAsync(blueprint.Id);
+
+        Assert.Equal(HumanReviewReadStatus.Ready, detail.Status);
+        Assert.Equal(HumanReviewEffectEvidenceStatus.Missing, detail.Detail!.EffectEvidence!.Status);
+        Assert.Equal("effect-facade-missing", detail.Detail.EffectEvidence.EffectAttemptId);
+        Assert.Equal(HumanReviewEvidenceReadStatus.Ready, evidence.Status);
+        Assert.Equal(HumanReviewEffectEvidenceStatus.Missing, evidence.EffectEvidence!.Status);
+    }
+
     private static async Task<CustomLoopRunRecord> CreateLivePendingBlueprintAsync(string runId)
     {
         var blueprint = await HumanReviewRecoveryCanonicalRunFactory.CreateApprovedRunAsync(runId, "admission-" + runId);
@@ -194,6 +221,14 @@ public sealed partial class AgentRuntimeFactoryTests
         var now = DateTimeOffset.UtcNow;
         var timing = new CommonHumanReviewTiming(request.Timing.CreatedAtUtc, now, now.AddHours(1));
         return blueprint with { HumanReview = blueprint.HumanReview with { Request = HumanReviewContractHash.ApplyRequest(request with { Timing = timing }) } };
+    }
+
+    private static HumanReviewRequest CreatePreDispatchRequest(HumanReviewRequest request)
+    {
+        var effect = HumanReviewContractHash.ApplyEffectAttempt(new CommonEffectAttemptBinding("effect-facade-missing", "effect-operation-facade-missing", 1, new string('a', 64), new string('b', 64), CommonEffectDispatchCertainty.NotDispatched, string.Empty));
+        var binding = HumanReviewContractHash.ApplyBinding(request.Binding with { EffectAttempt = effect });
+        var approvalScope = HumanReviewContractHash.ApplyApprovalScope(request.ApprovalScope with { Kind = CommonApprovalScopeKind.PreDispatchEffect, BindingHash = binding.BindingHash, EffectAttemptId = effect.EffectAttemptId });
+        return HumanReviewContractHash.ApplyRequest(request with { Binding = binding, Purpose = HumanReviewPurpose.PreDispatchEffect, ApprovalScope = approvalScope });
     }
 
     private static IHumanReviewDecisionAuthorizationProvider CreateAllowingAuthorizationProvider()
