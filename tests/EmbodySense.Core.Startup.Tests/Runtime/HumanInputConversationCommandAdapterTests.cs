@@ -160,7 +160,7 @@ public sealed class HumanInputConversationCommandAdapterTests
     }
 
     [Fact]
-    public async Task Exact_submit_replays_after_restart_and_rejects_changed_payload_for_the_same_operation()
+    public async Task Exact_submit_replays_after_restart_and_rejects_changed_payload_or_lifecycle_terms_for_the_same_operation()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
@@ -194,9 +194,21 @@ public sealed class HumanInputConversationCommandAdapterTests
             "submit-restart-exact",
             "response-restart-exact",
             $"{{\"value\":{{\"kind\":\"text\",\"text\":\"{ChangedValue}\"}}}}"));
+        var staleVersion = await restarted.RunTurnAsync(HumanInputConversationTestRuntime.SubmitCommand(
+            head with { LifecycleVersion = head.LifecycleVersion + 1 },
+            "submit-restart-exact",
+            "response-restart-exact",
+            $"{{\"value\":{{\"kind\":\"text\",\"text\":\"{PrivateValue}\"}}}}"));
+        var staleStatus = await restarted.RunTurnAsync(HumanInputConversationTestRuntime.SubmitCommand(
+            head with { Status = HumanInputRequestLifecycleStatus.Answered },
+            "submit-restart-exact",
+            "response-restart-exact",
+            $"{{\"value\":{{\"kind\":\"text\",\"text\":\"{PrivateValue}\"}}}}"));
 
         Assert.Contains("replayed", replayed.Output, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("conflict", changed.Output, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("conflict", staleVersion.Output, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("conflict", staleStatus.Output, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain(PrivateValue, replayed.Output, StringComparison.Ordinal);
         Assert.DoesNotContain(ChangedValue, changed.Output, StringComparison.Ordinal);
         Assert.Empty(restarted.GetActiveConversationTranscript());

@@ -708,6 +708,8 @@ public sealed class HumanInputRuntimeFacade
     {
         if (input.Kind != evidence.Kind
             || !string.Equals(input.RequestId, evidence.Request.RequestId, StringComparison.Ordinal)
+            || input.ExpectedLifecycleVersion != evidence.ExpectedLifecycleVersion
+            || input.ExpectedLifecycleStatus != evidence.ExpectedLifecycleStatus
             || !Equals(input.ExpectedRequest, evidence.Request))
         {
             return false;
