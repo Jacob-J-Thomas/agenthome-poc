@@ -4,7 +4,7 @@ import test from "node:test";
 
 import {
   boundedHumanReviewText,
-  createHumanReviewSurface,
+  createHumanReviewSurface as createRawHumanReviewSurface,
   humanReviewActionPath,
   humanReviewOperationIdentity,
   humanReviewOutcomeMessage,
@@ -24,6 +24,20 @@ const loopBuilderSource = fs.readFileSync(
   new URL("../../src/EmbodySense.Web/wwwroot/loop-builder.js", import.meta.url),
   "utf8",
 );
+const testHumanReviewScope = "c".repeat(64);
+
+function createHumanReviewSurface(options = {}) {
+  const providedWindow = options.window ?? {};
+  const window = { ...providedWindow };
+  if (!Object.hasOwn(window, "localStorage"))
+    window.localStorage = new FakeStorage();
+  if (!window.navigator) window.navigator = { locks: new FakeLocks() };
+  else if (!window.navigator.locks)
+    window.navigator = { ...window.navigator, locks: new FakeLocks() };
+  const surface = createRawHumanReviewSurface({ ...options, window });
+  surface.configureWorkspaceScope(testHumanReviewScope);
+  return surface;
+}
 
 test("Human Review exposes stable semantic controls and retires loop-builder approval dispatch", () => {
   assert.match(indexSource, /data-app-view="reviews"/);
@@ -806,6 +820,277 @@ test("Human Review operation storage evicts the oldest unresolved entries at its
   );
 });
 
+test("Human Review requires a server workspace scope and cross-tab lock before dispatch", async () => {
+  const fixture = createFixture();
+  const storage = new FakeStorage();
+  let postCount = 0;
+  const requestJson = async (url, options = {}) => {
+    if (options.method === "POST") postCount++;
+    if (url === "/api/human-reviews?maximumCount=50")
+      return { status: "ready", items: [summary()], continuationCursor: null };
+    if (url.endsWith("/evidence"))
+      return { status: "ready", evidence: [], effectEvidence: null };
+    if (url.endsWith("/posture"))
+      return { status: "ready", posture: { lifecycleStatus: "pending" } };
+    return {
+      status: "ready",
+      detail: {
+        summary: summary(),
+        previews: [],
+        decisions: [],
+        evidence: [],
+        runtime: { lifecycleStatus: "pending" },
+        effectEvidence: null,
+      },
+    };
+  };
+  const surface = createRawHumanReviewSurface({
+    document: fixture.document,
+    window: { localStorage: storage, navigator: { locks: new FakeLocks() } },
+    requestJson,
+  });
+  await surface.activate();
+  await clickAndFlush(fixture.elements.humanReviewApproveButton);
+  assert.equal(postCount, 0);
+  surface.configureWorkspaceScope("not-a-scope");
+  await clickAndFlush(fixture.elements.humanReviewApproveButton);
+  assert.equal(postCount, 0);
+
+  const noLockFixture = createFixture();
+  const noLockSurface = createRawHumanReviewSurface({
+    document: noLockFixture.document,
+    window: { localStorage: new FakeStorage(), navigator: {} },
+    requestJson,
+  });
+  assert.equal(
+    noLockSurface.configureWorkspaceScope(testHumanReviewScope),
+    false,
+  );
+  await noLockSurface.activate();
+  await clickAndFlush(noLockFixture.elements.humanReviewApproveButton);
+  assert.equal(postCount, 0);
+
+  const malformedLockFixture = createFixture();
+  const malformedLockSurface = createRawHumanReviewSurface({
+    document: malformedLockFixture.document,
+    window: {
+      localStorage: new FakeStorage(),
+      navigator: { locks: { request: "not-callable" } },
+    },
+    requestJson,
+  });
+  assert.equal(
+    malformedLockSurface.configureWorkspaceScope(testHumanReviewScope),
+    false,
+  );
+  await malformedLockSurface.activate();
+  await clickAndFlush(malformedLockFixture.elements.humanReviewApproveButton);
+  assert.equal(postCount, 0);
+});
+
+test("Human Review workspace-scoped registries isolate A and B and restore A after a scope switch", async () => {
+  const storage = new FakeScopedStorage();
+  const locks = new FakeLocks();
+  const scopeA = "a".repeat(64);
+  const scopeB = "b".repeat(64);
+  const fixture = createFixture();
+  const calls = [];
+  const requestJson = async (url, options = {}) => {
+    calls.push({ url, options });
+    if (url === "/api/human-reviews?maximumCount=50")
+      return { status: "ready", items: [summary()], continuationCursor: null };
+    if (url.endsWith("/evidence"))
+      return { status: "ready", evidence: [], effectEvidence: null };
+    if (url.endsWith("/posture"))
+      return { status: "ready", posture: { lifecycleStatus: "pending" } };
+    if (options.method === "POST") throw new Error("transport lost");
+    return {
+      status: "ready",
+      detail: {
+        summary: summary(),
+        previews: [],
+        decisions: [],
+        evidence: [],
+        runtime: { lifecycleStatus: "pending" },
+        effectEvidence: null,
+      },
+    };
+  };
+  const surface = createRawHumanReviewSurface({
+    document: fixture.document,
+    window: { localStorage: storage, navigator: { locks } },
+    requestJson,
+  });
+  assert.equal(surface.configureWorkspaceScope(scopeA), true);
+  await surface.activate();
+  await clickAndFlush(fixture.elements.humanReviewApproveButton);
+  const firstOperationId = JSON.parse(
+    calls.find((call) => call.options.method === "POST").options.body,
+  ).operationId;
+  assert.equal(storage.values.size, 1);
+  assert.equal(
+    [...storage.values.keys()][0],
+    `embodysense.human-review.operations.v1.${scopeA}`,
+  );
+
+  assert.equal(surface.configureWorkspaceScope(scopeB), true);
+  await clickAndFlush(fixture.elements.humanReviewApproveButton);
+  const secondOperationId = JSON.parse(
+    calls.filter((call) => call.options.method === "POST")[1].options.body,
+  ).operationId;
+  assert.equal(storage.values.size, 2);
+  assert.equal(
+    storage.values.has(`embodysense.human-review.operations.v1.${scopeB}`),
+    true,
+  );
+
+  assert.equal(surface.configureWorkspaceScope(scopeA), true);
+  await clickAndFlush(fixture.elements.humanReviewApproveButton);
+  const posts = calls.filter((call) => call.options.method === "POST");
+  assert.equal(JSON.parse(posts[2].options.body).operationId, firstOperationId);
+  assert.equal(firstOperationId, secondOperationId);
+  assert.equal(storage.values.size, 2);
+});
+
+test("Human Review lock rereads and merges interleaved different requests while converging identical tabs", async () => {
+  const storage = new FakeScopedStorage();
+  const locks = new FakeLocks();
+  const first = summary();
+  const second = summary({
+    runId: "run-review-2",
+    requestId: "request-review-2",
+    requestHash: "b".repeat(64),
+  });
+  const firstFixture = createFixture();
+  const secondFixture = createFixture();
+  const thirdFixture = createFixture();
+  const fourthFixture = createFixture();
+  const calls = [];
+  const makeRequestJson =
+    (item) =>
+    async (url, options = {}) => {
+      if (options.method === "POST") {
+        calls.push({ item, body: JSON.parse(options.body) });
+        throw new Error("transport lost");
+      }
+      if (url === "/api/human-reviews?maximumCount=50")
+        return { status: "ready", items: [item], continuationCursor: null };
+      if (url.endsWith("/evidence"))
+        return { status: "ready", evidence: [], effectEvidence: null };
+      if (url.endsWith("/posture"))
+        return { status: "ready", posture: { lifecycleStatus: "pending" } };
+      return {
+        status: "ready",
+        detail: {
+          summary: item,
+          previews: [],
+          decisions: [],
+          evidence: [],
+          runtime: { lifecycleStatus: "pending" },
+          effectEvidence: null,
+        },
+      };
+    };
+  const create = (fixture, item) => {
+    const surface = createRawHumanReviewSurface({
+      document: fixture.document,
+      window: { localStorage: storage, navigator: { locks } },
+      requestJson: makeRequestJson(item),
+    });
+    surface.configureWorkspaceScope(testHumanReviewScope);
+    return surface;
+  };
+  const firstSurface = create(firstFixture, first);
+  const secondSurface = create(secondFixture, second);
+  await Promise.all([firstSurface.activate(), secondSurface.activate()]);
+  await Promise.all([
+    clickAndFlush(firstFixture.elements.humanReviewApproveButton),
+    clickAndFlush(secondFixture.elements.humanReviewApproveButton),
+  ]);
+  const storageKey = `embodysense.human-review.operations.v1.${testHumanReviewScope}`;
+  assert.equal(JSON.parse(storage.values.get(storageKey)).entries.length, 2);
+
+  const thirdSurface = create(thirdFixture, first);
+  const fourthSurface = create(fourthFixture, first);
+  await Promise.all([thirdSurface.activate(), fourthSurface.activate()]);
+  await Promise.all([
+    clickAndFlush(thirdFixture.elements.humanReviewApproveButton),
+    clickAndFlush(fourthFixture.elements.humanReviewApproveButton),
+  ]);
+  const sameRequestPosts = calls.filter((call) => call.item === first);
+  assert.equal(sameRequestPosts.length, 3);
+  assert.equal(
+    sameRequestPosts[1].body.operationId,
+    sameRequestPosts[2].body.operationId,
+  );
+  assert.equal(sameRequestPosts[1].body.expectedLifecycleVersion, 3);
+});
+
+test("Human Review conclusive cleanup preserves another tab's scoped operation", async () => {
+  const storage = new FakeScopedStorage();
+  const locks = new FakeLocks();
+  const first = summary();
+  const second = summary({
+    runId: "run-review-2",
+    requestId: "request-review-2",
+    requestHash: "b".repeat(64),
+  });
+  const firstFixture = createFixture();
+  const secondFixture = createFixture();
+  const cleanupFixture = createFixture();
+  const makeRequestJson =
+    (item, accepted = false) =>
+    async (url, options = {}) => {
+      if (options.method === "POST") {
+        if (accepted) return { status: "accepted" };
+        throw new Error("transport lost");
+      }
+      if (url === "/api/human-reviews?maximumCount=50")
+        return { status: "ready", items: [item], continuationCursor: null };
+      if (url.endsWith("/evidence"))
+        return { status: "ready", evidence: [], effectEvidence: null };
+      if (url.endsWith("/posture"))
+        return { status: "ready", posture: { lifecycleStatus: "pending" } };
+      return {
+        status: "ready",
+        detail: {
+          summary: item,
+          previews: [],
+          decisions: [],
+          evidence: [],
+          runtime: { lifecycleStatus: "pending" },
+          effectEvidence: null,
+        },
+      };
+    };
+  const create = (fixture, item, accepted = false) => {
+    const surface = createRawHumanReviewSurface({
+      document: fixture.document,
+      window: { localStorage: storage, navigator: { locks } },
+      requestJson: makeRequestJson(item, accepted),
+    });
+    surface.configureWorkspaceScope(testHumanReviewScope);
+    return surface;
+  };
+  const firstSurface = create(firstFixture, first);
+  const secondSurface = create(secondFixture, second);
+  await Promise.all([firstSurface.activate(), secondSurface.activate()]);
+  await Promise.all([
+    clickAndFlush(firstFixture.elements.humanReviewApproveButton),
+    clickAndFlush(secondFixture.elements.humanReviewApproveButton),
+  ]);
+  const cleanupSurface = create(cleanupFixture, first, true);
+  await cleanupSurface.activate();
+  await clickAndFlush(cleanupFixture.elements.humanReviewApproveButton);
+  const stored = JSON.parse(
+    storage.values.get(
+      `embodysense.human-review.operations.v1.${testHumanReviewScope}`,
+    ),
+  );
+  assert.equal(stored.entries.length, 1);
+  assert.equal(stored.entries[0].requestHash, second.requestHash);
+});
+
 test("Human Review starts a new operation identity after a definitive conflict and reread lifecycle", async () => {
   const fixture = createFixture();
   const information = "A bounded information request.";
@@ -1113,6 +1398,18 @@ async function clickAndFlush(element) {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+class FakeLocks {
+  constructor() {
+    this.tail = Promise.resolve();
+  }
+
+  request(_name, _options, callback) {
+    const result = this.tail.then(callback);
+    this.tail = result.catch(() => {});
+    return result;
+  }
+}
+
 class FakeStorage {
   constructor(value = null) {
     this.value = value;
@@ -1128,6 +1425,24 @@ class FakeStorage {
 
   removeItem() {
     this.value = null;
+  }
+}
+
+class FakeScopedStorage {
+  constructor() {
+    this.values = new Map();
+  }
+
+  getItem(key) {
+    return this.values.get(key) ?? null;
+  }
+
+  setItem(key, value) {
+    this.values.set(key, value);
+  }
+
+  removeItem(key) {
+    this.values.delete(key);
   }
 }
 

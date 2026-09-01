@@ -8,7 +8,10 @@ const maximumOperationStorageCharacters = 64 * 1024;
 const maximumOperationLifecycleVersion = 1_000_000;
 const maximumReviewPages = 20;
 const maximumAggregateItems = 500;
-const humanReviewOperationStorageKey = "embodysense.human-review.operations.v1";
+const humanReviewOperationStorageKeyPrefix =
+  "embodysense.human-review.operations.v1";
+const humanReviewOperationLockNamePrefix =
+  "embodysense.human-review.operations.v1";
 const humanReviewOperationStorageSchemaVersion = 1;
 const sha256Pattern = /^[0-9a-f]{64}$/;
 const identifierPattern = /^[a-z0-9][a-z0-9._-]{0,119}$/;
@@ -291,7 +294,6 @@ export function createHumanReviewSurface({
     title: document.getElementById("humanReviewTitle"),
     identity: document.getElementById("humanReviewIdentity"),
   };
-  const initialOperationStorage = readHumanReviewOperationStorage(hostWindow);
   const state = {
     actionInFlight: false,
     active: false,
@@ -299,11 +301,13 @@ export function createHumanReviewSurface({
     evidence: null,
     posture: null,
     items: [],
-    operations: new Map(initialOperationStorage.entries),
-    operationStorage: initialOperationStorage.storage,
-    operationStorageKey: humanReviewOperationStorageKey,
-    operationStorageEnabled: initialOperationStorage.enabled,
-    operationStorageStatus: initialOperationStorage.status,
+    operations: new Map(),
+    operationStorage: null,
+    operationStorageKey: null,
+    operationStorageLockName: null,
+    operationStorageScope: null,
+    operationStorageEnabled: false,
+    operationStorageStatus: "unconfigured",
     refreshPromise: null,
     selectedRunId: null,
     selectedSummary: null,
@@ -480,42 +484,23 @@ export function createHumanReviewSurface({
       );
       return;
     }
-    if (!synchronizeOperationStorage()) {
-      setActionStatus(
-        "Human Review operation recovery is unavailable. No decision was sent.",
-        "error",
-      );
-      return;
-    }
     const intent = humanReviewDecisionIntent(summary, normalizedAction);
-    let operation = state.operations.get(intent.key);
-    if (!operation) {
-      operation = Object.freeze({
-        runId: summary.runId,
-        requestId: summary.requestId,
-        requestHash: summary.requestHash,
-        action: normalizedAction,
-        operationId: stableHumanReviewOperationIdentity(
-          summary.runId,
-          summary.requestId,
-          summary.requestHash,
-          normalizedAction,
-          summary.lifecycleVersion,
-        ),
-        expectedLifecycleVersion: summary.lifecycleVersion,
-      });
-      if (!rememberOperation(intent.key, operation)) {
+    state.actionInFlight = true;
+    setActionButtonsDisabled(true);
+    if (button) button.setAttribute("aria-busy", "true");
+    try {
+      const operation = await reserveHumanReviewOperation(
+        intent,
+        summary,
+        normalizedAction,
+      );
+      if (!operation) {
         setActionStatus(
           "Human Review operation recovery is unavailable. No decision was sent.",
           "error",
         );
         return;
       }
-    }
-    state.actionInFlight = true;
-    setActionButtonsDisabled(true);
-    if (button) button.setAttribute("aria-busy", "true");
-    try {
       const payload = {
         expectedLifecycleVersion: operation.expectedLifecycleVersion,
         operationId: operation.operationId,
@@ -529,7 +514,7 @@ export function createHumanReviewSurface({
           body: JSON.stringify(payload),
         },
       );
-      forgetOperation(intent.key);
+      await forgetOperation(intent.key);
       setActionStatus(
         humanReviewOutcomeMessage(response?.status),
         ["accepted", "information-requested", "replayed"].includes(
@@ -546,7 +531,7 @@ export function createHumanReviewSurface({
       await refresh(summary.runId);
     } catch (error) {
       if (isDefinitiveHumanReviewDecisionError(error))
-        forgetOperation(intent.key);
+        await forgetOperation(intent.key);
       setActionStatus(
         humanReviewOutcomeMessage(null, error?.status ?? null),
         "error",
@@ -570,41 +555,138 @@ export function createHumanReviewSurface({
     }
   }
 
-  function rememberOperation(key, operation) {
-    const previousOperations = new Map(state.operations);
-    state.operations.set(key, operation);
-    while (state.operations.size > maximumOperationEntries)
-      state.operations.delete(state.operations.keys().next().value);
-    if (state.operationStorageStatus !== "ready") return true;
-    if (persistHumanReviewOperations(state)) return true;
+  function configureWorkspaceScope(scope) {
     state.operations.clear();
-    for (const [previousKey, previousOperation] of previousOperations)
-      state.operations.set(previousKey, previousOperation);
-    return false;
-  }
-
-  function forgetOperation(key) {
-    if (!state.operations.delete(key)) return true;
-    if (state.operationStorageStatus !== "ready") return true;
-    return persistHumanReviewOperations(state);
-  }
-
-  function synchronizeOperationStorage() {
-    if (!state.operationStorageEnabled) return true;
-    const current = readHumanReviewOperationStorage(
-      hostWindow,
-      state.operationStorageKey,
-    );
-    if (!current.enabled || current.status !== "ready") {
+    state.operationStorageScope = null;
+    state.operationStorageKey = null;
+    state.operationStorageLockName = null;
+    state.operationStorage = null;
+    state.operationStorageEnabled = false;
+    if (typeof scope !== "string" || !sha256Pattern.test(scope)) {
       state.operationStorageStatus = "unavailable";
-      state.operations.clear();
       return false;
     }
+    state.operationStorageScope = scope;
+    state.operationStorageKey = `${humanReviewOperationStorageKeyPrefix}.${scope}`;
+    state.operationStorageLockName = `${humanReviewOperationLockNamePrefix}.${scope}`;
+    let storage;
+    try {
+      storage = hostWindow?.localStorage;
+    } catch {
+      storage = null;
+    }
+    if (
+      !storage ||
+      typeof storage.getItem !== "function" ||
+      typeof storage.removeItem !== "function" ||
+      typeof storage.setItem !== "function" ||
+      typeof hostWindow?.navigator?.locks?.request !== "function"
+    ) {
+      state.operationStorageStatus = "unavailable";
+      return false;
+    }
+    state.operationStorage = storage;
+    state.operationStorageEnabled = true;
     state.operationStorageStatus = "ready";
-    state.operations.clear();
-    for (const [key, operation] of current.entries)
-      state.operations.set(key, operation);
     return true;
+  }
+
+  async function reserveHumanReviewOperation(intent, summary, action) {
+    if (
+      !state.operationStorageEnabled ||
+      state.operationStorageStatus !== "ready"
+    )
+      return null;
+    try {
+      return await withHumanReviewOperationStorageLock(async () => {
+        const current = readHumanReviewOperationStorage(
+          hostWindow,
+          state.operationStorageKey,
+          state.operationStorageScope,
+        );
+        if (!current.enabled || current.status !== "ready")
+          throw new Error("operation storage unavailable");
+        state.operationStorage = current.storage;
+        replaceOperations(current.entries);
+        let operation = state.operations.get(intent.key);
+        if (!operation) {
+          operation = Object.freeze({
+            runId: summary.runId,
+            requestId: summary.requestId,
+            requestHash: summary.requestHash,
+            action,
+            operationId: stableHumanReviewOperationIdentity(
+              summary.runId,
+              summary.requestId,
+              summary.requestHash,
+              action,
+              summary.lifecycleVersion,
+            ),
+            expectedLifecycleVersion: summary.lifecycleVersion,
+          });
+          state.operations.set(intent.key, operation);
+          while (state.operations.size > maximumOperationEntries)
+            state.operations.delete(state.operations.keys().next().value);
+          if (!persistHumanReviewOperations(state))
+            throw new Error("operation storage unavailable");
+        }
+        return operation;
+      });
+    } catch {
+      state.operationStorageStatus = "unavailable";
+      state.operations.clear();
+      return null;
+    }
+  }
+
+  async function forgetOperation(key) {
+    if (
+      !state.operationStorageEnabled ||
+      state.operationStorageStatus !== "ready"
+    )
+      return false;
+    try {
+      await withHumanReviewOperationStorageLock(async () => {
+        const current = readHumanReviewOperationStorage(
+          hostWindow,
+          state.operationStorageKey,
+          state.operationStorageScope,
+        );
+        if (!current.enabled || current.status !== "ready")
+          throw new Error("operation storage unavailable");
+        state.operationStorage = current.storage;
+        replaceOperations(current.entries);
+        if (!state.operations.delete(key)) return;
+        if (!persistHumanReviewOperations(state))
+          throw new Error("operation storage unavailable");
+      });
+      return true;
+    } catch {
+      state.operationStorageStatus = "unavailable";
+      return false;
+    }
+  }
+
+  function replaceOperations(entries) {
+    state.operations.clear();
+    for (const [key, operation] of entries)
+      state.operations.set(key, operation);
+  }
+
+  function withHumanReviewOperationStorageLock(callback) {
+    const locks = hostWindow?.navigator?.locks;
+    if (
+      !state.operationStorageEnabled ||
+      !state.operationStorageKey ||
+      !state.operationStorageLockName ||
+      typeof locks?.request !== "function"
+    )
+      return Promise.reject(new Error("operation storage lock unavailable"));
+    return locks.request(
+      state.operationStorageLockName,
+      { mode: "exclusive" },
+      callback,
+    );
   }
 
   function renderList(page) {
@@ -945,6 +1027,7 @@ export function createHumanReviewSurface({
 
   return Object.freeze({
     activate,
+    configureWorkspaceScope,
     notifyChanged,
     refresh,
     selectReview,
@@ -1034,10 +1117,7 @@ function humanReviewSummaryIdentity(summary) {
   return `${summary.runId}\u001f${summary.requestId}\u001f${summary.requestHash}`;
 }
 
-function readHumanReviewOperationStorage(
-  hostWindow,
-  storageKey = humanReviewOperationStorageKey,
-) {
+function readHumanReviewOperationStorage(hostWindow, storageKey, storageScope) {
   let storage;
   try {
     storage = hostWindow?.localStorage;
@@ -1094,7 +1174,7 @@ function readHumanReviewOperationStorage(
       entries: new Map(),
     };
   }
-  if (!isValidHumanReviewOperationStorageEnvelope(parsed))
+  if (!isValidHumanReviewOperationStorageEnvelope(parsed, storageScope))
     return {
       enabled: true,
       status: "unavailable",
@@ -1116,15 +1196,17 @@ function readHumanReviewOperationStorage(
   return { enabled: true, status: "ready", storage, entries };
 }
 
-function isValidHumanReviewOperationStorageEnvelope(value) {
+function isValidHumanReviewOperationStorageEnvelope(value, expectedScope) {
   if (
     !value ||
     typeof value !== "object" ||
     Array.isArray(value) ||
-    Object.keys(value).length !== 2 ||
+    Object.keys(value).length !== 3 ||
     !Object.hasOwn(value, "schemaVersion") ||
     !Object.hasOwn(value, "entries") ||
+    !Object.hasOwn(value, "scope") ||
     value.schemaVersion !== humanReviewOperationStorageSchemaVersion ||
+    value.scope !== expectedScope ||
     !Array.isArray(value.entries) ||
     value.entries.length > maximumOperationEntries
   )
@@ -1184,6 +1266,7 @@ function persistHumanReviewOperations(state) {
   }));
   const raw = JSON.stringify({
     schemaVersion: humanReviewOperationStorageSchemaVersion,
+    scope: state.operationStorageScope,
     entries,
   });
   if (raw.length > maximumOperationStorageCharacters) {
