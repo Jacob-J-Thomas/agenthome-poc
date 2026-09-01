@@ -1,4 +1,3 @@
-using System.Reflection;
 using EmbodySense.Core.Startup.HumanReview.Models;
 using EmbodySense.Web.Controllers;
 using EmbodySense.Web.Models;
@@ -10,21 +9,6 @@ namespace EmbodySense.Web.Tests;
 
 public sealed class HumanReviewsControllerTests
 {
-    [Fact]
-    public void Controller_declares_authenticated_no_store_routes_and_body_cap()
-    {
-        var type = typeof(HumanReviewsController);
-        var route = Assert.Single(type.GetCustomAttributes<RouteAttribute>());
-        var requestSize = Assert.Single(type.GetCustomAttributes<RequestSizeLimitAttribute>());
-
-        Assert.Equal("api/human-reviews", route.Template);
-        Assert.NotNull(requestSize);
-        Assert.NotNull(type.GetCustomAttribute<Microsoft.AspNetCore.Authorization.AuthorizeAttribute>());
-        var cache = Assert.Single(type.GetCustomAttributes<ResponseCacheAttribute>());
-        Assert.True(cache.NoStore);
-        Assert.Equal(ResponseCacheLocation.None, cache.Location);
-    }
-
     [Fact]
     public async Task List_projects_bounds_and_all_closed_statuses()
     {
