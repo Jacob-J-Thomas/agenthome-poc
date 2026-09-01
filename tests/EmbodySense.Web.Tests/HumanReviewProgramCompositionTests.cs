@@ -74,7 +74,8 @@ public sealed class HumanReviewProgramCompositionTests
             var afterBody = await afterResponse.Content.ReadAsStringAsync();
             var after = JsonSerializer.Deserialize<HumanReviewReadResult>(afterBody, _jsonOptions);
             var afterDetail = Assert.IsType<HumanReviewDetail>(after?.Detail);
-            var durable = await new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath)).GetAsync(runId);
+            using var durableStore = new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath));
+            var durable = await durableStore.GetAsync(runId);
             var durableDecision = Assert.Single(Assert.IsType<HumanReviewRunState>(durable?.HumanReview).AcceptedDecisions);
 
             Assert.Equal(HttpStatusCode.OK, beforeResponse.StatusCode);
