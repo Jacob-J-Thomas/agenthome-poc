@@ -26,6 +26,7 @@ using CommonEffectAttemptBinding = EmbodySense.Core.Common.HumanReview.Models.Hu
 using CommonEffectDispatchCertainty = EmbodySense.Core.Common.HumanReview.Models.HumanReviewEffectDispatchCertainty;
 using CommonApprovalScopeKind = EmbodySense.Core.Common.HumanReview.Models.HumanReviewApprovalScopeKind;
 using CommonHumanReviewRequest = EmbodySense.Core.Common.HumanReview.Models.HumanReviewRequest;
+using CommonHumanReviewPurpose = EmbodySense.Core.Common.HumanReview.Models.HumanReviewPurpose;
 
 namespace EmbodySense.Core.Startup.Tests.Runtime;
 
@@ -229,7 +230,7 @@ public sealed partial class AgentRuntimeFactoryTests
         var effect = HumanReviewContractHash.ApplyEffectAttempt(new CommonEffectAttemptBinding("effect-facade-missing", "effect-operation-facade-missing", 1, new string('a', 64), new string('b', 64), CommonEffectDispatchCertainty.NotDispatched, string.Empty));
         var binding = HumanReviewContractHash.ApplyBinding(request.Binding with { EffectAttempt = effect });
         var approvalScope = HumanReviewContractHash.ApplyApprovalScope(request.ApprovalScope with { Kind = CommonApprovalScopeKind.PreDispatchEffect, BindingHash = binding.BindingHash, EffectAttemptId = effect.EffectAttemptId });
-        return HumanReviewContractHash.ApplyRequest(request with { Binding = binding, Purpose = HumanReviewPurpose.PreDispatchEffect, ApprovalScope = approvalScope });
+        return HumanReviewContractHash.ApplyRequest(request with { Binding = binding, Purpose = CommonHumanReviewPurpose.PreDispatchEffect, ApprovalScope = approvalScope });
     }
 
     private static IHumanReviewDecisionAuthorizationProvider CreateAllowingAuthorizationProvider()
