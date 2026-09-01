@@ -388,14 +388,17 @@ test("Human Input measures exact UTF-8 request bytes at the server boundary", as
   ]);
   await clickAndFlush(fixture.elements.humanInputResponseSubmitButton);
   assert.equal(postCalls().length, 1);
+  const exactBoundaryBody = postCalls()[0].options.body;
+  assert.equal(new TextEncoder().encode(exactBoundaryBody).byteLength, 16_384);
   assert.equal(
-    new TextEncoder().encode(postCalls()[0].options.body).byteLength,
-    16_384,
-  );
-  assert.equal(
-    JSON.parse(postCalls()[0].options.body).value.structuredFields[3].text,
+    JSON.parse(exactBoundaryBody).value.structuredFields[3].text,
     `${"é".repeat(390)}xxx`,
   );
+  const oneByteLargerBody = exactBoundaryBody.replace(
+    `${"é".repeat(390)}xxx`,
+    `${"é".repeat(390)}xxxx`,
+  );
+  assert.equal(new TextEncoder().encode(oneByteLargerBody).byteLength, 16_385);
 
   setValues([
     "é".repeat(2500),
@@ -413,6 +416,129 @@ test("Human Input measures exact UTF-8 request bytes at the server boundary", as
     fixture.elements.humanInputResponseStatus.textContent,
     /16,384 UTF-8 bytes|shorten|no request was sent/i,
   );
+});
+
+test("Human Input releases distinct oversized answer entries and preserves an ambiguous retry", async () => {
+  const fixture = createFixture();
+  const current = structuredTextPosture();
+  const calls = [];
+  let postNumber = 0;
+  const requestJson = async (url, options = {}) => {
+    calls.push({ url, options });
+    if (url === "/api/human-input?maximumCount=50")
+      return { status: "ready", requests: [current], nextCursor: null };
+    if (url === "/api/human-input/request-input-1") return current;
+    if (options.method === "POST") {
+      postNumber++;
+      if (postNumber === 1) throw new Error("transport unavailable");
+      return { status: "committed" };
+    }
+    throw new Error("unexpected request");
+  };
+  const surface = createHumanInputSurface({
+    document: fixture.document,
+    window: { crypto: { randomUUID: () => "oversized-answer-operation" } },
+    requestJson,
+  });
+
+  await surface.activate();
+  const postCalls = () =>
+    calls.filter((call) => call.options.method === "POST");
+  const ambiguousValues = ["ambiguous response", "", "", ""];
+  setResponseEditorValues(fixture, ambiguousValues);
+  fixture.elements.humanInputExplanation.value = "private explanation";
+  await clickAndFlush(fixture.elements.humanInputResponseSubmitButton);
+  assert.equal(postCalls().length, 1);
+  const ambiguousOperationId = JSON.parse(
+    postCalls()[0].options.body,
+  ).operationId;
+
+  for (let index = 0; index < 130; index++) {
+    setResponseEditorValues(fixture, [
+      "é".repeat(2500),
+      "é".repeat(2500),
+      "é".repeat(2500),
+      `${"é".repeat(390)}xxxx-${index}`,
+    ]);
+    fixture.elements.humanInputExplanation.value = `private explanation ${index}`;
+    await clickAndFlush(fixture.elements.humanInputResponseSubmitButton);
+  }
+  assert.equal(postCalls().length, 1);
+  assert.equal(
+    fixture.elements.humanInputResponseStatus.textContent,
+    humanInputRequestBodyCapacityMessage(),
+  );
+
+  setResponseEditorValues(fixture, ambiguousValues);
+  fixture.elements.humanInputExplanation.value = "private explanation";
+  await clickAndFlush(fixture.elements.humanInputResponseSubmitButton);
+  assert.equal(postCalls().length, 2);
+  assert.equal(
+    JSON.parse(postCalls()[1].options.body).operationId,
+    ambiguousOperationId,
+  );
+
+  setResponseEditorValues(fixture, ["valid response", "", "", ""]);
+  fixture.elements.humanInputExplanation.value = "";
+  await clickAndFlush(fixture.elements.humanInputResponseSubmitButton);
+  assert.equal(postCalls().length, 3);
+  assert.equal(
+    JSON.parse(postCalls()[2].options.body).value.structuredFields[0].text,
+    "valid response",
+  );
+});
+
+test("Human Input releases distinct oversized supersede preparations before operation capacity", async () => {
+  const fixture = createFixture();
+  let current = oversizedSuccessorPosture();
+  const calls = [];
+  let prepareCount = 0;
+  const requestJson = async (url, options = {}) => {
+    calls.push({ url, options });
+    if (url === "/api/human-input?maximumCount=50")
+      return { status: "ready", requests: [current], nextCursor: null };
+    if (url === "/api/human-input/request-input-1") return current;
+    if (options.method === "POST") {
+      prepareCount++;
+      return {
+        status: "ready",
+        candidateKey: "candidate-opaque",
+        expiresAtUtc: "2026-09-01T13:00:00Z",
+      };
+    }
+    throw new Error("unexpected request");
+  };
+  const surface = createHumanInputSurface({
+    document: fixture.document,
+    window: { crypto: { randomUUID: () => "oversized-supersede-operation" } },
+    requestJson,
+  });
+
+  await surface.activate();
+  const postCalls = () =>
+    calls.filter((call) => call.options.method === "POST");
+  for (let index = 0; index < 130; index++) {
+    fixture.elements.humanInputSupersedePurpose.value = `private-successor-purpose-${index}`;
+    fixture.elements.humanInputSupersedePrompt.value = `private-successor-prompt-${index}`;
+    await clickAndFlush(fixture.elements.humanInputSupersedeButton);
+  }
+  assert.equal(prepareCount, 0);
+  assert.equal(postCalls().length, 0);
+  assert.equal(
+    fixture.elements.humanInputSupersedeStatus.textContent,
+    humanInputRequestBodyCapacityMessage(),
+  );
+
+  current = posture();
+  await surface.refresh();
+  fixture.elements.humanInputSupersedePurpose.value = "valid successor purpose";
+  fixture.elements.humanInputSupersedePrompt.value = "valid successor prompt";
+  await clickAndFlush(fixture.elements.humanInputSupersedeButton);
+  assert.equal(prepareCount, 1);
+  assert.equal(postCalls().length, 1);
+  const body = postCalls()[0].options.body;
+  assert.equal(JSON.parse(body).successor.purpose, "valid successor purpose");
+  assert.doesNotMatch(body, /private-successor-/);
 });
 
 test("Human Input lifecycle controls and supersede keep operation identity separate from private state", async () => {
@@ -721,6 +847,51 @@ function posture(overrides = {}) {
     isAnswered: false,
     ...overrides,
   };
+}
+
+function structuredTextPosture() {
+  return posture({
+    presentation: {
+      ...posture().presentation,
+      responseSchema: {
+        kind: "structured",
+        structuredFields: Array.from({ length: 4 }, (_, index) => ({
+          fieldId: `field-${index + 1}`,
+          kind: "text",
+          required: false,
+          maxTextCharacters: 4000,
+        })),
+      },
+    },
+  });
+}
+
+function oversizedSuccessorPosture() {
+  return posture({
+    presentation: {
+      ...posture().presentation,
+      responseSchema: {
+        kind: "structured",
+        structuredFields: Array.from({ length: 12 }, (_, fieldIndex) => ({
+          fieldId: `field-${fieldIndex + 1}`,
+          kind: "choice",
+          required: false,
+          choices: Array.from({ length: 16 }, (_, choiceIndex) => ({
+            choiceId: `choice-${choiceIndex + 1}`,
+            displayText: "é".repeat(240),
+          })),
+        })),
+      },
+    },
+  });
+}
+
+function setResponseEditorValues(fixture, values) {
+  values.forEach((value, index) => {
+    fixture.elements.humanInputResponseEditor.children[
+      index
+    ].children[1].value = value;
+  });
 }
 
 function createFixture() {

@@ -510,11 +510,13 @@ export function createHumanInputSurface({
     state.responseDraft = value;
     const explanation = boundedInputValue(elements.explanation, 1000);
     const key = `${humanInputIdentity(posture)}:answer:${JSON.stringify(value)}:${explanation}`;
-    const operation = getOperation(key);
-    if (!operation) {
+    const operationHandle = getOperation(key);
+    if (!operationHandle) {
+      state.responseDraft = null;
       setOperationCapacityFeedback();
       return;
     }
+    const { operation } = operationHandle;
     const payload = {
       operationId: operation.operationId,
       expectedLifecycleVersion: posture.lifecycleVersion,
@@ -527,7 +529,7 @@ export function createHumanInputSurface({
     await submitOperation(
       "answer",
       payload,
-      operation.operationId,
+      operationHandle,
       posture.requestId,
     );
   }
@@ -537,11 +539,12 @@ export function createHumanInputSurface({
     if (!posture || state.actionInFlight || !canLifecycle(posture)) return;
     const reason = action === "reject" ? "reject" : "cancel";
     const key = `${humanInputIdentity(posture)}:${action}`;
-    const operation = getOperation(key);
-    if (!operation) {
+    const operationHandle = getOperation(key);
+    if (!operationHandle) {
       setOperationCapacityFeedback();
       return;
     }
+    const { operation } = operationHandle;
     const payload = {
       operationId: operation.operationId,
       expectedLifecycleVersion: posture.lifecycleVersion,
@@ -549,27 +552,27 @@ export function createHumanInputSurface({
       expectedRequest: requestReference(posture),
       reason,
     };
-    await submitOperation(
-      action,
-      payload,
-      operation.operationId,
-      posture.requestId,
-    );
+    await submitOperation(action, payload, operationHandle, posture.requestId);
   }
 
   async function prepareOrCommitSupersede() {
     const posture = state.selectedPosture;
     if (!posture || state.actionInFlight || !canSupersede(posture)) return;
     if (state.candidate?.requestId === posture.requestId) {
-      const operation = state.candidate.operationId
-        ? { operationId: state.candidate.operationId }
+      const operationHandle = state.candidate.operationId
+        ? {
+            operation: { operationId: state.candidate.operationId },
+            key: null,
+            isNew: false,
+          }
         : getOperation(
             `${humanInputIdentity(posture)}:supersede:${state.candidate.candidateKey}`,
           );
-      if (!operation) {
+      if (!operationHandle) {
         setSupersedeStatus(humanInputOperationCapacityMessage(), "warning");
         return;
       }
+      const { operation } = operationHandle;
       await submitOperation(
         "supersede",
         {
@@ -580,7 +583,7 @@ export function createHumanInputSurface({
           reason: "supersede",
           candidateKey: state.candidate.candidateKey,
         },
-        operation.operationId,
+        operationHandle,
         posture.requestId,
       );
       return;
@@ -600,13 +603,14 @@ export function createHumanInputSurface({
       );
       return;
     }
-    const operation = getOperation(
+    const operationHandle = getOperation(
       `${humanInputIdentity(posture)}:prepare:${purpose}:${prompt}`,
     );
-    if (!operation) {
+    if (!operationHandle) {
       setSupersedeStatus(humanInputOperationCapacityMessage(), "warning");
       return;
     }
+    const { operation } = operationHandle;
     const payload = {
       operationId: operation.operationId,
       expectedLifecycleVersion: posture.lifecycleVersion,
@@ -623,6 +627,7 @@ export function createHumanInputSurface({
     };
     const body = serializeHumanInputRequest(payload);
     if (!body) {
+      releaseLocallyRejectedOperation(operationHandle);
       setSupersedeStatus(humanInputRequestBodyCapacityMessage(), "warning");
       return;
     }
@@ -671,9 +676,10 @@ export function createHumanInputSurface({
     }
   }
 
-  async function submitOperation(action, payload, operationId, requestId) {
+  async function submitOperation(action, payload, operationHandle, requestId) {
     const body = serializeHumanInputRequest(payload);
     if (!body) {
+      releaseLocallyRejectedOperation(operationHandle);
       setOperationFeedback(humanInputRequestBodyCapacityMessage(), "warning");
       return;
     }
@@ -706,25 +712,35 @@ export function createHumanInputSurface({
     } finally {
       state.actionInFlight = false;
       setBusy(false);
-      if (operationId && state.selectedPosture?.requestId === requestId)
+      if (
+        operationHandle?.operation?.operationId &&
+        state.selectedPosture?.requestId === requestId
+      )
         configureControls(state.selectedPosture, true);
     }
   }
 
   function getOperation(key) {
     let operation = state.operations.get(key);
-    if (!operation) {
-      if (state.operations.size >= maximumOperationEntries) return null;
-      const operationSeed = `${randomUUID(hostWindow) ?? "operation"}-${state.operationNumber++}`;
-      const responseSeed = `${randomUUID(hostWindow) ?? "response"}-${state.operationNumber++}`;
-      const operationId = humanInputOperationIdentity(operationSeed);
-      operation = Object.freeze({
-        operationId,
-        responseId: humanInputOperationIdentity(responseSeed),
-      });
-      state.operations.set(key, operation);
-    }
-    return operation;
+    if (operation) return Object.freeze({ operation, key, isNew: false });
+    if (state.operations.size >= maximumOperationEntries) return null;
+    const operationSeed = `${randomUUID(hostWindow) ?? "operation"}-${state.operationNumber++}`;
+    const responseSeed = `${randomUUID(hostWindow) ?? "response"}-${state.operationNumber++}`;
+    const operationId = humanInputOperationIdentity(operationSeed);
+    operation = Object.freeze({
+      operationId,
+      responseId: humanInputOperationIdentity(responseSeed),
+    });
+    state.operations.set(key, operation);
+    return Object.freeze({ operation, key, isNew: true });
+  }
+
+  function releaseLocallyRejectedOperation(operationHandle) {
+    if (!operationHandle?.isNew || !operationHandle.key) return;
+    if (state.operations.get(operationHandle.key) !== operationHandle.operation)
+      return;
+    state.operations.delete(operationHandle.key);
+    state.responseDraft = null;
   }
 
   function renderList(page) {
