@@ -23,7 +23,7 @@ public sealed class HumanReviewsController : ControllerBase
     private const int MaximumPageSize = 50;
     private const long MaximumRequestBodyBytes = 16_384;
     private readonly IWebHumanReviewRuntime _runtime;
-    private readonly IWebHumanReviewNotifier? _notifier;
+    private readonly IWebHumanReviewNotifier _notifier;
     private readonly ILogger<HumanReviewsController> _logger;
 
     /// <summary>Creates the authenticated projection over the retained Human Review runtime.</summary>
@@ -320,18 +320,13 @@ public sealed class HumanReviewsController : ControllerBase
 
     private async Task NotifyAsync(string runId, CancellationToken cancellationToken)
     {
-        if (_notifier is null)
-        {
-            return;
-        }
-
         try
         {
             await _notifier.HumanReviewChangedAsync(new WebHumanReviewChanged(runId), cancellationToken).ConfigureAwait(false);
         }
         catch (Exception exception)
         {
-            _logger.LogWarning(exception, "Human Review durable decision completed but refresh notification failed.");
+            _logger.LogWarning("Human Review durable decision completed but refresh notification failed with {ExceptionType}.", exception.GetType().Name);
         }
     }
 
@@ -344,7 +339,7 @@ public sealed class HumanReviewsController : ControllerBase
     {
         if (exception is not null)
         {
-            _logger.LogWarning(exception, "The retained Human Review runtime is unavailable.");
+            _logger.LogWarning("The retained Human Review runtime is unavailable after {ExceptionType}.", exception.GetType().Name);
         }
 
         return StatusCode(StatusCodes.Status503ServiceUnavailable, new { error = "human_review_runtime_unavailable", detail = "The retained Human Review runtime is unavailable. Retry after runtime health is restored." });
