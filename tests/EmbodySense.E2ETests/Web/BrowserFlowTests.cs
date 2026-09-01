@@ -64,6 +64,7 @@ namespace EmbodySense.E2ETests.Web;
 public sealed class BrowserFlowTests
 {
     private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web);
+    private static readonly TimeSpan _visibleGovernedInvocationTimeout = TimeSpan.FromSeconds(150);
 
     [Fact]
     public void Restart_diagnostic_classifier_accepts_connection_reset_only_for_expected_target_traffic()
@@ -118,6 +119,37 @@ public sealed class BrowserFlowTests
         Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "fetch failed: net::ERR_CONNECTION_RESET", "https://example.test/api/loop-runs?maximumCount=50", null, TargetAuthority, capturedAtRestart: true));
         Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "fetch failed: net::ERR_CONNECTION_RESET", "https://example.test/api/loop-runs?maximumCount=50", "https://127.0.0.1:5001/api/loop-runs?maximumCount=50", TargetAuthority, capturedAtRestart: true));
         Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "500 (Internal Server Error)", "https://127.0.0.1:5001/api/loop-runs?maximumCount=50", null, TargetAuthority, capturedAtRestart: true));
+    }
+
+    [Fact]
+    public void Restart_page_exception_classifier_accepts_only_the_exact_active_recovery_abort()
+    {
+        const string TargetAuthority = "127.0.0.1:5001";
+        const string ExactDescription = "Error: The browser session is being recovered.\n    at suspendSession (https://127.0.0.1:5001/loop-builder.js:7023:7)";
+
+        Assert.True(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartPageException(true, "Uncaught (in promise)", "Error", ExactDescription, "suspendSession", "https://127.0.0.1:5001/loop-builder.js", TargetAuthority));
+        Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartPageException(false, "Uncaught (in promise)", "Error", ExactDescription, "suspendSession", "https://127.0.0.1:5001/loop-builder.js", TargetAuthority));
+        Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartPageException(true, "Uncaught", "Error", ExactDescription, "suspendSession", "https://127.0.0.1:5001/loop-builder.js", TargetAuthority));
+        Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartPageException(true, "Uncaught (in promise)", "TypeError", ExactDescription, "suspendSession", "https://127.0.0.1:5001/loop-builder.js", TargetAuthority));
+        Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartPageException(true, "Uncaught (in promise)", "Error", ExactDescription, "resumeSession", "https://127.0.0.1:5001/loop-builder.js", TargetAuthority));
+        Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartPageException(true, "Uncaught (in promise)", "Error", "Error: The browser session is unavailable.", "suspendSession", "https://127.0.0.1:5001/loop-builder.js", TargetAuthority));
+        Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartPageException(true, "Uncaught (in promise)", "Error", ExactDescription, "suspendSession", "https://example.test/loop-builder.js", TargetAuthority));
+        Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartPageException(true, "Uncaught (in promise)", "Error", ExactDescription, "suspendSession", "https://127.0.0.1:5001/app.js", TargetAuthority));
+    }
+
+    [Fact]
+    public void Visible_run_readiness_requires_one_new_exact_selected_identity()
+    {
+        const string Status = "Authority ready. Started · exact run run-2 is open in Runs.";
+
+        Assert.Equal("run-2", GovernedVisibleRunReadiness.RequireNewSelectedRunId(Status, ["run-1"], ["run-2", "run-1"], ["run-2"]));
+        GovernedVisibleRunReadiness.RequireUnambiguousBaseline(["run-1"]);
+        Assert.Throws<InvalidOperationException>(() => GovernedVisibleRunReadiness.RequireUnambiguousBaseline(["run-1", "run-1"]));
+        Assert.Throws<InvalidOperationException>(() => GovernedVisibleRunReadiness.RequireNewSelectedRunId(Status, ["run-2"], ["run-2"], ["run-2"]));
+        Assert.Throws<InvalidOperationException>(() => GovernedVisibleRunReadiness.RequireNewSelectedRunId(Status, ["run-1"], ["run-2", "run-2"], ["run-2"]));
+        Assert.Throws<InvalidOperationException>(() => GovernedVisibleRunReadiness.RequireNewSelectedRunId(Status, ["run-1"], ["run-2", "run-1"], ["run-1"]));
+        Assert.Throws<InvalidOperationException>(() => GovernedVisibleRunReadiness.RequireNewSelectedRunId("Authority ready. Invocation unavailable: timed out", ["run-1"], ["run-1"], ["run-1"]));
+        Assert.Throws<InvalidOperationException>(() => GovernedVisibleRunReadiness.RequireNewSelectedRunId("Authority ready. Started · exact run ../run is open in Runs.", ["run-1"], ["../run", "run-1"], ["../run"]));
     }
 
     [Fact]
@@ -327,7 +359,7 @@ public sealed class BrowserFlowTests
             await browser.WaitForExpressionAsync("document.getElementById('clientStatus').textContent === 'Web primary'");
             await browser.WaitForExpressionAsync("document.getElementById('workspaceStatus').textContent.includes('Initialized')");
             Assert.True(await browser.EvaluateBooleanAsync("Array.from({ length: sessionStorage.length }, (_, index) => sessionStorage.getItem(sessionStorage.key(index))).some(value => value && value.includes('unsaved restart draft'))"), "The unsaved draft storage was cleared during host recovery.");
-            browser.EndExpectedServerRestart();
+            await browser.EndExpectedServerRestartAsync();
             await browser.WaitForExpressionAsync("document.getElementById('transcript').textContent.includes('browser-first-turn') && document.getElementById('transcript').textContent.includes('browser response: browser-first-turn')");
             Assert.Equal(1, await browser.EvaluateInt32Async("Array.from(document.querySelectorAll('#transcript .message.user')).filter(message => message.textContent.includes('browser-first-turn')).length"));
             Assert.Equal(1, await browser.EvaluateInt32Async("Array.from(document.querySelectorAll('#transcript .message.agent')).filter(message => message.textContent.includes('browser response: browser-first-turn')).length"));
@@ -487,7 +519,7 @@ public sealed class BrowserFlowTests
             await browser.ReloadAsync(acceptBeforeUnload: true);
             await browser.WaitForExpressionAsync("document.getElementById('workspaceStatus').textContent.includes('Initialized')");
             await browser.WaitForExpressionAsync("document.getElementById('configContent').textContent.includes('compatible-test')");
-            browser.EndExpectedServerRestart();
+            await browser.EndExpectedServerRestartAsync();
             await ClickAsync(browser, "#loopsNav");
             await browser.WaitForExpressionAsync("document.getElementById('loopName').value === 'Browser governed loop' && document.getElementById('saveState').textContent.includes('Unsaved draft')");
             Assert.Equal("Description survives validation correction and reload.", await browser.EvaluateStringAsync("document.getElementById('loopDescription').value"));
@@ -1442,24 +1474,134 @@ public sealed class BrowserFlowTests
         {
             await browser.WaitForExpressionAsync("document.getElementById('governedGraphGrantChoices').textContent.includes('Eligible exact grant') && document.getElementById('governedGraphGrantSelection').options.length > 0");
         }
-        await ClickAsync(browser, "#governedGraphConfirmInvokeButton");
-        await browser.WaitForExpressionAsync("!document.getElementById('runsView').hidden && document.querySelector('#runList .run-id')?.textContent?.length > 0");
-        return await browser.EvaluateStringAsync("document.querySelector('#runList .run-id')?.textContent ?? ''");
+        var baselineRunIds = JsonSerializer.Deserialize<string[]>(await browser.EvaluateStringAsync("JSON.stringify([...document.querySelectorAll('#runList .run-id')].map((element) => element.textContent ?? ''))")) ?? [];
+        GovernedVisibleRunReadiness.RequireUnambiguousBaseline(baselineRunIds);
+        var selectedGraphId = await browser.EvaluateStringAsync("document.getElementById('governedGraphId').value");
+        var selectedRevisionId = await browser.EvaluateStringAsync("document.getElementById('governedGraphRevisionId').value");
+        var preConfirmStatus = await browser.EvaluateStringAsync("document.getElementById('governedGraphInvocationStatus').textContent");
+        await browser.EvaluateAsync("""
+            (() => {
+              const probeKey = "__embodySenseGovernedInvocationProbe";
+              const pendingKeyPrefix = "embodysense.governed-graph-pending-invocation.v1";
+              if (globalThis[probeKey]) throw new Error("A governed invocation identity probe is already active.");
+              const originalSetItem = Storage.prototype.setItem;
+              const probe = { originalSetItem, capture: null, captureCount: 0 };
+              globalThis[probeKey] = probe;
+              Storage.prototype.setItem = function (key, value) {
+                const result = originalSetItem.call(this, key, value);
+                if (this === sessionStorage && typeof key === "string" && key.startsWith(`${pendingKeyPrefix}.`)) {
+                  try {
+                    const pending = JSON.parse(value);
+                    probe.capture = {
+                      captureCount: ++probe.captureCount,
+                      valid:
+                        pending?.schemaVersion === 1 &&
+                        typeof pending?.workspaceScope === "string" &&
+                        key === `${pendingKeyPrefix}.${pending.workspaceScope}` &&
+                        typeof pending?.graphId === "string" &&
+                        typeof pending?.revisionId === "string" &&
+                        typeof pending?.operationId === "string",
+                      graphId: typeof pending?.graphId === "string" ? pending.graphId : "",
+                      revisionId: typeof pending?.revisionId === "string" ? pending.revisionId : "",
+                      operationId: typeof pending?.operationId === "string" ? pending.operationId : "",
+                    };
+                  } catch {
+                    probe.capture = { captureCount: ++probe.captureCount, valid: false, graphId: "", revisionId: "", operationId: "" };
+                  }
+                }
+                return result;
+              };
+            })()
+            """);
+        string? capturedInvocationJson = null;
+        try
+        {
+            await ClickAsync(browser, "#governedGraphConfirmInvokeButton");
+            await browser.WaitForExpressionAsync("Boolean(globalThis.__embodySenseGovernedInvocationProbe?.capture)");
+            capturedInvocationJson = await browser.EvaluateStringAsync("JSON.stringify(globalThis.__embodySenseGovernedInvocationProbe.capture)");
+        }
+        finally
+        {
+            try
+            {
+                await browser.EvaluateAsync("(() => { const probe = globalThis.__embodySenseGovernedInvocationProbe; if (!probe) return; Storage.prototype.setItem = probe.originalSetItem; delete globalThis.__embodySenseGovernedInvocationProbe; })()");
+            }
+            catch when (capturedInvocationJson is null)
+            {
+            }
+        }
+
+        using var capturedInvocation = JsonDocument.Parse(Assert.IsType<string>(capturedInvocationJson));
+        Assert.Equal(1, capturedInvocation.RootElement.GetProperty("captureCount").GetInt32());
+        Assert.True(capturedInvocation.RootElement.GetProperty("valid").GetBoolean(), "The visible invocation did not retain one scope-bound operation identity before dispatch.");
+        var expectedGraphId = Assert.IsType<string>(capturedInvocation.RootElement.GetProperty("graphId").GetString());
+        var expectedRevisionId = Assert.IsType<string>(capturedInvocation.RootElement.GetProperty("revisionId").GetString());
+        var expectedOperationId = Assert.IsType<string>(capturedInvocation.RootElement.GetProperty("operationId").GetString());
+        Assert.Equal(selectedGraphId, expectedGraphId);
+        Assert.Equal(selectedRevisionId, expectedRevisionId);
+        Assert.False(string.IsNullOrWhiteSpace(expectedGraphId));
+        Assert.False(string.IsNullOrWhiteSpace(expectedRevisionId));
+        Assert.StartsWith("governed-invoke-", expectedOperationId, StringComparison.Ordinal);
+        Assert.True(Guid.TryParseExact(expectedOperationId["governed-invoke-".Length..], "D", out _), $"The retained governed invocation operation identity was malformed: {expectedOperationId}");
+        var serializedPreConfirmStatus = JsonSerializer.Serialize(preConfirmStatus);
+        try
+        {
+            await browser.WaitForExpressionAsync($"(() => {{ const status = document.getElementById('governedGraphInvocationStatus').textContent; return status.includes(' · exact run ') || (status !== {serializedPreConfirmStatus} && document.getElementById('governedGraphPrepareInvokeButton').textContent === 'Prepare invocation'); }})()", _visibleGovernedInvocationTimeout);
+        }
+        catch (TimeoutException exception)
+        {
+            using var diagnosticTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            string status;
+            string runProjection;
+            try
+            {
+                status = await browser.EvaluateStringAsync("document.getElementById('governedGraphInvocationStatus').textContent", diagnosticTimeout.Token);
+                runProjection = await browser.EvaluateStringAsync("JSON.stringify([...document.querySelectorAll('#runList .run-id')].map((element) => element.textContent ?? ''))", diagnosticTimeout.Token);
+            }
+            catch (OperationCanceledException) when (diagnosticTimeout.IsCancellationRequested)
+            {
+                status = "<diagnostic read timed out>";
+                runProjection = "<diagnostic read timed out>";
+            }
+
+            throw new TimeoutException($"The visible governed invocation did not reach a conclusive bounded outcome. Status: {status}. Run projection: {runProjection}", exception);
+        }
+
+        var invocationStatus = await browser.EvaluateStringAsync("document.getElementById('governedGraphInvocationStatus').textContent");
+        var visibleRunIds = JsonSerializer.Deserialize<string[]>(await browser.EvaluateStringAsync("JSON.stringify([...document.querySelectorAll('#runList .run-id')].map((element) => element.textContent ?? ''))")) ?? [];
+        var selectedRunIds = JsonSerializer.Deserialize<string[]>(await browser.EvaluateStringAsync("JSON.stringify([...document.querySelectorAll('#runList .run-item.selected .run-id')].map((element) => element.textContent ?? ''))")) ?? [];
+        var runId = GovernedVisibleRunReadiness.RequireNewSelectedRunId(invocationStatus, baselineRunIds, visibleRunIds, selectedRunIds);
+        using var exactRunReadTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        using var exactRun = JsonDocument.Parse(await ReadRunFromBrowserAsync(browser, runId, exactRunReadTimeout.Token));
+        Assert.Equal(expectedOperationId, exactRun.RootElement.GetProperty("admissionOperationId").GetString());
+        Assert.Equal(expectedGraphId, exactRun.RootElement.GetProperty("loopId").GetString());
+        var binding = exactRun.RootElement.GetProperty("frontier").GetProperty("binding");
+        Assert.Equal(expectedGraphId, binding.GetProperty("graphId").GetString());
+        Assert.Equal(expectedRevisionId, binding.GetProperty("revisionId").GetString());
+        return runId;
     }
 
-    private static Task<string> ReadRunFromBrowserAsync(HeadlessBrowserSession browser, string runId)
+    private static Task<string> ReadRunFromBrowserAsync(HeadlessBrowserSession browser, string runId, CancellationToken cancellationToken = default)
     {
         var runUrl = JsonSerializer.Serialize($"/api/loop-runs/{runId}");
-        return browser.EvaluateStringAsync($"(async () => {{ const response = await fetch({runUrl}); if (!response.ok) throw new Error(`run read ${{response.status}}`); return JSON.stringify(await response.json()); }})()");
+        return browser.EvaluateStringAsync($"(async () => {{ const response = await fetch({runUrl}); if (!response.ok) throw new Error(`run read ${{response.status}}`); return JSON.stringify(await response.json()); }})()", cancellationToken);
     }
 
     private static async Task<string> WaitForTerminalRunFromBrowserAsync(HeadlessBrowserSession browser, string runId)
     {
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        using var timeout = new CancellationTokenSource(_visibleGovernedInvocationTimeout);
         string? latestSerialized = null;
         while (!timeout.IsCancellationRequested)
         {
-            latestSerialized = await ReadRunFromBrowserAsync(browser, runId);
+            try
+            {
+                latestSerialized = await ReadRunFromBrowserAsync(browser, runId, timeout.Token);
+            }
+            catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+            {
+                break;
+            }
+
             using var run = JsonDocument.Parse(latestSerialized);
             var status = run.RootElement.GetProperty("status").GetString();
             if (status is nameof(CustomLoopRunStatus.Completed)
@@ -2174,10 +2316,15 @@ public sealed class BrowserFlowTests
             }
         }
 
-        public async Task WaitForExpressionAsync(string expression)
+        public Task WaitForExpressionAsync(string expression)
+        {
+            return WaitForExpressionAsync(expression, TimeSpan.FromSeconds(30));
+        }
+
+        public async Task WaitForExpressionAsync(string expression, TimeSpan timeoutValue)
         {
             Exception? lastException = null;
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            using var timeout = new CancellationTokenSource(timeoutValue);
             while (!timeout.IsCancellationRequested)
             {
                 try
@@ -2220,9 +2367,9 @@ public sealed class BrowserFlowTests
             _ = await EvaluateAsync(expression, CancellationToken.None, userGesture: true);
         }
 
-        public async Task<string> EvaluateStringAsync(string expression)
+        public async Task<string> EvaluateStringAsync(string expression, CancellationToken cancellationToken = default)
         {
-            var value = await EvaluateAsync(expression, CancellationToken.None);
+            var value = await EvaluateAsync(expression, cancellationToken);
             return value.GetString() ?? "";
         }
 
@@ -2281,9 +2428,19 @@ public sealed class BrowserFlowTests
             _requestTracker.MarkExpectedReplacementServerStarting();
         }
 
-        public void EndExpectedServerRestart()
+        public async Task EndExpectedServerRestartAsync(CancellationToken cancellationToken = default)
         {
-            _requestTracker.EndExpectedServerRestart();
+            using var barrierTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            barrierTimeout.CancelAfter(TimeSpan.FromSeconds(5));
+            try
+            {
+                _ = await EvaluateAsync("true", barrierTimeout.Token, responseHandler: EndExpectedServerRestartAtBarrierResponse);
+            }
+            catch
+            {
+                _requestTracker.AbortExpectedServerRestart();
+                throw;
+            }
         }
 
         public async Task AssertHealthyAsync(params (string UrlFragment, int StatusCode)[] expectedHttpFailures)
@@ -2416,6 +2573,18 @@ public sealed class BrowserFlowTests
             }
 
             _requestTracker.FreezeExpectedServerRestart();
+        }
+
+        private void EndExpectedServerRestartAtBarrierResponse(JsonElement response)
+        {
+            if (response.TryGetProperty("exceptionDetails", out _)
+                || !response.TryGetProperty("result", out var commandResult)
+                || !commandResult.TryGetProperty("result", out _))
+            {
+                throw new InvalidOperationException("Browser restart completion barrier command failed: " + response.GetRawText());
+            }
+
+            _requestTracker.EndExpectedServerRestart();
         }
 
         private async Task<JsonElement> SendCommandAsync(string method, object? parameters = null, CancellationToken cancellationToken = default, Action<JsonElement>? responseHandler = null)
@@ -2627,6 +2796,50 @@ public sealed class BrowserFlowTests
 
             if (method == "Runtime.exceptionThrown")
             {
+                if (!parameters.TryGetProperty("exceptionDetails", out var exceptionDetails)
+                    || exceptionDetails.ValueKind != JsonValueKind.Object)
+                {
+                    AddDiagnostic("page exception: " + parameters.GetRawText());
+                    return;
+                }
+
+                var text = exceptionDetails.TryGetProperty("text", out var textValue) && textValue.ValueKind == JsonValueKind.String ? textValue.GetString() : null;
+                var url = exceptionDetails.TryGetProperty("url", out var urlValue) && urlValue.ValueKind == JsonValueKind.String ? urlValue.GetString() : null;
+                var description = exceptionDetails.TryGetProperty("exception", out var exceptionValue)
+                    && exceptionValue.ValueKind == JsonValueKind.Object
+                    && exceptionValue.TryGetProperty("description", out var descriptionValue)
+                    && descriptionValue.ValueKind == JsonValueKind.String
+                        ? descriptionValue.GetString()
+                        : null;
+                var className = exceptionValue.ValueKind == JsonValueKind.Object
+                    && exceptionValue.TryGetProperty("className", out var classNameValue)
+                    && classNameValue.ValueKind == JsonValueKind.String
+                        ? classNameValue.GetString()
+                        : null;
+                var stackFrame = exceptionDetails.TryGetProperty("stackTrace", out var stackTrace)
+                    && stackTrace.ValueKind == JsonValueKind.Object
+                    && stackTrace.TryGetProperty("callFrames", out var callFrames)
+                    && callFrames.ValueKind == JsonValueKind.Array
+                    && callFrames.GetArrayLength() > 0
+                        ? callFrames[0]
+                        : default;
+                var functionName = stackFrame.ValueKind == JsonValueKind.Object
+                    && stackFrame.TryGetProperty("functionName", out var functionNameValue)
+                    && functionNameValue.ValueKind == JsonValueKind.String
+                        ? functionNameValue.GetString()
+                        : null;
+                if (ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartPageException(
+                    _requestTracker.IsExpectedServerRestart(),
+                    text,
+                    className,
+                    description,
+                    functionName,
+                    url,
+                    _requestTracker.TargetAuthority))
+                {
+                    return;
+                }
+
                 AddDiagnostic("page exception: " + parameters.GetRawText());
                 return;
             }
