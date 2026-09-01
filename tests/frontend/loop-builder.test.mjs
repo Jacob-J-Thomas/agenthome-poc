@@ -8775,16 +8775,17 @@ test("cancelling stalled connection setup cannot clobber or dispatch through its
     vm.runInContext("hub === testConnections[1]", app.context),
     true,
   );
-  vm.runInContext(
-    "testConnections[1].handlers.get('ApprovalsChanged')([{ requestId: 'replacement-approval' }])",
-    app.context,
+  assert.equal(
+    vm.runInContext(
+      "testConnections[1].handlers.has('ApprovalsChanged')",
+      app.context,
+    ),
+    false,
   );
-  assert.equal(app.elements.approvalCount.textContent, "1 pending");
 
   vm.runInContext(
     `
     releaseFirstConnection();
-    testConnections[0].handlers.get("ApprovalsChanged")([]);
   `,
     app.context,
   );
@@ -8800,7 +8801,6 @@ test("cancelling stalled connection setup cannot clobber or dispatch through its
   );
   assert.equal(vm.runInContext("testInvocations.length", app.context), 1);
   assert.equal(vm.runInContext("invocationInFlight", app.context), false);
-  assert.equal(app.elements.approvalCount.textContent, "1 pending");
 });
 
 test("a runtime model change allocates a new operation without discarding the older pending identity", async () => {
@@ -11551,7 +11551,7 @@ test("Run confirmation exposes real governed limits and never reintroduces fixed
   );
 });
 
-test("owned run approvals expose resolved governance evidence in the loop builder", async () => {
+test("the loop builder keeps its legacy approval shell hidden while Human Review owns governed decisions", async () => {
   const app = await loadLoopBuilder();
 
   app.context.renderLoopApprovals([
@@ -11566,28 +11566,9 @@ test("owned run approvals expose resolved governance evidence in the loop builde
     },
   ]);
 
-  assert.equal(app.elements.approvalPanel.hidden, false);
-  assert.equal(app.elements.approvalCount.textContent, "1 pending");
-  assert.match(app.elements.approvals.textContent, /workspace read/i);
-  assert.match(app.elements.approvals.textContent, /target docs\/issue\.md/);
-  assert.match(
-    app.elements.approvals.textContent,
-    /resolved C:\/workspace\/docs\/issue\.md/,
-  );
-  assert.match(
-    app.elements.approvals.textContent,
-    /matched permission C:\/workspace/,
-  );
-  assert.match(
-    app.elements.approvals.textContent,
-    /governed workspace read access/,
-  );
-  assert.deepEqual(
-    findByTag(app.elements.approvals, "button").map(
-      (button) => button.textContent,
-    ),
-    ["Reject", "Approve"],
-  );
+  assert.equal(app.elements.approvalPanel.hidden, true);
+  assert.equal(app.elements.approvalCount.textContent, "0 pending");
+  assert.equal(app.elements.approvals.children.length, 0);
 
   app.context.renderLoopApprovals([]);
   assert.equal(app.elements.approvalPanel.hidden, true);
