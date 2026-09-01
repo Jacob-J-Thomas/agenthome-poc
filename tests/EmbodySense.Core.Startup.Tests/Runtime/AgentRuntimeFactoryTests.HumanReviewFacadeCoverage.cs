@@ -25,6 +25,7 @@ using CommonHumanReviewTiming = EmbodySense.Core.Common.HumanReview.Models.Human
 using CommonEffectAttemptBinding = EmbodySense.Core.Common.HumanReview.Models.HumanReviewEffectAttemptBinding;
 using CommonEffectDispatchCertainty = EmbodySense.Core.Common.HumanReview.Models.HumanReviewEffectDispatchCertainty;
 using CommonApprovalScopeKind = EmbodySense.Core.Common.HumanReview.Models.HumanReviewApprovalScopeKind;
+using CommonHumanReviewRequest = EmbodySense.Core.Common.HumanReview.Models.HumanReviewRequest;
 
 namespace EmbodySense.Core.Startup.Tests.Runtime;
 
@@ -223,7 +224,7 @@ public sealed partial class AgentRuntimeFactoryTests
         return blueprint with { HumanReview = blueprint.HumanReview with { Request = HumanReviewContractHash.ApplyRequest(request with { Timing = timing }) } };
     }
 
-    private static HumanReviewRequest CreatePreDispatchRequest(HumanReviewRequest request)
+    private static CommonHumanReviewRequest CreatePreDispatchRequest(CommonHumanReviewRequest request)
     {
         var effect = HumanReviewContractHash.ApplyEffectAttempt(new CommonEffectAttemptBinding("effect-facade-missing", "effect-operation-facade-missing", 1, new string('a', 64), new string('b', 64), CommonEffectDispatchCertainty.NotDispatched, string.Empty));
         var binding = HumanReviewContractHash.ApplyBinding(request.Binding with { EffectAttempt = effect });
