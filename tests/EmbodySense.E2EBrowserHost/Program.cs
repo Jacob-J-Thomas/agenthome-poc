@@ -10,6 +10,7 @@ using EmbodySense.Core.Common.CommandActions.Models;
 using EmbodySense.Core.Common.Inference.Profiles.Models;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Startup.Capabilities;
+using EmbodySense.Core.Startup.HumanReview;
 using EmbodySense.Core.Startup.Inference.Profiles;
 using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Core.Startup.Loops.Execution.Effects;
@@ -67,6 +68,7 @@ namespace EmbodySense.E2EBrowserHost
             {
                 var approval = provider.GetRequiredService<WebApprovalCoordinator>();
                 var publication = provider.GetRequiredService<IAgentRuntimeConversationPublicationObserver>();
+                var decisionAuthorizationProvider = provider.GetRequiredService<IHumanReviewDecisionAuthorizationProvider>();
                 return new WebAgentRuntimeHost(
                     options,
                     approval,
@@ -78,7 +80,8 @@ namespace EmbodySense.E2EBrowserHost
                         status,
                         publication,
                         additionalModelProfileProviders: providers,
-                        commandActionRuntimeProvider: commandActionProvider));
+                        commandActionRuntimeProvider: commandActionProvider)
+                        .WithHumanReviewDecisionAuthorizationProvider(decisionAuthorizationProvider));
             });
             await using var application = builder.Build();
             EmbodySense.Web.Program.ConfigurePipeline(application);
