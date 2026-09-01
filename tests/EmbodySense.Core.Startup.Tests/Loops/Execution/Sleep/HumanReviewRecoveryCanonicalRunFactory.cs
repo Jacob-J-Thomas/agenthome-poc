@@ -34,7 +34,8 @@ internal static class HumanReviewRecoveryCanonicalRunFactory
         string runId,
         string admissionOperationId,
         string? loopId = null,
-        DateTimeOffset? materializedAtUtc = null)
+        DateTimeOffset? materializedAtUtc = null,
+        string? workspaceId = null)
     {
         var canonicalMaterializedAtUtc = materializedAtUtc ?? GovernedLoopSequentialApplicationTestFixture.Now.AddMinutes(2);
         if (canonicalMaterializedAtUtc == default || canonicalMaterializedAtUtc.Offset != TimeSpan.Zero)
@@ -97,7 +98,7 @@ internal static class HumanReviewRecoveryCanonicalRunFactory
         var receipt = GovernedLoopSequentialApplicationTestFixture.AdmissionReceipt(
             artifact,
             execution,
-            "workspace-sha256:" + GovernedLoopSequentialApplicationTestFixture.Hash('f'),
+            workspaceId ?? "workspace-sha256:" + GovernedLoopSequentialApplicationTestFixture.Hash('f'),
             admissionRequest.OperationId,
             admissionRequest.RequestHash,
             artifact.ArtifactHash,
