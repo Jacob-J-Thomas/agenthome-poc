@@ -557,202 +557,7 @@ public sealed class HumanReviewContinuationRunStoreTests
         }
     }
 
-    [Theory]
-    [InlineData(CustomLoopRunPublicationBoundary.StagedFileFlushed)]
-    [InlineData(CustomLoopRunPublicationBoundary.CanonicalRenamed)]
-    [InlineData(CustomLoopRunPublicationBoundary.ParentDirectoryFlushed)]
-    [InlineData(CustomLoopRunPublicationBoundary.TargetProven)]
-    public async Task Separate_process_loss_at_each_claim_boundary_preserves_one_replayable_predecessor_or_successor_and_rejects_a_stale_worker(CustomLoopRunPublicationBoundary boundary)
-    {
-        using var workspace = new TestWorkspace();
-        var paths = new WorkspacePaths(workspace.RootPath);
-        var approved = await CreateApprovedRunAsync(paths, "continuation-claim-loss");
-        var review = Assert.IsType<HumanReviewRunState>(approved.HumanReview);
-        var reservation = Assert.IsType<HumanReviewContinuationReservation>(review.ContinuationReservation);
-        var wake = Wake(review, reservation, approved.UpdatedAtUtc.AddSeconds(1), "wake-claim-process-loss");
-        var initial = HumanReviewContinuationContractHash.ApplyState(new HumanReviewContinuationState(1, wake, ImmutableArray<HumanReviewContinuationClaim>.Empty, null, null, string.Empty));
-        CustomLoopRunRecord published;
-        using (var store = new CustomLoopRunStore(paths))
-        {
-            published = Assert.IsType<CustomLoopRunRecord>((await new HumanReviewContinuationRunStore(store).PublishAsync(approved.Id, approved.LifecycleVersion, initial)).Run);
-        }
-
-        var expected = Claim(wake, reservation, wake.PublishedAtUtc.AddMinutes(1), "claim-process-loss");
-        var predecessorBytes = CustomLoopRunArtifactSerializer.Serialize(published);
-        await RunTransitionProcessLossAsync(workspace, published.Id, "claim", boundary);
-
-        using var restarted = new CustomLoopRunStore(paths);
-        var recovered = Assert.IsType<CustomLoopRunRecord>(await restarted.GetAsync(published.Id));
-        Assert.True(CustomLoopRunValidator.Validate(recovered).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(recovered).Errors));
-        if (recovered.HumanReview?.Continuation?.Claims.IsEmpty == true)
-        {
-            Assert.Equal(predecessorBytes, CustomLoopRunArtifactSerializer.Serialize(recovered));
-        }
-        else
-        {
-            Assert.Equal(expected.ClaimHash, recovered.HumanReview?.Continuation?.Claims.Single().ClaimHash);
-        }
-
-        var reconciliation = await new HumanReviewContinuationRunStore(restarted).ClaimAsync(recovered.Id, recovered.LifecycleVersion, expected);
-        Assert.Contains(reconciliation.Status, new[] { HumanReviewContinuationMutationStatus.Committed, HumanReviewContinuationMutationStatus.Replayed });
-        var claimed = Assert.IsType<CustomLoopRunRecord>(reconciliation.Run);
-        var takeover = Claim(wake, reservation, expected.LeaseExpiresAtUtc.AddTicks(1), "claim-process-loss-takeover");
-        var takenOver = await new HumanReviewContinuationRunStore(restarted).ClaimAsync(claimed.Id, claimed.LifecycleVersion, takeover);
-        Assert.Equal(HumanReviewContinuationMutationStatus.Committed, takenOver.Status);
-        var staleCompletion = Completion(review.Request, wake, reservation, expected, expected.ClaimedAtUtc.AddSeconds(1), "completion-process-loss-stale");
-        Assert.Equal(HumanReviewContinuationMutationStatus.Conflict, (await new HumanReviewContinuationRunStore(restarted).CompleteAsync(takenOver.Run!.Id, takenOver.Run.LifecycleVersion, staleCompletion)).Status);
-    }
-
-    [Theory]
-    [InlineData(CustomLoopRunPublicationBoundary.StagedFileFlushed)]
-    [InlineData(CustomLoopRunPublicationBoundary.CanonicalRenamed)]
-    [InlineData(CustomLoopRunPublicationBoundary.ParentDirectoryFlushed)]
-    [InlineData(CustomLoopRunPublicationBoundary.TargetProven)]
-    public async Task Separate_process_loss_at_each_completion_boundary_preserves_one_replayable_predecessor_or_successor_and_excludes_retirement(CustomLoopRunPublicationBoundary boundary)
-    {
-        using var workspace = new TestWorkspace();
-        var paths = new WorkspacePaths(workspace.RootPath);
-        var approved = await CreateApprovedRunAsync(paths, "continuation-completion-loss");
-        var review = Assert.IsType<HumanReviewRunState>(approved.HumanReview);
-        var reservation = Assert.IsType<HumanReviewContinuationReservation>(review.ContinuationReservation);
-        var wake = Wake(review, reservation, approved.UpdatedAtUtc.AddSeconds(1), "wake-completion-process-loss");
-        var initial = HumanReviewContinuationContractHash.ApplyState(new HumanReviewContinuationState(1, wake, ImmutableArray<HumanReviewContinuationClaim>.Empty, null, null, string.Empty));
-        var claim = Claim(wake, reservation, wake.PublishedAtUtc.AddMinutes(1), "claim-completion-process-loss");
-        CustomLoopRunRecord claimed;
-        using (var store = new CustomLoopRunStore(paths))
-        {
-            var continuations = new HumanReviewContinuationRunStore(store);
-            var published = Assert.IsType<CustomLoopRunRecord>((await continuations.PublishAsync(approved.Id, approved.LifecycleVersion, initial)).Run);
-            claimed = Assert.IsType<CustomLoopRunRecord>((await continuations.ClaimAsync(published.Id, published.LifecycleVersion, claim)).Run);
-        }
-
-        var expected = Completion(review.Request, wake, reservation, claim, claim.ClaimedAtUtc.AddSeconds(1), "completion-process-loss");
-        var predecessorBytes = CustomLoopRunArtifactSerializer.Serialize(claimed);
-        await RunTransitionProcessLossAsync(workspace, claimed.Id, "completion", boundary);
-
-        using var restarted = new CustomLoopRunStore(paths);
-        var recovered = Assert.IsType<CustomLoopRunRecord>(await restarted.GetAsync(claimed.Id));
-        Assert.True(CustomLoopRunValidator.Validate(recovered).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(recovered).Errors));
-        if (recovered.HumanReview?.Continuation?.Completion is null)
-        {
-            Assert.Equal(predecessorBytes, CustomLoopRunArtifactSerializer.Serialize(recovered));
-        }
-        else
-        {
-            Assert.Equal(expected.CompletionHash, recovered.HumanReview.Continuation.Completion.CompletionHash);
-        }
-
-        var reconciliation = await new HumanReviewContinuationRunStore(restarted).CompleteAsync(recovered.Id, recovered.LifecycleVersion, expected);
-        Assert.Contains(reconciliation.Status, new[] { HumanReviewContinuationMutationStatus.Committed, HumanReviewContinuationMutationStatus.Replayed });
-        var retirement = Retirement(wake, reservation, expected.CompletedAtUtc.AddSeconds(1), "retirement-after-completion-process-loss");
-        Assert.Equal(HumanReviewContinuationMutationStatus.Conflict, (await new HumanReviewContinuationRunStore(restarted).RetireAsync(
-            reconciliation.Run!.Id,
-            reconciliation.Run.LifecycleVersion,
-            new HumanReviewContinuationClaimReference(claim.ClaimId, claim.ClaimHash),
-            retirement)).Status);
-    }
-
-    [Theory]
-    [InlineData(CustomLoopRunPublicationBoundary.StagedFileFlushed)]
-    [InlineData(CustomLoopRunPublicationBoundary.CanonicalRenamed)]
-    [InlineData(CustomLoopRunPublicationBoundary.ParentDirectoryFlushed)]
-    [InlineData(CustomLoopRunPublicationBoundary.TargetProven)]
-    public async Task Separate_process_loss_at_each_retirement_boundary_preserves_one_replayable_predecessor_or_successor_and_excludes_completion(CustomLoopRunPublicationBoundary boundary)
-    {
-        using var workspace = new TestWorkspace();
-        var paths = new WorkspacePaths(workspace.RootPath);
-        var approved = await CreateApprovedRunAsync(paths, "continuation-retirement-loss");
-        var review = Assert.IsType<HumanReviewRunState>(approved.HumanReview);
-        var reservation = Assert.IsType<HumanReviewContinuationReservation>(review.ContinuationReservation);
-        var wake = Wake(review, reservation, approved.UpdatedAtUtc.AddSeconds(1), "wake-retirement-process-loss");
-        var initial = HumanReviewContinuationContractHash.ApplyState(new HumanReviewContinuationState(1, wake, ImmutableArray<HumanReviewContinuationClaim>.Empty, null, null, string.Empty));
-        var claim = Claim(wake, reservation, wake.PublishedAtUtc.AddMinutes(1), "claim-retirement-process-loss");
-        CustomLoopRunRecord claimed;
-        using (var store = new CustomLoopRunStore(paths))
-        {
-            var continuations = new HumanReviewContinuationRunStore(store);
-            var published = Assert.IsType<CustomLoopRunRecord>((await continuations.PublishAsync(approved.Id, approved.LifecycleVersion, initial)).Run);
-            claimed = Assert.IsType<CustomLoopRunRecord>((await continuations.ClaimAsync(published.Id, published.LifecycleVersion, claim)).Run);
-        }
-
-        var expected = Retirement(wake, reservation, claim.ClaimedAtUtc.AddSeconds(1), "retirement-process-loss");
-        var predecessorBytes = CustomLoopRunArtifactSerializer.Serialize(claimed);
-        await RunTransitionProcessLossAsync(workspace, claimed.Id, "retirement", boundary);
-
-        using var restarted = new CustomLoopRunStore(paths);
-        var recovered = Assert.IsType<CustomLoopRunRecord>(await restarted.GetAsync(claimed.Id));
-        Assert.True(CustomLoopRunValidator.Validate(recovered).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(recovered).Errors));
-        if (recovered.HumanReview?.Continuation?.Retirement is null)
-        {
-            Assert.Equal(predecessorBytes, CustomLoopRunArtifactSerializer.Serialize(recovered));
-        }
-        else
-        {
-            Assert.Equal(expected.RetirementHash, recovered.HumanReview.Continuation.Retirement.RetirementHash);
-        }
-
-        var reconciliation = await new HumanReviewContinuationRunStore(restarted).RetireAsync(
-            recovered.Id,
-            recovered.LifecycleVersion,
-            new HumanReviewContinuationClaimReference(claim.ClaimId, claim.ClaimHash),
-            expected);
-        Assert.Contains(reconciliation.Status, new[] { HumanReviewContinuationMutationStatus.Committed, HumanReviewContinuationMutationStatus.Replayed });
-        var completion = Completion(review.Request, wake, reservation, claim, claim.ClaimedAtUtc.AddSeconds(1), "completion-after-retirement-process-loss");
-        Assert.Equal(HumanReviewContinuationMutationStatus.Conflict, (await new HumanReviewContinuationRunStore(restarted).CompleteAsync(reconciliation.Run!.Id, reconciliation.Run.LifecycleVersion, completion)).Status);
-    }
-
-    [Theory]
-    [InlineData(CustomLoopRunPublicationBoundary.StagedFileFlushed)]
-    [InlineData(CustomLoopRunPublicationBoundary.CanonicalRenamed)]
-    [InlineData(CustomLoopRunPublicationBoundary.ParentDirectoryFlushed)]
-    [InlineData(CustomLoopRunPublicationBoundary.TargetProven)]
-    public async Task Separate_process_loss_at_each_publication_boundary_converges_on_the_one_exact_wake_or_its_untouched_predecessor(CustomLoopRunPublicationBoundary boundary)
-    {
-        using var workspace = new TestWorkspace();
-        var paths = new WorkspacePaths(workspace.RootPath);
-        var approved = await CreateApprovedRunAsync(paths, "continuation-publication-loss");
-        var review = Assert.IsType<HumanReviewRunState>(approved.HumanReview);
-        var reservation = Assert.IsType<HumanReviewContinuationReservation>(review.ContinuationReservation);
-        var expectedWake = Wake(review, reservation, approved.UpdatedAtUtc.AddSeconds(1), "wake-process-loss");
-        var expected = HumanReviewContinuationContractHash.ApplyState(new HumanReviewContinuationState(1, expectedWake, ImmutableArray<HumanReviewContinuationClaim>.Empty, null, null, string.Empty));
-        var predecessorBytes = CustomLoopRunArtifactSerializer.Serialize(approved);
-        using var process = CancellationHostProcess.Start("human-review-continuation-publication-process-loss", workspace.RootPath, approved.Id, boundary.ToString());
-        var outputTask = process.StandardOutput.ReadToEndAsync();
-        var errorTask = process.StandardError.ReadToEndAsync();
-        try
-        {
-            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
-        }
-        finally
-        {
-            if (!process.HasExited)
-            {
-                process.Kill(entireProcessTree: true);
-                await process.WaitForExitAsync();
-            }
-        }
-
-        Assert.NotEqual(0, process.ExitCode);
-        Assert.Contains("test host process crashed", await errorTask, StringComparison.OrdinalIgnoreCase);
-        _ = await outputTask;
-        using var restarted = new CustomLoopRunStore(paths);
-        var recovered = Assert.IsType<CustomLoopRunRecord>(await restarted.GetAsync(approved.Id));
-        Assert.True(CustomLoopRunValidator.Validate(recovered).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(recovered).Errors));
-        if (recovered.HumanReview?.Continuation is null)
-        {
-            Assert.Equal(predecessorBytes, CustomLoopRunArtifactSerializer.Serialize(recovered));
-        }
-        else
-        {
-            Assert.Equal(expected.StateHash, recovered.HumanReview.Continuation.StateHash);
-        }
-
-        var reconciliation = await new HumanReviewContinuationRunStore(restarted).PublishAsync(recovered.Id, recovered.LifecycleVersion, expected);
-        Assert.Contains(reconciliation.Status, new[] { HumanReviewContinuationMutationStatus.Committed, HumanReviewContinuationMutationStatus.Replayed });
-        Assert.Equal(expected.StateHash, reconciliation.Run?.HumanReview?.Continuation?.StateHash);
-    }
-
-    private static async Task<CustomLoopRunRecord> CreateArchivedCurrentReviewAsync(WorkspacePaths paths, string identity, bool retire)
+    internal static async Task<CustomLoopRunRecord> CreateArchivedCurrentReviewAsync(WorkspacePaths paths, string identity, bool retire)
     {
         var approved = await CreateStrictApprovedRunAsync(paths, identity);
         using var store = new CustomLoopRunStore(paths);
@@ -793,7 +598,7 @@ public sealed class HumanReviewContinuationRunStoreTests
         return Assert.IsType<CustomLoopRunRecord>(persisted.Run);
     }
 
-    private static CustomLoopRunRecord CreateFollowOnCurrent(CustomLoopRunRecord terminal, string identity)
+    internal static CustomLoopRunRecord CreateFollowOnCurrent(CustomLoopRunRecord terminal, string identity)
     {
         var archivedState = Assert.IsType<HumanReviewRunState>(terminal.HumanReview);
         var nextRequest = HumanReviewContractHash.ApplyRequest(archivedState.Request with
@@ -851,7 +656,7 @@ public sealed class HumanReviewContinuationRunStoreTests
         };
     }
 
-    private static async Task<CustomLoopRunRecord> CreateApprovedRunAsync(WorkspacePaths paths, string identity)
+    internal static async Task<CustomLoopRunRecord> CreateApprovedRunAsync(WorkspacePaths paths, string identity)
     {
         var admitted = await CustomLoopFrontierStoreTests.PersistHumanReviewAdmissionAsync(paths, identity);
         using var store = new CustomLoopRunStore(paths);
@@ -864,7 +669,7 @@ public sealed class HumanReviewContinuationRunStoreTests
         return Assert.IsType<CustomLoopRunRecord>(await store.GetAsync(admitted.Id));
     }
 
-    private static async Task<CustomLoopRunRecord> CreateStrictApprovedRunAsync(WorkspacePaths paths, string identity)
+    internal static async Task<CustomLoopRunRecord> CreateStrictApprovedRunAsync(WorkspacePaths paths, string identity)
     {
         var admitted = await CustomLoopFrontierStoreTests.PersistStrictHumanReviewAdmissionAsync(paths, identity);
         using var store = new CustomLoopRunStore(paths);
@@ -877,7 +682,7 @@ public sealed class HumanReviewContinuationRunStoreTests
         return Assert.IsType<CustomLoopRunRecord>(await store.GetAsync(admitted.Id));
     }
 
-    private static HumanReviewContinuationWake Wake(HumanReviewRunState review, HumanReviewContinuationReservation reservation, DateTimeOffset publishedAtUtc, string wakeId)
+    internal static HumanReviewContinuationWake Wake(HumanReviewRunState review, HumanReviewContinuationReservation reservation, DateTimeOffset publishedAtUtc, string wakeId)
         => HumanReviewContinuationContractHash.ApplyWake(new HumanReviewContinuationWake(
             1,
             wakeId,
@@ -891,7 +696,7 @@ public sealed class HumanReviewContinuationRunStoreTests
             Provenance(wakeId, publishedAtUtc),
             string.Empty));
 
-    private static HumanReviewContinuationClaim Claim(HumanReviewContinuationWake wake, HumanReviewContinuationReservation reservation, DateTimeOffset claimedAtUtc, string claimId)
+    internal static HumanReviewContinuationClaim Claim(HumanReviewContinuationWake wake, HumanReviewContinuationReservation reservation, DateTimeOffset claimedAtUtc, string claimId)
         => HumanReviewContinuationContractHash.ApplyClaim(new HumanReviewContinuationClaim(
             1,
             claimId,
@@ -904,7 +709,7 @@ public sealed class HumanReviewContinuationRunStoreTests
             Provenance(claimId, claimedAtUtc),
             string.Empty));
 
-    private static HumanReviewContinuationCompletion Completion(HumanReviewRequest request, HumanReviewContinuationWake wake, HumanReviewContinuationReservation reservation, HumanReviewContinuationClaim claim, DateTimeOffset completedAtUtc, string completionId)
+    internal static HumanReviewContinuationCompletion Completion(HumanReviewRequest request, HumanReviewContinuationWake wake, HumanReviewContinuationReservation reservation, HumanReviewContinuationClaim claim, DateTimeOffset completedAtUtc, string completionId)
     {
         var receipt = HumanReviewContinuationContractHash.ApplyReleaseReceipt(new HumanReviewContinuationReleaseReceipt(
             1,
@@ -933,7 +738,7 @@ public sealed class HumanReviewContinuationRunStoreTests
             string.Empty));
     }
 
-    private static HumanReviewContinuationRetirement Retirement(HumanReviewContinuationWake wake, HumanReviewContinuationReservation reservation, DateTimeOffset retiredAtUtc, string retirementId)
+    internal static HumanReviewContinuationRetirement Retirement(HumanReviewContinuationWake wake, HumanReviewContinuationReservation reservation, DateTimeOffset retiredAtUtc, string retirementId)
         => HumanReviewContinuationContractHash.ApplyRetirement(new HumanReviewContinuationRetirement(
             1,
             retirementId,
@@ -946,12 +751,12 @@ public sealed class HumanReviewContinuationRunStoreTests
             Provenance(retirementId, retiredAtUtc),
             string.Empty));
 
-    private static HumanReviewProvenance Provenance(string correlationId, DateTimeOffset observedAtUtc)
+    internal static HumanReviewProvenance Provenance(string correlationId, DateTimeOffset observedAtUtc)
         => HumanReviewContractHash.ApplyProvenance(new HumanReviewProvenance(HumanReviewProvenanceKind.Coordinator, "human-review-continuation-store", correlationId, observedAtUtc, string.Empty));
 
-    private static string Hash(char character) => new(character, HumanReviewContractLimits.Sha256HexCharacters);
+    internal static string Hash(char character) => new(character, HumanReviewContractLimits.Sha256HexCharacters);
 
-    private static async Task RunTransitionProcessLossAsync(TestWorkspace workspace, string runId, string transition, CustomLoopRunPublicationBoundary boundary)
+    internal static async Task RunTransitionProcessLossAsync(TestWorkspace workspace, string runId, string transition, CustomLoopRunPublicationBoundary boundary)
     {
         using var process = CancellationHostProcess.Start("human-review-continuation-transition-process-loss", workspace.RootPath, runId, transition, boundary.ToString());
         var outputTask = process.StandardOutput.ReadToEndAsync();
@@ -974,7 +779,7 @@ public sealed class HumanReviewContinuationRunStoreTests
         _ = await outputTask;
     }
 
-    private static async Task WaitForFileAsync(string path, TimeSpan timeout)
+    internal static async Task WaitForFileAsync(string path, TimeSpan timeout)
     {
         using var cancellation = new CancellationTokenSource(timeout);
         while (!File.Exists(path))

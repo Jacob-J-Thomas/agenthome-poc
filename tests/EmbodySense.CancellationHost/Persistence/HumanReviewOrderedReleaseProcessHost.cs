@@ -113,9 +113,7 @@ internal static class HumanReviewOrderedReleaseProcessHost
         var (current, intent) = await CreateEffectIntentWithRetryAsync(store, attempts, runId);
         if (current is null || intent is null) return 2;
 
-        await File.WriteAllTextAsync(readyPath, "ready");
-        await WaitForFileAsync(releasePath, TimeSpan.FromSeconds(30));
-        return await ReleaseEffectAsync(paths, store, attempts, current, intent, markerPath, resultPath, crashAfterMarker: false);
+        return await ReleaseEffectAsync(paths, store, attempts, current, intent, markerPath, resultPath, crashAfterMarker: false, authorityReadyPath: readyPath, authorityReleasePath: releasePath);
     }
 
     internal static async Task<int> RunEffectOwnerBarrierAsync(string workspaceRoot, string runId, string markerPath, string ownerReadyPath, string ownerReleasePath, string resultPath)
@@ -151,7 +149,9 @@ internal static class HumanReviewOrderedReleaseProcessHost
         string? resultPath,
         bool crashAfterMarker,
         string? ownerReadyPath = null,
-        string? ownerReleasePath = null)
+        string? ownerReleasePath = null,
+        string? authorityReadyPath = null,
+        string? authorityReleasePath = null)
     {
         var timeProvider = new HumanReviewOrderedReleaseProcessTimeProvider(intent.ReleaseAtUtc);
         var runtime = HumanReviewOrderedReleaseProcessRuntimeFactory.Create(store, paths, markerPath, timeProvider, crashAfterMarker, ownerReadyPath, ownerReleasePath);
@@ -161,7 +161,7 @@ internal static class HumanReviewOrderedReleaseProcessHost
             new HumanReviewOrderedReleaseProcessContextResolver(),
             runtime,
             timeProvider,
-            new HumanReviewOrderedReleaseProcessAuthority(),
+            new HumanReviewOrderedReleaseProcessAuthority(authorityReadyPath, authorityReleasePath),
             evidence,
             evidence).ReleaseAsync(intent.Action, intent.Completion);
         if (resultPath is not null)
