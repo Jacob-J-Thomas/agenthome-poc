@@ -65,9 +65,11 @@ public sealed class GovernedSchedulesControllerTests
 
             Assert.Equal(HttpStatusCode.OK, (await SendAsync(client, HttpMethod.Post, "/api/workspace/init", token)).StatusCode);
 
+            var timeZones = await SendAsync(client, HttpMethod.Get, "/api/governed-schedules/time-zones", token);
             var read = await SendAsync(client, HttpMethod.Get, "/api/governed-schedules/detail?scheduleId=INVALID", token);
             var create = await SendAsync(client, HttpMethod.Post, "/api/governed-schedules/create", token, CreateInput());
 
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, timeZones.StatusCode);
             Assert.Equal(HttpStatusCode.ServiceUnavailable, read.StatusCode);
             Assert.Equal(HttpStatusCode.ServiceUnavailable, create.StatusCode);
             var readBody = await read.Content.ReadAsStringAsync();

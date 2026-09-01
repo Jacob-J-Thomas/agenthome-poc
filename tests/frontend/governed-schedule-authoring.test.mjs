@@ -11,6 +11,15 @@ const selectedGraph = () => ({
   lifecycleVersion: 4,
 });
 
+function serverTimeZoneCatalog() {
+  return {
+    status: "available",
+    detail:
+      "Select one exact identifier from the server-owned schedule rules snapshot.",
+    timeZones: [{ id: "Central Standard Time" }, { id: "UTC" }],
+  };
+}
+
 test("schedule authoring keeps one confirmed operation through response loss, rereads, bounds input, and renders server text safely", async () => {
   const view = createView();
   const calls = [];
@@ -24,6 +33,8 @@ test("schedule authoring keeps one confirmed operation through response loss, re
     },
     requestJson: async (url, options) => {
       calls.push({ url, options });
+      if (url === "/api/governed-schedules/time-zones")
+        return serverTimeZoneCatalog();
       if (url === "/api/governed-schedules/create") {
         createCount += 1;
         if (createCount === 1)
@@ -114,6 +125,57 @@ test("schedule authoring keeps one confirmed operation through response loss, re
   assert.equal(view.elements.result.children.length, 0);
 });
 
+test("schedule authoring uses the server-owned time-zone catalog instead of the browser IANA default", async () => {
+  const view = createView();
+  const calls = [];
+  let createBody = null;
+  const authoring = createGovernedScheduleAuthoring({
+    document: view.document,
+    operationId: (kind) => `operation-${kind}`,
+    selectedGraph,
+    requestJson: async (url, options) => {
+      calls.push({ url, options });
+      if (url === "/api/governed-schedules/time-zones")
+        return serverTimeZoneCatalog();
+      if (url === "/api/governed-schedules/create") {
+        createBody = JSON.parse(options.body);
+        return {
+          status: "created",
+          detail: "Created.",
+          schedule: authoredSchedule("schedule-server-zone", true),
+        };
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    },
+  });
+  authoring.setInteractive(true);
+
+  view.elements.fixedIntervalSeconds.value = "300";
+  view.elements.timeZoneId.value = "America/Chicago";
+  await view.elements.submit.click();
+
+  assert.equal(createBody, null);
+  assert.match(
+    view.elements.result.textContent,
+    /select one before submitting/i,
+  );
+
+  view.elements.timeZoneId.value = "Central Standard Time";
+  await view.elements.timeZoneId.change();
+  await view.elements.submit.click();
+
+  assert.deepEqual(
+    calls.filter((call) => call.url === "/api/governed-schedules/time-zones")
+      .length,
+    1,
+  );
+  assert.equal(createBody.timeZoneId, "Central Standard Time");
+  assert.deepEqual(
+    view.elements.timeZoneId.options.map((option) => option.value),
+    ["", "Central Standard Time", "UTC"],
+  );
+});
+
 test("immutable replacement rereads canonical posture and never enables a successor before its predecessor is disabled", async () => {
   const view = createView();
   const calls = [];
@@ -140,6 +202,8 @@ test("immutable replacement rereads canonical posture and never enables a succes
     selectedGraph,
     requestJson: async (url, options) => {
       calls.push({ url, options });
+      if (url === "/api/governed-schedules/time-zones")
+        return serverTimeZoneCatalog();
       if (url === "/api/governed-schedules/detail?scheduleId=schedule-old")
         return { status: "found", schedule: predecessor };
       if (url === "/api/governed-schedules/create") {
@@ -317,6 +381,8 @@ test("stale or response-lost replacement controls leave the disabled successor r
     selectedGraph,
     requestJson: async (url, options) => {
       calls.push({ url, options });
+      if (url === "/api/governed-schedules/time-zones")
+        return serverTimeZoneCatalog();
       if (url === "/api/governed-schedules/detail?scheduleId=schedule-old")
         return { status: "found", schedule: predecessor };
       if (url === "/api/governed-schedules/create")
@@ -389,6 +455,8 @@ async function runResponseLostReplacementRecovery(lostKind) {
     selectedGraph,
     requestJson: async (url, options) => {
       calls.push({ url, options });
+      if (url === "/api/governed-schedules/time-zones")
+        return serverTimeZoneCatalog();
       if (url === "/api/governed-schedules/detail?scheduleId=schedule-old")
         return { status: "found", schedule: predecessor };
       if (url === "/api/governed-schedules/detail?scheduleId=schedule-new")
@@ -464,7 +532,7 @@ function authoredSchedule(scheduleId, enabled, stateRevision = 1) {
     recurrenceKind: "fixed-interval",
     firstLocalOccurrence: "2026-08-30T09:00:00",
     fixedIntervalSeconds: 300,
-    timeZoneId: "America/Chicago",
+    timeZoneId: "Central Standard Time",
     invalidLocalTimePolicy: "reject",
     ambiguousLocalTimePolicy: "earlier",
     misfirePolicy: "skip",
@@ -528,7 +596,10 @@ function createView() {
   elements.governedScheduleOverlap.value = "skip";
   elements.governedSchedulePriority.value = "normal";
   return {
-    document: { getElementById: (id) => elements[id] },
+    document: {
+      createElement: () => new FakeElement(),
+      getElementById: (id) => elements[id],
+    },
     elements: {
       ambiguousLocalTime: elements.governedScheduleAmbiguousLocalTime,
       catchUpLimit: elements.governedScheduleCatchUpLimit,
@@ -556,8 +627,17 @@ class FakeElement {
     this.checked = false;
     this.disabled = false;
     this.listeners = new Map();
+    this.options = [];
     this._value = "";
     this._textContent = "";
+  }
+
+  add(option) {
+    this.options.push(option);
+  }
+
+  remove(index) {
+    this.options.splice(index, 1);
   }
 
   addEventListener(name, handler) {
@@ -570,6 +650,10 @@ class FakeElement {
 
   async input() {
     await this.listeners.get("input")?.({});
+  }
+
+  async change() {
+    await this.listeners.get("change")?.({});
   }
 
   get textContent() {

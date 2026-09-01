@@ -34,8 +34,11 @@ public sealed class GovernedGraphsApiControllerTests
             using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
             var token = app.Services.GetRequiredService<WebSessionSecurity>().Token;
             var unauthorized = await client.GetAsync("/api/governed-schedules/detail?scheduleId=schedule-1");
+            var unauthorizedTimeZones = await client.GetAsync("/api/governed-schedules/time-zones");
             var beforeInitialization = await SendAsync(client, HttpMethod.Post, "/api/governed-schedules/create", token);
+            var beforeInitializationTimeZones = await SendAsync(client, HttpMethod.Get, "/api/governed-schedules/time-zones", token);
             var initialized = await SendAsync(client, HttpMethod.Post, "/api/workspace/init", token);
+            var timeZones = await SendAsync(client, HttpMethod.Get, "/api/governed-schedules/time-zones", token);
             var missing = await SendAsync(client, HttpMethod.Post, "/api/governed-schedules/create", token);
             var missingSchedule = await SendAsync(client, HttpMethod.Get, "/api/governed-schedules/detail?scheduleId=schedule-missing", token);
             var forged = await SendAsync(
@@ -64,8 +67,16 @@ public sealed class GovernedGraphsApiControllerTests
                 });
 
             Assert.Equal(HttpStatusCode.Unauthorized, unauthorized.StatusCode);
+            Assert.Equal(HttpStatusCode.Unauthorized, unauthorizedTimeZones.StatusCode);
             Assert.Equal(HttpStatusCode.Conflict, beforeInitialization.StatusCode);
+            Assert.Equal(HttpStatusCode.Conflict, beforeInitializationTimeZones.StatusCode);
             Assert.Equal(HttpStatusCode.OK, initialized.StatusCode);
+            Assert.Equal(HttpStatusCode.OK, timeZones.StatusCode);
+            using var timeZonesDocument = JsonDocument.Parse(await timeZones.Content.ReadAsStringAsync());
+            Assert.Equal("available", timeZonesDocument.RootElement.GetProperty("status").GetString());
+            Assert.Contains(
+                timeZonesDocument.RootElement.GetProperty("timeZones").EnumerateArray(),
+                item => item.GetProperty("id").GetString() == "UTC");
             Assert.Equal(HttpStatusCode.BadRequest, missing.StatusCode);
             Assert.Equal(HttpStatusCode.BadRequest, forged.StatusCode);
             Assert.Equal(HttpStatusCode.NotFound, missingSchedule.StatusCode);

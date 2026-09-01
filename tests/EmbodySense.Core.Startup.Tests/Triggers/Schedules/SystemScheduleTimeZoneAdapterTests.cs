@@ -8,6 +8,31 @@ namespace EmbodySense.Core.Startup.Tests.Triggers.Schedules;
 
 public sealed class SystemScheduleTimeZoneAdapterTests
 {
+    [Fact]
+    public void Supported_identifiers_are_a_deterministic_detached_view_of_the_server_snapshot()
+    {
+        var later = TimeZoneInfo.CreateCustomTimeZone("Later", TimeSpan.FromHours(1), "Later", "Later");
+        var adapter = Adapter(TimeZoneInfo.Utc, later);
+
+        var first = adapter.GetSupportedTimeZoneIds();
+        Assert.Equal(["Later", "UTC"], first);
+
+        Assert.IsAssignableFrom<IReadOnlyList<string>>(first);
+        Assert.NotSame(first, adapter.GetSupportedTimeZoneIds());
+    }
+
+    [Fact]
+    public void Rejects_a_server_snapshot_larger_than_the_bounded_catalog()
+    {
+        var timeZones = Enumerable.Range(0, SystemScheduleTimeZoneAdapter.MaximumSupportedTimeZoneIds + 1)
+            .Select(value => TimeZoneInfo.CreateCustomTimeZone($"Test/Zone-{value}", TimeSpan.Zero, $"Zone {value}", $"Zone {value}"))
+            .ToArray();
+
+        var exception = Assert.Throws<ArgumentException>(() => new SystemScheduleTimeZoneAdapter(timeZones));
+
+        Assert.Contains("bounded identifier catalog", exception.Message, StringComparison.Ordinal);
+    }
+
     private const string PlaceholderFingerprint = "0000000000000000000000000000000000000000000000000000000000000000";
     private static readonly DateTime _uniqueLocal = new(2026, 1, 15, 9, 30, 0, DateTimeKind.Unspecified);
 

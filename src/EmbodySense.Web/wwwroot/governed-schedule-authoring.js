@@ -55,6 +55,9 @@ export function createGovernedScheduleAuthoring({
   let stableOperationId = null;
   let inspectedSchedule = null;
   let replacement = null;
+  let supportedTimeZoneIds = null;
+  let timeZoneLoadPromise = null;
+  let timeZoneSelectionRequired = false;
 
   initializeDefaults();
   bind();
@@ -95,15 +98,14 @@ export function createGovernedScheduleAuthoring({
       item.addEventListener("input", resetConfirmation);
       item.addEventListener("change", resetConfirmation);
     }
+    elements.timeZoneId.addEventListener(
+      "change",
+      acknowledgeTimeZoneSelection,
+    );
   }
 
   function initializeDefaults() {
-    try {
-      elements.timeZoneId.value =
-        Intl.DateTimeFormat().resolvedOptions().timeZone;
-    } catch {
-      elements.timeZoneId.value = "UTC";
-    }
+    elements.timeZoneId.value = "UTC";
     const later = new Date(Date.now() + 60 * 60 * 1000);
     const local = new Date(later.getTime() - later.getTimezoneOffset() * 60000);
     elements.firstLocalOccurrence.value = local.toISOString().slice(0, 16);
@@ -113,6 +115,11 @@ export function createGovernedScheduleAuthoring({
     pendingPreviewHash = null;
     stableOperationId = null;
     render();
+  }
+
+  function acknowledgeTimeZoneSelection() {
+    timeZoneSelectionRequired = false;
+    resetConfirmation();
   }
 
   async function inspect() {
@@ -183,11 +190,24 @@ export function createGovernedScheduleAuthoring({
 
     inFlight = true;
     render();
+    if (!(await ensureServerTimeZones())) {
+      inFlight = false;
+      render();
+      return;
+    }
+    const serverBoundInput = createInput(selector);
+    if (!serverBoundInput) {
+      elements.result.textContent =
+        "Select one exact time zone from the server-owned rules snapshot.";
+      inFlight = false;
+      render();
+      return;
+    }
     try {
       const response = await requestJson("/api/governed-schedules/create", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(input),
+        body: JSON.stringify(serverBoundInput),
       });
       pendingPreviewHash =
         response.status === "confirmation-required" &&
@@ -252,6 +272,81 @@ export function createGovernedScheduleAuthoring({
       priority: elements.priority.value,
       enabled: replacement ? false : elements.enabled.checked,
     };
+  }
+
+  async function ensureServerTimeZones() {
+    if (supportedTimeZoneIds) {
+      if (
+        !timeZoneSelectionRequired &&
+        supportedTimeZoneIds.includes(elements.timeZoneId.value)
+      )
+        return true;
+      elements.result.textContent =
+        "Select one exact time zone from the server-owned rules snapshot before submitting.";
+      return false;
+    }
+    timeZoneLoadPromise ??= requestJson("/api/governed-schedules/time-zones")
+      .then((response) => {
+        const ids = [...(response?.timeZones ?? [])].map((item) => item?.id);
+        if (
+          response?.status !== "available" ||
+          ids.length === 0 ||
+          ids.length > 1024 ||
+          ids.some(
+            (id) =>
+              typeof id !== "string" || id.length === 0 || id.length > 128,
+          ) ||
+          new Set(ids).size !== ids.length
+        )
+          throw new Error(
+            response?.detail ??
+              "The server-owned time-zone catalog is unavailable.",
+          );
+        const selectedTimeZoneId = elements.timeZoneId.value;
+        supportedTimeZoneIds = Object.freeze(ids);
+        timeZoneSelectionRequired =
+          !supportedTimeZoneIds.includes(selectedTimeZoneId);
+        populateServerTimeZones(supportedTimeZoneIds);
+        if (timeZoneSelectionRequired) {
+          elements.result.textContent =
+            "The server-owned time-zone choices are loaded. Select one before submitting.";
+          return false;
+        }
+        return true;
+      })
+      .catch((error) => {
+        timeZoneLoadPromise = null;
+        elements.result.textContent = `Time-zone choices are unavailable: ${error.message}`;
+        return false;
+      });
+    return timeZoneLoadPromise;
+  }
+
+  function populateServerTimeZones(ids) {
+    if (
+      !elements.timeZoneId.options ||
+      typeof elements.timeZoneId.add !== "function"
+    )
+      return;
+    const selectedTimeZoneId = elements.timeZoneId.value;
+    while (elements.timeZoneId.options.length > 0)
+      elements.timeZoneId.remove(0);
+    if (timeZoneSelectionRequired) {
+      const placeholder = document.createElement("option");
+      placeholder.value = "";
+      placeholder.textContent = "Select a server time zone";
+      placeholder.disabled = true;
+      elements.timeZoneId.add(placeholder);
+    }
+    for (const id of ids) {
+      const option = document.createElement("option");
+      option.value = id;
+      option.textContent = id;
+      elements.timeZoneId.add(option);
+    }
+    elements.timeZoneId.value = ids.includes(selectedTimeZoneId)
+      ? selectedTimeZoneId
+      : "";
   }
 
   function renderResponse(response) {

@@ -26,6 +26,30 @@ public sealed class GovernedSchedulesController : ControllerBase
         _host = host ?? throw new ArgumentNullException(nameof(host));
     }
 
+    /// <summary>Reads the exact time-zone choices supported by the server's retained schedule rules snapshot.</summary>
+    /// <param name="cancellationToken">Cancels runtime acquisition or the server-owned catalog read.</param>
+    /// <returns>The bounded server-supported identifier catalog.</returns>
+    [HttpGet("time-zones")]
+    public async Task<ActionResult<GovernedLoopScheduleTimeZoneCatalogResponse>> ReadTimeZones(CancellationToken cancellationToken = default)
+    {
+        if (!IsWorkspaceInitialized())
+        {
+            return WorkspaceNotInitialized();
+        }
+
+        try
+        {
+            var response = await _host.ReadGovernedLoopScheduleTimeZonesAsync(cancellationToken);
+            return response.Status == "available"
+                ? Ok(response)
+                : StatusCode(StatusCodes.Status503ServiceUnavailable, response);
+        }
+        catch (Exception exception) when (IsRuntimeAcquisitionFailure(exception))
+        {
+            return RuntimeUnavailable();
+        }
+    }
+
     /// <summary>Rereads one exact immutable schedule definition and current optimistic state.</summary>
     /// <param name="scheduleId">The stable canonical schedule identity.</param>
     /// <param name="cancellationToken">Cancels runtime acquisition or the reread.</param>

@@ -766,6 +766,22 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         }
     }
 
+    /// <summary>Reads the server-owned time-zone choices through the retained schedule runtime.</summary>
+    /// <param name="cancellationToken">Cancels runtime acquisition before the snapshot is read.</param>
+    /// <returns>The bounded exact identifiers accepted by the current server rules snapshot.</returns>
+    internal async Task<GovernedLoopScheduleTimeZoneCatalogResponse> ReadGovernedLoopScheduleTimeZonesAsync(CancellationToken cancellationToken)
+    {
+        var runtime = await BeginCustomRuntimeOperationAsync(cancellationToken);
+        try
+        {
+            return runtime.GovernedLoopScheduleAuthoring.GetSupportedTimeZones();
+        }
+        finally
+        {
+            await EndCustomRuntimeOperationAsync();
+        }
+    }
+
     /// <summary>Creates or replays one immutable canonical schedule from bounded visible-Web authoring intent.</summary>
     /// <param name="input">The browser-selected graph revision, exact lifecycle evidence, and bounded time policies.</param>
     /// <param name="cancellationToken">Cancels before durable authority or schedule boundaries.</param>

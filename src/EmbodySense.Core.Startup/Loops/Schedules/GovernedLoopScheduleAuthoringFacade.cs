@@ -32,6 +32,7 @@ namespace EmbodySense.Core.Startup.Loops.Schedules;
 /// </remarks>
 public sealed class GovernedLoopScheduleAuthoringFacade
 {
+    private const int MaximumTimeZoneOptions = SystemScheduleTimeZoneAdapter.MaximumSupportedTimeZoneIds;
     private const string ScheduleIdDomain = "embodysense-governed-loop-schedule-id-v1";
     private const string TimeTriggerCapabilityId = "org.embodysense/triggers/time";
     private readonly AuthorityActorId _actor;
@@ -68,6 +69,23 @@ public sealed class GovernedLoopScheduleAuthoringFacade
         _grants = grants ?? throw new ArgumentNullException(nameof(grants));
         _schedules = schedules ?? throw new ArgumentNullException(nameof(schedules));
         _timeZones = timeZones ?? throw new ArgumentNullException(nameof(timeZones));
+    }
+
+    /// <summary>Reads the exact time-zone identifiers supported by this server's retained rules snapshot.</summary>
+    /// <remarks>
+    /// This projection is non-authoritative and contains identifiers only. Schedule creation still resolves the
+    /// selected identifier against the same retained adapter immediately before deriving its rules fingerprint.
+    /// </remarks>
+    /// <returns>A bounded catalog of server-owned choices, or an unavailable posture when no choice is available.</returns>
+    public GovernedLoopScheduleTimeZoneCatalogResponse GetSupportedTimeZones()
+    {
+        var identifiers = _timeZones.GetSupportedTimeZoneIds();
+        return identifiers.Count is 0 or > MaximumTimeZoneOptions
+            ? new("unavailable", "The server-owned time-zone catalog is unavailable.", [])
+            : new(
+                "available",
+                "Select one exact identifier from the server-owned schedule rules snapshot.",
+                identifiers.Select(value => new GovernedLoopScheduleTimeZoneOption(value)).ToArray());
     }
 
     /// <summary>Rereads one exact canonical schedule definition and its current state without following successors.</summary>

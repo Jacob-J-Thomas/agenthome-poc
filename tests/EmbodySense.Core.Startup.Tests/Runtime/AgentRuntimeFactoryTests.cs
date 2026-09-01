@@ -1245,6 +1245,7 @@ public sealed partial class AgentRuntimeFactoryTests
         var replayed = await runtime.GovernedLoopScheduleAuthoring.CreateAsync(input);
         var conflict = await runtime.GovernedLoopScheduleAuthoring.CreateAsync(input with { Overlap = ScheduleOverlapPolicy.Allow });
         var reread = await runtime.GovernedLoopScheduleAuthoring.ReadAsync(confirmed.Schedule?.ScheduleId);
+        var timeZones = runtime.GovernedLoopScheduleAuthoring.GetSupportedTimeZones();
         Assert.True(ScheduleId.TryParse(confirmed.Schedule?.ScheduleId, out var scheduleId));
         var persisted = await new ScheduleStore(paths).ReadAsync(scheduleId!);
         var trustProvider = new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath);
@@ -1266,6 +1267,8 @@ public sealed partial class AgentRuntimeFactoryTests
         Assert.Equal("replayed", replayed.Status);
         Assert.Equal("conflict", conflict.Status);
         Assert.Equal("ready", reread.Status);
+        Assert.Equal("available", timeZones.Status);
+        Assert.Contains(timeZones.TimeZones, value => value.Id == "UTC");
         Assert.Equal(confirmed.Schedule, replayed.Schedule);
         Assert.Equal(confirmed.Schedule, reread.Schedule);
         Assert.Equal(candidate.GraphId, confirmed.Schedule?.GraphId);
