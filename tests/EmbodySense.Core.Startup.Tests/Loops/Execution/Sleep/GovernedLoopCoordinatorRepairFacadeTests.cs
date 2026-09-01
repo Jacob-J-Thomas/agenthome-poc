@@ -131,6 +131,7 @@ public sealed class GovernedLoopCoordinatorRepairFacadeTests
             true,
             true,
             true,
+            true,
             _now,
             string.Empty));
         return GovernedLoopSleepContractHash.Apply(new GovernedLoopCoordinatorRepairDisposition(

@@ -13,6 +13,7 @@ using EmbodySense.Core.Application.HumanInput.Lifecycle;
 using EmbodySense.Core.Application.HumanInput.Policies;
 using EmbodySense.Core.Application.HumanInput.Publication;
 using EmbodySense.Core.Application.HumanInput.Responses;
+using EmbodySense.Core.Application.HumanReview;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Admission;
 using EmbodySense.Core.Application.Loops.EffectAuthorityUsage;
@@ -50,6 +51,7 @@ using EmbodySense.Core.Persistence.ContextualRoles;
 using EmbodySense.Core.Persistence.HumanInput.Continuations;
 using EmbodySense.Core.Persistence.HumanInput.Requests;
 using EmbodySense.Core.Persistence.HumanInput.Policies;
+using EmbodySense.Core.Persistence.HumanReview;
 using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Core.Persistence.Loops.Admission;
 using EmbodySense.Core.Persistence.Loops.Execution.Authority;
@@ -68,6 +70,7 @@ using EmbodySense.Core.Startup.Capabilities;
 using EmbodySense.Core.Startup.Inference;
 using EmbodySense.Core.Startup.Inference.Profiles;
 using EmbodySense.Core.Startup.HumanInput;
+using EmbodySense.Core.Startup.HumanReview;
 using EmbodySense.Core.Startup.Loops;
 using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Core.Startup.Loops.Execution.Effects;
@@ -102,6 +105,7 @@ public sealed class AgentRuntimeFactory
     private readonly ICapabilityCatalogTrustProvider _capabilityTrustProvider;
     private readonly IAgentRuntimeAuthenticatedWakeVerifier? _authenticatedWakeVerifier;
     private readonly IAgentRuntimeHumanInputAuthorityProvider? _humanInputAuthorityProvider;
+    private readonly IHumanReviewDecisionAuthorizationProvider? _humanReviewDecisionAuthorizationProvider;
     private readonly IAgentRuntimeGovernedLoopCoordinatorRepairAuthorityProvider? _governedLoopCoordinatorRepairAuthorityProvider;
     private readonly IGovernedModelPrimaryExecutionBoundaryObserver? _governedModelExecutionObserver;
     private readonly IGovernedLoopLocalCoordinatorBoundaryObserver? _governedLoopLocalCoordinatorBoundaryObserver;
@@ -191,7 +195,8 @@ public sealed class AgentRuntimeFactory
             _commandActionRuntimeProvider,
             _customLoopRunStoreProvider,
             _governedLoopLocalCoordinatorBoundaryObserver,
-            _governedLoopCoordinatorRepairAuthorityProvider);
+            _governedLoopCoordinatorRepairAuthorityProvider,
+            _humanReviewDecisionAuthorizationProvider);
     }
 
     /// <summary>Returns an equivalent factory that composes one explicit server-owned Human Input authority provider.</summary>
@@ -213,7 +218,31 @@ public sealed class AgentRuntimeFactory
             _commandActionRuntimeProvider,
             _customLoopRunStoreProvider,
             _governedLoopLocalCoordinatorBoundaryObserver,
-            _governedLoopCoordinatorRepairAuthorityProvider);
+            _governedLoopCoordinatorRepairAuthorityProvider,
+            _humanReviewDecisionAuthorizationProvider);
+    }
+
+    /// <summary>Returns an equivalent factory with one explicit server-owned Human Review decision authority provider.</summary>
+    /// <remarks>Without this provider, Human Review remains structurally catalogued but is unavailable and non-executable.</remarks>
+    /// <param name="provider">The authenticated server boundary used to authorize exact Human Review decisions.</param>
+    /// <returns>A factory preserving existing runtime composition with the supplied Human Review authority boundary.</returns>
+    public AgentRuntimeFactory WithHumanReviewDecisionAuthorizationProvider(IHumanReviewDecisionAuthorizationProvider provider)
+    {
+        ArgumentNullException.ThrowIfNull(provider);
+        return new AgentRuntimeFactory(
+            _approvalPrompt,
+            _conversationPublicationObserver,
+            _codexRuntimeStatus,
+            _capabilityTrustProvider,
+            _governedModelExecutionObserver,
+            _additionalModelProfileProviders,
+            _authenticatedWakeVerifier,
+            _humanInputAuthorityProvider,
+            _commandActionRuntimeProvider,
+            _customLoopRunStoreProvider,
+            _governedLoopLocalCoordinatorBoundaryObserver,
+            _governedLoopCoordinatorRepairAuthorityProvider,
+            provider);
     }
 
     /// <summary>Returns an equivalent factory with authenticated current-operator authority for coordinator repair.</summary>
@@ -236,7 +265,8 @@ public sealed class AgentRuntimeFactory
             _commandActionRuntimeProvider,
             _customLoopRunStoreProvider,
             _governedLoopLocalCoordinatorBoundaryObserver,
-            provider);
+            provider,
+            _humanReviewDecisionAuthorizationProvider);
     }
 
     /// <summary>Returns an equivalent factory with one explicit server-owned structured command Action provider.</summary>
@@ -257,7 +287,8 @@ public sealed class AgentRuntimeFactory
             provider,
             _customLoopRunStoreProvider,
             _governedLoopLocalCoordinatorBoundaryObserver,
-            _governedLoopCoordinatorRepairAuthorityProvider);
+            _governedLoopCoordinatorRepairAuthorityProvider,
+            _humanReviewDecisionAuthorizationProvider);
     }
 
     /// <summary>
@@ -280,7 +311,8 @@ public sealed class AgentRuntimeFactory
             _commandActionRuntimeProvider,
             provider,
             _governedLoopLocalCoordinatorBoundaryObserver,
-            _governedLoopCoordinatorRepairAuthorityProvider);
+            _governedLoopCoordinatorRepairAuthorityProvider,
+            _humanReviewDecisionAuthorizationProvider);
     }
 
     /// <summary>Returns an equivalent factory with one diagnostic observer for local coordinator heartbeat boundaries.</summary>
@@ -303,7 +335,8 @@ public sealed class AgentRuntimeFactory
             _commandActionRuntimeProvider,
             _customLoopRunStoreProvider,
             observer,
-            _governedLoopCoordinatorRepairAuthorityProvider);
+            _governedLoopCoordinatorRepairAuthorityProvider,
+            _humanReviewDecisionAuthorizationProvider);
     }
 
     internal AgentRuntimeFactory(
@@ -318,7 +351,8 @@ public sealed class AgentRuntimeFactory
         CommandActionRuntimeProvider? commandActionRuntimeProvider = null,
         CustomLoopRunStoreProvider? customLoopRunStoreProvider = null,
         IGovernedLoopLocalCoordinatorBoundaryObserver? governedLoopLocalCoordinatorBoundaryObserver = null,
-        IAgentRuntimeGovernedLoopCoordinatorRepairAuthorityProvider? governedLoopCoordinatorRepairAuthorityProvider = null)
+        IAgentRuntimeGovernedLoopCoordinatorRepairAuthorityProvider? governedLoopCoordinatorRepairAuthorityProvider = null,
+        IHumanReviewDecisionAuthorizationProvider? humanReviewDecisionAuthorizationProvider = null)
     {
         ArgumentNullException.ThrowIfNull(approvalPrompt);
         if (codexRuntimeStatus is not null && codexRuntimeStatus.Compatibility != CodexRuntimeCompatibility.Compatible)
@@ -337,6 +371,7 @@ public sealed class AgentRuntimeFactory
         _capabilityTrustProvider = capabilityTrustProvider ?? FileCapabilityCatalogTrustProvider.CreateDefault();
         _authenticatedWakeVerifier = authenticatedWakeVerifier;
         _humanInputAuthorityProvider = humanInputAuthorityProvider;
+        _humanReviewDecisionAuthorizationProvider = humanReviewDecisionAuthorizationProvider;
         _governedLoopCoordinatorRepairAuthorityProvider = governedLoopCoordinatorRepairAuthorityProvider;
         _governedModelExecutionObserver = governedModelExecutionObserver;
         _governedLoopLocalCoordinatorBoundaryObserver = governedLoopLocalCoordinatorBoundaryObserver;
@@ -661,13 +696,14 @@ public sealed class AgentRuntimeFactory
                 paths,
                 capabilityAuthority,
                 permissionService);
-            var governedWorkspaceActionFacade = GovernedLoopEffectAttemptFactory.Create(
-                paths,
-                customRunStore,
-                _capabilityTrustProvider,
-                capabilityAuthority,
+            var governedEffectAttemptComposition = GovernedLoopEffectAttemptComposition.Create(paths, customRunStore);
+            var governedWorkspaceActionFacade = governedEffectAttemptComposition.CreateFacade(
+                graphCapabilityCatalog,
                 governedWorkspaceActionRegistry,
-                governedEffectAuthority);
+                governedEffectAuthority,
+                CapabilityHostRuntime.HostContractVersion,
+                CapabilityHostRuntime.Platform,
+                operationalClock);
             var governedWorkspaceActionExecutor = new GovernedLoopWorkspaceActionExecutor(governedWorkspaceActionFacade);
             GovernedLoopCommandActionExecutor? governedCommandActionExecutor = null;
             CommandActionRegistrationRegistry? governedCommandActionRegistrations = null;
@@ -679,13 +715,13 @@ public sealed class AgentRuntimeFactory
                     commandActionRuntime.Registrations,
                     commandActionRuntime.ArtifactResolver,
                     commandActionRuntime.IsolationBoundary);
-                var commandActionFacade = GovernedLoopEffectAttemptFactory.Create(
-                    paths,
-                    customRunStore,
-                    _capabilityTrustProvider,
-                    capabilityAuthority,
+                var commandActionFacade = governedEffectAttemptComposition.CreateFacade(
+                    graphCapabilityCatalog,
                     commandActions.Operations,
-                    governedEffectAuthority);
+                    governedEffectAuthority,
+                    CapabilityHostRuntime.HostContractVersion,
+                    CapabilityHostRuntime.Platform,
+                    operationalClock);
                 governedCommandActionRegistrations = commandActions.Registrations;
                 governedCommandActionNativeHost = commandActions.NativeHost;
                 governedCommandActionExecutor = new GovernedLoopCommandActionExecutor(commandActionFacade, commandActions.Registrations);
@@ -744,6 +780,7 @@ public sealed class AgentRuntimeFactory
             var humanInputBindingSource = new HumanInputResponseContinuationBindingSource(humanInputResponses);
             var humanInputRecovery = new HumanInputResponseContinuationRecoveryStore(customRunStore);
             var humanInputReadiness = new HumanInputContinuationReadinessSignal();
+            var humanReviewAdmission = new HumanReviewAdmissionService(customRunStore);
             var governedWaitPosture = new GovernedLoopCanonicalWaitCurrentPostureAdapter(
                 customRunStore,
                 governedGrantResolver);
@@ -767,7 +804,8 @@ public sealed class AgentRuntimeFactory
                 humanInputPolicyResolutionService: humanInputPolicyResolutionService,
                 humanInputBindingSource: humanInputBindingSource,
                 humanInputRequestPublicationService: humanInputPublication,
-                humanInputCancellationConvergence: humanInputCancellationConvergence);
+                humanInputCancellationConvergence: humanInputCancellationConvergence,
+                humanReviewAdmissionService: humanReviewAdmission);
             var governedAdmissionStore = new GovernedLoopAdmissionStore(paths, _capabilityTrustProvider, authorityTransaction: capabilityAuthority);
             var governedAdmission = new GovernedLoopAdmissionService(
                 workspaceId,
@@ -790,6 +828,76 @@ public sealed class AgentRuntimeFactory
                 governedAdmissionStore,
                 governedGraphStore,
                 governedOrderedRuntime);
+            var humanReviewTrustedClock = new TimeProviderHumanReviewTrustedClock(operationalClock);
+            var humanReviewContinuationAuthority = new CurrentHumanReviewContinuationAuthoritySource(
+                governedGrantResolver,
+                capabilityAdmission);
+            var humanReviewDecisionAuthorizer = new ServerOwnedHumanReviewDecisionAuthorizer(
+                _humanReviewDecisionAuthorizationProvider);
+            var humanReviewDecisionService = new HumanReviewDecisionService(
+                customRunStore,
+                humanReviewDecisionAuthorizer,
+                humanReviewTrustedClock);
+            var humanReviewContinuationPublicationStore = new HumanReviewContinuationRunStore(customRunStore);
+            var humanReviewContinuationPublication = new HumanReviewContinuationPublicationService(
+                customRunStore,
+                humanReviewContinuationPublicationStore);
+            var humanReviewContinuationRecoveryStore = new HumanReviewContinuationRecoveryStore(
+                customRunStore,
+                governedGraphStore);
+            var humanReviewDecisionActionRecoveryStore = new HumanReviewDecisionActionRunStore(
+                customRunStore,
+                governedGraphStore);
+            var humanReviewContinuationConsumer = new HumanReviewContinuationConsumer(
+                humanReviewContinuationAuthority,
+                governedEffectAttemptComposition.HumanReviewEffectEvidence,
+                governedEffectAttemptComposition.HumanReviewEffectCertainty,
+                humanReviewTrustedClock);
+            var humanReviewOrderedRelease = new HumanReviewOrderedReleaseService(
+                customRunStore,
+                governedWaitResume,
+                governedOrderedRuntime,
+                operationalClock,
+                humanReviewContinuationAuthority,
+                governedEffectAttemptComposition.HumanReviewEffectEvidence,
+                governedEffectAttemptComposition.HumanReviewEffectCertainty);
+            var humanReviewContinuationRecovery = new HumanReviewContinuationRecoveryCoordinator(
+                humanReviewContinuationRecoveryStore,
+                humanReviewContinuationConsumer,
+                humanReviewOrderedRelease,
+                humanReviewTrustedClock);
+            var humanReviewDecisionActionRecovery = new HumanReviewDecisionActionRecoveryCoordinator(
+                humanReviewDecisionActionRecoveryStore,
+                humanReviewContinuationConsumer,
+                humanReviewOrderedRelease,
+                humanReviewTrustedClock);
+            var humanReviewFacade = new HumanReviewRuntimeFacade(
+                customRunStore,
+                humanReviewDecisionService,
+                governedEffectAttemptComposition.HumanReviewEffectEvidence,
+                governedEffectAttemptComposition.HumanReviewEffectCertainty);
+            var humanReviewComposition = new HumanReviewRuntimeCompositionReadiness(
+                humanReviewAdmission,
+                humanReviewContinuationPublication,
+                humanReviewContinuationConsumer,
+                humanReviewContinuationRecovery,
+                humanReviewDecisionActionRecovery,
+                humanReviewDecisionService,
+                humanReviewFacade,
+                humanReviewOrderedRelease);
+            var humanReviewDependencyReadinessProbe = new HumanReviewRuntimeDependencyReadinessProbe(
+                paths,
+                governedGraphStore,
+                capabilityAdmission,
+                capabilityAuthority,
+                governedGrantResolver,
+                governedEffectAttemptComposition,
+                operationalClock,
+                _humanReviewDecisionAuthorizationProvider,
+                humanReviewComposition);
+            var humanReviewRecoveryReadiness = new HumanReviewRecoveryReadinessSignal(
+                humanReviewDependencyReadinessProbe.ProbeAsync,
+                operationalClock);
             var humanInputContinuation = new HumanInputResponseContinuationService(
                 customRunStore,
                 humanInputResponses,
@@ -925,7 +1033,10 @@ public sealed class AgentRuntimeFactory
                 registration => executableCommandActions.Contains(registration.Template.ContentHash),
                 graphCapabilityCatalog,
                 governedCommandActionNativeHost,
-                isHumanInputExecutable: () => humanInputReadiness.IsExecutable);
+                isHumanInputExecutable: () => humanInputReadiness.IsExecutable,
+                isHumanReviewExecutable: () => _humanReviewDecisionAuthorizationProvider is not null
+                    && humanReviewRecoveryReadiness.IsExecutable
+                    && IsHealthyTrustedUtcClock(operationalClock));
             var graphAuthority = new GovernedLoopAuthoritySnapshotProvider(governedRoleSource);
             var graphAuthoringFacade = new GovernedLoopGraphAuthoringFacade(
                 workspaceId,
@@ -1042,8 +1153,20 @@ public sealed class AgentRuntimeFactory
                 CustomLoopLimits.MaxRecentRunsPageSize,
                 operationalClock,
                 humanInputReadiness);
-            var coordinatorRepairDependencies = new GovernedLoopCoordinatorRepairDependencyProbe(repairableBackgroundWork, operationalClock);
-            governedBackgroundRuntimeHost.BindBackgroundWork(repairableBackgroundWork, coordinatorRepairDependencies, workspaceId);
+            var humanReviewBackgroundWork = new HumanReviewRecoveryRunner(
+                repairableBackgroundWork,
+                customRunStore,
+                humanReviewContinuationPublication,
+                humanReviewContinuationRecovery,
+                humanReviewDecisionActionRecovery,
+                new HumanReviewRecoveryRunnerOptions(
+                    CustomLoopLimits.MaxRecentRunsPageSize,
+                    "human-review-" + Guid.NewGuid().ToString("N"),
+                    "local-background-human-review",
+                    TimeSpan.FromMinutes(2)),
+                humanReviewRecoveryReadiness);
+            var coordinatorRepairDependencies = new GovernedLoopCoordinatorRepairDependencyProbe(humanReviewBackgroundWork, operationalClock);
+            governedBackgroundRuntimeHost.BindBackgroundWork(humanReviewBackgroundWork, coordinatorRepairDependencies, workspaceId);
             var coordinatorRepair = new GovernedLoopCoordinatorRepairFacade(
                 new GovernedLoopCoordinatorRepairService(
                     workspaceId,
@@ -1077,6 +1200,7 @@ public sealed class AgentRuntimeFactory
                 governedLoopScheduleAuthoring,
                 modelProfileCatalogFacade,
                 humanInputFacade,
+                humanReviewFacade,
                 defaultConversationReviews,
                 codexRuntimeStatus,
                 triggerAuthorizer,
@@ -1155,6 +1279,19 @@ public sealed class AgentRuntimeFactory
         }
 
         return WorkspaceActors.ForSurface(surface.SurfaceId);
+    }
+
+    private static bool IsHealthyTrustedUtcClock(TimeProvider timeProvider)
+    {
+        try
+        {
+            var now = timeProvider.GetUtcNow();
+            return now != default && now.Offset == TimeSpan.Zero;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static bool ShouldPreserveCurrentConversation(IReadOnlyList<CustomLoopRecoveryResult> recoveryResults, string currentConversationIdentity)

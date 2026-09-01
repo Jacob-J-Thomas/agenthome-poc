@@ -20,7 +20,7 @@ internal static class GovernedLoopCoordinatorEvidenceStoreCodec
     private static readonly string[] _heartbeatRetirementProperties = ["chainHash", "contentHash", "initialHeartbeatHash", "ownershipHash", "retiredCount", "retiredThroughHeartbeatHash", "retiredThroughLeaseExpiresAtUtc", "retiredThroughRecordedAtUtc", "retiredThroughSequence", "schemaVersion"];
     private static readonly string[] _failureProperties = ["contentHash", "detailEvidenceReference", "failureSequence", "kind", "occurredAtUtc", "ownershipHash", "schemaVersion"];
     private static readonly string[] _repairProperties = ["actorId", "contentHash", "coordinatorId", "dependencyReadiness", "failedOwnershipHash", "latestFailureHash", "latestHeartbeatHash", "operationId", "recordedAtUtc", "schemaVersion", "terminalLifecycleHash", "workspaceId"];
-    private static readonly string[] _repairReadinessProperties = ["contentHash", "coordinatorId", "evaluatedAtUtc", "humanInputReady", "scheduleReady", "schemaVersion", "triggerReady", "wakeReady", "workspaceId"];
+    private static readonly string[] _repairReadinessProperties = ["contentHash", "coordinatorId", "evaluatedAtUtc", "humanInputReady", "humanReviewReady", "scheduleReady", "schemaVersion", "triggerReady", "wakeReady", "workspaceId"];
     private static readonly string[] _evidenceArrayProperties = ["ownerships", "lifecycles", "heartbeatRetirements", "heartbeats", "failures", "repairs"];
 
     public static byte[] Serialize(
@@ -391,6 +391,7 @@ internal static class GovernedLoopCoordinatorEvidenceStoreCodec
             || !TryBoolean(element, "triggerReady", out var triggerReady)
             || !TryBoolean(element, "wakeReady", out var wakeReady)
             || !TryBoolean(element, "humanInputReady", out var humanInputReady)
+            || !TryBoolean(element, "humanReviewReady", out var humanReviewReady)
             || !TryUtc(element, "evaluatedAtUtc", out var evaluatedAtUtc)
             || !TryString(element, "contentHash", out var contentHash))
         {
@@ -405,6 +406,7 @@ internal static class GovernedLoopCoordinatorEvidenceStoreCodec
             triggerReady,
             wakeReady,
             humanInputReady,
+            humanReviewReady,
             evaluatedAtUtc,
             contentHash!);
     }
@@ -721,6 +723,7 @@ internal static class GovernedLoopCoordinatorEvidenceStoreCodec
         writer.WriteString("coordinatorId", readiness.CoordinatorId);
         WriteUtc(writer, "evaluatedAtUtc", readiness.EvaluatedAtUtc);
         writer.WriteBoolean("humanInputReady", readiness.HumanInputReady);
+        writer.WriteBoolean("humanReviewReady", readiness.HumanReviewReady);
         writer.WriteBoolean("scheduleReady", readiness.ScheduleReady);
         writer.WriteNumber("schemaVersion", readiness.SchemaVersion);
         writer.WriteBoolean("triggerReady", readiness.TriggerReady);

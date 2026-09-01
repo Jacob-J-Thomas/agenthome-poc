@@ -1,9 +1,12 @@
+using System.Collections.Immutable;
 using EmbodySense.Core.Application.HumanReview;
 using ApplicationAuthorization = EmbodySense.Core.Application.HumanReview.Models.HumanReviewDecisionAuthorization;
 using ApplicationAuthorizationRequest = EmbodySense.Core.Application.HumanReview.Models.HumanReviewDecisionAuthorizationRequest;
 using EmbodySense.Core.Common.HumanReview;
 using CommonDecisionKind = EmbodySense.Core.Common.HumanReview.Models.HumanReviewDecisionKind;
+using CommonReviewerScope = EmbodySense.Core.Common.HumanReview.Models.HumanReviewReviewerScope;
 using StartupAuthorizationRequest = EmbodySense.Core.Startup.HumanReview.Models.HumanReviewDecisionAuthorizationRequest;
+using StartupEligibility = EmbodySense.Core.Startup.HumanReview.Models.HumanReviewDecisionAuthorizationEligibility;
 using EmbodySense.Core.Startup.HumanReview.Models;
 
 namespace EmbodySense.Core.Startup.HumanReview;
@@ -50,6 +53,11 @@ internal sealed class ServerOwnedHumanReviewDecisionAuthorizer : IHumanReviewDec
             return null!;
         }
 
+        if (!TryProjectEligibility(canonicalRequest.EligibleReviewers, out var eligibleReviewers))
+        {
+            return null!;
+        }
+
         StartupAuthorizationRequest providerRequest;
         HumanReviewDecisionAuthorizationResult? authorization;
         try
@@ -60,7 +68,8 @@ internal sealed class ServerOwnedHumanReviewDecisionAuthorizer : IHumanReviewDec
                 decisionKind,
                 request.DecisionOperationId,
                 request.ProposalHash,
-                request.EvaluatedAtUtc);
+                request.EvaluatedAtUtc,
+                eligibleReviewers);
             authorization = await _provider.AuthorizeAsync(providerRequest, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -92,17 +101,97 @@ internal sealed class ServerOwnedHumanReviewDecisionAuthorizer : IHumanReviewDec
             return null!;
         }
 
-        return new ApplicationAuthorization(true, request.RequestHash, request.DecisionOperationId, request.ProposalHash, request.EvaluatedAtUtc, authorization.ActorId, authorization.ReviewerRoleId, authorization.ScopeIds, authorization.CorrelationId);
+        if (!TryValidateReadyAuthorization(authorization, providerRequest.EligibleReviewers, out var scopeIds))
+        {
+            return null!;
+        }
+
+        return new ApplicationAuthorization(true, request.RequestHash, request.DecisionOperationId, request.ProposalHash, request.EvaluatedAtUtc, authorization.ActorId, authorization.ReviewerRoleId, scopeIds, authorization.CorrelationId);
     }
 
     private static bool IsBound(StartupAuthorizationRequest request, HumanReviewDecisionAuthorizationResult? authorization)
         => authorization is not null
-            && authorization.RequestId == request.RequestId
+            && string.Equals(authorization.RequestId, request.RequestId, StringComparison.Ordinal)
             && string.Equals(authorization.RequestHash, request.RequestHash, StringComparison.Ordinal)
             && authorization.DecisionKind == request.DecisionKind
             && string.Equals(authorization.DecisionOperationId, request.DecisionOperationId, StringComparison.Ordinal)
             && string.Equals(authorization.ProposalHash, request.ProposalHash, StringComparison.Ordinal)
-            && authorization.EvaluatedAtUtc == request.EvaluatedAtUtc;
+            && authorization.EvaluatedAtUtc.EqualsExact(request.EvaluatedAtUtc);
+
+    private static bool TryProjectEligibility(
+        ImmutableArray<CommonReviewerScope> source,
+        out ImmutableArray<StartupEligibility> projection)
+    {
+        projection = default;
+        if (source.IsDefault || source.Length is < 1 or > HumanReviewContractLimits.MaxEligibleReviewers)
+        {
+            return false;
+        }
+
+        var projected = new StartupEligibility[source.Length];
+        string? previousRole = null;
+        for (var index = 0; index < source.Length; index++)
+        {
+            var reviewer = source[index];
+            if (reviewer is null
+                || !HumanReviewIdentifier.IsValid(reviewer.ReviewerRoleId)
+                || previousRole is not null && string.CompareOrdinal(previousRole, reviewer.ReviewerRoleId) >= 0
+                || !TryCopyCanonicalScopes(reviewer.ScopeIds, out var scopeIds))
+            {
+                return false;
+            }
+
+            projected[index] = new StartupEligibility(reviewer.ReviewerRoleId, scopeIds);
+            previousRole = reviewer.ReviewerRoleId;
+        }
+
+        projection = ImmutableArray.CreateRange(projected);
+        return true;
+    }
+
+    private static bool TryValidateReadyAuthorization(
+        HumanReviewDecisionAuthorizationResult authorization,
+        ImmutableArray<StartupEligibility> eligibleReviewers,
+        out ImmutableArray<string> scopeIds)
+    {
+        scopeIds = default;
+        if (!HumanReviewIdentifier.IsValid(authorization.ActorId)
+            || !HumanReviewIdentifier.IsValid(authorization.ReviewerRoleId)
+            || !HumanReviewIdentifier.IsValid(authorization.CorrelationId)
+            || !TryCopyCanonicalScopes(authorization.ScopeIds, out scopeIds))
+        {
+            return false;
+        }
+
+        var candidateScopeIds = scopeIds;
+        return eligibleReviewers.Any(item => string.Equals(item.ReviewerRoleId, authorization.ReviewerRoleId, StringComparison.Ordinal)
+            && item.ScopeIds.SequenceEqual(candidateScopeIds, StringComparer.Ordinal));
+    }
+
+    private static bool TryCopyCanonicalScopes(ImmutableArray<string> source, out ImmutableArray<string> copy)
+    {
+        copy = default;
+        if (source.IsDefault || source.Length is < 1 or > HumanReviewContractLimits.MaxScopesPerReviewer)
+        {
+            return false;
+        }
+
+        var values = new string[source.Length];
+        for (var index = 0; index < source.Length; index++)
+        {
+            var value = source[index];
+            if (!HumanReviewIdentifier.IsValid(value)
+                || index > 0 && string.CompareOrdinal(values[index - 1], value) >= 0)
+            {
+                return false;
+            }
+
+            values[index] = value;
+        }
+
+        copy = ImmutableArray.CreateRange(values);
+        return true;
+    }
 
     private static HumanReviewDecisionKind MapDecisionKind(CommonDecisionKind source)
         => source switch

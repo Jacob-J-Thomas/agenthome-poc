@@ -12,7 +12,7 @@ public sealed class GovernedLoopCoordinatorRepairContractTests
     public void Repair_evidence_is_canonical_and_binds_the_exact_failed_generation()
     {
         var ownership = GovernedLoopSleepContractHash.Apply(new GovernedLoopCoordinatorOwnership(1, "coordinator", "owner", 3, _now.AddMinutes(-2), string.Empty));
-        var readiness = GovernedLoopSleepContractHash.Apply(new GovernedLoopCoordinatorRepairReadiness(1, _workspaceId, "coordinator", true, true, true, true, _now, string.Empty));
+        var readiness = GovernedLoopSleepContractHash.Apply(new GovernedLoopCoordinatorRepairReadiness(1, _workspaceId, "coordinator", true, true, true, true, true, _now, string.Empty));
         var disposition = GovernedLoopSleepContractHash.Apply(new GovernedLoopCoordinatorRepairDisposition(
             1,
             _workspaceId,
@@ -38,7 +38,7 @@ public sealed class GovernedLoopCoordinatorRepairContractTests
     public void Repair_evidence_rejects_unready_dependencies()
     {
         var ownership = GovernedLoopSleepContractHash.Apply(new GovernedLoopCoordinatorOwnership(1, "coordinator", "owner", 1, _now, string.Empty));
-        var readiness = GovernedLoopSleepContractHash.Apply(new GovernedLoopCoordinatorRepairReadiness(1, _workspaceId, "coordinator", true, true, false, true, _now, string.Empty));
+        var readiness = GovernedLoopSleepContractHash.Apply(new GovernedLoopCoordinatorRepairReadiness(1, _workspaceId, "coordinator", true, true, false, true, true, _now, string.Empty));
         var disposition = GovernedLoopSleepContractHash.Apply(new GovernedLoopCoordinatorRepairDisposition(
             1,
             _workspaceId,
@@ -56,6 +56,18 @@ public sealed class GovernedLoopCoordinatorRepairContractTests
         Assert.True(GovernedLoopSleepContractValidator.Validate(readiness).IsValid);
         Assert.False(GovernedLoopSleepContractValidator.Validate(disposition).IsValid);
         Assert.False(GovernedLoopCoordinatorRepairReadinessContract.IsReady(readiness));
+    }
+
+    [Fact]
+    public void Human_review_readiness_is_part_of_the_authorization_contract_and_hash()
+    {
+        var ready = GovernedLoopSleepContractHash.Apply(new GovernedLoopCoordinatorRepairReadiness(1, _workspaceId, "coordinator", true, true, true, true, true, _now, string.Empty));
+        var notReady = GovernedLoopSleepContractHash.Apply(ready with { HumanReviewReady = false, ContentHash = string.Empty });
+
+        Assert.True(GovernedLoopCoordinatorRepairReadinessContract.IsReady(ready));
+        Assert.False(GovernedLoopCoordinatorRepairReadinessContract.IsReady(notReady));
+        Assert.True(GovernedLoopSleepContractHash.Matches(notReady));
+        Assert.NotEqual(ready.ContentHash, notReady.ContentHash);
     }
 
     private static string Hash(char value) => new(value, 64);

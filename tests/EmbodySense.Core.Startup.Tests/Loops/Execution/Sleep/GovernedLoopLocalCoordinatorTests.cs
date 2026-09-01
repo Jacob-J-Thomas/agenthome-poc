@@ -58,7 +58,7 @@ public sealed class GovernedLoopLocalCoordinatorTests
             perFamily: 2);
 
         Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Started, (await coordinator.StartAsync()).Status);
-        await WaitUntilAsync(() => work.CallCount >= 12);
+        await WaitUntilAsync(() => work.CallCount >= 15);
         Assert.Equal(GovernedLoopLocalCoordinatorStopStatus.Stopped, (await coordinator.StopAsync()).Status);
 
         Assert.Equal(
@@ -71,12 +71,15 @@ public sealed class GovernedLoopLocalCoordinatorTests
                 GovernedLoopLocalWorkFamily.Wake,
                 GovernedLoopLocalWorkFamily.HumanInput,
                 GovernedLoopLocalWorkFamily.HumanInput,
+                GovernedLoopLocalWorkFamily.HumanReview,
+                GovernedLoopLocalWorkFamily.HumanReview,
                 GovernedLoopLocalWorkFamily.Trigger,
                 GovernedLoopLocalWorkFamily.Trigger,
                 GovernedLoopLocalWorkFamily.Wake,
-                GovernedLoopLocalWorkFamily.Wake
+                GovernedLoopLocalWorkFamily.Wake,
+                GovernedLoopLocalWorkFamily.HumanInput
             ],
-            work.Calls.Take(12));
+            work.Calls.Take(15));
     }
 
     [Fact]
@@ -122,7 +125,7 @@ public sealed class GovernedLoopLocalCoordinatorTests
             heartbeat: TimeSpan.FromMilliseconds(500),
             lease: TimeSpan.FromSeconds(1));
         var restarted = await second.StartAsync();
-        await WaitUntilAsync(() => rehydrated.CallCount >= 3);
+        await WaitUntilAsync(() => rehydrated.CallCount >= 5);
         await second.StopAsync();
 
         Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Started, restarted.Status);
@@ -130,6 +133,8 @@ public sealed class GovernedLoopLocalCoordinatorTests
         Assert.Contains(GovernedLoopLocalWorkFamily.Schedule, rehydrated.Calls);
         Assert.Contains(GovernedLoopLocalWorkFamily.Trigger, rehydrated.Calls);
         Assert.Contains(GovernedLoopLocalWorkFamily.Wake, rehydrated.Calls);
+        Assert.Contains(GovernedLoopLocalWorkFamily.HumanInput, rehydrated.Calls);
+        Assert.Contains(GovernedLoopLocalWorkFamily.HumanReview, rehydrated.Calls);
     }
 
     [Fact]
@@ -339,6 +344,29 @@ public sealed class GovernedLoopLocalCoordinatorTests
         Assert.Single(evidence.Failures);
         Assert.Equal(GovernedLoopCoordinatorFailureKind.CorruptState, evidence.Failures[0].Kind);
         Assert.Equal("schedule-result-corrupt", evidence.Failures[0].DetailEvidenceReference);
+    }
+
+    [Fact]
+    public async Task Malformed_human_review_result_fails_closed_with_family_specific_corruption_evidence()
+    {
+        var evidence = new RecordingCoordinatorEvidencePort();
+        var work = new ScriptedLocalWorkRunner
+        {
+            Handler = static (family, _) => Task.FromResult<GovernedLoopLocalWorkResult?>(
+                family == GovernedLoopLocalWorkFamily.HumanReview
+                    ? null
+                    : new GovernedLoopLocalWorkResult(GovernedLoopLocalWorkResultStatus.Empty, "no-work"))
+        };
+        await using var coordinator = Coordinator(evidence, work, Clock(), "owner-a");
+
+        Assert.Equal(GovernedLoopLocalCoordinatorStartStatus.Started, (await coordinator.StartAsync()).Status);
+        await WaitUntilAsync(() => evidence.Snapshot?.LatestLifecycle.Status == GovernedLoopCoordinatorStatus.Failed);
+        var stopped = await coordinator.StopAsync();
+
+        Assert.Equal(GovernedLoopLocalCoordinatorStopStatus.Failed, stopped.Status);
+        Assert.Single(evidence.Failures);
+        Assert.Equal(GovernedLoopCoordinatorFailureKind.CorruptState, evidence.Failures[0].Kind);
+        Assert.Equal("human-review-result-corrupt", evidence.Failures[0].DetailEvidenceReference);
     }
 
     [Fact]
@@ -686,7 +714,7 @@ public sealed class GovernedLoopLocalCoordinatorTests
         await WaitUntilAsync(() => work.CallCount >= 9);
         await coordinator.StopAsync();
 
-        Assert.Equal(4, evidence.Failures.Count);
+        Assert.Equal(5, evidence.Failures.Count);
         Assert.All(evidence.Failures, item => Assert.Equal(GovernedLoopCoordinatorFailureKind.Backpressured, item.Kind));
     }
 
@@ -1790,6 +1818,7 @@ public sealed class GovernedLoopLocalCoordinatorTests
             1,
             workspaceId,
             failed.Ownership.CoordinatorId,
+            true,
             true,
             true,
             true,

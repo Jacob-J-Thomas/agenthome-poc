@@ -13,5 +13,6 @@ public static class GovernedLoopCoordinatorRepairReadinessContract
             && readiness.ScheduleReady
             && readiness.TriggerReady
             && readiness.WakeReady
-            && readiness.HumanInputReady;
+            && readiness.HumanInputReady
+            && readiness.HumanReviewReady;
 }

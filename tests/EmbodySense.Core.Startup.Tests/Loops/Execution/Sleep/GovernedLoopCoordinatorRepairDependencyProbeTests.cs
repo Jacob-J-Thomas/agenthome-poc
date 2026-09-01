@@ -29,7 +29,8 @@ public sealed class GovernedLoopCoordinatorRepairDependencyProbeTests
                 GovernedLoopLocalWorkFamily.Schedule,
                 GovernedLoopLocalWorkFamily.Trigger,
                 GovernedLoopLocalWorkFamily.Wake,
-                GovernedLoopLocalWorkFamily.HumanInput
+                GovernedLoopLocalWorkFamily.HumanInput,
+                GovernedLoopLocalWorkFamily.HumanReview
             },
             work.Families.Order());
     }
@@ -48,6 +49,23 @@ public sealed class GovernedLoopCoordinatorRepairDependencyProbeTests
         Assert.NotNull(readiness);
         Assert.True(GovernedLoopSleepContractValidator.Validate(readiness).IsValid);
         Assert.False(readiness.HumanInputReady);
+        Assert.False(GovernedLoopCoordinatorRepairReadinessContract.IsReady(readiness));
+    }
+
+    [Fact]
+    public async Task ReadAsync_marks_human_review_unready_without_authorizing_repair()
+    {
+        var work = new RecordingReadinessProbe
+        {
+            FaultedFamily = GovernedLoopLocalWorkFamily.HumanReview
+        };
+        var probe = new GovernedLoopCoordinatorRepairDependencyProbe(work, new FixedClock(_now));
+
+        var readiness = await probe.ReadAsync(_workspaceId, "coordinator");
+
+        Assert.NotNull(readiness);
+        Assert.True(GovernedLoopSleepContractValidator.Validate(readiness).IsValid);
+        Assert.False(readiness.HumanReviewReady);
         Assert.False(GovernedLoopCoordinatorRepairReadinessContract.IsReady(readiness));
     }
 
