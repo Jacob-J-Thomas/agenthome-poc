@@ -495,7 +495,10 @@ public sealed class WebGovernedLoopBackgroundLifetimeTests
             await WebShutdownDeadlineCodexExecutable.ReleaseRuntimeCompositionAsync(workspace);
             Assert.Equal(WebGovernedLoopBackgroundPosture.Stopped, (await WaitForPostureAsync(runtimeHost, WebGovernedLoopBackgroundPosture.Stopped)).BackgroundPosture);
             var coordinatorPath = workspace.File(".agent", "loops", "execution", "coordinator");
-            Assert.Empty(Directory.EnumerateFiles(coordinatorPath, "ledger-*.json"));
+            if (Directory.Exists(coordinatorPath))
+            {
+                Assert.Empty(Directory.EnumerateFiles(coordinatorPath, "ledger-*.json"));
+            }
         }
         finally
         {

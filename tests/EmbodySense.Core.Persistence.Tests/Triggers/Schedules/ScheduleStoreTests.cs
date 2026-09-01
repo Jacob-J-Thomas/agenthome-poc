@@ -22,16 +22,6 @@ public sealed class ScheduleStoreTests
 {
     private static readonly TimeSpan _crossProcessReadinessTimeout = TimeSpan.FromSeconds(60);
 
-    private const string CrossProcessWorkspace = "EMBODYSENSE_SCHEDULE_STORE_WORKSPACE";
-    private const string CrossProcessGate = "EMBODYSENSE_SCHEDULE_STORE_GATE";
-    private const string CrossProcessReady = "EMBODYSENSE_SCHEDULE_STORE_READY";
-    private const string CrossProcessOutput = "EMBODYSENSE_SCHEDULE_STORE_OUTPUT";
-    private const string CrossProcessScheduleId = "EMBODYSENSE_SCHEDULE_STORE_ID";
-    private const string CrossProcessCrashBoundary = "EMBODYSENSE_SCHEDULE_STORE_CRASH_BOUNDARY";
-    private const string CrossProcessOperation = "EMBODYSENSE_SCHEDULE_STORE_OPERATION";
-    private const string CrossProcessVariant = "EMBODYSENSE_SCHEDULE_STORE_VARIANT";
-    private const string CrossProcessMaxDurabilityArtifacts = "EMBODYSENSE_SCHEDULE_STORE_MAX_DURABILITY_ARTIFACTS";
-
     [Fact]
     public async Task Accepted_terminal_schedule_provenance_is_exact_restart_safe_and_conflict_closed()
     {
@@ -714,79 +704,7 @@ public sealed class ScheduleStoreTests
     [Fact]
     public async Task Cross_process_schedule_create_host()
     {
-        var workspace = Environment.GetEnvironmentVariable(CrossProcessWorkspace);
-        if (string.IsNullOrEmpty(workspace))
-        {
-            return;
-        }
-
-        var ready = Environment.GetEnvironmentVariable(CrossProcessReady)!;
-        var gate = Environment.GetEnvironmentVariable(CrossProcessGate)!;
-        var output = Environment.GetEnvironmentVariable(CrossProcessOutput)!;
-        var scheduleId = Environment.GetEnvironmentVariable(CrossProcessScheduleId)!;
-        await File.WriteAllTextAsync(ready, "ready");
-        await WaitForPathAsync(gate);
-        Action<ScheduleStorePersistenceBoundary>? observer = null;
-        if (Enum.TryParse<ScheduleStorePersistenceBoundary>(
-            Environment.GetEnvironmentVariable(CrossProcessCrashBoundary),
-            out var crashBoundary))
-        {
-            observer = boundary =>
-            {
-                if (boundary == crashBoundary)
-                {
-                    TerminateCrossProcessHost();
-                }
-            };
-        }
-
-        var options = new ScheduleStoreOptions
-        {
-            MaxSchedules = 1,
-            MaxDurabilityArtifacts = int.TryParse(
-                Environment.GetEnvironmentVariable(CrossProcessMaxDurabilityArtifacts),
-                System.Globalization.NumberStyles.None,
-                System.Globalization.CultureInfo.InvariantCulture,
-                out var maxDurabilityArtifacts)
-                    ? maxDurabilityArtifacts
-                    : ScheduleStoreOptions.DefaultMaximumDurabilityArtifacts,
-            DurableBoundaryObserver = observer,
-        };
-        var store = new ScheduleStore(new WorkspacePaths(workspace), options);
-        var request = ScheduleStoreTestData.CreateRequest(scheduleId);
-        ScheduleStoreMutationResult result;
-        if (string.Equals(
-                Environment.GetEnvironmentVariable(CrossProcessOperation),
-                "compare-exchange-current",
-                StringComparison.Ordinal))
-        {
-            var read = await store.ReadAsync(request.Definition.ScheduleId);
-            Assert.Equal(ScheduleStoreReadStatus.Found, read.Status);
-            var variant = int.Parse(
-                Environment.GetEnvironmentVariable(CrossProcessVariant)!,
-                System.Globalization.CultureInfo.InvariantCulture);
-            result = await store.CompareExchangeAsync(new(
-                read.State!,
-                ScheduleStoreTestData.Replacement(read.State!, variant)));
-        }
-        else if (string.Equals(
-                Environment.GetEnvironmentVariable(CrossProcessOperation),
-                "compare-exchange",
-                StringComparison.Ordinal))
-        {
-            var variant = int.Parse(
-                Environment.GetEnvironmentVariable(CrossProcessVariant)!,
-                System.Globalization.CultureInfo.InvariantCulture);
-            result = await store.CompareExchangeAsync(new(
-                request.InitialState,
-                ScheduleStoreTestData.Replacement(request.InitialState, variant)));
-        }
-        else
-        {
-            result = await store.CreateAsync(request);
-        }
-
-        await File.WriteAllTextAsync(output, result.Status.ToString());
+        await EmbodySense.CancellationHost.Persistence.ScheduleStoreCrossProcessHost.RunFromEnvironmentAsync();
     }
 
     [Fact]
@@ -1272,6 +1190,21 @@ public sealed class ScheduleStoreTests
         int variant = 1,
         int? maxDurabilityArtifacts = null)
     {
+        if (crashBoundary is null)
+        {
+            return Verification.CancellationHostProcess.StartAppHostOwned(
+                "schedule-store",
+                workspace,
+                gate,
+                ready,
+                output,
+                scheduleId,
+                operation,
+                variant.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                maxDurabilityArtifacts?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty,
+                string.Empty);
+        }
+
         var startInfo = new ProcessStartInfo("dotnet")
         {
             WorkingDirectory = Path.GetTempPath(),
@@ -1281,32 +1214,22 @@ public sealed class ScheduleStoreTests
             CreateNoWindow = true,
         };
         const string CrossProcessHostTestName = "EmbodySense.Core.Persistence.Tests.Triggers.Schedules.ScheduleStoreTests.Cross_process_schedule_create_host";
-        if (crashBoundary is not null)
-        {
-            Verification.CoverageChildProcessAssembly.AddExpectedTerminationVstestArguments(startInfo, typeof(ScheduleStoreTests).Assembly.Location, CrossProcessHostTestName);
-        }
-        else
-        {
-            Verification.CoverageChildProcessAssembly.AddVstestArguments(startInfo, typeof(ScheduleStoreTests).Assembly.Location, CrossProcessHostTestName);
-        }
+        Verification.CoverageChildProcessAssembly.AddExpectedTerminationVstestArguments(startInfo, typeof(ScheduleStoreTests).Assembly.Location, CrossProcessHostTestName);
         startInfo.Environment["DOTNET_ROLL_FORWARD"] = "Major";
-        startInfo.Environment[CrossProcessWorkspace] = workspace;
-        startInfo.Environment[CrossProcessGate] = gate;
-        startInfo.Environment[CrossProcessReady] = ready;
-        startInfo.Environment[CrossProcessOutput] = output;
-        startInfo.Environment[CrossProcessScheduleId] = scheduleId;
-        startInfo.Environment[CrossProcessOperation] = operation;
-        startInfo.Environment[CrossProcessVariant] = variant.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        startInfo.Environment[EmbodySense.CancellationHost.Persistence.ScheduleStoreCrossProcessHost.WorkspaceVariable] = workspace;
+        startInfo.Environment[EmbodySense.CancellationHost.Persistence.ScheduleStoreCrossProcessHost.GateVariable] = gate;
+        startInfo.Environment[EmbodySense.CancellationHost.Persistence.ScheduleStoreCrossProcessHost.ReadyVariable] = ready;
+        startInfo.Environment[EmbodySense.CancellationHost.Persistence.ScheduleStoreCrossProcessHost.OutputVariable] = output;
+        startInfo.Environment[EmbodySense.CancellationHost.Persistence.ScheduleStoreCrossProcessHost.ScheduleIdVariable] = scheduleId;
+        startInfo.Environment[EmbodySense.CancellationHost.Persistence.ScheduleStoreCrossProcessHost.OperationVariable] = operation;
+        startInfo.Environment[EmbodySense.CancellationHost.Persistence.ScheduleStoreCrossProcessHost.VariantVariable] = variant.ToString(System.Globalization.CultureInfo.InvariantCulture);
         if (maxDurabilityArtifacts is not null)
         {
-            startInfo.Environment[CrossProcessMaxDurabilityArtifacts] = maxDurabilityArtifacts.Value.ToString(
+            startInfo.Environment[EmbodySense.CancellationHost.Persistence.ScheduleStoreCrossProcessHost.MaxDurabilityArtifactsVariable] = maxDurabilityArtifacts.Value.ToString(
                 System.Globalization.CultureInfo.InvariantCulture);
         }
 
-        if (crashBoundary is not null)
-        {
-            startInfo.Environment[CrossProcessCrashBoundary] = crashBoundary.Value.ToString();
-        }
+        startInfo.Environment[EmbodySense.CancellationHost.Persistence.ScheduleStoreCrossProcessHost.CrashBoundaryVariable] = crashBoundary.Value.ToString();
 
         return Verification.CrossProcessProcessOwnership.Start(startInfo);
     }
@@ -1333,12 +1256,6 @@ public sealed class ScheduleStoreTests
         var standardError = await process.StandardError.ReadToEndAsync();
         var standardOutput = await process.StandardOutput.ReadToEndAsync();
         Assert.True(process.ExitCode == 0, standardError + Environment.NewLine + standardOutput);
-    }
-
-    private static void TerminateCrossProcessHost()
-    {
-        Process.GetCurrentProcess().Kill();
-        Thread.Sleep(Timeout.Infinite);
     }
 
     [DllImport("libc", EntryPoint = "mkfifo", SetLastError = true)]

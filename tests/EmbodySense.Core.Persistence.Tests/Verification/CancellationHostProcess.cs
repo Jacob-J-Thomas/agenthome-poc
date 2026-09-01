@@ -15,6 +15,9 @@ internal static class CancellationHostProcess
     internal static CrossProcessProcess StartOwned(params string[] arguments)
         => CrossProcessProcessOwnership.Start(CreateDotnetStartInfo(arguments));
 
+    internal static CrossProcessProcess StartAppHostOwned(params string[] arguments)
+        => CrossProcessProcessOwnership.Start(CreateAppHostStartInfo(arguments));
+
     private static ProcessStartInfo CreateDotnetStartInfo(string[] arguments)
     {
         var outputDirectory = new DirectoryInfo(AppContext.BaseDirectory);
