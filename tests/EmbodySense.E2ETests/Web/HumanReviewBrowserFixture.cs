@@ -594,6 +594,10 @@ internal static class HumanReviewBrowserFixture
                     throw new InvalidOperationException($"The browser Human Review fixture ambiguous evidence was not persisted: {reconciled.Status}.");
                 }
             }
+            else
+            {
+                begun.Lease?.Dispose();
+            }
         }
 
         var scope = HumanReviewContractHash.ApplyApprovalScope(new HumanReviewApprovalScope(includePreDispatchEffect ? HumanReviewApprovalScopeKind.PreDispatchEffect : HumanReviewApprovalScopeKind.Continuation, binding.BindingHash, binding.EffectAttempt?.EffectAttemptId, string.Empty));
