@@ -27,9 +27,11 @@ public sealed class HumanReviewDecisionServiceTests
         Assert.Equal(HumanReviewDecisionServiceStatus.Invalid, (await service.DecideAsync(new HumanReviewDecisionCommand("con", fixture.Run.LifecycleVersion, "reserved-run-one", HumanReviewDecisionKind.Reject, null))).Status);
         Assert.Equal(HumanReviewDecisionServiceStatus.Invalid, (await service.DecideAsync(new HumanReviewDecisionCommand(fixture.Run.Id, -1, "invalid-version-one", HumanReviewDecisionKind.Reject, null))).Status);
         Assert.Equal(HumanReviewDecisionServiceStatus.Invalid, (await service.DecideAsync(new HumanReviewDecisionCommand(fixture.Run.Id, 0, "zero-version-one", HumanReviewDecisionKind.Reject, null))).Status);
+        Assert.Equal(HumanReviewDecisionServiceStatus.Invalid, (await service.DecideAsync(new HumanReviewDecisionCommand(fixture.Run.Id, checked((int)HumanReviewContractLimits.MaxVersion + 1), "oversized-version-one", HumanReviewDecisionKind.Reject, null))).Status);
         Assert.Equal(HumanReviewDecisionServiceStatus.Invalid, (await service.DecideAsync(new HumanReviewDecisionCommand(fixture.Run.Id, fixture.Run.LifecycleVersion, "invalid-kind-one", (HumanReviewDecisionKind)999, null))).Status);
         Assert.Equal(HumanReviewDecisionServiceStatus.Invalid, (await service.DecideAsync(new HumanReviewDecisionCommand(fixture.Run.Id, fixture.Run.LifecycleVersion, "invalid-detail-one", HumanReviewDecisionKind.RequestInformation, null))).Status);
         Assert.Equal(0, store.ReadCount);
+        Assert.Equal(0, store.UpdateAttempts);
         Assert.Empty(authorizer.Requests);
     }
 

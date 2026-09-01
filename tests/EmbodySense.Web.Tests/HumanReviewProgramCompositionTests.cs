@@ -8,6 +8,7 @@ using EmbodySense.Core.Application.HumanReview.Models;
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.GraphValidation;
 using EmbodySense.Core.Application.Loops.Sequential;
+using EmbodySense.Core.Common.HumanReview;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Execution.Models;
@@ -35,6 +36,7 @@ using StartupDecisionKind = EmbodySense.Core.Startup.HumanReview.Models.HumanRev
 using StartupDecisionStatus = EmbodySense.Core.Startup.HumanReview.Models.HumanReviewDecisionStatus;
 using StartupDecisionDisposition = EmbodySense.Core.Startup.HumanReview.Models.HumanReviewDecisionOperationDisposition;
 using StartupLifecycleStatus = EmbodySense.Core.Startup.HumanReview.Models.HumanReviewLifecycleStatus;
+using CommonLifecycleStatus = EmbodySense.Core.Common.HumanReview.Models.HumanReviewLifecycleStatus;
 
 namespace EmbodySense.Web.Tests;
 
@@ -96,6 +98,45 @@ public sealed class HumanReviewProgramCompositionTests
             Assert.DoesNotContain("connection", decisionBody, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("grant", decisionBody, StringComparison.OrdinalIgnoreCase);
             Assert.Equal(afterDetail.Decisions.Single().OperationId, durableDecision.DecisionOperationId);
+        }
+        finally
+        {
+            await app.StopAsync();
+        }
+    }
+
+    [Fact]
+    public async Task Program_composition_rejects_out_of_range_review_versions_without_durable_mutation()
+    {
+        using var workspace = new TestWorkspace();
+        var runId = "run-web-program-invalid-version";
+        var codexPath = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
+        await using var app = CreateApp(workspace, codexPath, out var options, out var host);
+        await host.InitializeWorkspaceAsync();
+        var blueprint = await HumanReviewRecoveryCanonicalRunFactory.CreateApprovedRunAsync(runId, "admission-" + runId, materializedAtUtc: DateTimeOffset.UtcNow.AddMinutes(-5));
+        await PersistPendingHumanReviewAsync(workspace, blueprint);
+        await app.StartAsync();
+
+        try
+        {
+            using var client = new HttpClient { BaseAddress = new Uri(options.Url) };
+            var token = app.Services.GetRequiredService<WebSessionSecurity>().Token;
+            using var zeroResponse = await SendJsonAsync(client, $"/api/human-reviews/{runId}/approve", token, JsonSerializer.Serialize(new WebHumanReviewDecisionRequest(0, "web-program-zero-version", null), _jsonOptions));
+            using var oversizedResponse = await SendJsonAsync(client, $"/api/human-reviews/{runId}/approve", token, JsonSerializer.Serialize(new WebHumanReviewDecisionRequest(checked((int)HumanReviewContractLimits.MaxVersion + 1), "web-program-oversized-version", null), _jsonOptions));
+            var zero = JsonSerializer.Deserialize<HumanReviewDecisionResult>(await zeroResponse.Content.ReadAsStringAsync(), _jsonOptions);
+            var oversized = JsonSerializer.Deserialize<HumanReviewDecisionResult>(await oversizedResponse.Content.ReadAsStringAsync(), _jsonOptions);
+            using var durableStore = new CustomLoopRunStore(new WorkspacePaths(workspace.RootPath));
+            var durable = await durableStore.GetAsync(runId);
+            var review = Assert.IsType<HumanReviewRunState>(durable?.HumanReview);
+
+            Assert.Equal(HttpStatusCode.BadRequest, zeroResponse.StatusCode);
+            Assert.Equal(HttpStatusCode.BadRequest, oversizedResponse.StatusCode);
+            Assert.Equal(StartupDecisionStatus.Invalid, zero?.Status);
+            Assert.Equal(StartupDecisionStatus.Invalid, oversized?.Status);
+            Assert.Empty(review.AcceptedDecisions);
+            Assert.Null(review.AcceptedTerminalDecision);
+            Assert.Null(review.ContinuationReservation);
+            Assert.Equal(CommonLifecycleStatus.Pending, review.Lifecycle.Status);
         }
         finally
         {
