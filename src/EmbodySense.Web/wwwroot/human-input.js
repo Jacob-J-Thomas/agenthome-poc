@@ -10,6 +10,7 @@ const maximumResponseCharacters = 4000;
 const maximumReferenceCharacters = 512;
 const maximumPurposeCharacters = 240;
 const maximumPromptCharacters = 4000;
+const maximumRequestBodyBytes = 16_384;
 const sha256Pattern = /^[0-9a-f]{64}$/;
 const identifierPattern = /^[a-z0-9][a-z0-9._-]{0,119}$/;
 const cursorPattern = /^[A-Za-z0-9_-]+$/;
@@ -286,6 +287,11 @@ export function humanInputOutcomeMessage(status, httpStatus = null) {
 /** Explains why a new operation is rejected without evicting an exact retry identity. */
 export function humanInputOperationCapacityMessage() {
   return `The browser has reached the bounded limit of ${maximumOperationEntries} retained Human Input operations. No new request was sent; reuse an existing operation or reload before trying again.`;
+}
+
+/** Explains why a serialized Human Input request is rejected before transport. */
+export function humanInputRequestBodyCapacityMessage() {
+  return `The Human Input payload exceeds the server limit of ${maximumRequestBodyBytes.toLocaleString("en-US")} UTF-8 bytes. Shorten the response, explanation, or successor text and try again; no request was sent.`;
 }
 
 /** Creates the isolated Human Input surface over the authenticated Startup facade. */
@@ -601,6 +607,25 @@ export function createHumanInputSurface({
       setSupersedeStatus(humanInputOperationCapacityMessage(), "warning");
       return;
     }
+    const payload = {
+      operationId: operation.operationId,
+      expectedLifecycleVersion: posture.lifecycleVersion,
+      expectedLifecycleStatus: posture.status,
+      expectedRequest: requestReference(posture),
+      successor: {
+        purpose,
+        prompt,
+        responseSchema: posture.presentation.responseSchema,
+        privacyClass: posture.presentation.privacyClass,
+        expiresAtUtc: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+        responsePolicy: { kind: "preserve-canonical" },
+      },
+    };
+    const body = serializeHumanInputRequest(payload);
+    if (!body) {
+      setSupersedeStatus(humanInputRequestBodyCapacityMessage(), "warning");
+      return;
+    }
     state.actionInFlight = true;
     setBusy(true);
     try {
@@ -609,20 +634,7 @@ export function createHumanInputSurface({
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            operationId: operation.operationId,
-            expectedLifecycleVersion: posture.lifecycleVersion,
-            expectedLifecycleStatus: posture.status,
-            expectedRequest: requestReference(posture),
-            successor: {
-              purpose,
-              prompt,
-              responseSchema: posture.presentation.responseSchema,
-              privacyClass: posture.presentation.privacyClass,
-              expiresAtUtc: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
-              responsePolicy: { kind: "preserve-canonical" },
-            },
-          }),
+          body,
         },
       );
       if (
@@ -660,6 +672,11 @@ export function createHumanInputSurface({
   }
 
   async function submitOperation(action, payload, operationId, requestId) {
+    const body = serializeHumanInputRequest(payload);
+    if (!body) {
+      setOperationFeedback(humanInputRequestBodyCapacityMessage(), "warning");
+      return;
+    }
     state.actionInFlight = true;
     setBusy(true);
     try {
@@ -668,7 +685,7 @@ export function createHumanInputSurface({
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
+          body,
         },
       );
       setOperationFeedback(
@@ -1397,6 +1414,13 @@ function requestReference(posture) {
 
 function schemaDescription(schema) {
   return boundedHumanInputText(JSON.stringify(schema), 2048);
+}
+
+function serializeHumanInputRequest(payload) {
+  const body = JSON.stringify(payload);
+  return new TextEncoder().encode(body).byteLength <= maximumRequestBodyBytes
+    ? body
+    : null;
 }
 
 function formatToken(value) {

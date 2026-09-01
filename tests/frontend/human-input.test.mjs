@@ -8,6 +8,7 @@ import {
   humanInputOperationCapacityMessage,
   humanInputOperationIdentity,
   humanInputOutcomeMessage,
+  humanInputRequestBodyCapacityMessage,
   projectHumanInputPage,
   projectHumanInputPosture,
 } from "../../src/EmbodySense.Web/wwwroot/human-input.js";
@@ -333,6 +334,84 @@ test("Human Input retains 128 exact operation identities and fails closed before
   assert.equal(
     JSON.parse(postCalls()[129].options.body).operationId,
     lastOperationId,
+  );
+});
+
+test("Human Input measures exact UTF-8 request bytes at the server boundary", async () => {
+  const fixture = createFixture();
+  const calls = [];
+  const current = posture({
+    presentation: {
+      ...posture().presentation,
+      responseSchema: {
+        kind: "structured",
+        structuredFields: Array.from({ length: 4 }, (_, index) => ({
+          fieldId: `field-${index + 1}`,
+          kind: "text",
+          required: false,
+          maxTextCharacters: 4000,
+        })),
+      },
+    },
+  });
+  const requestJson = async (url, options = {}) => {
+    calls.push({ url, options });
+    if (url === "/api/human-input?maximumCount=50")
+      return { status: "ready", requests: [current], nextCursor: null };
+    if (url === "/api/human-input/request-input-1") return current;
+    if (options.method === "POST") return { status: "committed" };
+    throw new Error("unexpected request");
+  };
+  const surface = createHumanInputSurface({
+    document: fixture.document,
+    window: { crypto: { randomUUID: () => "boundary-operation" } },
+    requestJson,
+  });
+
+  await surface.activate();
+  const controls = () =>
+    fixture.elements.humanInputResponseEditor.children.map(
+      (field) => field.children[1],
+    );
+  const setValues = (values) =>
+    values.forEach((value, index) => {
+      controls()[index].value = value;
+    });
+  const postCalls = () =>
+    calls.filter((call) => call.options.method === "POST");
+
+  setValues([
+    "é".repeat(2500),
+    "é".repeat(2500),
+    "é".repeat(2500),
+    `${"é".repeat(390)}xxx`,
+  ]);
+  await clickAndFlush(fixture.elements.humanInputResponseSubmitButton);
+  assert.equal(postCalls().length, 1);
+  assert.equal(
+    new TextEncoder().encode(postCalls()[0].options.body).byteLength,
+    16_384,
+  );
+  assert.equal(
+    JSON.parse(postCalls()[0].options.body).value.structuredFields[3].text,
+    `${"é".repeat(390)}xxx`,
+  );
+
+  setValues([
+    "é".repeat(2500),
+    "é".repeat(2500),
+    "é".repeat(2500),
+    `${"é".repeat(390)}xxxx`,
+  ]);
+  await clickAndFlush(fixture.elements.humanInputResponseSubmitButton);
+  assert.equal(postCalls().length, 1);
+  assert.equal(
+    fixture.elements.humanInputResponseStatus.textContent,
+    humanInputRequestBodyCapacityMessage(),
+  );
+  assert.match(
+    fixture.elements.humanInputResponseStatus.textContent,
+    /16,384 UTF-8 bytes|shorten|no request was sent/i,
   );
 });
 
