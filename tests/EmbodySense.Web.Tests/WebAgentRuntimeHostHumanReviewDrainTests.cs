@@ -22,7 +22,6 @@ using EmbodySense.Web.Services;
 using CommonCustomLoopRunStatus = EmbodySense.Core.Common.Loops.Models.Custom.Execution.CustomLoopRunStatus;
 using CommonGovernedLoopFrontierStatus = EmbodySense.Core.Common.Loops.Execution.Models.GovernedLoopFrontierStatus;
 using StartupHumanReviewLifecycleStatus = EmbodySense.Core.Startup.HumanReview.Models.HumanReviewLifecycleStatus;
-using StartupHumanReviewAuthorizationRequest = EmbodySense.Core.Startup.HumanReview.Models.HumanReviewDecisionAuthorizationRequest;
 
 namespace EmbodySense.Web.Tests;
 
@@ -143,20 +142,4 @@ public sealed class WebAgentRuntimeHostHumanReviewDrainTests
         return running with { LifecycleVersion = 3, UpdatedAtUtc = updatedAtUtc, Frontier = frontier };
     }
 
-    private sealed class BlockingHumanReviewAuthorization : IHumanReviewDecisionAuthorizationProvider
-    {
-        private readonly TaskCompletionSource _entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        private readonly TaskCompletionSource _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        public async Task<HumanReviewDecisionAuthorizationResult?> AuthorizeAsync(StartupHumanReviewAuthorizationRequest request, CancellationToken cancellationToken = default)
-        {
-            _entered.TrySetResult();
-            await _release.Task.ConfigureAwait(false);
-            return new HumanReviewDecisionAuthorizationResult(HumanReviewDecisionAuthorizationStatus.Ready, request.RequestId, request.RequestHash, request.DecisionKind, request.DecisionOperationId, request.ProposalHash, request.EvaluatedAtUtc, "server-reviewer", request.EligibleReviewers[0].ReviewerRoleId, request.EligibleReviewers[0].ScopeIds, "server-correlation");
-        }
-
-        public Task WaitUntilEnteredAsync() => _entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
-
-        public void Release() => _release.TrySetResult();
-    }
 }
