@@ -143,7 +143,7 @@ public sealed class HumanReviewRecoveryRunner : IHumanReviewRecoveryRunner
 
         var continuation = await RecoverContinuationsAsync(cancellationToken).ConfigureAwait(false);
         var decisionAction = await RecoverDecisionActionsAsync(cancellationToken).ConfigureAwait(false);
-        return new(MapStatus(publication.Status, continuation.Status, decisionAction.Status), publication, continuation, decisionAction);
+        return new(MapStatus(publication, continuation, decisionAction), publication, continuation, decisionAction);
     }
 
     private async Task<HumanReviewPublicationRecoveryResult> RecoverApprovalPublicationAsync(CancellationToken cancellationToken)
@@ -565,15 +565,19 @@ public sealed class HumanReviewRecoveryRunner : IHumanReviewRecoveryRunner
         return options;
     }
 
-    private static HumanReviewRecoveryPassStatus MapStatus(HumanReviewPublicationRecoveryStatus publication, HumanReviewContinuationRecoveryStatus continuation, HumanReviewDecisionActionRecoveryStatus decisionAction)
-        => !Enum.IsDefined(publication)
-            || !Enum.IsDefined(continuation)
-            || !Enum.IsDefined(decisionAction)
-            || publication is HumanReviewPublicationRecoveryStatus.Unknown or HumanReviewPublicationRecoveryStatus.Invalid
-            || continuation is HumanReviewContinuationRecoveryStatus.Unknown or HumanReviewContinuationRecoveryStatus.Invalid
-            || decisionAction is HumanReviewDecisionActionRecoveryStatus.Unknown or HumanReviewDecisionActionRecoveryStatus.Invalid
+    private static HumanReviewRecoveryPassStatus MapStatus(HumanReviewPublicationRecoveryResult publication, HumanReviewContinuationRecoveryResult continuation, HumanReviewDecisionActionRecoveryResult decisionAction)
+        => !Enum.IsDefined(publication.Status)
+            || !Enum.IsDefined(continuation.Status)
+            || !Enum.IsDefined(decisionAction.Status)
+            || publication.Status is HumanReviewPublicationRecoveryStatus.Unknown or HumanReviewPublicationRecoveryStatus.Invalid
+            || continuation.Status is HumanReviewContinuationRecoveryStatus.Unknown or HumanReviewContinuationRecoveryStatus.Invalid
+            || decisionAction.Status is HumanReviewDecisionActionRecoveryStatus.Unknown or HumanReviewDecisionActionRecoveryStatus.Invalid
+            || publication.Items.Any(item => item.Status == HumanReviewPublicationRecoveryItemStatus.Invalid)
+            || continuation.Items.Any(item => item.Status == HumanReviewContinuationRecoveryItemStatus.Invalid)
+            || decisionAction.Items.Any(item => item.Status == HumanReviewDecisionActionRecoveryItemStatus.Invalid)
+            || decisionAction.PublicationItems.Any(item => item.Status == HumanReviewDecisionActionPublicationRecoveryItemStatus.Invalid)
             ? HumanReviewRecoveryPassStatus.Invalid
-            : publication == HumanReviewPublicationRecoveryStatus.Unavailable || continuation == HumanReviewContinuationRecoveryStatus.Unavailable || decisionAction == HumanReviewDecisionActionRecoveryStatus.Unavailable
+            : publication.Status == HumanReviewPublicationRecoveryStatus.Unavailable || continuation.Status == HumanReviewContinuationRecoveryStatus.Unavailable || decisionAction.Status == HumanReviewDecisionActionRecoveryStatus.Unavailable
                 ? HumanReviewRecoveryPassStatus.Unavailable
                 : HumanReviewRecoveryPassStatus.Current;
 

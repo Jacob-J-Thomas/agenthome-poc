@@ -30,8 +30,18 @@ namespace EmbodySense.Core.Startup.Tests.Loops.Execution.Sleep;
 
 internal static class HumanReviewRecoveryCanonicalRunFactory
 {
-    public static async Task<CustomLoopRunRecord> CreateApprovedRunAsync(string runId, string admissionOperationId, string? loopId = null)
+    public static async Task<CustomLoopRunRecord> CreateApprovedRunAsync(
+        string runId,
+        string admissionOperationId,
+        string? loopId = null,
+        DateTimeOffset? materializedAtUtc = null)
     {
+        var canonicalMaterializedAtUtc = materializedAtUtc ?? GovernedLoopSequentialApplicationTestFixture.Now.AddMinutes(2);
+        if (canonicalMaterializedAtUtc == default || canonicalMaterializedAtUtc.Offset != TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(materializedAtUtc));
+        }
+
         var artifact = GovernedLoopSequentialApplicationTestFixture.Artifact(
             [
                 GovernedLoopSequentialApplicationTestFixture.Trigger("trigger"),
@@ -92,7 +102,7 @@ internal static class HumanReviewRecoveryCanonicalRunFactory
             admissionRequest.RequestHash,
             artifact.ArtifactHash,
             artifact.LayoutHash,
-            now: GovernedLoopSequentialApplicationTestFixture.Now.AddMinutes(2));
+            now: canonicalMaterializedAtUtc);
         var adapterBinding = GovernedLoopSequentialContractHash.Apply(new GovernedLoopSequentialAdapterBinding(
             GovernedLoopSequentialAdapterBinding.CurrentSchemaVersion,
             receipt.Intent.WorkspaceId,
@@ -119,7 +129,7 @@ internal static class HumanReviewRecoveryCanonicalRunFactory
             store,
             new HumanReviewRecoveryCanonicalAuditRecorder(),
             new GovernedLoopSequentialEventIdentityGenerator(),
-            new HumanReviewRecoveryCanonicalTimeProvider(GovernedLoopSequentialApplicationTestFixture.Now.AddMinutes(2))).MaterializeAsync(materialization);
+            new HumanReviewRecoveryCanonicalTimeProvider(canonicalMaterializedAtUtc)).MaterializeAsync(materialization);
         var admitted = materialized.Run ?? throw new InvalidOperationException($"The canonical recovery test run was not materialized: {materialized.Status} {materialized.Detail}");
         var running = TransitionToRunning(admitted);
         var runningMutation = await store.UpdateAsync(running, admitted.LifecycleVersion);

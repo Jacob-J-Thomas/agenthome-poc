@@ -4,10 +4,13 @@ using EmbodySense.Core.Application.Loops.Sleep.Models;
 using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
+using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Core.Persistence.Loops.Execution.Sleep;
 using EmbodySense.Core.Startup.Loops.GraphAuthoring.Models;
+using EmbodySense.Core.Startup.Loops;
 using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Runtime.Models;
+using EmbodySense.Core.Startup.Tests.Loops.Execution.Sleep;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Tests.Support;
 
@@ -132,6 +135,47 @@ public sealed partial class AgentRuntimeFactoryTests
         Directory.CreateDirectory(paths.CustomLoopRunsPath);
         await File.WriteAllTextAsync(Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json"), "{\"schemaVersion\":2,\"revision\":1,\"entries\":[]}");
 
+        var start = await runtime.StartGovernedLoopLocalBackgroundWithStatusAsync();
+        var status = await runtime.ReadGovernedLoopLocalBackgroundStatusAsync();
+        var stop = await runtime.StopGovernedLoopLocalBackgroundAsync();
+
+        Assert.Equal(AgentRuntimeGovernedLoopBackgroundStartStatus.RepairRequired, start.Status);
+        Assert.Equal(AgentRuntimeGovernedLoopBackgroundReadiness.Unavailable, start.Readiness);
+        Assert.Equal(AgentRuntimeGovernedLoopBackgroundOwnership.Unknown, start.Ownership);
+        Assert.False(start.RetryAllowed);
+        Assert.Contains("human_review_recovery_requires_repair", start.Detail, StringComparison.Ordinal);
+        Assert.Equal(AgentRuntimeGovernedLoopBackgroundReadiness.Stopped, status.Readiness);
+        Assert.Equal(AgentRuntimeGovernedLoopBackgroundStopStatus.AlreadyStopped, stop.Status);
+    }
+
+    [Fact]
+    public async Task Background_start_fails_closed_when_a_current_human_review_page_contains_an_invalid_claim_item()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        const string RunId = "run-startup-human-review-invalid-claim";
+        var futurePublicationTime = DateTimeOffset.UtcNow.ToUniversalTime().AddMinutes(30);
+        var approved = await HumanReviewRecoveryCanonicalRunFactory.CreateApprovedRunAsync(
+            RunId,
+            "admission-startup-human-review-invalid-claim",
+            "startup-human-review-invalid-claim-loop",
+            futurePublicationTime);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        using (var seedStore = new CustomLoopRunStore(paths))
+        {
+            await SeedApprovedRunAsync(seedStore, approved);
+        }
+
+        var executablePath = await CreateFakeCodexExecutableAsync(workspace);
+        await using var runStoreProvider = new CustomLoopRunStoreProvider(workspace.RootPath);
+        var factory = AgentRuntimeFactory.ForFileCapabilityTrustRoot(
+                new RejectingApprovalPrompt(),
+                workspace.ServerStatePath,
+                CreateCompatibleRuntimeStatus(executablePath))
+            .WithCustomLoopRunStoreProvider(runStoreProvider)
+            .WithHumanReviewDecisionAuthorizationProvider(new HumanReviewDecisionAuthorizationProviderTestDouble());
+
+        await using var runtime = await factory.CreateAsync("test-model", workspace.RootPath, executablePath, "read-only", AgentRuntimeSurface.Web);
         var start = await runtime.StartGovernedLoopLocalBackgroundWithStatusAsync();
         var status = await runtime.ReadGovernedLoopLocalBackgroundStatusAsync();
         var stop = await runtime.StopGovernedLoopLocalBackgroundAsync();
