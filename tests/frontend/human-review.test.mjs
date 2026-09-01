@@ -10,7 +10,9 @@ import {
   humanReviewOutcomeMessage,
   humanReviewReadMessage,
   normalizeHumanReviewStatus,
+  projectHumanReviewEvidence,
   projectHumanReviewPage,
+  projectHumanReviewSummary,
 } from "../../src/EmbodySense.Web/wwwroot/human-review.js";
 
 const hash = "a".repeat(64);
@@ -70,7 +72,7 @@ test("Human Review normalizes the closed action vocabulary and rejects caller-sh
 test("Human Review page projection is bounded and fails closed on malformed identities or decisions", () => {
   const page = projectHumanReviewPage({
     status: "ready",
-    continuationCursor: "opaque-cursor",
+    continuationCursor: "Y3Vyc29y",
     items: [summary()],
   });
   assert.equal(page.status, "ready");
@@ -94,6 +96,50 @@ test("Human Review page projection is bounded and fails closed on malformed iden
     projectHumanReviewPage({
       status: "ready",
       items: [summary({ requestedDecisions: ["approve", "approve"] })],
+    }).status,
+    "invalid",
+  );
+  assert.equal(
+    projectHumanReviewPage({
+      status: "ready",
+      continuationCursor: "invalid cursor",
+      items: [summary()],
+    }).status,
+    "invalid",
+  );
+  assert.equal(
+    projectHumanReviewPage({
+      status: "ready",
+      continuationCursor: "x".repeat(1025),
+      items: [summary()],
+    }).status,
+    "invalid",
+  );
+  for (const field of ["lifecycleStatus", "runStatus", "frontierStatus"])
+    assert.equal(
+      projectHumanReviewSummary(summary({ [field]: "future" })),
+      null,
+    );
+});
+
+test("Human Review evidence projection fails closed for non-ready and malformed canonical reads", () => {
+  assert.equal(
+    projectHumanReviewEvidence({ status: "unavailable" }).status,
+    "unavailable",
+  );
+  assert.equal(
+    projectHumanReviewEvidence({ status: "conflict" }).status,
+    "conflict",
+  );
+  assert.equal(
+    projectHumanReviewEvidence({ status: "ready", evidence: [] }).status,
+    "invalid",
+  );
+  assert.equal(
+    projectHumanReviewEvidence({
+      status: "ready",
+      evidence: [],
+      effectEvidence: { status: "future", certainty: "unknown" },
     }).status,
     "invalid",
   );
@@ -258,6 +304,186 @@ test("Human Review fails closed when detail evidence is bound to another request
     fixture.elements.humanReviewDetailStatus.textContent,
     /canonical review response was invalid/i,
   );
+
+  const versionFixture = createFixture();
+  const versionSurface = createHumanReviewSurface({
+    document: versionFixture.document,
+    requestJson: async (url) => {
+      if (url === "/api/human-reviews?maximumCount=50")
+        return {
+          status: "ready",
+          items: [summary()],
+          continuationCursor: null,
+        };
+      if (url.endsWith("/evidence"))
+        return { status: "ready", evidence: [], effectEvidence: null };
+      if (url.endsWith("/posture"))
+        return { status: "ready", posture: { lifecycleStatus: "pending" } };
+      return {
+        status: "ready",
+        detail: { summary: summary({ lifecycleVersion: 4 }) },
+      };
+    },
+  });
+
+  await versionSurface.activate();
+  assert.equal(versionFixture.elements.humanReviewApproveButton.disabled, true);
+});
+
+test("Human Review does not fall back to detail effect evidence when canonical evidence is unavailable", async () => {
+  for (const evidenceFailure of ["unavailable", "conflict"]) {
+    const fixture = createFixture();
+    const requestJson = async (url) => {
+      if (url === "/api/human-reviews?maximumCount=50")
+        return {
+          status: "ready",
+          items: [summary()],
+          continuationCursor: null,
+        };
+      if (url.endsWith("/evidence")) {
+        if (evidenceFailure === "unavailable")
+          throw Object.assign(new Error("evidence unavailable"), {
+            status: 503,
+          });
+        return { status: evidenceFailure };
+      }
+      if (url.endsWith("/posture"))
+        return { status: "ready", posture: { lifecycleStatus: "pending" } };
+      return {
+        status: "ready",
+        detail: {
+          summary: summary(),
+          previews: [],
+          decisions: [],
+          evidence: [],
+          runtime: { lifecycleStatus: "pending" },
+          effectEvidence: {
+            status: "exact-not-started",
+            certainty: "not-started",
+          },
+        },
+      };
+    };
+    const surface = createHumanReviewSurface({
+      document: fixture.document,
+      requestJson,
+    });
+
+    await surface.activate();
+    assert.equal(fixture.elements.humanReviewApproveButton.disabled, true);
+    assert.match(
+      fixture.elements.humanReviewDetailStatus.textContent,
+      /evidence posture is not ready/i,
+    );
+    assert.match(
+      fixture.elements.humanReviewActionStatus.textContent,
+      /evidence is not ready/i,
+    );
+  }
+});
+
+test("Human Review paginates bounded canonical pages and rejects cursor cycles and page overflow", async () => {
+  const first = summary({
+    runId: "run-review-first",
+    requestId: "request-review-first",
+  });
+  const second = summary({
+    runId: "run-review-second",
+    requestId: "request-review-second",
+  });
+  const cursor = "Y3Vyc29y";
+  const pagedFixture = createFixture();
+  const pagedCalls = [];
+  const pagedRequestJson = async (url) => {
+    pagedCalls.push(url);
+    if (url === "/api/human-reviews?maximumCount=50")
+      return { status: "ready", items: [first], continuationCursor: cursor };
+    if (url === `/api/human-reviews?maximumCount=50&cursor=${cursor}`)
+      return { status: "ready", items: [second], continuationCursor: null };
+    if (url.endsWith("/evidence"))
+      return { status: "ready", evidence: [], effectEvidence: null };
+    if (url.endsWith("/posture"))
+      return { status: "ready", posture: { lifecycleStatus: "pending" } };
+    return {
+      status: "ready",
+      detail: {
+        summary: first,
+        previews: [],
+        decisions: [],
+        evidence: [],
+        runtime: {},
+      },
+    };
+  };
+  const pagedSurface = createHumanReviewSurface({
+    document: pagedFixture.document,
+    requestJson: pagedRequestJson,
+  });
+  await pagedSurface.activate();
+  assert.equal(pagedFixture.elements.humanReviewList.children.length, 2);
+  assert.ok(
+    pagedCalls.includes(`/api/human-reviews?maximumCount=50&cursor=${cursor}`),
+  );
+
+  const cycleFixture = createFixture();
+  let cycleCalls = 0;
+  const cycleSurface = createHumanReviewSurface({
+    document: cycleFixture.document,
+    requestJson: async () => {
+      cycleCalls++;
+      return { status: "ready", items: [first], continuationCursor: cursor };
+    },
+  });
+  await cycleSurface.activate();
+  assert.equal(cycleFixture.elements.humanReviewList.children.length, 0);
+  assert.equal(cycleCalls, 2);
+
+  const overflowFixture = createFixture();
+  let overflowCalls = 0;
+  const overflowSurface = createHumanReviewSurface({
+    document: overflowFixture.document,
+    requestJson: async () => {
+      overflowCalls++;
+      return {
+        status: "ready",
+        items: [
+          summary({
+            runId: `run-overflow-${overflowCalls}`,
+            requestId: `request-overflow-${overflowCalls}`,
+          }),
+        ],
+        continuationCursor: `cursor--${String(overflowCalls).padStart(2, "0")}`,
+      };
+    },
+  });
+  await overflowSurface.activate();
+  assert.equal(overflowFixture.elements.humanReviewList.children.length, 0);
+  assert.equal(overflowCalls, 20);
+
+  const aggregateFixture = createFixture();
+  let aggregateCalls = 0;
+  const aggregateSurface = createHumanReviewSurface({
+    document: aggregateFixture.document,
+    requestJson: async () => {
+      aggregateCalls++;
+      const items = Array.from(
+        { length: aggregateCalls === 11 ? 1 : 50 },
+        (_, index) =>
+          summary({
+            runId: `run-aggregate-${aggregateCalls}-${index}`,
+            requestId: `request-aggregate-${aggregateCalls}-${index}`,
+          }),
+      );
+      return {
+        status: "ready",
+        items,
+        continuationCursor: `aggregate-${aggregateCalls}`,
+      };
+    },
+  });
+  await aggregateSurface.activate();
+  assert.equal(aggregateFixture.elements.humanReviewList.children.length, 0);
+  assert.equal(aggregateCalls, 11);
 });
 
 function createFixture() {

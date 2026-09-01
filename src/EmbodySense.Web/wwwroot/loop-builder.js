@@ -3938,7 +3938,7 @@ function appendRunProgressEvidence(run, definition) {
   appendEvidenceSection(
     "Status and checkpoint",
     `${formatStatus(run.status)} · ${current}`,
-    `run ${run.id}\nloop ${run.loopId} · role ${definitionRoleId(definition)} · ${run.surface} surface\nlifecycle version ${run.lifecycleVersion}\nexecution ${deadlineText}\nnext proved boundary ${nextStep}\niteration ${checkpoint?.iteration ?? "unknown"} · accepted repeats ${checkpoint?.acceptedRepeatCount ?? "unknown"} · tool requests ${checkpoint?.toolRequestsUsed ?? "unknown"}\nlast committed sequence ${checkpoint?.lastCommittedSequence ?? "none"} · latest event ${latest?.sequence ?? "none"} ${latest?.kind ? formatStatus(latest.kind) : ""}\npending approvals visible to this connection ${elements.approvals.children.length}`,
+    `run ${run.id}\nloop ${run.loopId} · role ${definitionRoleId(definition)} · ${run.surface} surface\nlifecycle version ${run.lifecycleVersion}\nexecution ${deadlineText}\nnext proved boundary ${nextStep}\niteration ${checkpoint?.iteration ?? "unknown"} · accepted repeats ${checkpoint?.acceptedRepeatCount ?? "unknown"} · tool requests ${checkpoint?.toolRequestsUsed ?? "unknown"}\nlast committed sequence ${checkpoint?.lastCommittedSequence ?? "none"} · latest event ${latest?.sequence ?? "none"} ${latest?.kind ? formatStatus(latest.kind) : ""}\ndurable Human Review state is available in Reviews; Chat approvals remain in Chat`,
   );
 }
 

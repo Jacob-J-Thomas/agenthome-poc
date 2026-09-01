@@ -6044,7 +6044,7 @@ test("Runs projects durable timeline and context evidence from the authenticated
   );
   assert.match(
     app.elements.inspectorContent.textContent,
-    /pending approvals visible to this connection 0/,
+    /durable Human Review state is available in Reviews; Chat approvals remain in Chat/,
   );
   assert.match(
     app.elements.inspectorContent.textContent,

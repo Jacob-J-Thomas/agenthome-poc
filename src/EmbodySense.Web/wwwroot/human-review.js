@@ -4,8 +4,61 @@ const maximumEvidenceItems = 64;
 const maximumDecisionItems = 16;
 const maximumDisplayCharacters = 1024;
 const maximumOperationEntries = 128;
+const maximumReviewPages = 20;
+const maximumAggregateItems = 500;
 const sha256Pattern = /^[0-9a-f]{64}$/;
 const identifierPattern = /^[a-z0-9][a-z0-9._-]{0,119}$/;
+const cursorPattern = /^[A-Za-z0-9_-]+$/;
+const lifecycleStatuses = new Set([
+  "pending",
+  "awaiting-information",
+  "approved",
+  "rejected",
+  "cancelled",
+  "expired",
+  "superseded",
+  "conflicted",
+]);
+const runStatuses = new Set([
+  "admitted",
+  "running",
+  "pause-requested",
+  "paused",
+  "cancel-requested",
+  "completed",
+  "failed",
+  "cancelled",
+  "needs-review",
+  "waiting",
+]);
+const frontierStatuses = new Set([
+  "active",
+  "waiting",
+  "review-blocked",
+  "completed",
+  "failed",
+  "cancelled",
+]);
+const effectEvidenceStatuses = new Set([
+  "invalid",
+  "exact-not-started",
+  "dispatched",
+  "conclusive",
+  "ambiguous",
+  "terminal",
+  "missing",
+  "corrupt",
+  "unavailable",
+  "stale",
+]);
+const effectCertaintyStatuses = new Set([
+  "unknown",
+  "not-started",
+  "dispatched",
+  "conclusive",
+  "ambiguous",
+  "terminal",
+]);
 const supportedActions = Object.freeze([
   "approve",
   "reject",
@@ -66,13 +119,16 @@ export function projectHumanReviewPage(response) {
   const items = response.items.map(projectHumanReviewSummary);
   if (items.some((item) => item === null))
     return Object.freeze({ status: "invalid", items: [], cursor: null });
+  const cursor =
+    typeof response.continuationCursor === "string"
+      ? response.continuationCursor
+      : null;
+  if (cursor !== null && !isValidHumanReviewCursor(cursor))
+    return Object.freeze({ status: "invalid", items: [], cursor: null });
   return Object.freeze({
     status,
     items: Object.freeze(items),
-    cursor:
-      typeof response.continuationCursor === "string"
-        ? response.continuationCursor
-        : null,
+    cursor,
   });
 }
 
@@ -96,12 +152,52 @@ export function projectHumanReviewSummary(summary) {
     new Set(requestedDecisions).size !== requestedDecisions.length
   )
     return null;
+  const lifecycleStatus = validatedStatus(
+    summary.lifecycleStatus,
+    lifecycleStatuses,
+  );
+  const runStatus = validatedStatus(summary.runStatus, runStatuses);
+  const frontierStatus = validatedStatus(
+    summary.frontierStatus,
+    frontierStatuses,
+  );
+  if (!lifecycleStatus || !runStatus || !frontierStatus) return null;
   return Object.freeze({
     ...summary,
     requestedDecisions: Object.freeze(requestedDecisions),
-    lifecycleStatus: normalizeHumanReviewStatus(summary.lifecycleStatus),
-    runStatus: normalizeHumanReviewStatus(summary.runStatus),
-    frontierStatus: normalizeHumanReviewStatus(summary.frontierStatus),
+    lifecycleStatus,
+    runStatus,
+    frontierStatus,
+  });
+}
+
+export function projectHumanReviewEvidence(response) {
+  const status = normalizeHumanReviewStatus(response?.status);
+  if (status !== "ready")
+    return Object.freeze({ status, evidence: [], effectEvidence: null });
+  if (
+    !Array.isArray(response.evidence) ||
+    response.evidence.length > maximumEvidenceItems ||
+    !Object.hasOwn(response, "effectEvidence")
+  )
+    return Object.freeze({
+      status: "invalid",
+      evidence: [],
+      effectEvidence: null,
+    });
+  const effectEvidence = projectHumanReviewEffectEvidence(
+    response.effectEvidence,
+  );
+  if (response.effectEvidence !== null && effectEvidence === null)
+    return Object.freeze({
+      status: "invalid",
+      evidence: [],
+      effectEvidence: null,
+    });
+  return Object.freeze({
+    status,
+    evidence: Object.freeze(response.evidence),
+    effectEvidence,
   });
 }
 
@@ -203,6 +299,8 @@ export function createHumanReviewSurface({
     selectedRunId: null,
     selectedSummary: null,
     selectionGeneration: 0,
+    evidenceProjection: null,
+    evidenceReady: false,
   };
 
   function activate() {
@@ -235,11 +333,7 @@ export function createHumanReviewSurface({
   async function refreshCore(runId) {
     setListBusy(true);
     try {
-      const page = projectHumanReviewPage(
-        await requestJson(
-          `/api/human-reviews?maximumCount=${maximumPageItems}`,
-        ),
-      );
+      const page = await readReviewPages();
       state.items = page.status === "ready" ? page.items : [];
       if (runId && state.items.some((item) => item.runId === runId))
         state.selectedRunId = runId;
@@ -266,6 +360,42 @@ export function createHumanReviewSurface({
     }
   }
 
+  async function readReviewPages() {
+    const items = [];
+    const identities = new Set();
+    const cursors = new Set();
+    let cursor = null;
+    for (let pageNumber = 0; pageNumber < maximumReviewPages; pageNumber++) {
+      const query = cursor ? `&cursor=${encodeURIComponent(cursor)}` : "";
+      const page = projectHumanReviewPage(
+        await requestJson(
+          `/api/human-reviews?maximumCount=${maximumPageItems}${query}`,
+        ),
+      );
+      if (page.status !== "ready") return page;
+      if (items.length + page.items.length > maximumAggregateItems)
+        return { status: "invalid", items: [], cursor: null };
+      for (const item of page.items) {
+        const identity = humanReviewSummaryIdentity(item);
+        if (identities.has(identity))
+          return { status: "invalid", items: [], cursor: null };
+        identities.add(identity);
+        items.push(item);
+      }
+      if (!page.cursor)
+        return Object.freeze({
+          status: "ready",
+          items: Object.freeze(items),
+          cursor: null,
+        });
+      if (cursors.has(page.cursor))
+        return { status: "invalid", items: [], cursor: null };
+      cursors.add(page.cursor);
+      cursor = page.cursor;
+    }
+    return { status: "invalid", items: [], cursor: null };
+  }
+
   async function readSelectedReview() {
     const summary = state.selectedSummary;
     if (!summary) {
@@ -276,6 +406,8 @@ export function createHumanReviewSurface({
     state.detail = null;
     state.evidence = null;
     state.posture = null;
+    state.evidenceProjection = null;
+    state.evidenceReady = false;
     renderDetailLoading(summary);
     const encodedRunId = encodeURIComponent(summary.runId);
     const [detail, evidence, posture] = await Promise.all([
@@ -286,8 +418,17 @@ export function createHumanReviewSurface({
     if (generation !== state.selectionGeneration) return;
     state.detail = detail;
     state.evidence = evidence;
+    state.evidenceProjection =
+      evidence.status === "ready"
+        ? projectHumanReviewEvidence(evidence.value)
+        : Object.freeze({
+            status: evidence.status,
+            evidence: [],
+            effectEvidence: null,
+          });
+    state.evidenceReady = state.evidenceProjection.status === "ready";
     state.posture = posture;
-    renderDetail(summary, detail, evidence, posture);
+    renderDetail(summary, detail, state.evidenceProjection, posture);
   }
 
   async function readEndpoint(url) {
@@ -389,7 +530,9 @@ export function createHumanReviewSurface({
       )
         configureActions(
           state.selectedSummary,
-          state.evidence?.value?.effectEvidence,
+          state.evidenceProjection?.effectEvidence,
+          true,
+          state.evidenceReady,
         );
     }
   }
@@ -482,37 +625,36 @@ export function createHumanReviewSurface({
       exactSummary.purpose || "Human Review",
     );
     elements.identity.textContent = `Request ${boundedHumanReviewText(exactSummary.requestId, 120)} · ${shortHash(exactSummary.requestHash)}`;
-    elements.detailStatus.textContent = detailReady
-      ? "Canonical state reread. Browser content is a redacted projection; authority remains server-owned."
-      : humanReviewReadMessage(
-          detailResult?.status === "ready" && detail?.status === "ready"
-            ? "invalid"
-            : detailResult?.status,
-          detailResult?.status === "ready" ? null : detailResult?.httpStatus,
-        );
-    elements.detailStatus.className = detailReady
-      ? "human-review-status"
-      : "human-review-status error";
+    const evidenceReady = evidenceResult?.status === "ready";
+    elements.detailStatus.textContent =
+      detailReady && evidenceReady
+        ? "Canonical state reread. Browser content is a redacted projection; authority remains server-owned."
+        : detailReady
+          ? "Canonical review loaded, but evidence posture is not ready. Approval is disabled until evidence is ready."
+          : humanReviewReadMessage(
+              detailResult?.status === "ready" && detail?.status === "ready"
+                ? "invalid"
+                : detailResult?.status,
+              detailResult?.status === "ready"
+                ? null
+                : detailResult?.httpStatus,
+            );
+    elements.detailStatus.className =
+      detailReady && evidenceReady
+        ? "human-review-status"
+        : "human-review-status error";
     renderSummary(
       exactSummary,
       projectedDetail?.runtime ?? postureResult?.value?.posture,
     );
     renderPreviews(projectedDetail?.previews);
-    const evidencePayload =
-      evidenceResult?.status === "ready" ? evidenceResult.value : null;
-    const evidenceItems =
-      evidencePayload?.status === "ready"
-        ? evidencePayload.evidence
-        : projectedDetail?.evidence;
-    renderEvidence(
-      evidenceItems,
-      evidencePayload?.effectEvidence ?? projectedDetail?.effectEvidence,
-    );
+    renderEvidence(evidenceResult, evidenceReady);
     renderDecisions(projectedDetail?.decisions);
     configureActions(
       exactSummary,
-      evidencePayload?.effectEvidence ?? projectedDetail?.effectEvidence,
+      evidenceResult?.effectEvidence,
       detailReady,
+      evidenceReady,
     );
   }
 
@@ -572,20 +714,25 @@ export function createHumanReviewSurface({
     }
   }
 
-  function renderEvidence(evidence, effectEvidence) {
+  function renderEvidence(evidence, evidenceReady) {
     clearCollection(elements.evidence);
-    const values = Array.isArray(evidence)
-      ? evidence.slice(0, maximumEvidenceItems)
-      : [];
-    elements.evidencePosture.textContent = effectEvidence
-      ? `Effect posture: ${formatToken(effectEvidence.status)} · certainty: ${formatToken(effectEvidence.certainty)}`
-      : "Value-free effect posture";
+    const values =
+      evidenceReady && Array.isArray(evidence?.evidence)
+        ? evidence.evidence.slice(0, maximumEvidenceItems)
+        : [];
+    const effectEvidence = evidenceReady ? evidence.effectEvidence : null;
+    elements.evidencePosture.textContent = evidenceReady
+      ? effectEvidence
+        ? `Effect posture: ${formatToken(effectEvidence.status)} · certainty: ${formatToken(effectEvidence.certainty)}`
+        : "No exact effect evidence is retained."
+      : `Canonical evidence is ${formatToken(evidence?.status)}. Approval remains disabled until it is ready.`;
     elements.effectEvidence.replaceChildren();
-    if (effectEvidence) {
+    if (effectEvidence || !evidenceReady) {
       const posture = document.createElement("p");
-      posture.textContent =
-        "Effect values and authority material are intentionally withheld. " +
-        `Current evidence is ${formatToken(effectEvidence.status)}.`;
+      posture.textContent = effectEvidence
+        ? "Effect values and authority material are intentionally withheld. " +
+          `Current evidence is ${formatToken(effectEvidence.status)}.`
+        : "The canonical evidence read is not ready. Approval cannot dispatch an effect from this surface.";
       elements.effectEvidence.append(posture);
     }
     if (values.length === 0) {
@@ -640,7 +787,12 @@ export function createHumanReviewSurface({
     }
   }
 
-  function configureActions(summary, effectEvidence, detailReady = true) {
+  function configureActions(
+    summary,
+    effectEvidence,
+    detailReady = true,
+    evidenceReady = true,
+  ) {
     const lifecycle = normalizeHumanReviewStatus(summary.lifecycleStatus);
     const requested = new Set(summary.requestedDecisions);
     const effectStatus = normalizeHumanReviewStatus(effectEvidence?.status);
@@ -660,12 +812,17 @@ export function createHumanReviewSurface({
         !detailReady ||
         !pending ||
         !requested.has(action) ||
-        (action === "approve" && approvalBlocked);
+        (action === "approve" && (!evidenceReady || approvalBlocked));
       button.setAttribute("aria-disabled", button.disabled ? "true" : "false");
     }
     elements.informationField.hidden =
       !requested.has("request-information") || !pending;
-    if (approvalBlocked && requested.has("approve"))
+    if (!evidenceReady)
+      setActionStatus(
+        "Canonical effect evidence is not ready. Approval is disabled until the evidence read succeeds.",
+        "warning",
+      );
+    else if (approvalBlocked && requested.has("approve"))
       setActionStatus(
         "Approval is blocked because exact effect evidence needs revalidation. No effect is dispatched by this surface.",
         "warning",
@@ -770,6 +927,49 @@ function clearCollection(element) {
   element?.replaceChildren?.();
 }
 
+function validatedStatus(value, allowed) {
+  const normalized = normalizeHumanReviewStatus(value);
+  return allowed.has(normalized) ? normalized : null;
+}
+
+function projectHumanReviewEffectEvidence(effectEvidence) {
+  if (effectEvidence === null) return null;
+  if (
+    !effectEvidence ||
+    typeof effectEvidence !== "object" ||
+    !effectEvidenceStatuses.has(
+      normalizeHumanReviewStatus(effectEvidence.status),
+    ) ||
+    (effectEvidence.certainty !== null &&
+      !effectCertaintyStatuses.has(
+        normalizeHumanReviewStatus(effectEvidence.certainty),
+      ))
+  )
+    return null;
+  return Object.freeze({
+    ...effectEvidence,
+    status: normalizeHumanReviewStatus(effectEvidence.status),
+    certainty:
+      effectEvidence.certainty === null
+        ? null
+        : normalizeHumanReviewStatus(effectEvidence.certainty),
+  });
+}
+
+function isValidHumanReviewCursor(cursor) {
+  return (
+    typeof cursor === "string" &&
+    cursor.length <= 1024 &&
+    cursor.length > 0 &&
+    cursor.length % 4 !== 1 &&
+    cursorPattern.test(cursor)
+  );
+}
+
+function humanReviewSummaryIdentity(summary) {
+  return `${summary.runId}\u001f${summary.requestId}\u001f${summary.requestHash}`;
+}
+
 function isIdentifier(value) {
   return typeof value === "string" && identifierPattern.test(value);
 }
@@ -784,7 +984,8 @@ function sameHumanReviewIdentity(left, right) {
   return (
     left.runId === right.runId &&
     left.requestId === right.requestId &&
-    left.requestHash === right.requestHash
+    left.requestHash === right.requestHash &&
+    left.lifecycleVersion === right.lifecycleVersion
   );
 }
 
