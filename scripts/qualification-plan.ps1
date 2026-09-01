@@ -269,7 +269,8 @@ $script:QualificationLinkedTestMappings = @(
         TestProjects = @(
             "tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj",
             "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj",
-            "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj"
+            "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj",
+            "tests/EmbodySense.Web.Tests/EmbodySense.Web.Tests.csproj"
         )
     },
     [pscustomobject]@{
@@ -277,7 +278,8 @@ $script:QualificationLinkedTestMappings = @(
         TestProjects = @(
             "tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj",
             "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj",
-            "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj"
+            "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj",
+            "tests/EmbodySense.Web.Tests/EmbodySense.Web.Tests.csproj"
         )
     },
     [pscustomobject]@{
@@ -292,7 +294,50 @@ $script:QualificationLinkedTestMappings = @(
         TestProjects = @(
             "tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj",
             "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj",
-            "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj"
+            "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj",
+            "tests/EmbodySense.Web.Tests/EmbodySense.Web.Tests.csproj"
+        )
+    },
+    [pscustomobject]@{
+        Path = "tests/EmbodySense.Core.Startup.Tests/Loops/Execution/Sleep/HumanReviewRecoveryCanonicalAuditRecorder.cs"
+        TestProjects = @(
+            "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj",
+            "tests/EmbodySense.Web.Tests/EmbodySense.Web.Tests.csproj"
+        )
+    },
+    [pscustomobject]@{
+        Path = "tests/EmbodySense.Core.Startup.Tests/Loops/Execution/Sleep/HumanReviewRecoveryCanonicalRunFactory.cs"
+        TestProjects = @(
+            "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj",
+            "tests/EmbodySense.Web.Tests/EmbodySense.Web.Tests.csproj"
+        )
+    },
+    [pscustomobject]@{
+        Path = "tests/EmbodySense.Core.Startup.Tests/Loops/Execution/Sleep/HumanReviewRecoveryCanonicalRunStore.cs"
+        TestProjects = @(
+            "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj",
+            "tests/EmbodySense.Web.Tests/EmbodySense.Web.Tests.csproj"
+        )
+    },
+    [pscustomobject]@{
+        Path = "tests/EmbodySense.Core.Startup.Tests/Loops/Execution/Sleep/HumanReviewRecoveryCanonicalTimeProvider.cs"
+        TestProjects = @(
+            "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj",
+            "tests/EmbodySense.Web.Tests/EmbodySense.Web.Tests.csproj"
+        )
+    },
+    [pscustomobject]@{
+        Path = "tests/EmbodySense.Core.Startup.Tests/Loops/Execution/Sleep/HumanReviewRecoveryServerAuthorizer.cs"
+        TestProjects = @(
+            "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj",
+            "tests/EmbodySense.Web.Tests/EmbodySense.Web.Tests.csproj"
+        )
+    },
+    [pscustomobject]@{
+        Path = "tests/EmbodySense.Core.Startup.Tests/Loops/Execution/Sleep/HumanReviewRecoveryTrustedClock.cs"
+        TestProjects = @(
+            "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj",
+            "tests/EmbodySense.Web.Tests/EmbodySense.Web.Tests.csproj"
         )
     },
     [pscustomobject]@{
