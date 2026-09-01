@@ -6,6 +6,7 @@ import test from "node:test";
 import vm from "node:vm";
 import { projectFrontier } from "../../src/EmbodySense.Web/wwwroot/frontier-projection.js";
 import { createGovernedGraphWorkspace } from "../../src/EmbodySense.Web/wwwroot/governed-graph-workspace.js";
+import { createGovernedScheduleAuthoring } from "../../src/EmbodySense.Web/wwwroot/governed-schedule-authoring.js";
 import {
   controlKinds,
   controlRequest,
@@ -223,6 +224,7 @@ test("governed graph authoring waits for conclusive Loops hydration", async () =
   assert.equal(app.elements.governedGraphTab.disabled, true);
   assert.equal(app.elements.governedGraphNewButton.disabled, true);
   assert.equal(app.elements.governedGraphId.disabled, true);
+  assert.equal(app.elements.governedScheduleSubmitButton.disabled, true);
   assert.equal(app.elements.governedGraphView.inert, true);
   assert.equal(app.elements.loopInitializationPanel.hidden, false);
   assert.match(
@@ -240,10 +242,12 @@ test("governed graph authoring waits for conclusive Loops hydration", async () =
   await hydration;
 
   assert.equal(app.elements.governedGraphTab.disabled, false);
+  assert.equal(app.elements.governedScheduleSubmitButton.disabled, false);
   assert.equal(app.elements.loopInitializationPanel.hidden, true);
   const firstAuthoringClick = app.elements.governedGraphTab.click();
   await firstAuthoringClick;
   assert.equal(app.elements.governedGraphView.hidden, false);
+  assert.equal(app.elements.governedScheduleSubmitButton.disabled, false);
   assert.match(
     app.elements.governedGraphLifecycle.textContent,
     /Published · lifecycle v4/,
@@ -1000,6 +1004,14 @@ test("governed graph workspace uses the server catalog and submits no caller-own
       changeKind: "unknown",
       errors: [
         {
+          code: "node.wait-contract.incompatible",
+          elementKind: "node",
+          elementId: "wait-authenticated-event",
+          path: "graph.nodes[wait-authenticated-event]",
+          message:
+            "The Wait condition is not one exact canonical UTC timestamp or bounded governed event reference.",
+        },
+        {
           code: "graph.terminal.required",
           elementKind: "graph",
           elementId: "scheduled-review",
@@ -1032,6 +1044,20 @@ test("governed graph workspace uses the server catalog and submits no caller-own
   );
   parameterInputs[0].value = "2026-08-13T12:00:00.0000000Z";
   await parameterInputs[0].input();
+  const eventWait = findByTag(app.elements.governedGraphCatalog, "button").find(
+    (button) => /wait-authenticated-event/.test(button.textContent),
+  );
+  await eventWait.click();
+  const eventReference = findByTag(
+    app.elements.governedGraphInspector,
+    "input",
+  )[0];
+  eventReference.value = "governed-event-reference";
+  await eventReference.input();
+  assert.match(
+    app.elements.governedGraphInspector.textContent,
+    /Wait configurationAuthenticated event.*server validates it on save or publish/i,
+  );
 
   await app.context.refreshWorkspace();
 
@@ -1045,7 +1071,7 @@ test("governed graph workspace uses the server catalog and submits no caller-own
   );
   assert.equal(
     findByTag(app.elements.governedGraphInspector, "input")[0].value,
-    "2026-08-13T12:00:00.0000000Z",
+    "governed-event-reference",
   );
   assert.match(
     app.elements.governedGraphNotice.textContent,
@@ -1061,20 +1087,101 @@ test("governed graph workspace uses the server catalog and submits no caller-own
   assert.equal(mutation.body.kind, "create-draft");
   assert.equal(mutation.body.graphId, "scheduled-review");
   assert.deepEqual(
-    mutation.body.graphCandidate.nodes.map((node) => node.descriptor.typeId),
-    ["schedule-trigger", "wait-timestamp"],
+    mutation.body.graphCandidate.nodes
+      .map((node) => node.descriptor.typeId)
+      .sort(),
+    ["schedule-trigger", "wait-authenticated-event", "wait-timestamp"],
   );
-  assert.deepEqual(mutation.body.graphCandidate.nodes[0].parameters, {});
+  const nodesByType = Object.fromEntries(
+    mutation.body.graphCandidate.nodes.map((node) => [
+      node.descriptor.typeId,
+      node,
+    ]),
+  );
+  assert.deepEqual(nodesByType["schedule-trigger"].parameters, {});
   assert.equal(
-    mutation.body.graphCandidate.nodes[1].parameters["deadline-utc"],
+    nodesByType["wait-timestamp"].parameters["deadline-utc"],
     "2026-08-13T12:00:00.0000000Z",
+  );
+  assert.equal(
+    nodesByType["wait-authenticated-event"].parameters["event-reference"],
+    "governed-event-reference",
   );
   assert.equal(Object.hasOwn(mutation.body, "actorId"), false);
   assert.equal(Object.hasOwn(mutation.body, "workspaceId"), false);
   assert.equal(Object.hasOwn(mutation.body, "authorityEvidenceHash"), false);
   assert.match(
     app.elements.governedGraphErrors.textContent,
-    /graph\.terminal\.required.*terminalNodeIds.*terminal node is required/i,
+    /node\.wait-contract\.incompatible.*wait-authenticated-event.*graph\.terminal\.required.*terminalNodeIds.*terminal node is required/i,
+  );
+});
+
+test("schedule authoring requires the exact visible published Graph ID and a clean graph workspace", async () => {
+  const server = new FakeFetchServer(createCatalog());
+  server.on("GET", "/api/governed-graphs/catalog", () => ({
+    status: 200,
+    body: createGovernedGraphCatalog(),
+  }));
+  server.on(
+    "GET",
+    "/api/governed-graphs/detail?graphId=published-graph",
+    () => ({
+      status: 200,
+      body: governedGraphRead(
+        governedGraphLifecycle("published", 4),
+        governedGraphArtifact(
+          governedGraphLifecycle("published", 4),
+          "Published graph",
+        ),
+      ),
+    }),
+  );
+  server.on("POST", "/api/governed-schedules/create", () => ({
+    status: 200,
+    body: {
+      status: "confirmation-required",
+      authorityPreviewHash: "a".repeat(64),
+    },
+  }));
+  const app = await loadLoopBuilder({ server });
+
+  await app.elements.governedGraphTab.click();
+  app.elements.governedGraphId.value = "published-graph";
+  await app.elements.governedGraphId.input();
+  await app.elements.governedGraphLoadButton.click();
+  assert.equal(app.elements.governedScheduleSubmitButton.disabled, false);
+
+  app.elements.governedGraphId.value = "other-graph";
+  await app.elements.governedGraphId.input();
+  await app.elements.governedScheduleSubmitButton.click();
+  assert.equal(
+    server.calls.some(
+      (call) =>
+        call.method === "POST" && call.url === "/api/governed-schedules/create",
+    ),
+    false,
+  );
+  assert.match(
+    app.elements.governedScheduleResult.textContent,
+    /publish and refresh one exact graph revision/i,
+  );
+
+  app.elements.governedGraphId.value = "published-graph";
+  await app.elements.governedGraphId.input();
+  await app.elements.governedGraphLoadButton.click();
+  app.elements.governedGraphDisplayName.value = "Unsaved graph edit";
+  await app.elements.governedGraphDisplayName.input();
+  await app.elements.governedScheduleSubmitButton.click();
+  assert.equal(
+    server.calls.some(
+      (call) =>
+        call.method === "POST" && call.url === "/api/governed-schedules/create",
+    ),
+    false,
+  );
+  assert.match(
+    app.elements.governedScheduleResult.textContent,
+    /publish and refresh one exact graph revision/i,
   );
 });
 
@@ -11556,6 +11663,7 @@ async function loadLoopBuilder(options = {}) {
     controlKinds,
     controlRequest,
     createGovernedGraphWorkspace,
+    createGovernedScheduleAuthoring,
     exactControl,
     navigator: { locks },
     performance,
@@ -12466,7 +12574,7 @@ function createGovernedGraphCatalog() {
         isExecutable: true,
         isLegalEntry: false,
         isLegalTerminal: false,
-        allowedControlOutcomes: ["success"],
+        allowedControlOutcomes: ["success", "failure"],
         requiredControlOutcomes: ["success"],
         joinPolicy: "none",
         minimumIncomingControlEdges: 1,
@@ -12481,6 +12589,38 @@ function createGovernedGraphCatalog() {
             required: true,
             minimumCharacters: 28,
             maximumCharacters: 28,
+            minimumInteger: null,
+            maximumInteger: null,
+            allowedValues: [],
+          },
+        ],
+        requiredCapabilityIds: [],
+      },
+      {
+        descriptor: {
+          kind: "wait",
+          typeId: "wait-authenticated-event",
+          version: 1,
+        },
+        isAdvertised: true,
+        isExecutable: true,
+        isLegalEntry: false,
+        isLegalTerminal: false,
+        allowedControlOutcomes: ["success", "failure"],
+        requiredControlOutcomes: ["success"],
+        joinPolicy: "none",
+        minimumIncomingControlEdges: 1,
+        allowsCycle: false,
+        cycleIterationBudgetParameterId: null,
+        cycleTimeBudgetMillisecondsParameterId: null,
+        ports: [],
+        parameters: [
+          {
+            id: "event-reference",
+            valueKind: "text",
+            required: true,
+            minimumCharacters: 1,
+            maximumCharacters: 256,
             minimumInteger: null,
             maximumInteger: null,
             allowedValues: [],

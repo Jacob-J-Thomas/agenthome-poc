@@ -77,6 +77,7 @@ using EmbodySense.Core.Startup.Loops.Execution.Sleep.Models;
 using EmbodySense.Core.Startup.Loops.Posture;
 using EmbodySense.Core.Startup.Loops.GraphAuthoring;
 using EmbodySense.Core.Startup.Loops.InvocationPreparation;
+using EmbodySense.Core.Startup.Loops.Schedules;
 using EmbodySense.Core.Startup.ContextualRoles;
 using EmbodySense.Core.Startup.Runtime.Models;
 using EmbodySense.Core.Startup.Triggers;
@@ -619,7 +620,27 @@ public sealed class AgentRuntimeFactory
                 failureClassifier: failureClassifier);
             var triggerWorkspaceId = workspaceId["workspace-sha256:".Length..];
             var triggerQueueStore = new TriggerQueueStore(paths, TriggerQueueQuota.Runtime, timeProvider: operationalClock);
+            var triggerQueueAdmission = new TriggerQueueAdmissionService(new TriggerDeliveryAdmissionService(triggerQueueStore), triggerQueueStore);
             var scheduleStore = new ScheduleStore(paths);
+            var scheduleTimeZones = new SystemScheduleTimeZoneAdapter(TimeZoneInfo.GetSystemTimeZones());
+            var schedulePayloadSource = new GovernedLoopSchedulePayloadSource(scheduleStore, governedGraphStore);
+            var scheduleCurrentEvidence = new ScheduleCurrentEvidenceAdapter(
+                triggerWorkspaceId,
+                governedBindingSource,
+                governedGrantResolver,
+                new AuthorityGrantProfileSource(governedAuthorityStore),
+                modelProfileCapabilityCatalog,
+                schedulePayloadSource,
+                capabilityAuthority,
+                operationalClock);
+            var scheduleRuntime = ScheduleRuntimeFactory.Create(
+                scheduleStore,
+                scheduleCurrentEvidence,
+                new ScheduleRunOverlapAdapter(customRunStore),
+                scheduleTimeZones,
+                triggerQueueAdmission,
+                triggerQueueStore,
+                operationalClock);
             var coordinatorEvidenceStore = new GovernedLoopCoordinatorEvidenceStore(paths);
             var governedEffectAuthorityEvidence = new GovernedLoopEffectAuthorityEvidenceStore(
                 paths,
@@ -932,6 +953,15 @@ public sealed class AgentRuntimeFactory
                 modelProfileAdapters,
                 capabilityAuthority,
                 operationalClock);
+            var governedLoopScheduleAuthoring = new GovernedLoopScheduleAuthoringFacade(
+                triggerWorkspaceId,
+                actor,
+                runtimeSurface.Id,
+                graphAuthoringFacade,
+                governedLoopInvocationPreparation,
+                governedGrantResolver,
+                scheduleRuntime,
+                scheduleTimeZones);
             var customModelSnapshot = new CustomLoopModelSnapshot(effectiveOptions.Surface.ToString(), effectiveOptions.Model);
             var customLoops = new CustomLoopRuntimeFacade(
                 customDefinitionStore,
@@ -990,7 +1020,7 @@ public sealed class AgentRuntimeFactory
                 new GovernedLoopBackgroundWorkSource(scheduleStore, governedSleepStore),
                 new GovernedLoopWaitAndTriggerOneShotServices(
                     customRunStore,
-                    scheduleStore,
+                    scheduleRuntime,
                     triggerQueueStore,
                     triggerWorker,
                     governedSleep,
@@ -1042,6 +1072,7 @@ public sealed class AgentRuntimeFactory
                 operationalFacade,
                 graphAuthoringFacade,
                 governedLoopInvocationPreparation,
+                governedLoopScheduleAuthoring,
                 modelProfileCatalogFacade,
                 humanInputFacade,
                 defaultConversationReviews,

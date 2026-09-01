@@ -6,6 +6,8 @@ namespace EmbodySense.Core.Startup.Tests.Triggers.Schedules;
 
 internal sealed class ScriptedScheduleStore : IScheduleStorePort
 {
+    internal int ReadCallCount { get; private set; }
+
     internal Func<ScheduleId, CancellationToken, Task<ScheduleStoreReadResult>> ReadBehavior { get; set; }
         = (_, _) => Task.FromResult(new ScheduleStoreReadResult(ScheduleStoreReadStatus.NotFound, null, null));
 
@@ -16,7 +18,10 @@ internal sealed class ScriptedScheduleStore : IScheduleStorePort
         = (_, _) => Task.FromResult(new ScheduleStoreMutationResult(ScheduleStoreMutationStatus.Corrupt, null));
 
     public Task<ScheduleStoreReadResult> ReadAsync(ScheduleId scheduleId, CancellationToken cancellationToken = default)
-        => ReadBehavior(scheduleId, cancellationToken);
+    {
+        ReadCallCount++;
+        return ReadBehavior(scheduleId, cancellationToken);
+    }
 
     public Task<ScheduleStoreMutationResult> CreateAsync(
         ScheduleStoreCreateRequest request,

@@ -237,6 +237,25 @@ public static class ScheduleRuntimeFactory
         return CreateCore(store, currentEvidence, overlap, timeZone, queue.Admission, queue.History, clock, null);
     }
 
+    internal static ScheduleRuntimeFacade Create(
+        IScheduleStorePort store,
+        IScheduleCurrentEvidencePort currentEvidence,
+        IScheduleOverlapPort overlap,
+        IScheduleTimeZonePort timeZone,
+        ITriggerQueueAdmissionPort queue,
+        ITriggerDeliveryAdmissionHistoryPort queueHistory,
+        TimeProvider timeProvider)
+    {
+        ArgumentNullException.ThrowIfNull(store);
+        ArgumentNullException.ThrowIfNull(currentEvidence);
+        ArgumentNullException.ThrowIfNull(overlap);
+        ArgumentNullException.ThrowIfNull(timeZone);
+        ArgumentNullException.ThrowIfNull(queue);
+        ArgumentNullException.ThrowIfNull(queueHistory);
+        ArgumentNullException.ThrowIfNull(timeProvider);
+        return CreateCore(store, currentEvidence, overlap, timeZone, queue, queueHistory, timeProvider, null);
+    }
+
     private static (ITriggerQueueAdmissionPort Admission, ITriggerDeliveryAdmissionHistoryPort History) CreateQueue(WorkspacePaths paths, TimeProvider clock)
     {
         var store = new TriggerQueueStore(paths, TriggerQueueQuota.Runtime, timeProvider: clock);

@@ -187,6 +187,28 @@ export function createGovernedGraphWorkspace({
       render();
     },
     refresh,
+    scheduleSelector() {
+      const lifecycle = aggregate?.lifecycle;
+      const publication = lifecycle?.publishedRevision;
+      const visibleGraphId = elements.graphId.value;
+      if (
+        !publication?.revision?.graphId ||
+        !publication?.revision?.revisionId ||
+        !Number.isSafeInteger(lifecycle?.lifecycleVersion) ||
+        lifecycle.lifecycleVersion < 1 ||
+        authoritativeHydrationStale ||
+        dirty ||
+        pendingMutation ||
+        visibleGraphId !== publication.revision.graphId ||
+        durableGraphSelection !== visibleGraphId
+      )
+        return null;
+      return Object.freeze({
+        graphId: visibleGraphId,
+        revisionId: publication.revision.revisionId,
+        lifecycleVersion: lifecycle.lifecycleVersion,
+      });
+    },
     isDirty() {
       return dirty || Boolean(pendingMutation);
     },
@@ -1605,6 +1627,9 @@ export function createGovernedGraphWorkspace({
           ? "Durable runtime posture is shown from the canonical run frontier."
           : "Not a gate node",
       ),
+      ...(String(node.descriptor.kind).toLowerCase() === "wait"
+        ? [fact("Wait configuration", waitConfigurationPosture(node))]
+        : []),
       fact(
         "Output",
         graph.outputContract?.outputs
@@ -1697,6 +1722,13 @@ export function createGovernedGraphWorkspace({
     } else {
       input = document.createElement("input");
       input.type = parameter.valueKind === "integer" ? "number" : "text";
+      if (node.descriptor.typeId === "wait-timestamp") {
+        input.placeholder = "2030-01-01T12:00:00.0000000Z";
+        input.autocomplete = "off";
+      } else if (node.descriptor.typeId === "wait-authenticated-event") {
+        input.placeholder = "governed-event-reference";
+        input.autocomplete = "off";
+      }
       if (parameter.minimumInteger != null)
         input.min = String(parameter.minimumInteger);
       if (parameter.maximumInteger != null)
@@ -1723,6 +1755,12 @@ export function createGovernedGraphWorkspace({
     });
     label.append(title, input);
     return label;
+  }
+
+  function waitConfigurationPosture(node) {
+    if (node.descriptor.typeId === "wait-timestamp")
+      return "Timestamp · exact canonical UTC deadline required; the server validates it on save or publish";
+    return "Authenticated event · bounded governed event reference required; the server validates it on save or publish";
   }
 
   function modelRoutingField(node) {

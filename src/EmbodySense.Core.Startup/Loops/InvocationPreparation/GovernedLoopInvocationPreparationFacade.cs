@@ -11,6 +11,7 @@ using EmbodySense.Core.Application.Inference.Profiles.Models;
 using EmbodySense.Core.Application.Loops.Revisions;
 using EmbodySense.Core.Application.Loops.Revisions.Models;
 using EmbodySense.Core.Application.Loops.Sequential;
+using EmbodySense.Core.Application.Loops.GraphValidation;
 using EmbodySense.Core.Application.Loops.EffectAuthorityUsage;
 using EmbodySense.Core.Application.Loops.EffectAuthorityUsage.Models;
 using EmbodySense.Core.Common.Authority;
@@ -128,7 +129,20 @@ public sealed class GovernedLoopInvocationPreparationFacade
     public Task<GovernedLoopInvocationPreparationResponse> PrepareAsync(
         GovernedLoopInvocationPreparationRequest? request,
         CancellationToken cancellationToken = default)
-        => _authorityTransaction.ExecuteAsync(token => PrepareUnderFenceAsync(request, token), cancellationToken);
+        => _authorityTransaction.ExecuteAsync(token => PrepareUnderFenceAsync(request, false, token), cancellationToken);
+
+    /// <summary>Returns current server-derived authority terms for authoring an exact Schedule Trigger graph.</summary>
+    /// <remarks>
+    /// The schedule path admits the exact Schedule Trigger descriptor but does not change the Manual Trigger invocation
+    /// contract exposed by <see cref="PrepareAsync"/>.
+    /// </remarks>
+    /// <param name="request">The selected graph and revision identifiers; they do not assert a publication or authority.</param>
+    /// <param name="cancellationToken">The token used to cancel before a durable operation is begun.</param>
+    /// <returns>A safe current-publication projection with no ambient grant catalog.</returns>
+    public Task<GovernedLoopInvocationPreparationResponse> PrepareScheduleAsync(
+        GovernedLoopInvocationPreparationRequest? request,
+        CancellationToken cancellationToken = default)
+        => _authorityTransaction.ExecuteAsync(token => PrepareUnderFenceAsync(request, true, token), cancellationToken);
 
     /// <summary>Confirms one server-derived preview and idempotently creates or resumes its exact profile then grant lifecycle.</summary>
     /// <param name="confirmation">The selected graph revision, expected preview digest, and durable operation identity.</param>
@@ -137,10 +151,20 @@ public sealed class GovernedLoopInvocationPreparationFacade
     public Task<GovernedLoopInvocationAuthorityConfirmationResult> ConfirmAsync(
         GovernedLoopInvocationAuthorityConfirmation? confirmation,
         CancellationToken cancellationToken = default)
-        => _authorityTransaction.ExecuteAsync(token => ConfirmUnderFenceAsync(confirmation, token), cancellationToken);
+        => _authorityTransaction.ExecuteAsync(token => ConfirmUnderFenceAsync(confirmation, false, token), cancellationToken);
+
+    /// <summary>Confirms one server-derived Schedule Trigger preview without broadening Manual Trigger invocation.</summary>
+    /// <param name="confirmation">The selected graph revision, expected preview digest, and durable operation identity.</param>
+    /// <param name="cancellationToken">The token used until a durable profile or grant boundary is reached.</param>
+    /// <returns>The exact confirmed grant reference or a fail-closed result.</returns>
+    public Task<GovernedLoopInvocationAuthorityConfirmationResult> ConfirmScheduleAsync(
+        GovernedLoopInvocationAuthorityConfirmation? confirmation,
+        CancellationToken cancellationToken = default)
+        => _authorityTransaction.ExecuteAsync(token => ConfirmUnderFenceAsync(confirmation, true, token), cancellationToken);
 
     private async Task<GovernedLoopInvocationPreparationResponse> PrepareUnderFenceAsync(
         GovernedLoopInvocationPreparationRequest? request,
+        bool allowScheduleTrigger,
         CancellationToken cancellationToken)
     {
         var asOfUtc = UtcNow();
@@ -149,7 +173,7 @@ public sealed class GovernedLoopInvocationPreparationFacade
             return Preparation(GovernedLoopInvocationPreparationStatus.Unavailable, null, [], null, asOfUtc, "Visible governed invocation preparation is available only to the authenticated Web surface.");
         }
 
-        var terms = await ReadTermsAsync(request?.GraphId, request?.RevisionId, asOfUtc, cancellationToken).ConfigureAwait(false);
+        var terms = await ReadTermsAsync(request?.GraphId, request?.RevisionId, asOfUtc, allowScheduleTrigger, cancellationToken).ConfigureAwait(false);
         if (terms.Status != GovernedLoopInvocationPreparationStatus.Ready)
         {
             return Preparation(terms.Status, terms.Publication, [], null, asOfUtc, terms.Detail);
@@ -172,6 +196,7 @@ public sealed class GovernedLoopInvocationPreparationFacade
 
     private async Task<GovernedLoopInvocationAuthorityConfirmationResult> ConfirmUnderFenceAsync(
         GovernedLoopInvocationAuthorityConfirmation? confirmation,
+        bool allowScheduleTrigger,
         CancellationToken cancellationToken)
     {
         var asOfUtc = UtcNow();
@@ -185,7 +210,7 @@ public sealed class GovernedLoopInvocationPreparationFacade
             return Confirmation(GovernedLoopInvocationAuthorityConfirmationStatus.Invalid, null, asOfUtc, "The confirmation selector, preview hash, or operation identity is invalid.");
         }
 
-        var terms = await ReadTermsAsync(confirmation!.GraphId, confirmation.RevisionId, asOfUtc, cancellationToken).ConfigureAwait(false);
+        var terms = await ReadTermsAsync(confirmation!.GraphId, confirmation.RevisionId, asOfUtc, allowScheduleTrigger, cancellationToken).ConfigureAwait(false);
         if (terms.Status != GovernedLoopInvocationPreparationStatus.Ready)
         {
             return Confirmation(MapTermsStatus(terms.Status), null, asOfUtc, terms.Detail);
@@ -479,7 +504,7 @@ public sealed class GovernedLoopInvocationPreparationFacade
         };
     }
 
-    private async Task<InvocationPreparationTerms> ReadTermsAsync(string? graphId, string? revisionId, DateTimeOffset asOfUtc, CancellationToken cancellationToken)
+    private async Task<InvocationPreparationTerms> ReadTermsAsync(string? graphId, string? revisionId, DateTimeOffset asOfUtc, bool allowScheduleTrigger, CancellationToken cancellationToken)
     {
         if (!IsIdentifier(graphId) || !IsIdentifier(revisionId))
         {
@@ -586,7 +611,7 @@ public sealed class GovernedLoopInvocationPreparationFacade
             return InvocationPreparationTerms.Failure(model.IsUnavailable ? GovernedLoopInvocationPreparationStatus.Unavailable : GovernedLoopInvocationPreparationStatus.Ineligible, publication, model.Detail);
         }
 
-        if (!SupportsLeastAuthorityProjection(binding.Artifact.Graph))
+        if (!SupportsLeastAuthorityProjection(binding.Artifact.Graph, allowScheduleTrigger))
         {
             return InvocationPreparationTerms.Failure(GovernedLoopInvocationPreparationStatus.Ineligible, publication, "The selected graph contains a node kind outside this first least-authority invocation slice.");
         }
@@ -775,14 +800,19 @@ public sealed class GovernedLoopInvocationPreparationFacade
             && Equals(pins[0].DescriptorIdentity, model.Metadata.DescriptorIdentity);
     }
 
-    private static bool SupportsLeastAuthorityProjection(GovernedLoopGraphDefinition graph)
-        => graph.Nodes.All(IsSupportedLeastAuthorityNode);
+    private static bool SupportsLeastAuthorityProjection(GovernedLoopGraphDefinition graph, bool allowScheduleTrigger)
+        => graph.Nodes.All(node => IsSupportedLeastAuthorityNode(node, allowScheduleTrigger));
 
-    private static bool IsSupportedLeastAuthorityNode(GovernedLoopNodeDefinition node)
+    private static bool IsSupportedLeastAuthorityNode(GovernedLoopNodeDefinition node, bool allowScheduleTrigger)
         => node.Descriptor.Kind switch
         {
-            GovernedLoopNodeKind.Trigger => Equals(node.Descriptor, GovernedLoopSequentialNodeDescriptors.ManualTrigger),
+            GovernedLoopNodeKind.Trigger => allowScheduleTrigger
+                ? Equals(node.Descriptor, GovernedLoopSequentialNodeDescriptors.ScheduleTrigger)
+                : Equals(node.Descriptor, GovernedLoopSequentialNodeDescriptors.ManualTrigger),
             GovernedLoopNodeKind.Inference => Equals(node.Descriptor, GovernedLoopSequentialNodeDescriptors.ProviderInference),
+            GovernedLoopNodeKind.Wait => allowScheduleTrigger
+                && GovernedLoopWaitNodeCatalogContract.TryResolve(node.Descriptor, out _)
+                && node.AuthorityCeiling.CapabilityIds.Count == 0,
             GovernedLoopNodeKind.Validate or GovernedLoopNodeKind.Condition => node.AuthorityCeiling.CapabilityIds.Count == 0
                 && GovernedLoopSequentialNodeDescriptors.IsDeterministic(node.Descriptor),
             GovernedLoopNodeKind.Exit => Equals(node.Descriptor, GovernedLoopSequentialNodeDescriptors.SuccessExit),

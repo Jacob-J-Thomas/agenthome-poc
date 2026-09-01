@@ -38,6 +38,9 @@ public sealed class SystemScheduleTimeZoneAdapter : IScheduleTimeZonePort
 
     private readonly IReadOnlyDictionary<string, TimeZoneInfo> _timeZones;
 
+    /// <summary>Maximum number of exact time-zone identifiers admitted into one server snapshot.</summary>
+    public const int MaximumSupportedTimeZoneIds = 1024;
+
     /// <summary>Creates an adapter over one composition-owned time-zone snapshot.</summary>
     /// <param name="timeZones">
     /// The exact immutable system rules admitted by composition, normally captured once with
@@ -48,6 +51,11 @@ public sealed class SystemScheduleTimeZoneAdapter : IScheduleTimeZonePort
     public SystemScheduleTimeZoneAdapter(IReadOnlyCollection<TimeZoneInfo> timeZones)
     {
         ArgumentNullException.ThrowIfNull(timeZones);
+        if (timeZones.Count > MaximumSupportedTimeZoneIds)
+        {
+            throw new ArgumentException("The composition-owned time-zone snapshot exceeds the bounded identifier catalog.", nameof(timeZones));
+        }
+
         var captured = new Dictionary<string, TimeZoneInfo>(timeZones.Count, StringComparer.Ordinal);
         foreach (var timeZone in timeZones)
         {
@@ -65,6 +73,47 @@ public sealed class SystemScheduleTimeZoneAdapter : IScheduleTimeZonePort
 
         _timeZones = captured;
     }
+
+    /// <summary>Creates a canonical reference to one time-zone rule snapshot retained by this adapter.</summary>
+    /// <remarks>
+    /// Callers provide only the exact bounded time-zone identifier. The adapter derives the fingerprint from its
+    /// composition-owned immutable rule snapshot so interface surfaces cannot select or forge scheduling rules.
+    /// </remarks>
+    /// <param name="timeZoneId">The exact case-sensitive identifier selected from the host snapshot.</param>
+    /// <param name="reference">The canonical identifier and derived rules fingerprint when available.</param>
+    /// <returns><see langword="true"/> when the snapshot contains a trustworthy matching rule set.</returns>
+    public bool TryCreateReference(string? timeZoneId, out ScheduleTimeZoneReference? reference)
+    {
+        reference = null;
+        if (!IsValidTimeZoneId(timeZoneId) || !_timeZones.TryGetValue(timeZoneId!, out var timeZone))
+        {
+            return false;
+        }
+
+        try
+        {
+            reference = new ScheduleTimeZoneReference(timeZone.Id, ComputeFingerprint(timeZone, CancellationToken.None));
+            return true;
+        }
+        catch (CryptographicException)
+        {
+            return false;
+        }
+        catch (Exception exception) when (IsRuleFailure(exception))
+        {
+            return false;
+        }
+    }
+
+    /// <summary>Returns the exact identifiers admitted by this composition-owned rules snapshot.</summary>
+    /// <remarks>
+    /// The identifiers are returned in a deterministic order and are detached from the adapter's internal lookup.
+    /// Interface surfaces should use this list when selecting a time zone instead of deriving an identifier from a
+    /// browser or another host's time-zone database.
+    /// </remarks>
+    /// <returns>A detached, ordinal-sorted list of server-supported identifiers.</returns>
+    public IReadOnlyList<string> GetSupportedTimeZoneIds()
+        => Array.AsReadOnly(_timeZones.Keys.OrderBy(value => value, StringComparer.Ordinal).ToArray());
 
     /// <inheritdoc />
     public Task<ScheduleTimeZoneResolution> ResolveLocalAsync(

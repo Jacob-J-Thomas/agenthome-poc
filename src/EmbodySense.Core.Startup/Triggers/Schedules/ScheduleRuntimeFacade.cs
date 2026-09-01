@@ -59,13 +59,41 @@ public sealed class ScheduleRuntimeFacade : IDisposable
     /// Callers cannot supply an initial state, UTC mapping, rules fingerprint, or optimistic revision. The facade constructs
     /// revision 1 only from the validated definition and its retained composition-owned time-zone source.
     /// </remarks>
-    public async Task<ScheduleRuntimeCreateResult> CreateAsync(
+    public Task<ScheduleRuntimeCreateResult> CreateAsync(
         ScheduleDefinition definition,
         CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         cancellationToken.ThrowIfCancellationRequested();
+        return definition is null
+            ? Task.FromResult(Creation(ScheduleRuntimeCreateStatus.Corrupt))
+            : CreateAsync(definition, definition.Enabled, cancellationToken);
+    }
+
+    /// <summary>Creates one immutable definition with a separately validated revision-1 enablement state.</summary>
+    /// <remarks>
+    /// The immutable definition remains the durable policy for future state validation. A caller may stage a valid
+    /// immutable definition disabled, but may never stage an initially enabled state for a permanently disabled definition.
+    /// Existing callers should use the overload without <paramref name="initialEnabled"/> to retain definition enablement.
+    /// </remarks>
+    /// <param name="definition">The immutable, validated schedule definition.</param>
+    /// <param name="initialEnabled">Whether the revision-1 state permits due-occurrence claims.</param>
+    /// <param name="cancellationToken">Cancels before a durable create boundary.</param>
+    /// <returns>The closed creation outcome and authoritative state when available.</returns>
+    public async Task<ScheduleRuntimeCreateResult> CreateAsync(
+        ScheduleDefinition definition,
+        bool initialEnabled,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        cancellationToken.ThrowIfCancellationRequested();
+
         if (!ScheduleContractHash.TryComputeDefinition(definition, out var definitionHash, out _))
+        {
+            return Creation(ScheduleRuntimeCreateStatus.Corrupt);
+        }
+
+        if (initialEnabled && !definition.Enabled)
         {
             return Creation(ScheduleRuntimeCreateStatus.Corrupt);
         }
@@ -73,10 +101,10 @@ public sealed class ScheduleRuntimeFacade : IDisposable
         var existing = await ReadForCreateAsync(definition.ScheduleId, cancellationToken).ConfigureAwait(false);
         if (existing.Status != ScheduleStoreReadStatus.NotFound)
         {
-            return ClassifyExisting(existing, definitionHash!);
+            return ClassifyExisting(existing, definitionHash!, initialEnabled);
         }
 
-        var initial = await BuildInitialStateAsync(definition, definitionHash!, cancellationToken).ConfigureAwait(false);
+        var initial = await BuildInitialStateAsync(definition, definitionHash!, initialEnabled, cancellationToken).ConfigureAwait(false);
         if (initial.Status != ScheduleRuntimeCreateStatus.Created || initial.CurrentState is null)
         {
             return initial;
@@ -94,7 +122,7 @@ public sealed class ScheduleRuntimeFacade : IDisposable
         var raced = await ReadForCreateAsync(definition.ScheduleId, cancellationToken).ConfigureAwait(false);
         return raced.Status == ScheduleStoreReadStatus.NotFound
             ? Creation(ScheduleRuntimeCreateStatus.Corrupt)
-            : ClassifyExisting(raced, definitionHash!);
+            : ClassifyExisting(raced, definitionHash!, initialEnabled);
     }
 
     /// <summary>Evaluates, admits, and durably finalizes at most one due occurrence.</summary>
@@ -182,6 +210,7 @@ public sealed class ScheduleRuntimeFacade : IDisposable
     private async Task<ScheduleRuntimeCreateResult> BuildInitialStateAsync(
         ScheduleDefinition definition,
         string definitionHash,
+        bool initialEnabled,
         CancellationToken cancellationToken)
     {
         DateTimeOffset recordedAtUtc;
@@ -248,7 +277,7 @@ public sealed class ScheduleRuntimeFacade : IDisposable
                     local,
                     selectedUtc.Value,
                     definition.TimeZone);
-                return CreateInitialState(definition, definitionHash, occurrence, recordedAtUtc, skipped);
+                return CreateInitialState(definition, definitionHash, initialEnabled, occurrence, recordedAtUtc, skipped);
             }
 
             if (skipped.Count == ScheduleContractLimits.MaxDispositionEvidenceItems)
@@ -273,7 +302,7 @@ public sealed class ScheduleRuntimeFacade : IDisposable
 
             if (definition.Recurrence.Kind == ScheduleRecurrenceKind.Once)
             {
-                return CreateInitialState(definition, definitionHash, null, recordedAtUtc, skipped);
+                return CreateInitialState(definition, definitionHash, initialEnabled, null, recordedAtUtc, skipped);
             }
 
             if (definition.Recurrence.Kind == ScheduleRecurrenceKind.FixedInterval)
@@ -281,6 +310,7 @@ public sealed class ScheduleRuntimeFacade : IDisposable
                 return await ResolveFirstFixedIntervalAfterSkipAsync(
                     definition,
                     definitionHash,
+                    initialEnabled,
                     resolution.EarlierUtc!.Value,
                     recordedAtUtc,
                     skipped,
@@ -289,7 +319,7 @@ public sealed class ScheduleRuntimeFacade : IDisposable
 
             if (!TryNextNominal(definition.Recurrence, ordinal + 1, out local))
             {
-                return CreateInitialState(definition, definitionHash, null, recordedAtUtc, skipped);
+                return CreateInitialState(definition, definitionHash, initialEnabled, null, recordedAtUtc, skipped);
             }
         }
 
@@ -299,6 +329,7 @@ public sealed class ScheduleRuntimeFacade : IDisposable
     private async Task<ScheduleRuntimeCreateResult> ResolveFirstFixedIntervalAfterSkipAsync(
         ScheduleDefinition definition,
         string definitionHash,
+        bool initialEnabled,
         DateTimeOffset firstValidBoundaryUtc,
         DateTimeOffset recordedAtUtc,
         IReadOnlyList<ScheduleOccurrenceDispositionEvidence> skipped,
@@ -308,7 +339,7 @@ public sealed class ScheduleRuntimeFacade : IDisposable
             + definition.Recurrence.FixedIntervalSeconds!.Value * TimeSpan.TicksPerSecond;
         if (ticks > MaximumSupportedTicks())
         {
-            return CreateInitialState(definition, definitionHash, null, recordedAtUtc, skipped);
+            return CreateInitialState(definition, definitionHash, initialEnabled, null, recordedAtUtc, skipped);
         }
 
         var nextUtc = new DateTimeOffset((long)ticks, TimeSpan.Zero);
@@ -341,12 +372,13 @@ public sealed class ScheduleRuntimeFacade : IDisposable
             resolution.ScheduledLocal,
             nextUtc,
             definition.TimeZone);
-        return CreateInitialState(definition, definitionHash, occurrence, recordedAtUtc, skipped);
+        return CreateInitialState(definition, definitionHash, initialEnabled, occurrence, recordedAtUtc, skipped);
     }
 
     private static ScheduleRuntimeCreateResult CreateInitialState(
         ScheduleDefinition definition,
         string definitionHash,
+        bool initialEnabled,
         ScheduleOccurrence? occurrence,
         DateTimeOffset recordedAtUtc,
         IReadOnlyList<ScheduleOccurrenceDispositionEvidence> skipped)
@@ -357,7 +389,7 @@ public sealed class ScheduleRuntimeFacade : IDisposable
             definition.Revision,
             definitionHash,
             1,
-            definition.Enabled,
+            initialEnabled,
             occurrence,
             null,
             null,
@@ -449,7 +481,8 @@ public sealed class ScheduleRuntimeFacade : IDisposable
 
     private static ScheduleRuntimeCreateResult ClassifyExisting(
         ScheduleStoreReadResult read,
-        string expectedHash)
+        string expectedHash,
+        bool expectedInitialEnabled)
     {
         if (read.Status != ScheduleStoreReadStatus.Found)
         {
@@ -464,6 +497,7 @@ public sealed class ScheduleRuntimeFacade : IDisposable
         }
 
         return string.Equals(currentHash, expectedHash, StringComparison.Ordinal)
+            && (read.State!.StateRevision > 1 || read.State.Enabled == expectedInitialEnabled)
             ? Creation(ScheduleRuntimeCreateStatus.AlreadyExists, read.State)
             : Creation(ScheduleRuntimeCreateStatus.Conflict, read.State);
     }

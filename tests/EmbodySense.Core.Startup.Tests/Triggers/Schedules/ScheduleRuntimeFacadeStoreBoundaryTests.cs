@@ -139,6 +139,116 @@ public sealed class ScheduleRuntimeFacadeStoreBoundaryTests
     }
 
     [Fact]
+    public async Task Create_reconciles_a_conflicting_store_create_with_current_truth()
+    {
+        using var workspace = new TestWorkspace();
+        var context = ScheduleCurrentEvidenceTestContext.Create();
+        ScheduleState? racedState = null;
+        var readCall = 0;
+        var reconciledStore = new ScriptedScheduleStore
+        {
+            ReadBehavior = (_, _) => Task.FromResult(++readCall == 1
+                ? new ScheduleStoreReadResult(ScheduleStoreReadStatus.NotFound, null, null)
+                : new ScheduleStoreReadResult(ScheduleStoreReadStatus.Found, context.Definition, racedState)),
+            CreateBehavior = (request, _) =>
+            {
+                racedState = request.InitialState;
+                return Task.FromResult(new ScheduleStoreMutationResult(ScheduleStoreMutationStatus.Conflict, null));
+            },
+        };
+        using var reconciledRuntime = CreateRuntime(workspace, context, reconciledStore);
+
+        var reconciled = await reconciledRuntime.CreateAsync(context.Definition);
+
+        var missingStore = new ScriptedScheduleStore
+        {
+            CreateBehavior = (_, _) => Task.FromResult(new ScheduleStoreMutationResult(ScheduleStoreMutationStatus.Conflict, null)),
+        };
+        using var missingRuntime = CreateRuntime(workspace, context, missingStore);
+        var missing = await missingRuntime.CreateAsync(context.Definition);
+
+        Assert.Equal(ScheduleRuntimeCreateStatus.AlreadyExists, reconciled.Status);
+        Assert.Equal(racedState, reconciled.CurrentState);
+        Assert.Equal(2, reconciledStore.ReadCallCount);
+        Assert.Equal(ScheduleRuntimeCreateStatus.Corrupt, missing.Status);
+        Assert.Null(missing.CurrentState);
+        Assert.Equal(2, missingStore.ReadCallCount);
+    }
+
+    [Theory]
+    [InlineData(ScheduleStoreReadStatus.Unavailable, ScheduleRuntimeCreateStatus.Unavailable)]
+    [InlineData(ScheduleStoreReadStatus.Backpressured, ScheduleRuntimeCreateStatus.Backpressured)]
+    [InlineData((ScheduleStoreReadStatus)int.MaxValue, ScheduleRuntimeCreateStatus.Corrupt)]
+    public async Task Create_maps_closed_initial_read_statuses(
+        ScheduleStoreReadStatus readStatus,
+        ScheduleRuntimeCreateStatus expectedStatus)
+    {
+        using var workspace = new TestWorkspace();
+        var context = ScheduleCurrentEvidenceTestContext.Create();
+        var store = new ScriptedScheduleStore
+        {
+            ReadBehavior = (_, _) => Task.FromResult(new ScheduleStoreReadResult(readStatus, null, null)),
+        };
+        using var runtime = CreateRuntime(workspace, context, store);
+
+        var result = await runtime.CreateAsync(context.Definition);
+
+        Assert.Equal(expectedStatus, result.Status);
+        Assert.Null(result.CurrentState);
+    }
+
+    [Fact]
+    public async Task Set_enabled_same_state_uses_current_store_truth_and_rejects_invalid_expected_state()
+    {
+        using var workspace = new TestWorkspace();
+        var context = ScheduleCurrentEvidenceTestContext.Create();
+        var store = new ScriptedScheduleStore
+        {
+            CreateBehavior = (request, _) => Task.FromResult(new ScheduleStoreMutationResult(
+                ScheduleStoreMutationStatus.Applied,
+                request.InitialState)),
+        };
+        using var runtime = CreateRuntime(workspace, context, store);
+        var created = await runtime.CreateAsync(context.Definition);
+        var expected = Assert.IsType<ScheduleState>(created.CurrentState);
+
+        var invalidExpected = await runtime.SetEnabledAsync(expected with { StateRevision = 0 }, true);
+        store.ReadBehavior = (_, _) => Task.FromResult(new ScheduleStoreReadResult(ScheduleStoreReadStatus.NotFound, null, null));
+        var missing = await runtime.SetEnabledAsync(expected, true);
+        store.ReadBehavior = (_, _) => Task.FromResult(new ScheduleStoreReadResult(ScheduleStoreReadStatus.Unavailable, null, null));
+        var unavailable = await runtime.SetEnabledAsync(expected, true);
+        store.ReadBehavior = (_, _) => Task.FromResult(new ScheduleStoreReadResult(ScheduleStoreReadStatus.Backpressured, null, null));
+        var backpressured = await runtime.SetEnabledAsync(expected, true);
+        store.ReadBehavior = (_, _) => Task.FromResult(new ScheduleStoreReadResult((ScheduleStoreReadStatus)int.MaxValue, null, null));
+        var invalidStatus = await runtime.SetEnabledAsync(expected, true);
+        store.ReadBehavior = (_, _) => Task.FromResult(new ScheduleStoreReadResult(
+            ScheduleStoreReadStatus.Found,
+            context.Definition,
+            expected with { DefinitionHash = new string('f', 64) }));
+        var malformed = await runtime.SetEnabledAsync(expected, true);
+        store.ReadBehavior = (_, _) => Task.FromResult(new ScheduleStoreReadResult(
+            ScheduleStoreReadStatus.Found,
+            context.Definition,
+            expected with { StateRevision = expected.StateRevision + 1 }));
+        var advanced = await runtime.SetEnabledAsync(expected, true);
+        store.ReadBehavior = (_, _) => Task.FromResult(new ScheduleStoreReadResult(
+            ScheduleStoreReadStatus.Found,
+            context.Definition,
+            expected));
+        var exact = await runtime.SetEnabledAsync(expected, true);
+
+        Assert.Equal(ScheduleStoreMutationStatus.Corrupt, invalidExpected.Status);
+        Assert.Equal(ScheduleStoreMutationStatus.Conflict, missing.Status);
+        Assert.Equal(ScheduleStoreMutationStatus.Unavailable, unavailable.Status);
+        Assert.Equal(ScheduleStoreMutationStatus.Backpressured, backpressured.Status);
+        Assert.Equal(ScheduleStoreMutationStatus.Corrupt, invalidStatus.Status);
+        Assert.Equal(ScheduleStoreMutationStatus.Corrupt, malformed.Status);
+        Assert.Equal(ScheduleStoreMutationStatus.Conflict, advanced.Status);
+        Assert.Equal(ScheduleStoreMutationStatus.AlreadyExists, exact.Status);
+        Assert.Equal(expected, exact.CurrentState);
+    }
+
+    [Fact]
     public async Task Compare_exchange_requires_an_exact_applied_replacement_and_rejects_malformed_current_state()
     {
         using var workspace = new TestWorkspace();

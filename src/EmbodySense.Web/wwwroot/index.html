@@ -707,6 +707,160 @@
                           </button>
                         </div>
                       </section>
+                      <section
+                        id="governedScheduleAuthoring"
+                        class="governed-schedule-authoring"
+                        aria-labelledby="governedScheduleAuthoringTitle"
+                      >
+                        <div>
+                          <p class="eyebrow">Canonical schema-1 time trigger</p>
+                          <h3 id="governedScheduleAuthoringTitle">
+                            Schedule published graph
+                          </h3>
+                          <p>
+                            The server derives schedule identity, payload
+                            digest, authority, grant, publication, time rules,
+                            and state. To edit, create a disabled immutable
+                            successor, use the authoritative Schedules panel to
+                            disable the exact predecessor revision, then enable
+                            the successor after each canonical reread.
+                          </p>
+                        </div>
+                        <div class="governed-schedule-fields">
+                          <label
+                            ><span>Recurrence</span
+                            ><select id="governedScheduleRecurrenceKind">
+                              <option value="once">Once</option>
+                              <option value="daily">Daily</option>
+                              <option value="weekly">Weekly</option>
+                              <option value="fixed-interval">
+                                Fixed interval
+                              </option>
+                            </select></label
+                          >
+                          <label
+                            ><span>First local occurrence</span
+                            ><input
+                              id="governedScheduleFirstLocalOccurrence"
+                              type="datetime-local"
+                          /></label>
+                          <label
+                            ><span>Fixed interval seconds</span
+                            ><input
+                              id="governedScheduleFixedIntervalSeconds"
+                              type="number"
+                              min="1"
+                              max="31536000"
+                              inputmode="numeric"
+                              placeholder="Required for fixed interval"
+                          /></label>
+                          <label
+                            ><span>Time zone</span
+                            ><select id="governedScheduleTimeZoneId">
+                              <option value="UTC">UTC</option>
+                            </select></label
+                          >
+                          <label
+                            ><span>Invalid local time</span
+                            ><select id="governedScheduleInvalidLocalTime">
+                              <option value="skip">Skip</option>
+                              <option value="shift-forward">
+                                Shift forward
+                              </option>
+                            </select></label
+                          >
+                          <label
+                            ><span>Ambiguous local time</span
+                            ><select id="governedScheduleAmbiguousLocalTime">
+                              <option value="earlier-utc">Earlier UTC</option>
+                              <option value="later-utc">Later UTC</option>
+                            </select></label
+                          >
+                          <label
+                            ><span>Misfire</span
+                            ><select id="governedScheduleMisfireKind">
+                              <option value="skip">Skip</option>
+                              <option value="fire-latest-once">
+                                Fire latest once
+                              </option>
+                              <option value="catch-up">Catch up</option>
+                            </select></label
+                          >
+                          <label
+                            ><span>Catch-up limit</span
+                            ><input
+                              id="governedScheduleCatchUpLimit"
+                              type="number"
+                              min="0"
+                              max="256"
+                              value="0"
+                              inputmode="numeric"
+                          /></label>
+                          <label
+                            ><span>Overlap</span
+                            ><select id="governedScheduleOverlap">
+                              <option value="skip">Skip</option>
+                              <option value="defer-one">Defer one</option>
+                              <option value="allow">Allow</option>
+                            </select></label
+                          >
+                          <label
+                            ><span>Priority</span
+                            ><select id="governedSchedulePriority">
+                              <option value="background">Background</option>
+                              <option value="normal" selected>Normal</option>
+                              <option value="elevated">Elevated</option>
+                              <option value="critical">Critical</option>
+                            </select></label
+                          >
+                          <label class="governed-schedule-enabled"
+                            ><input
+                              id="governedScheduleEnabled"
+                              type="checkbox"
+                              checked
+                            />
+                            <span>Enable immediately</span></label
+                          >
+                        </div>
+                        <div class="governed-schedule-inspection">
+                          <label
+                            ><span>Canonical schedule ID</span
+                            ><input
+                              id="governedScheduleInspectId"
+                              autocomplete="off"
+                              placeholder="schedule-..."
+                          /></label>
+                          <button
+                            id="governedScheduleInspectButton"
+                            class="secondary-button"
+                            type="button"
+                          >
+                            Inspect canonical schedule
+                          </button>
+                          <button
+                            id="governedSchedulePrepareEditButton"
+                            class="secondary-button"
+                            type="button"
+                            disabled
+                          >
+                            Prepare immutable successor edit
+                          </button>
+                        </div>
+                        <p
+                          id="governedScheduleResult"
+                          role="status"
+                          aria-live="polite"
+                        ></p>
+                        <div class="governed-graph-actions">
+                          <button
+                            id="governedScheduleSubmitButton"
+                            class="primary-button"
+                            type="button"
+                          >
+                            Create schedule
+                          </button>
+                        </div>
+                      </section>
                       <div class="governed-graph-workspace">
                         <aside class="governed-node-palette">
                           <strong>Executable server catalog</strong>

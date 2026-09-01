@@ -31,6 +31,7 @@ using EmbodySense.Core.Startup.Inference.Profiles;
 using EmbodySense.Core.Startup.HumanInput;
 using EmbodySense.Core.Startup.Loops.InvocationPreparation;
 using EmbodySense.Core.Startup.Loops.InvocationPreparation.Models;
+using EmbodySense.Core.Startup.Loops.Schedules;
 
 namespace EmbodySense.Core.Startup.Runtime;
 
@@ -61,6 +62,7 @@ public sealed class AgentRuntime : IAsyncDisposable
     private readonly GovernedLoopOperationalFacade _governedLoopOperations;
     private readonly GovernedLoopGraphAuthoringFacade _governedLoopGraphAuthoring;
     private readonly GovernedLoopInvocationPreparationFacade _governedLoopInvocationPreparation;
+    private readonly GovernedLoopScheduleAuthoringFacade _governedLoopScheduleAuthoring;
     private readonly IModelProfileCatalogFacade _modelProfiles;
     private readonly HumanInputRuntimeFacade _humanInput;
     private readonly DefaultConversationTurnReviewService _defaultConversationReviews;
@@ -88,6 +90,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         GovernedLoopOperationalFacade governedLoopOperations,
         GovernedLoopGraphAuthoringFacade governedLoopGraphAuthoring,
         GovernedLoopInvocationPreparationFacade governedLoopInvocationPreparation,
+        GovernedLoopScheduleAuthoringFacade governedLoopScheduleAuthoring,
         IModelProfileCatalogFacade modelProfiles,
         HumanInputRuntimeFacade humanInput,
         DefaultConversationTurnReviewService defaultConversationReviews,
@@ -111,6 +114,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(governedLoopOperations);
         ArgumentNullException.ThrowIfNull(governedLoopGraphAuthoring);
         ArgumentNullException.ThrowIfNull(governedLoopInvocationPreparation);
+        ArgumentNullException.ThrowIfNull(governedLoopScheduleAuthoring);
         ArgumentNullException.ThrowIfNull(modelProfiles);
         ArgumentNullException.ThrowIfNull(humanInput);
         ArgumentNullException.ThrowIfNull(defaultConversationReviews);
@@ -135,6 +139,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         _governedLoopOperations = governedLoopOperations ?? throw new ArgumentNullException(nameof(governedLoopOperations));
         _governedLoopGraphAuthoring = governedLoopGraphAuthoring;
         _governedLoopInvocationPreparation = governedLoopInvocationPreparation;
+        _governedLoopScheduleAuthoring = governedLoopScheduleAuthoring;
         _modelProfiles = modelProfiles;
         _humanInput = humanInput;
         _defaultConversationReviews = defaultConversationReviews;
@@ -178,6 +183,9 @@ public sealed class AgentRuntime : IAsyncDisposable
 
     /// <summary>Gets the server-derived current-publication preparation and confirmation facade for visible governed invocation.</summary>
     public GovernedLoopInvocationPreparationFacade GovernedLoopInvocationPreparation => _governedLoopInvocationPreparation;
+
+    /// <summary>Gets the bounded canonical schedule authoring facade for the authenticated visible Web surface.</summary>
+    public GovernedLoopScheduleAuthoringFacade GovernedLoopScheduleAuthoring => _governedLoopScheduleAuthoring;
 
     /// <summary>Gets the shared safe model-profile catalog and exact configured default.</summary>
     public IModelProfileCatalogFacade ModelProfiles => _modelProfiles;

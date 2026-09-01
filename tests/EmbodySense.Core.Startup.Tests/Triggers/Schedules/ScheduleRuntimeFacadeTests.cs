@@ -48,6 +48,80 @@ public sealed class ScheduleRuntimeFacadeTests
     }
 
     [Fact]
+    public async Task Create_can_stage_a_disabled_state_without_mutating_the_immutable_definition()
+    {
+        using var workspace = new TestWorkspace();
+        var context = ScheduleCurrentEvidenceTestContext.Create();
+        using var runtime = CreateRuntime(workspace, context, new RuntimeTimeZone());
+
+        var created = await runtime.CreateAsync(context.Definition, initialEnabled: false);
+        var persisted = await runtime.ReadAsync(context.Definition.ScheduleId);
+        var replayed = await runtime.CreateAsync(context.Definition, initialEnabled: false);
+        var differentInitialState = await runtime.CreateAsync(context.Definition, initialEnabled: true);
+        var evaluated = await runtime.EvaluateOnceAsync(context.Definition.ScheduleId);
+        var queue = await new TriggerQueueStore(new WorkspacePaths(workspace.RootPath), TriggerQueueQuota.Runtime).GetSnapshotAsync(_now);
+        var enabled = await runtime.SetEnabledAsync(created.CurrentState!, true);
+        var advancedReplay = await runtime.CreateAsync(context.Definition, initialEnabled: false);
+
+        Assert.Equal(ScheduleRuntimeCreateStatus.Created, created.Status);
+        Assert.False(created.CurrentState!.Enabled);
+        Assert.Equal(ScheduleRuntimeCreateStatus.AlreadyExists, replayed.Status);
+        Assert.Equal(created.CurrentState, replayed.CurrentState);
+        Assert.Equal(ScheduleRuntimeCreateStatus.Conflict, differentInitialState.Status);
+        Assert.Equal(created.CurrentState, differentInitialState.CurrentState);
+        Assert.Equal(ScheduleEvaluationStatus.Disabled, evaluated.Status);
+        Assert.Empty(queue.Entries);
+        Assert.Equal(ScheduleStoreMutationStatus.Applied, enabled.Status);
+        Assert.True(enabled.CurrentState!.Enabled);
+        Assert.Equal(2, enabled.CurrentState.StateRevision);
+        Assert.Equal(ScheduleRuntimeCreateStatus.AlreadyExists, advancedReplay.Status);
+        Assert.Equal(enabled.CurrentState, advancedReplay.CurrentState);
+        Assert.Equal(ScheduleStoreReadStatus.Found, persisted.Status);
+        Assert.True(persisted.Definition!.Enabled);
+        Assert.False(persisted.State!.Enabled);
+    }
+
+    [Fact]
+    public async Task Create_rejects_an_enabled_initial_state_for_a_permanently_disabled_definition()
+    {
+        using var workspace = new TestWorkspace();
+        var context = ScheduleCurrentEvidenceTestContext.Create();
+        using var runtime = CreateRuntime(workspace, context, new RuntimeTimeZone());
+        var definition = context.Definition with { Enabled = false };
+
+        var rejected = await runtime.CreateAsync(definition, initialEnabled: true);
+        var created = await runtime.CreateAsync(definition);
+        var persisted = await runtime.ReadAsync(definition.ScheduleId);
+
+        Assert.Equal(ScheduleRuntimeCreateStatus.Corrupt, rejected.Status);
+        Assert.Null(rejected.CurrentState);
+        Assert.Equal(ScheduleRuntimeCreateStatus.Created, created.Status);
+        Assert.False(created.CurrentState!.Enabled);
+        Assert.Equal(ScheduleStoreReadStatus.Found, persisted.Status);
+        Assert.False(persisted.Definition!.Enabled);
+        Assert.False(persisted.State!.Enabled);
+    }
+
+    [Fact]
+    public async Task Concurrent_creates_with_opposing_initial_states_have_one_winner_and_one_conflict()
+    {
+        using var workspace = new TestWorkspace();
+        var context = ScheduleCurrentEvidenceTestContext.Create();
+        using var runtime = CreateRuntime(workspace, context, new RuntimeTimeZone());
+
+        var results = await Task.WhenAll(
+            runtime.CreateAsync(context.Definition, initialEnabled: false),
+            runtime.CreateAsync(context.Definition, initialEnabled: true));
+        var persisted = await runtime.ReadAsync(context.Definition.ScheduleId);
+
+        Assert.Equal(1, results.Count(result => result.Status == ScheduleRuntimeCreateStatus.Created));
+        Assert.Equal(1, results.Count(result => result.Status == ScheduleRuntimeCreateStatus.Conflict));
+        Assert.Equal(ScheduleStoreReadStatus.Found, persisted.Status);
+        Assert.True(persisted.Definition!.Enabled);
+        Assert.Equal(results.Single(result => result.Status == ScheduleRuntimeCreateStatus.Created).CurrentState, persisted.State);
+    }
+
+    [Fact]
     public async Task Create_persists_the_trusted_clock_watermark_and_first_evaluation_detects_rollback()
     {
         using var workspace = new TestWorkspace();
@@ -518,6 +592,8 @@ public sealed class ScheduleRuntimeFacadeTests
         using var workspace = new TestWorkspace();
         var context = ScheduleCurrentEvidenceTestContext.Create();
         using var runtime = CreateRuntime(workspace, context, new RuntimeTimeZone());
+        Assert.Equal(ScheduleRuntimeCreateStatus.Corrupt, (await runtime.CreateAsync(null!)).Status);
+        Assert.Equal(ScheduleRuntimeCreateStatus.Corrupt, (await runtime.CreateAsync(null!, initialEnabled: false)).Status);
         Assert.Equal(
             ScheduleRuntimeCreateStatus.Corrupt,
             (await runtime.CreateAsync(context.Definition with { Recurrence = null! })).Status);
