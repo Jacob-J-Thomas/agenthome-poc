@@ -471,24 +471,28 @@ export function createHumanReviewSurface({
       );
       return;
     }
-    const key = `${summary.runId}:${summary.lifecycleVersion}:${normalizedAction}`;
-    let operationId = state.operations.get(key);
-    if (!operationId) {
-      operationId = stableHumanReviewOperationIdentity(
-        summary.runId,
-        summary.lifecycleVersion,
-        normalizedAction,
-        detail,
-      );
-      rememberOperation(key, operationId);
+    const intent = humanReviewDecisionIntent(summary, normalizedAction, detail);
+    let operation = state.operations.get(intent.key);
+    if (!operation) {
+      operation = Object.freeze({
+        operationId: stableHumanReviewOperationIdentity(
+          summary.runId,
+          summary.requestId,
+          summary.requestHash,
+          normalizedAction,
+          intent.detailFingerprint,
+        ),
+        expectedLifecycleVersion: summary.lifecycleVersion,
+      });
+      rememberOperation(intent.key, operation);
     }
     state.actionInFlight = true;
     setActionButtonsDisabled(true);
     if (button) button.setAttribute("aria-busy", "true");
     try {
       const payload = {
-        expectedLifecycleVersion: summary.lifecycleVersion,
-        operationId,
+        expectedLifecycleVersion: operation.expectedLifecycleVersion,
+        operationId: operation.operationId,
       };
       if (normalizedAction === "request-information") payload.detail = detail;
       const response = await requestJson(
@@ -514,6 +518,8 @@ export function createHumanReviewSurface({
         elements.informationDetail.value = "";
       await refresh(summary.runId);
     } catch (error) {
+      if (isDefinitiveHumanReviewDecisionError(error))
+        forgetOperation(intent.key);
       setActionStatus(
         humanReviewOutcomeMessage(null, error?.status ?? null),
         "error",
@@ -537,10 +543,14 @@ export function createHumanReviewSurface({
     }
   }
 
-  function rememberOperation(key, operationId) {
-    state.operations.set(key, operationId);
+  function rememberOperation(key, operation) {
+    state.operations.set(key, operation);
     while (state.operations.size > maximumOperationEntries)
       state.operations.delete(state.operations.keys().next().value);
+  }
+
+  function forgetOperation(key) {
+    state.operations.delete(key);
   }
 
   function renderList(page) {
@@ -989,16 +999,46 @@ function sameHumanReviewIdentity(left, right) {
   );
 }
 
-function stableHumanReviewOperationIdentity(
-  runId,
-  lifecycleVersion,
-  action,
-  detail,
-) {
-  const source = [runId, lifecycleVersion, action, detail].join("\u001f");
+function humanReviewDecisionIntent(summary, action, detail) {
+  const detailFingerprint = humanReviewDecisionDetailFingerprint(detail);
+  return {
+    key: [
+      summary.runId,
+      summary.requestId,
+      summary.requestHash,
+      action,
+      detailFingerprint,
+    ].join("\u001f"),
+    detailFingerprint,
+  };
+}
+
+function humanReviewDecisionDetailFingerprint(detail) {
+  const source = String(detail ?? "");
   const first = hashOperationIdentity(source, 2166136261);
   const second = hashOperationIdentity(source, 2654435761);
-  return `web-human-review-${first.toString(16).padStart(8, "0")}-${second.toString(16).padStart(8, "0")}`;
+  return `${first.toString(16).padStart(8, "0")}${second.toString(16).padStart(8, "0")}`;
+}
+
+function stableHumanReviewOperationIdentity(
+  runId,
+  requestId,
+  requestHash,
+  action,
+  detailFingerprint,
+) {
+  const source = [
+    runId,
+    requestId,
+    requestHash,
+    action,
+    detailFingerprint,
+  ].join("\u001f");
+  const first = hashOperationIdentity(source, 2166136261);
+  const second = hashOperationIdentity(source, 2654435761);
+  const third = hashOperationIdentity(source, 2246822519);
+  const fourth = hashOperationIdentity(source, 3266489917);
+  return `web-human-review-${first.toString(16).padStart(8, "0")}-${second.toString(16).padStart(8, "0")}-${third.toString(16).padStart(8, "0")}-${fourth.toString(16).padStart(8, "0")}`;
 }
 
 function hashOperationIdentity(value, seed) {
@@ -1037,6 +1077,10 @@ function statusFromError(error) {
   if (error?.status === 404) return "not-found";
   if (error?.status === 409) return "conflict";
   return "unavailable";
+}
+
+function isDefinitiveHumanReviewDecisionError(error) {
+  return [400, 403, 404, 409].includes(error?.status);
 }
 
 if (typeof window !== "undefined" && typeof document !== "undefined") {

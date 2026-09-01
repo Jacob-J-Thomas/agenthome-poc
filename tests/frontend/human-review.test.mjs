@@ -279,6 +279,210 @@ test("Human Review surface rereads canonical detail and submits all four visible
   );
 });
 
+test("Human Review replays a committed response after the POST result is lost without using the reread lifecycle", async () => {
+  const fixture = createFixture();
+  const information =
+    "Private reviewer detail that must not enter the operation identity.";
+  const calls = [];
+  let canonical = summary();
+  let postCount = 0;
+  const requestJson = async (url, options = {}) => {
+    calls.push({ url, options });
+    if (url === "/api/human-reviews?maximumCount=50")
+      return { status: "ready", items: [canonical], continuationCursor: null };
+    if (url === "/api/human-reviews/run-review-1")
+      return {
+        status: "ready",
+        detail: {
+          summary: canonical,
+          previews: [],
+          decisions: [],
+          evidence: [],
+          runtime: { lifecycleStatus: canonical.lifecycleStatus },
+          effectEvidence: null,
+        },
+      };
+    if (url === "/api/human-reviews/run-review-1/evidence")
+      return { status: "ready", evidence: [], effectEvidence: null };
+    if (url === "/api/human-reviews/run-review-1/posture")
+      return {
+        status: "ready",
+        posture: { lifecycleStatus: canonical.lifecycleStatus },
+      };
+    if (options.method === "POST") {
+      const body = JSON.parse(options.body);
+      assert.equal(body.detail, information);
+      postCount++;
+      if (postCount === 1) {
+        canonical = summary({
+          lifecycleStatus: "awaiting-information",
+          lifecycleVersion: 4,
+          updatedAtUtc: "2026-09-01T12:01:00Z",
+        });
+        throw new Error("simulated committed response loss");
+      }
+      return { status: "replayed" };
+    }
+    throw Object.assign(new Error("unexpected"), { status: 500 });
+  };
+  const surface = createHumanReviewSurface({
+    document: fixture.document,
+    requestJson,
+  });
+
+  await surface.activate();
+  fixture.elements.humanReviewInformationDetail.value = information;
+  await clickAndFlush(fixture.elements.humanReviewRequestInformationButton);
+  assert.match(
+    fixture.elements.humanReviewLifecycleStatus.textContent,
+    /Awaiting Information/,
+  );
+  assert.match(
+    fixture.elements.humanReviewSummary.textContent,
+    /Lifecycle version 4/,
+  );
+
+  await clickAndFlush(fixture.elements.humanReviewRequestInformationButton);
+  const posts = calls.filter((call) => call.options.method === "POST");
+  assert.equal(posts.length, 2);
+  const firstBody = JSON.parse(posts[0].options.body);
+  const secondBody = JSON.parse(posts[1].options.body);
+  assert.equal(firstBody.expectedLifecycleVersion, 3);
+  assert.equal(secondBody.expectedLifecycleVersion, 3);
+  assert.equal(secondBody.operationId, firstBody.operationId);
+  assert.match(firstBody.operationId, /^web-human-review-[a-f0-9-]+$/);
+  assert.doesNotMatch(firstBody.operationId, /private|reviewer|detail/i);
+  assert.equal(secondBody.detail, information);
+  assert.match(
+    fixture.elements.humanReviewActionStatus.textContent,
+    /already recorded/i,
+  );
+});
+
+test("Human Review decision operation identity is deterministic across surfaces while retaining only bounded intent state", async () => {
+  const firstFixture = createFixture();
+  const secondFixture = createFixture();
+  const information = "Same exact bounded request-information intent.";
+  const requests = [];
+  const makeRequestJson =
+    () =>
+    async (url, options = {}) => {
+      requests.push({ url, options });
+      if (url === "/api/human-reviews?maximumCount=50")
+        return {
+          status: "ready",
+          items: [summary()],
+          continuationCursor: null,
+        };
+      if (url.endsWith("/evidence"))
+        return { status: "ready", evidence: [], effectEvidence: null };
+      if (url.endsWith("/posture"))
+        return { status: "ready", posture: { lifecycleStatus: "pending" } };
+      if (options.method === "POST") return { status: "replayed" };
+      return {
+        status: "ready",
+        detail: {
+          summary: summary(),
+          previews: [],
+          decisions: [],
+          evidence: [],
+          runtime: { lifecycleStatus: "pending" },
+          effectEvidence: null,
+        },
+      };
+    };
+  const firstSurface = createHumanReviewSurface({
+    document: firstFixture.document,
+    requestJson: makeRequestJson(),
+  });
+  const secondSurface = createHumanReviewSurface({
+    document: secondFixture.document,
+    requestJson: makeRequestJson(),
+  });
+
+  await firstSurface.activate();
+  firstFixture.elements.humanReviewInformationDetail.value = information;
+  await clickAndFlush(
+    firstFixture.elements.humanReviewRequestInformationButton,
+  );
+  await secondSurface.activate();
+  secondFixture.elements.humanReviewInformationDetail.value = information;
+  await clickAndFlush(
+    secondFixture.elements.humanReviewRequestInformationButton,
+  );
+
+  const posts = requests.filter((call) => call.options.method === "POST");
+  assert.equal(posts.length, 2);
+  const firstBody = JSON.parse(posts[0].options.body);
+  const secondBody = JSON.parse(posts[1].options.body);
+  assert.equal(firstBody.operationId, secondBody.operationId);
+  assert.equal(
+    firstBody.expectedLifecycleVersion,
+    secondBody.expectedLifecycleVersion,
+  );
+  assert.equal(firstBody.detail, information);
+  assert.equal(secondBody.detail, information);
+  assert.ok(requests.length < 32, "surface refresh state must remain bounded");
+});
+
+test("Human Review refreshes a decision operation after a definitive conflict while keeping its deterministic identity and reread lifecycle", async () => {
+  const fixture = createFixture();
+  const information = "A bounded information request.";
+  const calls = [];
+  let canonical = summary();
+  let postCount = 0;
+  const requestJson = async (url, options = {}) => {
+    calls.push({ url, options });
+    if (url === "/api/human-reviews?maximumCount=50")
+      return { status: "ready", items: [canonical], continuationCursor: null };
+    if (url.endsWith("/evidence"))
+      return { status: "ready", evidence: [], effectEvidence: null };
+    if (url.endsWith("/posture"))
+      return {
+        status: "ready",
+        posture: { lifecycleStatus: canonical.lifecycleStatus },
+      };
+    if (options.method === "POST") {
+      postCount++;
+      if (postCount === 1) {
+        canonical = summary({
+          lifecycleVersion: 4,
+          lifecycleStatus: "awaiting-information",
+        });
+        throw Object.assign(new Error("stale review"), { status: 409 });
+      }
+      return { status: "information-requested" };
+    }
+    return {
+      status: "ready",
+      detail: {
+        summary: canonical,
+        previews: [],
+        decisions: [],
+        evidence: [],
+        runtime: { lifecycleStatus: canonical.lifecycleStatus },
+        effectEvidence: null,
+      },
+    };
+  };
+  const surface = createHumanReviewSurface({
+    document: fixture.document,
+    requestJson,
+  });
+
+  await surface.activate();
+  fixture.elements.humanReviewInformationDetail.value = information;
+  await clickAndFlush(fixture.elements.humanReviewRequestInformationButton);
+  fixture.elements.humanReviewInformationDetail.value = information;
+  await clickAndFlush(fixture.elements.humanReviewRequestInformationButton);
+  const posts = calls.filter((call) => call.options.method === "POST");
+  const firstBody = JSON.parse(posts[0].options.body);
+  const secondBody = JSON.parse(posts[1].options.body);
+  assert.equal(firstBody.operationId, secondBody.operationId);
+  assert.equal(firstBody.expectedLifecycleVersion, 3);
+  assert.equal(secondBody.expectedLifecycleVersion, 4);
+});
+
 test("Human Review fails closed when detail evidence is bound to another request", async () => {
   const fixture = createFixture();
   const requestJson = async (url) => {
