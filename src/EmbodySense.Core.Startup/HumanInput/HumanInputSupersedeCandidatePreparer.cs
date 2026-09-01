@@ -17,6 +17,7 @@ namespace EmbodySense.Core.Startup.HumanInput;
 /// grant reference are copied from the canonical aggregate and never reconstructed from browser input.</remarks>
 public sealed class HumanInputSupersedeCandidatePreparer : IHumanInputSupersedeCandidatePreparer
 {
+    private const string PreserveCanonicalPolicyKind = "preserve-canonical";
     private readonly IHumanInputRequestCatalog _catalog;
     private readonly IAuthorityGrantResolver _grantResolver;
     private readonly IHumanInputSupersedeCandidateRegistry _registry;
@@ -197,7 +198,9 @@ public sealed class HumanInputSupersedeCandidatePreparer : IHumanInputSupersedeC
         {
             var options = JsonOptions();
             var schema = JsonSerializer.Deserialize<HumanInputResponseSchema>(input.ResponseSchema.GetRawText(), options);
-            var policy = JsonSerializer.Deserialize<HumanInputResponsePolicy>(input.ResponsePolicy.GetRawText(), options);
+            var policy = IsPreserveCanonicalPolicyIntent(input.ResponsePolicy)
+                ? current.ResponsePolicy
+                : JsonSerializer.Deserialize<HumanInputResponsePolicy>(input.ResponsePolicy.GetRawText(), options);
             if (schema is null || policy is null || !TryParsePrivacy(input.PrivacyClass, out var privacy))
             {
                 return false;
@@ -236,6 +239,20 @@ public sealed class HumanInputSupersedeCandidatePreparer : IHumanInputSupersedeC
         {
             return false;
         }
+    }
+
+    private static bool IsPreserveCanonicalPolicyIntent(JsonElement value)
+    {
+        if (value.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        var properties = value.EnumerateObject().ToArray();
+        return properties.Length == 1
+            && properties[0].NameEquals("kind")
+            && properties[0].Value.ValueKind == JsonValueKind.String
+            && string.Equals(properties[0].Value.GetString(), PreserveCanonicalPolicyKind, StringComparison.Ordinal);
     }
 
     private static JsonSerializerOptions JsonOptions()

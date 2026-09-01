@@ -6,6 +6,7 @@ using EmbodySense.Core.Application.HumanInput.Lifecycle.Models;
 using EmbodySense.Core.Common.Authority.Grants.Models;
 using EmbodySense.Core.Common.Authority.Models;
 using EmbodySense.Core.Common.Capabilities.Models;
+using EmbodySense.Core.Common.HumanInput;
 using EmbodySense.Core.Common.HumanInput.Lifecycle.Models;
 using EmbodySense.Core.Common.HumanInput.Models;
 using EmbodySense.Core.Persistence.Tests.HumanInput.Requests;
@@ -103,6 +104,7 @@ public sealed class HumanInputSupersedeCandidatePreparerTests
         var duplicateNestedProperty = input with { ResponseSchema = Json("""{"kind":"text","choices":[{"choiceId":"choice","displayText":"one","displayText":"two"}]}""") };
         Assert.Equal(HumanInputSupersedePreparationStatus.Invalid, (await preparer.PrepareAsync(duplicateNestedProperty)).Status);
         Assert.Equal(HumanInputSupersedePreparationStatus.Invalid, (await preparer.PrepareAsync(input with { ResponseSchema = Json("[]") })).Status);
+        Assert.Equal(HumanInputSupersedePreparationStatus.Invalid, (await preparer.PrepareAsync(input with { ResponsePolicy = Json("{\"kind\":\"preserve-canonical\",\"orderedRoleIds\":[\"private-role\"]}"), OperationId = "prepare-policy-intent-extra" })).Status);
         foreach (var (grantStatus, expectedStatus) in new[]
         {
             (AuthorityGrantResolutionStatus.NotFound, HumanInputSupersedePreparationStatus.NotFound),
@@ -119,6 +121,53 @@ public sealed class HumanInputSupersedeCandidatePreparerTests
         Assert.Equal(HumanInputSupersedePreparationStatus.Unavailable, (await preparer.PrepareAsync(input with { OperationId = "prepare-grant-error" })).Status);
     }
 
+    [Theory]
+    [InlineData(HumanInputResponsePolicyKind.FirstValid)]
+    [InlineData(HumanInputResponsePolicyKind.Quorum)]
+    [InlineData(HumanInputResponsePolicyKind.NamedRoles)]
+    [InlineData(HumanInputResponsePolicyKind.Merge)]
+    [InlineData(HumanInputResponsePolicyKind.ManualSelection)]
+    public async Task Preserve_canonical_policy_intent_prepares_each_policy_without_exposing_role_ids(HumanInputResponsePolicyKind policyKind)
+    {
+        var mutation = CreatePolicyMutation(policyKind);
+        var lifecycle = new HumanInputRequestLifecycleStoreSnapshot(mutation.PrimaryHeadToWrite!, [mutation.RequestToAppend!], [mutation.Operation]);
+        var catalog = new HumanInputSupersedeCandidatePreparerTestCatalog
+        {
+            ReadResponse = new HumanInputRequestCatalogReadResult(
+                HumanInputRequestCatalogReadStatus.Ready,
+                1,
+                new HumanInputRequestCatalogEntry(lifecycle, null!))
+        };
+        var grant = mutation.Operation.GrantReference!;
+        var resolver = new HumanInputSupersedeCandidatePreparerTestGrantResolver(new AuthorityGrantResolution(AuthorityGrantResolutionStatus.Active, grant, null!, EmptyCeiling(), "grant-evidence", mutation.Operation.RecordedAtUtc));
+        var registry = new HumanInputSupersedeCandidateRegistry();
+        var preparer = new HumanInputSupersedeCandidatePreparer(catalog, resolver, registry, mutation.RequestToAppend!.Binding.WorkspaceId, "user-one", TimeProvider.System);
+        var input = new HumanInputSupersedePreparationInput(
+            $"prepare-policy-{policyKind.ToString().ToLowerInvariant()}",
+            mutation.RequestToAppend.RequestId,
+            new HumanInputSurfaceRequestReference(mutation.RequestToAppend.RequestId, mutation.RequestToAppend.RequestVersionId, mutation.RequestToAppend.RequestHash),
+            mutation.PrimaryHeadToWrite!.LifecycleVersion,
+            HumanInputRequestLifecycleStatus.Pending.ToString(),
+            "successor-purpose",
+            "successor-prompt",
+            JsonSerializer.SerializeToElement(mutation.RequestToAppend.ResponseSchema, JsonOptions()),
+            HumanInputPrivacyClass.Private.ToString(),
+            DateTimeOffset.UtcNow.AddMinutes(2),
+            Json("{\"kind\":\"preserve-canonical\"}"));
+
+        var result = await preparer.PrepareAsync(input);
+
+        Assert.Equal(HumanInputSupersedePreparationStatus.Ready, result.Status);
+        Assert.True(registry.TryResolve(result.CandidateKey!, mutation.RequestToAppend.Binding.WorkspaceId, "user-one", input.OperationId, input.RequestId, input.ExpectedLifecycleVersion, input.ExpectedRequest!.RequestVersionId, input.ExpectedRequest.RequestHash, DateTimeOffset.UtcNow, out var resolution));
+        Assert.NotNull(resolution);
+        Assert.Equal(mutation.RequestToAppend.ResponsePolicy.Kind, resolution!.CandidateRequest.ResponsePolicy.Kind);
+        Assert.Equal(mutation.RequestToAppend.ResponsePolicy.RequiredResponseCount, resolution.CandidateRequest.ResponsePolicy.RequiredResponseCount);
+        Assert.Equal(mutation.RequestToAppend.ResponsePolicy.OrderedRoleIds?.ToArray(), resolution.CandidateRequest.ResponsePolicy.OrderedRoleIds?.ToArray());
+        Assert.Equal(mutation.RequestToAppend.EligibleRespondents, resolution.CandidateRequest.EligibleRespondents);
+        Assert.DoesNotContain("role-one", input.ResponsePolicy.GetRawText(), StringComparison.Ordinal);
+        Assert.DoesNotContain("role-two", input.ResponsePolicy.GetRawText(), StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task Invalid_operation_id_is_rejected_before_catalog_access()
     {
@@ -129,6 +178,37 @@ public sealed class HumanInputSupersedeCandidatePreparerTests
 
         Assert.Equal(HumanInputSupersedePreparationStatus.Invalid, result.Status);
         Assert.Equal(0, catalog.ReadCount);
+    }
+
+    private static HumanInputRequestLifecycleStoreMutation CreatePolicyMutation(HumanInputResponsePolicyKind policyKind)
+    {
+        var policyName = policyKind.ToString().ToLowerInvariant();
+        var baseMutation = HumanInputRequestStoreTestData.CreateMutation($"request-policy-{policyName}", $"version-policy-{policyName}", $"create-policy-{policyName}");
+        var respondents = policyKind == HumanInputResponsePolicyKind.FirstValid
+            ? [new HumanInputEligibleRespondent("user-one", "role-one", "route-one")]
+            : new[]
+            {
+                new HumanInputEligibleRespondent("user-one", "role-one", "route-one"),
+                new HumanInputEligibleRespondent("user-two", "role-two", "route-two")
+            };
+        var policy = policyKind switch
+        {
+            HumanInputResponsePolicyKind.FirstValid => new HumanInputResponsePolicy(policyKind, null, null),
+            HumanInputResponsePolicyKind.Quorum => new HumanInputResponsePolicy(policyKind, 2, null),
+            HumanInputResponsePolicyKind.NamedRoles => new HumanInputResponsePolicy(policyKind, null, ["role-one", "role-two"]),
+            HumanInputResponsePolicyKind.Merge => new HumanInputResponsePolicy(policyKind, 2, ["role-one", "role-two"]),
+            HumanInputResponsePolicyKind.ManualSelection => new HumanInputResponsePolicy(policyKind, null, ["role-one"]),
+            _ => throw new ArgumentOutOfRangeException(nameof(policyKind))
+        };
+        var request = HumanInputRequestHash.Apply(baseMutation.RequestToAppend! with
+        {
+            EligibleRespondents = respondents,
+            ResponsePolicy = policy,
+            RequestHash = string.Empty
+        });
+        var head = HumanInputRequestStoreTestData.Head(request, 1, HumanInputRequestLifecycleStatus.Pending, 0, null, null, baseMutation.Operation.OperationId, request.Timing.RequestedAtUtc);
+        var evidence = HumanInputRequestStoreTestData.Evidence(HumanInputRequestLifecycleOperationKind.Create, request.RequestId, baseMutation.Operation.OperationId, request.RequestHash, request.Timing.RequestedAtUtc, null, head, request);
+        return new HumanInputRequestLifecycleStoreMutation(0, evidence, request, head, null);
     }
 
     private static HumanInputSupersedeCandidatePreparer CreatePreparer(HumanInputSupersedeCandidatePreparerTestCatalog catalog, AuthorityGrantResolution resolution)

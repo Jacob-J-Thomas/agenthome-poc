@@ -312,7 +312,9 @@ test("Human Input lifecycle controls and supersede keep operation identity separ
   assert.equal(commitBody.operationId, prepareBody.operationId);
   assert.equal(rejectBody.reason, "reject");
   assert.equal(prepareBody.operationId, commitBody.operationId);
-  assert.equal(prepareBody.successor.responsePolicy.orderedRoleIds, null);
+  assert.deepEqual(prepareBody.successor.responsePolicy, {
+    kind: "preserve-canonical",
+  });
   assert.equal(Object.hasOwn(prepareBody, "actor"), false);
   assert.match(humanInputOutcomeMessage("replayed"), /already recorded/i);
 });
@@ -369,6 +371,7 @@ test("Human Input supersede remains available for every canonical response polic
     ["manual-selection", null],
   ]) {
     const fixture = createFixture();
+    const calls = [];
     const current = posture({
       presentation: {
         ...posture().presentation,
@@ -379,18 +382,42 @@ test("Human Input supersede remains available for every canonical response polic
     });
     const surface = createHumanInputSurface({
       document: fixture.document,
-      requestJson: async (url) => {
+      requestJson: async (url, options = {}) => {
+        calls.push({ url, options });
         if (url === "/api/human-input?maximumCount=50")
           return { status: "ready", requests: [current], nextCursor: null };
         if (url === "/api/human-input/request-input-1") return current;
+        if (url.endsWith("/supersede/prepare"))
+          return {
+            status: "ready",
+            candidateKey: "candidate-opaque",
+            expiresAtUtc: "2026-09-01T13:00:00Z",
+          };
+        if (url.endsWith("/supersede")) return { status: "committed" };
         throw new Error("unexpected request");
       },
     });
     await surface.activate();
-    assert.equal(
-      fixture.elements.humanInputSupersedeButton.disabled,
-      false,
+    await clickAndFlush(fixture.elements.humanInputSupersedeButton);
+    await clickAndFlush(fixture.elements.humanInputSupersedeButton);
+    const prepare = calls.find((call) =>
+      call.url.endsWith("/supersede/prepare"),
+    );
+    const commit = calls.find((call) => call.url.endsWith("/supersede"));
+    assert.ok(prepare, responsePolicyKind);
+    assert.ok(commit, responsePolicyKind);
+    assert.deepEqual(
+      JSON.parse(prepare.options.body).successor.responsePolicy,
+      { kind: "preserve-canonical" },
       responsePolicyKind,
+    );
+    assert.equal(
+      JSON.parse(commit.options.body).candidateKey,
+      "candidate-opaque",
+    );
+    assert.match(
+      fixture.elements.humanInputResponseStatus.textContent,
+      /recorded/i,
     );
   }
 });

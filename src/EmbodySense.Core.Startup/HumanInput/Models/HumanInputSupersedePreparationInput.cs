@@ -13,7 +13,7 @@ namespace EmbodySense.Core.Startup.HumanInput.Models;
 /// <param name="ResponseSchema">The untrusted successor response-schema JSON.</param>
 /// <param name="PrivacyClass">The successor privacy-class token.</param>
 /// <param name="ExpiresAtUtc">The proposed successor response deadline.</param>
-/// <param name="ResponsePolicy">The untrusted successor response-policy JSON.</param>
+/// <param name="ResponsePolicy">The untrusted successor response-policy JSON, or the exact `{ "kind": "preserve-canonical" }` server-owned intent that retains the current policy and its private role identities inside Startup.</param>
 public sealed record HumanInputSupersedePreparationInput(
     string OperationId,
     string RequestId,

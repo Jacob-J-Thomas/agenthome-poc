@@ -599,12 +599,7 @@ export function createHumanInputSurface({
               responseSchema: posture.presentation.responseSchema,
               privacyClass: posture.presentation.privacyClass,
               expiresAtUtc: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
-              responsePolicy: {
-                kind: posture.presentation.responsePolicyKind,
-                requiredResponseCount:
-                  posture.presentation.requiredResponseCount,
-                orderedRoleIds: null,
-              },
+              responsePolicy: { kind: "preserve-canonical" },
             },
           }),
         },
