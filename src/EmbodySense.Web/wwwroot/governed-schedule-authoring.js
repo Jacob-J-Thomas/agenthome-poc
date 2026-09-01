@@ -195,7 +195,15 @@ export function createGovernedScheduleAuthoring({
       render();
       return;
     }
-    const serverBoundInput = createInput(selector);
+    const currentSelector = selectedGraph();
+    if (!sameSelector(selector, currentSelector)) {
+      elements.result.textContent =
+        "The selected graph changed while schedule rules were loading. Refresh and select one exact graph revision before submitting.";
+      inFlight = false;
+      render();
+      return;
+    }
+    const serverBoundInput = createInput(currentSelector);
     if (!serverBoundInput) {
       elements.result.textContent =
         "Select one exact time zone from the server-owned rules snapshot.";
@@ -272,6 +280,16 @@ export function createGovernedScheduleAuthoring({
       priority: elements.priority.value,
       enabled: replacement ? false : elements.enabled.checked,
     };
+  }
+
+  function sameSelector(left, right) {
+    return (
+      validSelector(left) &&
+      validSelector(right) &&
+      left.graphId === right.graphId &&
+      left.revisionId === right.revisionId &&
+      left.lifecycleVersion === right.lifecycleVersion
+    );
   }
 
   async function ensureServerTimeZones() {

@@ -176,6 +176,51 @@ test("schedule authoring uses the server-owned time-zone catalog instead of the 
   );
 });
 
+test("schedule creation rejects a visible Graph ID change while the server time-zone catalog is loading", async () => {
+  const view = createView();
+  const calls = [];
+  const timeZonesRequested = createDeferred();
+  const timeZonesReady = createDeferred();
+  let visibleGraphId = "graph-published";
+  const authoring = createGovernedScheduleAuthoring({
+    document: view.document,
+    operationId: (kind) => `operation-${kind}`,
+    selectedGraph: () => ({
+      graphId: visibleGraphId,
+      revisionId: "revision-published",
+      lifecycleVersion: 4,
+    }),
+    requestJson: async (url, options) => {
+      calls.push({ url, options });
+      if (url === "/api/governed-schedules/time-zones") {
+        timeZonesRequested.resolve();
+        return await timeZonesReady.promise;
+      }
+      if (url === "/api/governed-schedules/create")
+        return {
+          status: "created",
+          detail: "Created.",
+          schedule: authoredSchedule("schedule-race", true),
+        };
+      throw new Error(`Unexpected request: ${url}`);
+    },
+  });
+  authoring.setInteractive(true);
+  view.elements.fixedIntervalSeconds.value = "300";
+
+  const submission = view.elements.submit.click();
+  await timeZonesRequested.promise;
+  visibleGraphId = "graph-mutated";
+  timeZonesReady.resolve(serverTimeZoneCatalog());
+  await submission;
+
+  assert.equal(
+    calls.some((call) => call.url === "/api/governed-schedules/create"),
+    false,
+  );
+  assert.match(view.elements.result.textContent, /selected graph changed/i);
+});
+
 test("immutable replacement rereads canonical posture and never enables a successor before its predecessor is disabled", async () => {
   const view = createView();
   const calls = [];
@@ -677,4 +722,12 @@ class FakeElement {
   set value(value) {
     this._value = String(value ?? "");
   }
+}
+
+function createDeferred() {
+  let resolve;
+  const promise = new Promise((promiseResolve) => {
+    resolve = promiseResolve;
+  });
+  return { promise, resolve };
 }
