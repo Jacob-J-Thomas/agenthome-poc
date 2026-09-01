@@ -283,6 +283,11 @@ export function humanInputOutcomeMessage(status, httpStatus = null) {
   return "Human Input is temporarily unavailable. Retry after the runtime is healthy.";
 }
 
+/** Explains why a new operation is rejected without evicting an exact retry identity. */
+export function humanInputOperationCapacityMessage() {
+  return `The browser has reached the bounded limit of ${maximumOperationEntries} retained Human Input operations. No new request was sent; reuse an existing operation or reload before trying again.`;
+}
+
 /** Creates the isolated Human Input surface over the authenticated Startup facade. */
 export function createHumanInputSurface({
   document,
@@ -500,6 +505,10 @@ export function createHumanInputSurface({
     const explanation = boundedInputValue(elements.explanation, 1000);
     const key = `${humanInputIdentity(posture)}:answer:${JSON.stringify(value)}:${explanation}`;
     const operation = getOperation(key);
+    if (!operation) {
+      setOperationCapacityFeedback();
+      return;
+    }
     const payload = {
       operationId: operation.operationId,
       expectedLifecycleVersion: posture.lifecycleVersion,
@@ -523,6 +532,10 @@ export function createHumanInputSurface({
     const reason = action === "reject" ? "reject" : "cancel";
     const key = `${humanInputIdentity(posture)}:${action}`;
     const operation = getOperation(key);
+    if (!operation) {
+      setOperationCapacityFeedback();
+      return;
+    }
     const payload = {
       operationId: operation.operationId,
       expectedLifecycleVersion: posture.lifecycleVersion,
@@ -547,6 +560,10 @@ export function createHumanInputSurface({
         : getOperation(
             `${humanInputIdentity(posture)}:supersede:${state.candidate.candidateKey}`,
           );
+      if (!operation) {
+        setSupersedeStatus(humanInputOperationCapacityMessage(), "warning");
+        return;
+      }
       await submitOperation(
         "supersede",
         {
@@ -580,6 +597,10 @@ export function createHumanInputSurface({
     const operation = getOperation(
       `${humanInputIdentity(posture)}:prepare:${purpose}:${prompt}`,
     );
+    if (!operation) {
+      setSupersedeStatus(humanInputOperationCapacityMessage(), "warning");
+      return;
+    }
     state.actionInFlight = true;
     setBusy(true);
     try {
@@ -676,6 +697,7 @@ export function createHumanInputSurface({
   function getOperation(key) {
     let operation = state.operations.get(key);
     if (!operation) {
+      if (state.operations.size >= maximumOperationEntries) return null;
       const operationSeed = `${randomUUID(hostWindow) ?? "operation"}-${state.operationNumber++}`;
       const responseSeed = `${randomUUID(hostWindow) ?? "response"}-${state.operationNumber++}`;
       const operationId = humanInputOperationIdentity(operationSeed);
@@ -684,8 +706,6 @@ export function createHumanInputSurface({
         responseId: humanInputOperationIdentity(responseSeed),
       });
       state.operations.set(key, operation);
-      while (state.operations.size > maximumOperationEntries)
-        state.operations.delete(state.operations.keys().next().value);
     }
     return operation;
   }
@@ -975,6 +995,10 @@ export function createHumanInputSurface({
       tone: tone || "",
     });
     renderOperationFeedback();
+  }
+
+  function setOperationCapacityFeedback() {
+    setOperationFeedback(humanInputOperationCapacityMessage(), "warning");
   }
 
   function renderOperationFeedback() {

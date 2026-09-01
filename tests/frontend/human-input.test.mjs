@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   boundedHumanInputText,
   createHumanInputSurface,
+  humanInputOperationCapacityMessage,
   humanInputOperationIdentity,
   humanInputOutcomeMessage,
   projectHumanInputPage,
@@ -263,6 +264,76 @@ test("Human Input answer is typed, exact-version-bound, retryable, and free of a
     "authority",
   ])
     assert.equal(Object.hasOwn(first, field), false);
+});
+
+test("Human Input retains 128 exact operation identities and fails closed before a new POST", async () => {
+  const fixture = createFixture();
+  const calls = [];
+  let randomNumber = 0;
+  const current = posture();
+  const requestJson = async (url, options = {}) => {
+    calls.push({ url, options });
+    if (url === "/api/human-input?maximumCount=50")
+      return { status: "ready", requests: [current], nextCursor: null };
+    if (url === "/api/human-input/request-input-1") return current;
+    if (options.method === "POST") return { status: "committed" };
+    throw new Error("unexpected request");
+  };
+  const surface = createHumanInputSurface({
+    document: fixture.document,
+    window: {
+      crypto: { randomUUID: () => `operation-${++randomNumber}` },
+    },
+    requestJson,
+  });
+
+  await surface.activate();
+  const responseControl = () =>
+    fixture.elements.humanInputResponseEditor.children[0].children[1];
+  const postCalls = () =>
+    calls.filter((call) => call.options.method === "POST");
+  const operationIds = [];
+  for (let index = 0; index < 128; index++) {
+    responseControl().value = `response-${index}`;
+    await clickAndFlush(fixture.elements.humanInputResponseSubmitButton);
+    const posts = postCalls();
+    operationIds.push(
+      JSON.parse(posts[posts.length - 1].options.body).operationId,
+    );
+  }
+
+  assert.equal(postCalls().length, 128);
+  assert.equal(new Set(operationIds).size, 128);
+  const firstOperationId = operationIds[0];
+  const lastOperationId = operationIds[127];
+
+  responseControl().value = "response-128";
+  await clickAndFlush(fixture.elements.humanInputResponseSubmitButton);
+  responseControl().value = "response-129";
+  await clickAndFlush(fixture.elements.humanInputResponseSubmitButton);
+  assert.equal(postCalls().length, 128);
+  assert.equal(
+    fixture.elements.humanInputResponseStatus.textContent,
+    humanInputOperationCapacityMessage(),
+  );
+  assert.ok(
+    fixture.elements.humanInputResponseStatus.textContent.length <= 1024,
+  );
+
+  responseControl().value = "response-0";
+  await clickAndFlush(fixture.elements.humanInputResponseSubmitButton);
+  assert.equal(postCalls().length, 129);
+  assert.equal(
+    JSON.parse(postCalls()[128].options.body).operationId,
+    firstOperationId,
+  );
+  responseControl().value = "response-127";
+  await clickAndFlush(fixture.elements.humanInputResponseSubmitButton);
+  assert.equal(postCalls().length, 130);
+  assert.equal(
+    JSON.parse(postCalls()[129].options.body).operationId,
+    lastOperationId,
+  );
 });
 
 test("Human Input lifecycle controls and supersede keep operation identity separate from private state", async () => {
