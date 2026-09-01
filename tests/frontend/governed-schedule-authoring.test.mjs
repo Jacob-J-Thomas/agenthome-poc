@@ -296,6 +296,11 @@ test("immutable replacement paginates canonical posture until both exact schedul
     selectedGraph,
     requestJson: async (url, options) => {
       calls.push({ url, options });
+      if (url === "/api/governed-schedules/time-zones")
+        return {
+          status: "available",
+          timeZones: [{ id: "Central Standard Time" }, { id: "UTC" }],
+        };
       if (url === "/api/governed-schedules/detail?scheduleId=schedule-old")
         return { status: "found", schedule: predecessor };
       if (url === "/api/governed-schedules/create") {
