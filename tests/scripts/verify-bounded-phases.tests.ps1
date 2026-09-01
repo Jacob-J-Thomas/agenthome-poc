@@ -28,6 +28,10 @@ $retentionTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tes
 $coverageChildProcessPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Verification\CoverageChildProcessAssembly.cs"
 $cancellationHostProcessPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Verification\CancellationHostProcess.cs"
 $persistenceTestProjectPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\EmbodySense.Core.Persistence.Tests.csproj"
+$cancellationHostProjectPath = Join-Path $repoRoot "tests\EmbodySense.CancellationHost\EmbodySense.CancellationHost.csproj"
+$cancellationHostProgramPath = Join-Path $repoRoot "tests\EmbodySense.CancellationHost\Program.cs"
+$scheduleStoreTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Triggers\Schedules\ScheduleStoreTests.cs"
+$scheduleStoreHostPath = Join-Path $repoRoot "tests\Shared\ScheduleStoreCrossProcessHost.cs"
 $admissionStoreTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Loops\Admission\GovernedLoopAdmissionStoreTests.cs"
 $admissionStoreFixturePath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Loops\Admission\GovernedLoopAdmissionStoreTestFixture.cs"
 $admissionStoreHostTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Loops\Admission\GovernedLoopAdmissionStoreCrossProcessHostTests.cs"
@@ -177,6 +181,10 @@ $retentionTest = Get-Content -LiteralPath $retentionTestPath -Raw
 $coverageChildProcess = Get-Content -LiteralPath $coverageChildProcessPath -Raw
 $cancellationHostProcess = Get-Content -LiteralPath $cancellationHostProcessPath -Raw
 $persistenceTestProject = Get-Content -LiteralPath $persistenceTestProjectPath -Raw
+$cancellationHostProject = Get-Content -LiteralPath $cancellationHostProjectPath -Raw
+$cancellationHostProgram = Get-Content -LiteralPath $cancellationHostProgramPath -Raw
+$scheduleStoreTest = Get-Content -LiteralPath $scheduleStoreTestPath -Raw
+$scheduleStoreHost = Get-Content -LiteralPath $scheduleStoreHostPath -Raw
 $admissionStoreTest = Get-Content -LiteralPath $admissionStoreTestPath -Raw
 $admissionStoreFixture = Get-Content -LiteralPath $admissionStoreFixturePath -Raw
 $admissionStoreHostTest = Get-Content -LiteralPath $admissionStoreHostTestPath -Raw
@@ -237,6 +245,16 @@ Assert-Contains -Actual $cancellationHostProcess -Expected 'internal static Proc
 Assert-Contains -Actual $cancellationHostProcess -Expected 'var startInfo = CreateStartInfo("dotnet")' -Message "Existing cancellation and process-loss fixtures must retain their reviewed dotnet exec semantics."
 Assert-Contains -Actual $cancellationHostProcess -Expected 'startInfo.ArgumentList.Add("exec")' -Message "Existing cancellation and process-loss fixtures must invoke the dedicated host through dotnet exec."
 Assert-Contains -Actual $admissionStoreFixture -Expected 'CancellationHostProcess.StartAppHost(' -Message "Only the successful admission writer may use the explicit apphost optimization."
+Assert-Contains -Actual $scheduleStoreTest -Expected 'public async Task Cross_process_schedule_create_host()' -Message "The canonical schedule worker Fact must remain discoverable in the Persistence inventory."
+Assert-Contains -Actual $scheduleStoreTest -Expected 'CancellationHostProcess.StartAppHostOwned(' -Message "Successful ScheduleStore workers must use the job-owned direct apphost route."
+Assert-Contains -Actual $scheduleStoreTest -Expected 'if (crashBoundary is null)' -Message "ScheduleStore apphost optimization must be limited to successful workers."
+Assert-Contains -Actual $scheduleStoreTest -Expected 'AddExpectedTerminationVstestArguments(startInfo, typeof(ScheduleStoreTests).Assembly.Location, CrossProcessHostTestName)' -Message "ScheduleStore crash-boundary workers must retain the exact expected-termination VSTest route."
+Assert-Contains -Actual $scheduleStoreHost -Expected 'internal static async Task<int> RunAsync(' -Message "ScheduleStore cross-process logic must live in the named shared fixture."
+Assert-Contains -Actual $scheduleStoreHost -Expected 'operation is not ("create" or "compare-exchange" or "compare-exchange-current")' -Message "The shared schedule worker must validate its bounded operation vocabulary."
+Assert-Contains -Actual $cancellationHostProgram -Expected '["schedule-store", var scheduleWorkspaceRoot' -Message "The cancellation host must expose the explicit schedule-store apphost operation."
+Assert-Contains -Actual $cancellationHostProject -Expected '..\Shared\ScheduleStoreCrossProcessHost.cs' -Message "The cancellation host must compile the shared schedule worker."
+Assert-Contains -Actual $persistenceTestProject -Expected '..\Shared\ScheduleStoreCrossProcessHost.cs' -Message "Persistence tests must compile the same shared schedule worker."
+Assert-Contains -Actual $cancellationHostProcess -Expected 'internal static CrossProcessProcess StartAppHostOwned' -Message "Direct schedule workers must be job-owned for bounded cleanup."
 Assert-Contains -Actual $verifyScript -Expected 'Resolve-VerificationPhysicalTempRoot -RunnerTemp $env:RUNNER_TEMP -SystemTempPath ([IO.Path]::GetTempPath())' -Message "Hosted verification must select the runner-owned ephemeral volume with a local fallback."
 Assert-Contains -Actual $verifyScript -Expected 'Get-VerificationLaneFixturePath -PhysicalTempRoot $verificationPhysicalTempRoot' -Message "Lane fixture isolation must remain short, disjoint, and outside retained repository artifacts."
 Assert-Contains -Actual $verifyScript -Expected 'EMBODYSENSE_CAPABILITY_CATALOG_TRUST_ROOT = Join-Path $laneFixtureRoot "catalog-trust"' -Message "Every project lane must receive a disjoint process-scoped catalog trust root."

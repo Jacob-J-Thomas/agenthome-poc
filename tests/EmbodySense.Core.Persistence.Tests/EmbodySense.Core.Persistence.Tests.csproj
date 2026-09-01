@@ -42,6 +42,7 @@
     <Compile Include="..\EmbodySense.HumanInputContinuationHost\HumanInputResponseContinuationGraphFixture.cs" Link="Support\HumanInputResponseContinuationGraphFixture.cs" />
     <Compile Include="..\EmbodySense.Core.Common.Tests\TriggerDeliveryTestData.cs" Link="Support\TriggerDeliveryTestData.cs" />
     <Compile Include="..\EmbodySense.Core.Common.Tests\Triggers\Schedules\ScheduleContractTestData.cs" Link="Support\ScheduleContractTestData.cs" />
+    <Compile Include="..\Shared\ScheduleStoreCrossProcessHost.cs" Link="Support\ScheduleStoreCrossProcessHost.cs" />
   </ItemGroup>
 
   <PropertyGroup>

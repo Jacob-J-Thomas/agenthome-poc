@@ -18,8 +18,7 @@ namespace EmbodySense.Core.Startup.Tests.Runtime;
 
 public sealed partial class AgentRuntimeFactoryTests
 {
-    [Fact]
-    public async Task CreateAsync_default_conversation_revalidates_current_authority_before_a_tool_actuation()
+    internal static async Task CreateAsync_default_conversation_revalidates_current_authority_before_a_tool_actuation()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
@@ -34,8 +33,7 @@ public sealed partial class AgentRuntimeFactoryTests
         Assert.True(result.Output.Contains("server-owned content", StringComparison.Ordinal), $"OUTPUT={result.Output}");
     }
 
-    [Fact]
-    public async Task CreateAsync_default_conversation_denies_tool_actuation_when_definition_authority_narrows()
+    internal static async Task CreateAsync_default_conversation_denies_tool_actuation_when_definition_authority_narrows()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);

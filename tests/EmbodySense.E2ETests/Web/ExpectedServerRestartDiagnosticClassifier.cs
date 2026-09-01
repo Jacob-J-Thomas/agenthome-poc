@@ -2,6 +2,8 @@ namespace EmbodySense.E2ETests.Web;
 
 internal static class ExpectedServerRestartDiagnosticClassifier
 {
+    private const string BrowserSessionRecoveryDescription = "Error: The browser session is being recovered.";
+
     public static bool IsExpectedNetworkFailure(
         bool expectedServerRestart,
         bool beganDuringOutage,
@@ -77,6 +79,27 @@ internal static class ExpectedServerRestartDiagnosticClassifier
                         || string.Equals(uri.Scheme, "https", StringComparison.OrdinalIgnoreCase))));
     }
 
+    public static bool IsExpectedServerRestartPageException(
+        bool expectedServerRestart,
+        string? text,
+        string? className,
+        string? description,
+        string? functionName,
+        string? url,
+        string targetAuthority)
+    {
+        if (!expectedServerRestart
+            || !string.Equals(text, "Uncaught (in promise)", StringComparison.Ordinal)
+            || !string.Equals(className, "Error", StringComparison.Ordinal)
+            || !string.Equals(functionName, "suspendSession", StringComparison.Ordinal)
+            || !IsExpectedLoopBuilderScript(url, targetAuthority))
+        {
+            return false;
+        }
+
+        return description?.StartsWith(BrowserSessionRecoveryDescription + "\n", StringComparison.Ordinal) == true;
+    }
+
     private static bool ContainsTargetAuthority(string? value, string targetAuthority)
     {
         return value?.Contains(targetAuthority, StringComparison.OrdinalIgnoreCase) == true;
@@ -86,5 +109,14 @@ internal static class ExpectedServerRestartDiagnosticClassifier
     {
         return Uri.TryCreate(value, UriKind.Absolute, out var uri)
             && string.Equals(uri.Authority, targetAuthority, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsExpectedLoopBuilderScript(string? value, string targetAuthority)
+    {
+        return Uri.TryCreate(value, UriKind.Absolute, out var uri)
+            && string.Equals(uri.Authority, targetAuthority, StringComparison.OrdinalIgnoreCase)
+            && (string.Equals(uri.Scheme, "http", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(uri.Scheme, "https", StringComparison.OrdinalIgnoreCase))
+            && string.Equals(uri.AbsolutePath, "/loop-builder.js", StringComparison.Ordinal);
     }
 }

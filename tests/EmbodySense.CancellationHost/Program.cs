@@ -207,6 +207,11 @@ if (args is ["governed-loop-revision-store", var revisionMode, var revisionWorks
     return await GovernedLoopRevisionStoreCrossProcessHost.RunAsync(revisionMode, revisionWorkspaceRoot, revisionTrustRoot, revisionGatePath, revisionReadyPath, revisionOutputPath, revisionGraphId, revisionId, revisionOperationId, revisionRequestHash);
 }
 
+if (args is ["schedule-store", var scheduleWorkspaceRoot, var scheduleGatePath, var scheduleReadyPath, var scheduleOutputPath, var scheduleId, var scheduleOperation, var scheduleVariant, var scheduleMaxDurabilityArtifacts, var scheduleCrashBoundary])
+{
+    return await ScheduleStoreCrossProcessHost.RunAsync(scheduleWorkspaceRoot, scheduleGatePath, scheduleReadyPath, scheduleOutputPath, scheduleId, scheduleOperation, scheduleVariant, scheduleMaxDurabilityArtifacts, scheduleCrashBoundary);
+}
+
 if (args is ["sequential-audit-record-then-exit", var auditWorkspaceRoot])
 {
     return await SequentialAuditCrossProcessHost.RecordThenExitAsync(auditWorkspaceRoot);
