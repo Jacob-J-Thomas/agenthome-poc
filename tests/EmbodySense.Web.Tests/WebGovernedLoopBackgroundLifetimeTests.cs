@@ -173,10 +173,8 @@ public sealed class WebGovernedLoopBackgroundLifetimeTests
             var standbyHost = standby.Services.GetRequiredService<WebAgentRuntimeHost>();
             Assert.Equal(WebGovernedLoopBackgroundPosture.Degraded, (await WaitForPostureAsync(standbyHost, WebGovernedLoopBackgroundPosture.Degraded)).BackgroundPosture);
 
-            var coordinatorLedger = Directory.EnumerateFiles(workspace.File(".agent", "loops", "execution", "coordinator"), "ledger-*.json")
-                .Order(StringComparer.Ordinal)
-                .Last();
-            await File.WriteAllTextAsync(coordinatorLedger, "{invalid");
+            var coordinatorDirectory = workspace.File(".agent", "loops", "execution", "coordinator");
+            await File.WriteAllTextAsync(Path.Combine(coordinatorDirectory, "unsupported-artifact"), "{invalid");
             await standby.StopAsync();
 
             Assert.Equal(WebGovernedLoopBackgroundPosture.Unavailable, (await WaitForPostureAsync(standbyHost, WebGovernedLoopBackgroundPosture.Unavailable)).BackgroundPosture);
