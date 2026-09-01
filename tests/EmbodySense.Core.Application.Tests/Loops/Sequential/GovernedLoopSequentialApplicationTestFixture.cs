@@ -335,7 +335,8 @@ internal static class GovernedLoopSequentialApplicationTestFixture
         IReadOnlyList<GovernedLoopBindingDefinition>? bindings = null,
         IReadOnlyList<GovernedLoopValueSchemaDefinition>? valueSchemas = null,
         GovernedLoopOutputContract? outputContract = null,
-        GovernedLoopAuthorityCeiling? authorityCeiling = null)
+        GovernedLoopAuthorityCeiling? authorityCeiling = null,
+        string graphId = "sequential-loop")
     {
         owningRole ??= new ContextualRoleRevisionPin(new ContextualRoleRevisionIdentity("sequential-role", 1), Hash('a'));
         valueSchemas ??= [new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false)];
@@ -343,7 +344,7 @@ internal static class GovernedLoopSequentialApplicationTestFixture
         authorityCeiling ??= GovernedLoopAuthorityCeiling.Create([ConversationTurnCapabilityId, ModelInferenceCapabilityId, ModelProfileCapabilityId]);
         var graph = GovernedLoopGraphDefinition.Create(
             1,
-            "sequential-loop",
+            graphId,
             "revision-1",
             "Execute one exact supported sequential governed graph.",
             owningRole,

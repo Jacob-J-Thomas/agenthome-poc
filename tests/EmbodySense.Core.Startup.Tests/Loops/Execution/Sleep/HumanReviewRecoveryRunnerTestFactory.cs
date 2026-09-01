@@ -1,6 +1,7 @@
 using System.Reflection;
 using EmbodySense.Core.Application.HumanReview;
 using EmbodySense.Core.Startup.Loops.Execution.Sleep;
+using EmbodySense.Core.Startup.Loops.Execution.Sleep.Models;
 
 namespace EmbodySense.Core.Startup.Tests.Loops.Execution.Sleep;
 

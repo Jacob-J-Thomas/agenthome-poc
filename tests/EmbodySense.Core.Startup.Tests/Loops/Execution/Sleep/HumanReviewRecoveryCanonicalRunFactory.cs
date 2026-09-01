@@ -30,7 +30,7 @@ namespace EmbodySense.Core.Startup.Tests.Loops.Execution.Sleep;
 
 internal static class HumanReviewRecoveryCanonicalRunFactory
 {
-    public static async Task<CustomLoopRunRecord> CreateApprovedRunAsync(string runId, string admissionOperationId)
+    public static async Task<CustomLoopRunRecord> CreateApprovedRunAsync(string runId, string admissionOperationId, string? loopId = null)
     {
         var artifact = GovernedLoopSequentialApplicationTestFixture.Artifact(
             [
@@ -60,7 +60,8 @@ internal static class HumanReviewRecoveryCanonicalRunFactory
             ],
             ["exit", "fail"],
             bindings: [new GovernedLoopBindingDefinition("request-to-exit", GovernedLoopBindingKind.Data, "trigger", "request", "exit", "result")],
-            authorityCeiling: GovernedLoopAuthorityCeiling.Create([GovernedLoopSequentialApplicationTestFixture.ConversationTurnCapabilityId]));
+            authorityCeiling: GovernedLoopAuthorityCeiling.Create([GovernedLoopSequentialApplicationTestFixture.ConversationTurnCapabilityId]),
+            graphId: loopId ?? "sequential-loop");
         var planResult = GovernedLoopSequentialPlanBuilder.Build(artifact);
         var plan = planResult.Plan ?? throw new InvalidOperationException($"The canonical recovery test artifact was not plannable: {planResult.Status}.");
         var invocation = GovernedLoopSequentialApplicationTestFixture.InvocationSnapshot(artifact, includeConversation: false);
