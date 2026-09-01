@@ -8,6 +8,7 @@ using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Core.Startup.Capabilities;
+using EmbodySense.Core.Startup.HumanReview;
 using EmbodySense.Web.Hubs;
 using EmbodySense.Web.Services;
 
@@ -82,10 +83,15 @@ public static class Program
         services.AddControllers().AddJsonOptions(options =>
         {
             options.JsonSerializerOptions.UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow;
+            options.JsonSerializerOptions.AllowDuplicateProperties = false;
             options.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.KebabCaseLower, allowIntegerValues: false));
         });
         services.AddSignalR()
-            .AddJsonProtocol(options => options.PayloadSerializerOptions.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.KebabCaseLower, allowIntegerValues: false)))
+            .AddJsonProtocol(options =>
+            {
+                options.PayloadSerializerOptions.AllowDuplicateProperties = false;
+                options.PayloadSerializerOptions.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.KebabCaseLower, allowIntegerValues: false));
+            })
             .AddHubOptions<WebSessionHub>(options =>
             {
                 options.MaximumReceiveMessageSize = LoopRunTransportLimits.MaxSignalRInvocationMessageUtf8Bytes;
@@ -100,16 +106,29 @@ public static class Program
                 policy.RequireAuthenticatedUser();
             });
         });
+        services.AddHttpContextAccessor();
         services.AddSingleton(options);
         services.AddSingleton(_ => WebSessionSecurity.CreateForWorkspace(options.WorkingDirectory, options.Port));
         services.AddSingleton<IWebClientNotifier, SignalRWebClientNotifier>();
+        services.AddSingleton<HumanReviewLocalDecisionAuthorizationPolicy>();
+        services.AddSingleton<IHumanReviewDecisionAuthorizationProvider, WebHumanReviewDecisionAuthorizationProvider>();
+        services.AddSingleton<IWebHumanReviewNotifier, SignalRWebHumanReviewNotifier>();
         services.AddSingleton<IAgentRuntimeConversationPublicationObserver, WebConversationPublicationObserver>();
         services.AddSingleton<WebApprovalCoordinator>();
-        services.AddSingleton(provider => new WebAgentRuntimeHost(
-            options,
-            provider.GetRequiredService<WebApprovalCoordinator>(),
-            WorkspaceInitializer.ForWeb(),
-            provider.GetRequiredService<IAgentRuntimeConversationPublicationObserver>()));
+        services.AddSingleton(provider =>
+        {
+            var approvals = provider.GetRequiredService<WebApprovalCoordinator>();
+            var observer = provider.GetRequiredService<IAgentRuntimeConversationPublicationObserver>();
+            var decisionAuthorizationProvider = provider.GetRequiredService<IHumanReviewDecisionAuthorizationProvider>();
+            return new WebAgentRuntimeHost(
+                options,
+                approvals,
+                WorkspaceInitializer.ForWeb(),
+                observer,
+                runtimeStatus => new AgentRuntimeFactory(approvals, observer, runtimeStatus)
+                    .WithHumanReviewDecisionAuthorizationProvider(decisionAuthorizationProvider));
+        });
+        services.AddSingleton<IWebHumanReviewRuntime>(provider => provider.GetRequiredService<WebAgentRuntimeHost>());
         services.AddSingleton(provider => new WebGovernedLoopBackgroundHostedService(provider.GetRequiredService<WebAgentRuntimeHost>()));
         services.AddSingleton<IHostedService>(provider => provider.GetRequiredService<WebGovernedLoopBackgroundHostedService>());
         services.AddSingleton<IWebLoopRuntimeInvoker>(provider => provider.GetRequiredService<WebAgentRuntimeHost>());

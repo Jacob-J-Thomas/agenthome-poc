@@ -11,6 +11,8 @@ using EmbodySense.Core.Startup.Inference.Profiles.Models;
 using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Runtime.Models;
 using EmbodySense.Core.Startup.Workspace;
+using EmbodySense.Core.Startup.HumanReview;
+using EmbodySense.Core.Startup.HumanReview.Models;
 using EmbodySense.Web.Models;
 using EmbodySense.Web.Services;
 
@@ -29,7 +31,7 @@ namespace EmbodySense.Web;
 /// admission. Evidence reads recover interrupted runs before returning state. The application container owns this host
 /// and must dispose it asynchronously.
 /// </remarks>
-public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvoker
+public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvoker, IWebHumanReviewRuntime
 {
     private readonly WebRunOptions _options;
     private readonly string _configuredModel;
@@ -562,6 +564,45 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     {
         return new LoopRunModelSnapshot("OpenAiCodex", _configuredModel);
     }
+
+    /// <summary>Gets whether the Web workspace is initialized for durable Human Review operations.</summary>
+    public bool IsWorkspaceInitialized
+        => _statusReader.Read(_options.WorkingDirectory).IsInitialized;
+
+    /// <summary>Lists one bounded detached Human Review page through the retained runtime.</summary>
+    /// <param name="request">The bounded page size and opaque continuation cursor.</param>
+    /// <param name="cancellationToken">Cancels host recovery, runtime acquisition, or the durable read.</param>
+    /// <returns>The detached canonical Human Review page.</returns>
+    public Task<HumanReviewPage> ListHumanReviewsAsync(HumanReviewPageRequest request, CancellationToken cancellationToken = default)
+        => UseHumanReviewRuntimeAsync((humanReview, token) => humanReview.ListAsync(request, token), cancellationToken);
+
+    /// <summary>Reads one exact detached Human Review detail through the retained runtime.</summary>
+    /// <param name="runId">The exact durable run identity.</param>
+    /// <param name="cancellationToken">Cancels host recovery, runtime acquisition, or the durable read.</param>
+    /// <returns>The detached canonical Human Review detail result.</returns>
+    public Task<HumanReviewReadResult> ReadHumanReviewAsync(string runId, CancellationToken cancellationToken = default)
+        => UseHumanReviewRuntimeAsync((humanReview, token) => humanReview.ReadAsync(runId, token), cancellationToken);
+
+    /// <summary>Reads one exact detached Human Review evidence projection through the retained runtime.</summary>
+    /// <param name="runId">The exact durable run identity.</param>
+    /// <param name="cancellationToken">Cancels host recovery, runtime acquisition, or the durable read.</param>
+    /// <returns>The detached canonical Human Review evidence result.</returns>
+    public Task<HumanReviewEvidenceReadResult> ReadHumanReviewEvidenceAsync(string runId, CancellationToken cancellationToken = default)
+        => UseHumanReviewRuntimeAsync((humanReview, token) => humanReview.ReadEvidenceAsync(runId, token), cancellationToken);
+
+    /// <summary>Reads one exact detached Human Review runtime posture through the retained runtime.</summary>
+    /// <param name="runId">The exact durable run identity.</param>
+    /// <param name="cancellationToken">Cancels host recovery, runtime acquisition, or the durable read.</param>
+    /// <returns>The detached canonical Human Review runtime posture.</returns>
+    public Task<HumanReviewRuntimePostureReadResult> ReadHumanReviewPostureAsync(string runId, CancellationToken cancellationToken = default)
+        => UseHumanReviewRuntimeAsync((humanReview, token) => humanReview.ReadRuntimePostureAsync(runId, token), cancellationToken);
+
+    /// <summary>Submits one authority-free Human Review decision through the retained runtime.</summary>
+    /// <param name="input">The route-derived run, version, operation, decision, and optional detail.</param>
+    /// <param name="cancellationToken">Cancels host recovery, runtime acquisition, or the durable decision.</param>
+    /// <returns>The detached canonical Human Review decision result.</returns>
+    public Task<HumanReviewDecisionResult> DecideHumanReviewAsync(HumanReviewDecisionOperationInput input, CancellationToken cancellationToken = default)
+        => UseHumanReviewRuntimeAsync((humanReview, token) => humanReview.DecideAsync(input, token), cancellationToken);
 
     internal async Task<T> UseLoopAuthoringAsync<T>(Func<LoopAuthoringFacade, Task<T>> operation, CancellationToken cancellationToken = default)
     {
@@ -1668,6 +1709,23 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         finally
         {
             _runtimeGate.Release();
+        }
+    }
+
+    private async Task<TResult> UseHumanReviewRuntimeAsync<TResult>(Func<HumanReviewRuntimeFacade, CancellationToken, Task<TResult>> operation, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        using var operationCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _hostLifetimeCancellation.Token);
+        EnsureWorkspaceInitialized("using Human Review");
+        await EnsureLoopRecoveryAsync(operationCancellation.Token).ConfigureAwait(false);
+        var runtime = await BeginCustomRuntimeOperationAsync(operationCancellation.Token).ConfigureAwait(false);
+        try
+        {
+            return await operation(runtime.HumanReview, operationCancellation.Token).ConfigureAwait(false);
+        }
+        finally
+        {
+            await EndCustomRuntimeOperationAsync().ConfigureAwait(false);
         }
     }
 
