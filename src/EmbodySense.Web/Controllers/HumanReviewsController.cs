@@ -150,7 +150,8 @@ public sealed class HumanReviewsController : ControllerBase
         }
     }
 
-    /// <summary>Approves one exact review after server-owned authority and fresh effect validation.</summary>
+    /// <summary>Records consent for one exact review after server-owned authority validation.</summary>
+    /// <remarks>The canonical release path separately revalidates current authority and effect evidence before dispatch.</remarks>
     /// <param name="runId">The exact durable run identity supplied by the route.</param>
     /// <param name="request">The bounded optimistic version, operation identity, and optional detail.</param>
     /// <param name="cancellationToken">Cancels before or during the durable decision boundary.</param>
