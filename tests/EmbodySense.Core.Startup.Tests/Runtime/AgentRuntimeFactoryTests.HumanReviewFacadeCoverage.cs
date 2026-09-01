@@ -193,7 +193,7 @@ public sealed partial class AgentRuntimeFactoryTests
     }
 
     [Fact]
-    public async Task Public_human_review_facade_keeps_a_missing_pre_dispatch_attempt_fail_closed()
+    public async Task Public_human_review_facade_keeps_an_unavailable_pre_dispatch_attempt_fail_closed()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
@@ -210,10 +210,10 @@ public sealed partial class AgentRuntimeFactoryTests
         var evidence = await runtime.HumanReview.ReadEvidenceAsync(blueprint.Id);
 
         Assert.Equal(HumanReviewReadStatus.Ready, detail.Status);
-        Assert.Equal(HumanReviewEffectEvidenceStatus.Missing, detail.Detail!.EffectEvidence!.Status);
+        Assert.Equal(HumanReviewEffectEvidenceStatus.Unavailable, detail.Detail!.EffectEvidence!.Status);
         Assert.Equal("effect-facade-missing", detail.Detail.EffectEvidence.EffectAttemptId);
         Assert.Equal(HumanReviewEvidenceReadStatus.Ready, evidence.Status);
-        Assert.Equal(HumanReviewEffectEvidenceStatus.Missing, evidence.EffectEvidence!.Status);
+        Assert.Equal(HumanReviewEffectEvidenceStatus.Unavailable, evidence.EffectEvidence!.Status);
     }
 
     private static async Task<CustomLoopRunRecord> CreateLivePendingBlueprintAsync(string runId)
