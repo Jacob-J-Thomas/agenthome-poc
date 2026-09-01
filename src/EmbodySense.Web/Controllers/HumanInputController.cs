@@ -10,10 +10,12 @@ namespace EmbodySense.Web.Controllers;
 [ApiController]
 [Authorize(Policy = WebAuthPolicies.LocalSession)]
 [ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
+[RequestSizeLimit(MaximumRequestBodyBytes)]
 [Route("api/human-input")]
 public sealed class HumanInputController : ControllerBase
 {
     private const int MaximumPageSize = 50;
+    private const long MaximumRequestBodyBytes = 16_384;
     private readonly IWebHumanInputRuntime _runtime;
 
     /// <summary>Creates the Web Human Input controller over one Startup-backed runtime boundary.</summary>
@@ -32,7 +34,18 @@ public sealed class HumanInputController : ControllerBase
             return BadRequest(new { error = "invalid_page" });
         }
 
-        return Project(await _runtime.ListAsync(new HumanInputRequestPosturePageRequest(maximumCount, cursor), cancellationToken).ConfigureAwait(false));
+        try
+        {
+            return Project(await _runtime.ListAsync(new HumanInputRequestPosturePageRequest(maximumCount, cursor), cancellationToken).ConfigureAwait(false));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            return RuntimeUnavailable<HumanInputRequestPosturePage>();
+        }
     }
 
     /// <summary>Reads one exact redacted canonical Human Input request posture.</summary>
@@ -44,14 +57,25 @@ public sealed class HumanInputController : ControllerBase
             return BadRequest(new { error = "invalid_request_id" });
         }
 
-        var result = await _runtime.ReadAsync(requestId, cancellationToken).ConfigureAwait(false);
-        return result.Status switch
+        try
         {
-            HumanInputRequestPostureReadStatus.Ready when result.Request is not null => Ok(result.Request),
-            HumanInputRequestPostureReadStatus.Invalid => BadRequest(new { error = "invalid_request_id" }),
-            HumanInputRequestPostureReadStatus.NotFound => NotFound(new { error = "human_input_not_found" }),
-            _ => StatusCode(StatusCodes.Status503ServiceUnavailable, new { error = "human_input_unavailable" })
-        };
+            var result = await _runtime.ReadAsync(requestId, cancellationToken).ConfigureAwait(false);
+            return result.Status switch
+            {
+                HumanInputRequestPostureReadStatus.Ready when result.Request is not null => Ok(result.Request),
+                HumanInputRequestPostureReadStatus.Invalid => BadRequest(new { error = "invalid_request_id" }),
+                HumanInputRequestPostureReadStatus.NotFound => NotFound(new { error = "human_input_not_found" }),
+                _ => StatusCode(StatusCodes.Status503ServiceUnavailable, new { error = "human_input_unavailable" })
+            };
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            return RuntimeUnavailable<HumanInputRequestPosture>();
+        }
     }
 
     /// <summary>Answers one exact pending Human Input request with bounded untrusted response data.</summary>
@@ -102,7 +126,18 @@ public sealed class HumanInputController : ControllerBase
             request.Successor.PrivacyClass,
             request.Successor.ExpiresAtUtc,
             request.Successor.ResponsePolicy);
-        return Project(await _runtime.PrepareSupersedeAsync(input, cancellationToken).ConfigureAwait(false));
+        try
+        {
+            return Project(await _runtime.PrepareSupersedeAsync(input, cancellationToken).ConfigureAwait(false));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            return RuntimeUnavailable<HumanInputSupersedePreparationResult>();
+        }
     }
 
     /// <summary>Commits one exact prepared successor candidate through server-owned lifecycle authority.</summary>
@@ -122,35 +157,57 @@ public sealed class HumanInputController : ControllerBase
             return BadRequest(new { error = "candidate_key_required" });
         }
 
-        var result = await _runtime.SubmitLifecycleAsync(
-            new HumanInputSurfaceLifecycleOperationInput(
-                request.OperationId,
-                kind,
-                requestId,
-                request.ExpectedLifecycleVersion,
-                request.ExpectedLifecycleStatus,
-                ToSurfaceReference(request.ExpectedRequest),
-                request.CandidateKey,
-                request.Reason),
-            cancellationToken).ConfigureAwait(false);
-        return Project(result);
+        try
+        {
+            var result = await _runtime.SubmitLifecycleAsync(
+                new HumanInputSurfaceLifecycleOperationInput(
+                    request.OperationId,
+                    kind,
+                    requestId,
+                    request.ExpectedLifecycleVersion,
+                    request.ExpectedLifecycleStatus,
+                    ToSurfaceReference(request.ExpectedRequest),
+                    request.CandidateKey,
+                    request.Reason),
+                cancellationToken).ConfigureAwait(false);
+            return Project(result);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            return RuntimeUnavailable<HumanInputOperationResult>();
+        }
     }
 
     private async Task<ActionResult<HumanInputOperationResult>> SubmitResponseAsync(string requestId, HumanInputWebResponseRequest request, CancellationToken cancellationToken)
     {
-        var result = await _runtime.SubmitResponseAsync(
-            new HumanInputSurfaceResponseOperationInput(
-                request.OperationId,
-                "Submit",
-                requestId,
-                request.ExpectedLifecycleVersion,
-                request.ExpectedLifecycleStatus,
-                ToSurfaceReference(request.ExpectedRequest)!,
-                request.ResponseId ?? string.Empty,
-                request.Value,
-                request.Explanation),
-            cancellationToken).ConfigureAwait(false);
-        return Project(result);
+        try
+        {
+            var result = await _runtime.SubmitResponseAsync(
+                new HumanInputSurfaceResponseOperationInput(
+                    request.OperationId,
+                    "Submit",
+                    requestId,
+                    request.ExpectedLifecycleVersion,
+                    request.ExpectedLifecycleStatus,
+                    ToSurfaceReference(request.ExpectedRequest)!,
+                    request.ResponseId ?? string.Empty,
+                    request.Value,
+                    request.Explanation),
+                cancellationToken).ConfigureAwait(false);
+            return Project(result);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            return RuntimeUnavailable<HumanInputOperationResult>();
+        }
     }
 
     private static bool MatchesRoute(string requestId, HumanInputWebRequestReference? expectedRequest)
@@ -189,4 +246,7 @@ public sealed class HumanInputController : ControllerBase
             HumanInputOperationStatus.Conflict or HumanInputOperationStatus.Late or HumanInputOperationStatus.Ambiguous => new ConflictObjectResult(response),
             _ => new ObjectResult(new { error = "human_input_unavailable" }) { StatusCode = StatusCodes.Status503ServiceUnavailable }
         };
+
+    private static ActionResult<T> RuntimeUnavailable<T>()
+        => new ObjectResult(new { error = "human_input_unavailable" }) { StatusCode = StatusCodes.Status503ServiceUnavailable };
 }
