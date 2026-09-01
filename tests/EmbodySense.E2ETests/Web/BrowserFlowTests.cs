@@ -514,18 +514,19 @@ public sealed class BrowserFlowTests
             Assert.Equal(1, await GetCustomDefinitionCountAsync(browser));
 
             var providerInstancesBeforeCustomRuns = await ReadFakeCodexProcessInstancesAsync(workspace);
-            const string ApprovePrompt = "browser-approval-approve";
-            const string RejectPrompt = "browser-approval-reject";
+            const string ApprovalPrompt = "browser-approval-unavailable";
 
-            await InvokeLoopAsync(browser, ApprovePrompt);
-            var approveProviderInstance = await WaitForFakeCodexEventAsync(workspace, ApprovePrompt, "tool-call", providerInstancesBeforeCustomRuns);
-            await browser.WaitForExpressionAsync("!document.getElementById('loopApprovalPanel').hidden && [...document.querySelectorAll('#loopApprovals button')].some((button) => button.textContent.includes('Approve'))");
-            await ClickButtonByTextAsync(browser, "#loopApprovals button", "Approve");
-            await WaitForFakeCodexEventAsync(workspace, ApprovePrompt, "tool-response", providerInstancesBeforeCustomRuns, approveProviderInstance, approved: true);
-            await WaitForFakeCodexEventAsync(workspace, ApprovePrompt, "turn-completed", providerInstancesBeforeCustomRuns, approveProviderInstance, approved: true);
-            await browser.WaitForExpressionAsync("document.getElementById('runCount').textContent === '1' && document.getElementById('runSubtitle').textContent.includes('· Completed') && document.getElementById('runTimeline').textContent.includes('approved browser evidence')");
-            await AssertOnlyExpectedFreshFakeCodexAttemptAsync(workspace, providerInstancesBeforeCustomRuns, approveProviderInstance);
-            Assert.Contains("browser governed tool approved", await browser.EvaluateStringAsync("document.getElementById('runTimeline').textContent"), StringComparison.OrdinalIgnoreCase);
+            await InvokeLoopAsync(browser, ApprovalPrompt);
+            var approvalProviderInstance = await WaitForFakeCodexEventAsync(workspace, ApprovalPrompt, "tool-call", providerInstancesBeforeCustomRuns);
+            await WaitForFakeCodexEventAsync(workspace, ApprovalPrompt, "tool-response", providerInstancesBeforeCustomRuns, approvalProviderInstance, approved: false);
+            await WaitForFakeCodexEventAsync(workspace, ApprovalPrompt, "turn-completed", providerInstancesBeforeCustomRuns, approvalProviderInstance, approved: false);
+            await browser.WaitForExpressionAsync("document.getElementById('runCount').textContent === '1' && document.getElementById('runSubtitle').textContent.includes('· Completed') && document.getElementById('runTimeline').textContent.includes('canonical_governed_loop_approval_unavailable')");
+            await AssertOnlyExpectedFreshFakeCodexAttemptAsync(workspace, providerInstancesBeforeCustomRuns, approvalProviderInstance);
+            Assert.True(await browser.EvaluateBooleanAsync("document.getElementById('loopApprovalPanel').hidden && document.querySelectorAll('#loopApprovals button').length === 0"));
+            var approvalTimeline = await browser.EvaluateStringAsync("document.getElementById('runTimeline').textContent");
+            Assert.Contains("browser governed tool rejected", approvalTimeline, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("canonical_governed_loop_approval_unavailable", approvalTimeline, StringComparison.Ordinal);
+            Assert.DoesNotContain("approved browser evidence", approvalTimeline, StringComparison.Ordinal);
             var publicationInspector = await browser.EvaluateStringAsync("document.getElementById('inspectorContent').textContent");
             Assert.Contains("Published", publicationInspector, StringComparison.Ordinal);
             Assert.Contains("definite", publicationInspector, StringComparison.Ordinal);
@@ -541,22 +542,10 @@ public sealed class BrowserFlowTests
             await browser.WaitForExpressionAsync("document.getElementById('inspectorContent').textContent.includes('Published') && !document.getElementById('inspectorContent').textContent.toLowerCase().includes('not published')");
 
             await ClickAsync(browser, "#builderTab");
-            var providerInstancesBeforeReject = await ReadFakeCodexProcessInstancesAsync(workspace);
-            await InvokeLoopAsync(browser, RejectPrompt);
-            var rejectProviderInstance = await WaitForFakeCodexEventAsync(workspace, RejectPrompt, "tool-call", providerInstancesBeforeReject);
-            Assert.NotEqual(approveProviderInstance, rejectProviderInstance);
-            await browser.WaitForExpressionAsync("!document.getElementById('loopApprovalPanel').hidden && [...document.querySelectorAll('#loopApprovals button')].some((button) => button.textContent.includes('Reject'))");
-            await ClickButtonByTextAsync(browser, "#loopApprovals button", "Reject");
-            await WaitForFakeCodexEventAsync(workspace, RejectPrompt, "tool-response", providerInstancesBeforeReject, rejectProviderInstance, approved: false);
-            await WaitForFakeCodexEventAsync(workspace, RejectPrompt, "turn-completed", providerInstancesBeforeReject, rejectProviderInstance, approved: false);
-            await browser.WaitForExpressionAsync("document.getElementById('runCount').textContent === '2' && document.getElementById('runSubtitle').textContent.includes('· Completed') && document.getElementById('runTimeline').textContent.toLowerCase().includes('rejected')");
-            await AssertOnlyExpectedFreshFakeCodexAttemptAsync(workspace, providerInstancesBeforeReject, rejectProviderInstance);
-
-            await ClickAsync(browser, "#builderTab");
             var providerInstancesBeforeFailure = await ReadFakeCodexProcessInstancesAsync(workspace);
             await InvokeLoopAsync(browser, "browser-provider-failure");
             var failureProviderInstance = await WaitForFakeCodexEventAsync(workspace, "browser-provider-failure", "turn-failed", providerInstancesBeforeFailure);
-            await browser.WaitForExpressionAsync("document.getElementById('runCount').textContent === '3' && document.getElementById('runSubtitle').textContent.includes('· Failed') && document.getElementById('runTimeline').textContent.includes('Provider attempt failed without an automatic retry')");
+            await browser.WaitForExpressionAsync("document.getElementById('runCount').textContent === '2' && document.getElementById('runSubtitle').textContent.includes('· Failed') && document.getElementById('runTimeline').textContent.includes('Provider attempt failed without an automatic retry')");
             await AssertOnlyExpectedFreshFakeCodexAttemptAsync(workspace, providerInstancesBeforeFailure, failureProviderInstance);
             Assert.Contains("Failed", await browser.EvaluateStringAsync("document.getElementById('runSubtitle').textContent"), StringComparison.Ordinal);
             Assert.False(await browser.EvaluateBooleanAsync("document.getElementById('runTimeline').textContent.includes('Needs Review')"));

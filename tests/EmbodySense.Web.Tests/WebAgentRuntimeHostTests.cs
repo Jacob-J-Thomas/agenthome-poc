@@ -985,12 +985,11 @@ public sealed class WebAgentRuntimeHostTests
     }
 
     [Fact]
-    public async Task Owner_disconnect_returns_a_zero_execution_tool_rejection_and_the_custom_run_continues()
+    public async Task Custom_loop_tool_approval_is_not_connection_owned_and_fails_closed_without_actuation()
     {
         using var workspace = new TestWorkspace();
         var codexPath = await CreateFakeCodexExecutableAsync(workspace, turnDelayMilliseconds: -1);
-        var approvalPublication = new ApprovalPublicationSignal();
-        var approvals = new WebApprovalCoordinator(approvalPublication);
+        var approvals = new WebApprovalCoordinator();
         approvals.RegisterOwnerConnection("connection-1");
         var options = WebRunOptions.FromArguments(["--workdir", workspace.RootPath, "--model", "gpt-test", "--codex-path", codexPath]);
         await using var host = CreateHost(options, approvals);
@@ -999,17 +998,14 @@ public sealed class WebAgentRuntimeHostTests
         var definition = await CreateInvocationLoopAsync(workspace, [LoopToolAssignment.Read]);
         var input = new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "invoke-owner-disconnect-tool", "request-the-governed-read");
 
-        var invocation = host.InvokeLoopAsync(input, "connection-1");
-        Assert.Equal("connection-1", await approvalPublication.WaitForNonemptyApprovalAsync());
-        Assert.Single(approvals.GetPending("connection-1"));
-        await approvals.DisconnectOwnerAsync("connection-1");
-        var response = await invocation;
+        var response = await host.InvokeLoopAsync(input, "connection-1");
         var toolResponse = await File.ReadAllTextAsync(workspace.File("owner-disconnected-tool-response.json"));
         var audit = await File.ReadAllTextAsync(workspace.File(".agent", "audit", "events.ndjson"));
 
+        Assert.Empty(approvals.GetPending("connection-1"));
         Assert.Equal("Completed", response.ExecutionStatus);
         Assert.Contains("continued after governed tool denial", response.Run!.FinalOutput, StringComparison.Ordinal);
-        Assert.Contains("owner_disconnected", toolResponse, StringComparison.Ordinal);
+        Assert.Contains("canonical_governed_loop_approval_unavailable", toolResponse, StringComparison.Ordinal);
         Assert.Contains("\"success\":false", toolResponse, StringComparison.Ordinal);
         Assert.DoesNotContain("content-that-must-not-be-returned", toolResponse, StringComparison.Ordinal);
         Assert.Contains("\"action\":\"tool.approval.decision\"", audit, StringComparison.Ordinal);

@@ -100,6 +100,7 @@ namespace EmbodySense.Core.Startup.Runtime;
 public sealed class AgentRuntimeFactory
 {
     private readonly IToolApprovalPrompt _approvalPrompt;
+    private readonly IToolApprovalPrompt _customLoopApprovalPrompt;
     private readonly IAgentRuntimeConversationPublicationObserver? _conversationPublicationObserver;
     private readonly CodexRuntimeStatus? _codexRuntimeStatus;
     private readonly ICapabilityCatalogTrustProvider _capabilityTrustProvider;
@@ -196,7 +197,8 @@ public sealed class AgentRuntimeFactory
             _customLoopRunStoreProvider,
             _governedLoopLocalCoordinatorBoundaryObserver,
             _governedLoopCoordinatorRepairAuthorityProvider,
-            _humanReviewDecisionAuthorizationProvider);
+            _humanReviewDecisionAuthorizationProvider,
+            _customLoopApprovalPrompt);
     }
 
     /// <summary>Returns an equivalent factory that composes one explicit server-owned Human Input authority provider.</summary>
@@ -219,7 +221,8 @@ public sealed class AgentRuntimeFactory
             _customLoopRunStoreProvider,
             _governedLoopLocalCoordinatorBoundaryObserver,
             _governedLoopCoordinatorRepairAuthorityProvider,
-            _humanReviewDecisionAuthorizationProvider);
+            _humanReviewDecisionAuthorizationProvider,
+            _customLoopApprovalPrompt);
     }
 
     /// <summary>Returns an equivalent factory with one explicit server-owned Human Review decision authority provider.</summary>
@@ -242,7 +245,8 @@ public sealed class AgentRuntimeFactory
             _customLoopRunStoreProvider,
             _governedLoopLocalCoordinatorBoundaryObserver,
             _governedLoopCoordinatorRepairAuthorityProvider,
-            provider);
+            provider,
+            _customLoopApprovalPrompt);
     }
 
     /// <summary>Returns an equivalent factory with authenticated current-operator authority for coordinator repair.</summary>
@@ -266,7 +270,8 @@ public sealed class AgentRuntimeFactory
             _customLoopRunStoreProvider,
             _governedLoopLocalCoordinatorBoundaryObserver,
             provider,
-            _humanReviewDecisionAuthorizationProvider);
+            _humanReviewDecisionAuthorizationProvider,
+            _customLoopApprovalPrompt);
     }
 
     /// <summary>Returns an equivalent factory with one explicit server-owned structured command Action provider.</summary>
@@ -288,7 +293,8 @@ public sealed class AgentRuntimeFactory
             _customLoopRunStoreProvider,
             _governedLoopLocalCoordinatorBoundaryObserver,
             _governedLoopCoordinatorRepairAuthorityProvider,
-            _humanReviewDecisionAuthorizationProvider);
+            _humanReviewDecisionAuthorizationProvider,
+            _customLoopApprovalPrompt);
     }
 
     /// <summary>
@@ -312,7 +318,8 @@ public sealed class AgentRuntimeFactory
             provider,
             _governedLoopLocalCoordinatorBoundaryObserver,
             _governedLoopCoordinatorRepairAuthorityProvider,
-            _humanReviewDecisionAuthorizationProvider);
+            _humanReviewDecisionAuthorizationProvider,
+            _customLoopApprovalPrompt);
     }
 
     /// <summary>Returns an equivalent factory with one diagnostic observer for local coordinator heartbeat boundaries.</summary>
@@ -336,7 +343,33 @@ public sealed class AgentRuntimeFactory
             _customLoopRunStoreProvider,
             observer,
             _governedLoopCoordinatorRepairAuthorityProvider,
-            _humanReviewDecisionAuthorizationProvider);
+            _humanReviewDecisionAuthorizationProvider,
+            _customLoopApprovalPrompt);
+    }
+
+    /// <summary>Returns an equivalent factory that rejects legacy custom-loop tool approvals at the runtime boundary.</summary>
+    /// <remarks>
+    /// Approval-required custom-loop effects must be represented by canonical durable Human Review before dispatch.
+    /// This setting does not change default-conversation tool approvals, which continue to use the surface prompt.
+    /// </remarks>
+    /// <returns>A factory preserving existing composition while removing connection- or prompt-owned custom-loop approval authority.</returns>
+    public AgentRuntimeFactory WithoutLegacyCustomLoopToolApprovals()
+    {
+        return new AgentRuntimeFactory(
+            _approvalPrompt,
+            _conversationPublicationObserver,
+            _codexRuntimeStatus,
+            _capabilityTrustProvider,
+            _governedModelExecutionObserver,
+            _additionalModelProfileProviders,
+            _authenticatedWakeVerifier,
+            _humanInputAuthorityProvider,
+            _commandActionRuntimeProvider,
+            _customLoopRunStoreProvider,
+            _governedLoopLocalCoordinatorBoundaryObserver,
+            _governedLoopCoordinatorRepairAuthorityProvider,
+            _humanReviewDecisionAuthorizationProvider,
+            CanonicalGovernedLoopApprovalPrompt.Instance);
     }
 
     internal AgentRuntimeFactory(
@@ -352,7 +385,8 @@ public sealed class AgentRuntimeFactory
         CustomLoopRunStoreProvider? customLoopRunStoreProvider = null,
         IGovernedLoopLocalCoordinatorBoundaryObserver? governedLoopLocalCoordinatorBoundaryObserver = null,
         IAgentRuntimeGovernedLoopCoordinatorRepairAuthorityProvider? governedLoopCoordinatorRepairAuthorityProvider = null,
-        IHumanReviewDecisionAuthorizationProvider? humanReviewDecisionAuthorizationProvider = null)
+        IHumanReviewDecisionAuthorizationProvider? humanReviewDecisionAuthorizationProvider = null,
+        IToolApprovalPrompt? customLoopApprovalPrompt = null)
     {
         ArgumentNullException.ThrowIfNull(approvalPrompt);
         if (codexRuntimeStatus is not null && codexRuntimeStatus.Compatibility != CodexRuntimeCompatibility.Compatible)
@@ -366,6 +400,7 @@ public sealed class AgentRuntimeFactory
         }
 
         _approvalPrompt = approvalPrompt;
+        _customLoopApprovalPrompt = customLoopApprovalPrompt ?? approvalPrompt;
         _conversationPublicationObserver = conversationPublicationObserver;
         _codexRuntimeStatus = codexRuntimeStatus;
         _capabilityTrustProvider = capabilityTrustProvider ?? FileCapabilityCatalogTrustProvider.CreateDefault();
@@ -640,7 +675,7 @@ public sealed class AgentRuntimeFactory
             var failureClassifier = new GovernedLoopFailureClassifier();
             var legacyInferenceExecutor = new CustomLoopInferenceAttemptExecutor(
                 effectiveOptions,
-                _approvalPrompt,
+                _customLoopApprovalPrompt,
                 customToolAuthority,
                 customToolEvidence,
                 capabilityAdmission,
@@ -749,7 +784,7 @@ public sealed class AgentRuntimeFactory
             var governedToolAuthority = new GovernedLoopReadOnlyWorkspaceToolAdapter();
             var governedInferenceExecutor = new CustomLoopInferenceAttemptExecutor(
                 effectiveOptions,
-                _approvalPrompt,
+                _customLoopApprovalPrompt,
                 governedToolAuthority,
                 customToolEvidence,
                 capabilityAdmission,

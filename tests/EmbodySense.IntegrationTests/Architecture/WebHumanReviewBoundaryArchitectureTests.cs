@@ -77,6 +77,16 @@ public sealed class WebHumanReviewBoundaryArchitectureTests
         Assert.Contains("AllowDuplicateProperties = false", program, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void Web_custom_loop_execution_cannot_reach_connection_owned_approval()
+    {
+        var root = FindRepositoryRoot();
+        var host = File.ReadAllText(Path.Combine(root, "src", "EmbodySense.Web", "WebAgentRuntimeHost.cs"));
+
+        Assert.Contains("WithoutLegacyCustomLoopToolApprovals", host, StringComparison.Ordinal);
+        Assert.Equal(1, Count(host, "BeginApprovalScope("));
+    }
+
     private static int Count(string source, string value)
     {
         var count = 0;
