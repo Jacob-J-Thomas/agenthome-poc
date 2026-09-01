@@ -1,6 +1,6 @@
 using EmbodySense.Core.Application.HumanReview.Models;
 
-namespace EmbodySense.Core.Startup.Loops.Execution.Sleep;
+namespace EmbodySense.Core.Startup.Loops.Execution.Sleep.Models;
 
 /// <summary>Retains canonical Application recovery results only inside the Startup composition boundary.</summary>
 internal sealed record HumanReviewRecoveryExecutionResult(

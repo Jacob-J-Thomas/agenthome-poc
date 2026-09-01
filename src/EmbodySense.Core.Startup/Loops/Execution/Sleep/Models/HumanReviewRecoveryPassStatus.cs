@@ -1,4 +1,4 @@
-namespace EmbodySense.Core.Startup.Loops.Execution.Sleep;
+namespace EmbodySense.Core.Startup.Loops.Execution.Sleep.Models;
 
 /// <summary>Describes the closed result of one bounded Startup Human Review recovery pass.</summary>
 public enum HumanReviewRecoveryPassStatus

@@ -1,4 +1,4 @@
-namespace EmbodySense.Core.Startup.Loops.Execution.Sleep;
+namespace EmbodySense.Core.Startup.Loops.Execution.Sleep.Models;
 
 /// <summary>Describes one wake-less approval publication outcome without implying continuation release.</summary>
 public enum HumanReviewPublicationRecoveryItemStatus

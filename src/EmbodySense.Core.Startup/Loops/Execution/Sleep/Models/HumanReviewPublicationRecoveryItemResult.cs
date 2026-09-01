@@ -1,4 +1,4 @@
-namespace EmbodySense.Core.Startup.Loops.Execution.Sleep;
+namespace EmbodySense.Core.Startup.Loops.Execution.Sleep.Models;
 
 /// <summary>Returns a non-secret publication outcome for one canonical run.</summary>
 /// <param name="RunId">The canonical run identity.</param>

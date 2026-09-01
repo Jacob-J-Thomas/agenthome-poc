@@ -66,6 +66,27 @@ public sealed class TestBoundaryGuardTests
         Assert.StartsWith("src/EmbodySense.Core.Persistence/Credentials/CredentialLifecyclePersistenceFactory.cs:", persistenceConstructionSites[0], StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void Startup_human_review_public_source_does_not_expose_lower_layer_contracts_or_test_hooks()
+    {
+        var root = FindRepositoryRoot();
+        var startupRoot = Path.Combine(root, "src", "EmbodySense.Core.Startup");
+        var humanReviewFiles = Directory
+            .EnumerateFiles(Path.Combine(startupRoot, "HumanReview"), "*.cs", SearchOption.AllDirectories)
+            .Concat(Directory.EnumerateFiles(Path.Combine(startupRoot, "Loops", "Execution", "Sleep"), "HumanReview*.cs", SearchOption.TopDirectoryOnly))
+            .ToArray();
+
+        var publicLowerLayerDeclarations = humanReviewFiles
+            .SelectMany(file => File.ReadLines(file)
+                .Where(line => line.Contains("public", StringComparison.Ordinal)
+                    && (line.Contains("Core.Application", StringComparison.Ordinal) || line.Contains("Core.Common", StringComparison.Ordinal)))
+                .Select(line => $"{Path.GetRelativePath(root, file)}|{line.Trim()}"))
+            .ToArray();
+
+        Assert.Empty(publicLowerLayerDeclarations);
+        Assert.False(Directory.Exists(Path.Combine(startupRoot, "Testing")), "Production Startup must not contain test-only composition hooks.");
+    }
+
     [Theory]
     [InlineData("src/EmbodySense.Core.Application/Properties/AssemblyInfo.cs", "src/EmbodySense.Core.Application/Properties/AssemblyInfo.cs")]
     [InlineData("src\\EmbodySense.Core.Application\\Properties\\AssemblyInfo.cs", "src/EmbodySense.Core.Application/Properties/AssemblyInfo.cs")]

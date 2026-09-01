@@ -1,4 +1,4 @@
-namespace EmbodySense.Core.Startup.Loops.Execution.Sleep;
+namespace EmbodySense.Core.Startup.Loops.Execution.Sleep.Models;
 
 /// <summary>Configures the bounded process-local Human Review recovery lanes.</summary>
 /// <param name="MaximumCount">The maximum canonical run summaries examined by each lane in one pass.</param>

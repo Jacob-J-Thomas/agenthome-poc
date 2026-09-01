@@ -1,4 +1,4 @@
-namespace EmbodySense.Core.Startup.Loops.Execution.Sleep;
+namespace EmbodySense.Core.Startup.Loops.Execution.Sleep.Models;
 
 /// <summary>Projects one bounded Human Review recovery pass without exposing Application candidates or authority evidence.</summary>
 /// <param name="Status">The aggregate fail-closed pass posture.</param>

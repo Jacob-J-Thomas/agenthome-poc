@@ -1,4 +1,4 @@
-namespace EmbodySense.Core.Startup.Loops.Execution.Sleep;
+namespace EmbodySense.Core.Startup.Loops.Execution.Sleep.Models;
 
 /// <summary>Returns the bounded wake-less approval discovery posture and its opaque scan cursor.</summary>
 /// <param name="Status">The canonical publication scan posture.</param>
