@@ -30,6 +30,13 @@ public interface IWebSessionClient
     Task ConversationChanged(WebConversationChanged notification);
 
     /// <summary>
+    /// Notifies the client that one durable Human Review run changed and should be reread.
+    /// </summary>
+    /// <param name="notification">The value-free durable Human Review run identity.</param>
+    /// <returns>The server-side SignalR dispatch task; client receipt is not acknowledged.</returns>
+    Task HumanReviewChanged(WebHumanReviewChanged notification);
+
+    /// <summary>
     /// Streams one typed default-conversation event to the client.
     /// </summary>
     /// <param name="item">The event payload.</param>

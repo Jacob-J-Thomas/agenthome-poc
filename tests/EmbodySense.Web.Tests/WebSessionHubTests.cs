@@ -656,6 +656,8 @@ public sealed class WebSessionHubTests
 
         public List<WebConversationChanged> ConversationChanges { get; } = [];
 
+        public List<WebHumanReviewChanged> HumanReviewChanges { get; } = [];
+
         public List<WebStreamEvent> StreamEvents { get; } = [];
 
         public Exception? StreamEventFailure { get; set; }
@@ -675,6 +677,12 @@ public sealed class WebSessionHubTests
         public Task ConversationChanged(WebConversationChanged notification)
         {
             ConversationChanges.Add(notification);
+            return Task.CompletedTask;
+        }
+
+        public Task HumanReviewChanged(WebHumanReviewChanged notification)
+        {
+            HumanReviewChanges.Add(notification);
             return Task.CompletedTask;
         }
 

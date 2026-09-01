@@ -10,6 +10,8 @@ internal sealed class RecordingWebSessionClient : IWebSessionClient
 
     public List<IReadOnlyList<WebPendingApproval>> ApprovalSnapshots { get; } = [];
 
+    public List<WebHumanReviewChanged> HumanReviewChanges { get; } = [];
+
     public Task StatusChanged(WebStatus status)
     {
         Statuses.Add(status);
@@ -23,6 +25,12 @@ internal sealed class RecordingWebSessionClient : IWebSessionClient
     }
 
     public Task ConversationChanged(WebConversationChanged notification) => Task.CompletedTask;
+
+    public Task HumanReviewChanged(WebHumanReviewChanged notification)
+    {
+        HumanReviewChanges.Add(notification);
+        return Task.CompletedTask;
+    }
 
     public Task StreamEvent(WebStreamEvent item) => Task.CompletedTask;
 }
