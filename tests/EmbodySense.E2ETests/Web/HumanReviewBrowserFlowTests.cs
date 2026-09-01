@@ -38,7 +38,7 @@ public sealed partial class BrowserFlowTests
         };
         foreach (var action in runIds)
         {
-            await HumanReviewBrowserFixture.SeedPendingAsync(paths, action.Value, "bounded browser review " + action.Key);
+            await HumanReviewBrowserFixture.SeedPendingAsync(paths, action.Value, "bounded browser review " + action.Key, capabilityTrustRoot: capabilityTrustRoot);
         }
         await using var app = await ExternalWebApplicationProcess.StartBrowserProfileHostAsync(workspace.RootPath, GetFreePort(), codexExecutable, "gpt-test", capabilityTrustRoot, [profile]);
         await using var browser = await HeadlessBrowserSession.StartAsync(app.BaseUrl);
@@ -82,7 +82,7 @@ public sealed partial class BrowserFlowTests
             await browser.EvaluateWithUserGestureAsync("document.querySelector('[data-testid=\\\"human-review-approve\\\"]').focus()");
             Assert.True(await browser.EvaluateBooleanAsync("document.activeElement?.getAttribute('data-testid') === 'human-review-approve'"));
             await browser.PressKeyAsync("Enter");
-            await WaitForHumanReviewLifecycleAsync(browser, "approved");
+            await WaitForCanonicalHumanReviewAsync(browser, "approved", 1);
             var approved = await ReadHumanReviewAsync(browser, runIds["approve"]);
             Assert.Contains("approve", approved, StringComparison.OrdinalIgnoreCase);
             Assert.Equal(1, await browser.EvaluateInt32Async("document.querySelectorAll('#humanReviewDecisionHistory .human-review-decision-item').length"));
@@ -112,7 +112,7 @@ public sealed partial class BrowserFlowTests
         await InstallBrowserModelProfilesAsync(workspace.RootPath, capabilityTrustRoot, [BrowserProfileWebHost.CreateDescriptor(profile)]);
         await SeedHumanReviewReadinessAuthorityAsync(paths, capabilityTrustRoot);
         var runId = "browser-human-review-restart";
-        await HumanReviewBrowserFixture.SeedPendingAsync(paths, runId, "restart durable review");
+        await HumanReviewBrowserFixture.SeedPendingAsync(paths, runId, "restart durable review", capabilityTrustRoot: capabilityTrustRoot);
         var port = GetFreePort();
         ExternalWebApplicationProcess? app = await ExternalWebApplicationProcess.StartBrowserProfileHostAsync(workspace.RootPath, port, codexExecutable, "gpt-test", capabilityTrustRoot, [profile]);
         HeadlessBrowserSession? browser = null;
@@ -192,7 +192,7 @@ public sealed partial class BrowserFlowTests
         await InstallBrowserModelProfilesAsync(workspace.RootPath, capabilityTrustRoot, [BrowserProfileWebHost.CreateDescriptor(profile)]);
         await SeedHumanReviewReadinessAuthorityAsync(paths, capabilityTrustRoot);
         var runId = "browser-human-review-two-tabs";
-        await HumanReviewBrowserFixture.SeedPendingAsync(paths, runId, "two tab decision");
+        await HumanReviewBrowserFixture.SeedPendingAsync(paths, runId, "two tab decision", capabilityTrustRoot: capabilityTrustRoot);
         await using var app = await ExternalWebApplicationProcess.StartBrowserProfileHostAsync(workspace.RootPath, GetFreePort(), codexExecutable, "gpt-test", capabilityTrustRoot, [profile]);
         await using var browser = await HeadlessBrowserSession.StartAsync(app.BaseUrl);
         try
@@ -250,7 +250,7 @@ public sealed partial class BrowserFlowTests
         await InstallBrowserModelProfilesAsync(workspace.RootPath, capabilityTrustRoot, [BrowserProfileWebHost.CreateDescriptor(profile)]);
         await SeedHumanReviewReadinessAuthorityAsync(paths, capabilityTrustRoot);
         var runId = "browser-human-review-security";
-        await HumanReviewBrowserFixture.SeedPendingAsync(paths, runId, "<script>secret-canary</script>");
+        await HumanReviewBrowserFixture.SeedPendingAsync(paths, runId, "<script>secret-canary</script>", capabilityTrustRoot: capabilityTrustRoot);
         await using var app = await ExternalWebApplicationProcess.StartBrowserProfileHostAsync(workspace.RootPath, GetFreePort(), codexExecutable, "gpt-test", capabilityTrustRoot, [profile]);
         await using var browser = await HeadlessBrowserSession.StartAsync(app.BaseUrl);
         try

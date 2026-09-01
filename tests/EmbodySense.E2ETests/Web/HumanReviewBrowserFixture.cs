@@ -2,6 +2,11 @@ using System.Collections.Immutable;
 using System.Security.Cryptography;
 using System.Text;
 using EmbodySense.Core.Application.Capabilities;
+using EmbodySense.Core.Application.ContextualRoles;
+using EmbodySense.Core.Application.ContextualRoles.Models;
+using EmbodySense.Core.Application.Governance.Authority.Grants;
+using EmbodySense.Core.Application.Governance.Authority.Grants.Models;
+using EmbodySense.Core.Application.Governance.Authority.Models;
 using EmbodySense.Core.Application.HumanReview;
 using EmbodySense.Core.Application.HumanReview.Models;
 using EmbodySense.Core.Application.Loops;
@@ -10,13 +15,18 @@ using EmbodySense.Core.Application.Loops.Admission.Models;
 using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Loops.Sequential;
 using EmbodySense.Core.Application.Loops.Sequential.Models;
+using EmbodySense.Core.Application.Loops.EffectAttempts.Models;
 using EmbodySense.Core.Application.Loops.GraphValidation;
+using EmbodySense.Core.Application.Loops.Revisions;
+using EmbodySense.Core.Application.Loops.GraphAuthoring.Models;
+using EmbodySense.Core.Application.Loops.Revisions.Models;
 using EmbodySense.Core.Common.Authority;
 using EmbodySense.Core.Common.Authority.Grants;
 using EmbodySense.Core.Common.Authority.Grants.Models;
 using EmbodySense.Core.Common.Authority.Models;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Capabilities.Models;
+using EmbodySense.Core.Common.ContextualRoles;
 using EmbodySense.Core.Common.ContextualRoles.Models;
 using EmbodySense.Core.Common.Governance.Audit;
 using EmbodySense.Core.Common.HumanReview;
@@ -28,6 +38,8 @@ using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Execution;
+using EmbodySense.Core.Common.Loops.Execution.Effects;
+using EmbodySense.Core.Common.Loops.Execution.Effects.Models;
 using EmbodySense.Core.Common.Loops.Execution.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
@@ -37,6 +49,12 @@ using EmbodySense.Core.Common.Loops.Sequential;
 using EmbodySense.Core.Common.Loops.Sequential.Models;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Loops;
+using EmbodySense.Core.Persistence.Loops.EffectAttempts;
+using EmbodySense.Core.Persistence.Authority;
+using EmbodySense.Core.Persistence.Capabilities;
+using EmbodySense.Core.Persistence.ContextualRoles;
+using EmbodySense.Core.Persistence.Loops.GraphAuthoring;
+using EmbodySense.Core.Persistence.Loops.Revisions;
 using EmbodySense.Tests.Support;
 
 namespace EmbodySense.E2ETests.Web;
@@ -44,14 +62,17 @@ namespace EmbodySense.E2ETests.Web;
 internal static class HumanReviewBrowserFixture
 {
     private const string ConversationTurnCapabilityId = "org.embodysense/conversation-turn";
-    public static async Task SeedPendingAsync(WorkspacePaths paths, string runId, string prompt, string reviewerRoleId = "governed-reviewer", TimeSpan? requestLifetime = null)
+    public static async Task SeedPendingAsync(WorkspacePaths paths, string runId, string prompt, string reviewerRoleId = "governed-reviewer", TimeSpan? requestLifetime = null, bool includePreDispatchEffect = false, bool makeEffectAmbiguous = false, string? capabilityTrustRoot = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
         ArgumentException.ThrowIfNullOrWhiteSpace(runId);
         ArgumentException.ThrowIfNullOrWhiteSpace(prompt);
+        ArgumentException.ThrowIfNullOrWhiteSpace(capabilityTrustRoot);
 
         var now = DateTimeOffset.UtcNow.AddMinutes(-5);
-        var artifact = CreateArtifact(runId, now);
+        var workspaceId = CapabilityWorkspaceScopeId.Create(paths.RootPath);
+        var role = CreateBrowserHumanReviewRole(workspaceId, now);
+        var artifact = CreateArtifact(runId, now, new ContextualRoleRevisionPin(role.Identity, role.ContentHash));
         var planResult = GovernedLoopSequentialPlanBuilder.Build(artifact);
         var plan = planResult.Plan ?? throw new InvalidOperationException($"The browser Human Review fixture graph was not plannable: {planResult.Status}.");
         var context = CustomLoopContextSnapshot.CreateEmpty(now);
@@ -63,17 +84,15 @@ internal static class HumanReviewBrowserFixture
             context.CapturedAtUtc,
             context.SourceManifest,
             string.Empty));
-        var publication = GovernedLoopRevisionPublicationPinFactory.Create(1, artifact.RevisionArtifact.Revision, "browser-human-review-publish", Hash('7'));
+        var publication = GovernedLoopRevisionPublicationPinFactory.Create(1, artifact.RevisionArtifact.Revision, "browser-human-review-publish-" + runId, Hash('7'));
         var execution = GovernedLoopExecutionBinding.Create(1, runId, publication.Revision, 1);
-        if (!AuthorityGrantId.TryParse("grant-browser-human-review", out var grantId, out _)
-            || !AuthorityGrantRevision.TryParse("1", out var grantRevision, out _)
-            || !AuthorityActorId.TryParse("user-owner", out var actorId, out _))
+        if (!AuthorityActorId.TryParse("user-owner", out var actorId, out _))
         {
             throw new InvalidOperationException("The browser Human Review fixture authority identities are invalid.");
         }
 
-        var workspaceId = CapabilityWorkspaceScopeId.Create(paths.RootPath);
-        var grantReference = new AuthorityGrantReference(grantId!, grantRevision!, "sha256:" + Hash('a'));
+        var authority = await SeedCanonicalAuthorityDependenciesAsync(paths, capabilityTrustRoot!, artifact, publication, role, workspaceId, runId, now).ConfigureAwait(false);
+        var grantReference = authority.GrantReference;
         var admissionOperationId = "browser-human-review-admit-" + runId;
         var admissionRequest = GovernedLoopAdmissionRequestHash.Apply(new GovernedLoopAdmissionRequest(
             GovernedLoopAdmissionRequest.CurrentSchemaVersion,
@@ -96,7 +115,7 @@ internal static class HumanReviewBrowserFixture
             admissionRequest.Surface,
             artifact.ArtifactHash,
             artifact.LayoutHash);
-        var admissionReceipt = CreateAdmissionReceipt(artifact, execution, intent, workspaceId, now);
+        var admissionReceipt = CreateAdmissionReceipt(artifact, execution, intent, workspaceId, now, authority.GrantProfile, authority.DependencyEvidenceHash);
         var adapterBinding = GovernedLoopSequentialContractHash.Apply(new GovernedLoopSequentialAdapterBinding(
             GovernedLoopSequentialAdapterBinding.CurrentSchemaVersion,
             workspaceId,
@@ -155,7 +174,7 @@ internal static class HumanReviewBrowserFixture
             CustomLoopSequentialOutcomeArtifactHash.Compute(parkedEvent),
             parkedEvent.TimestampUtc);
         var blocked = blockedTransition.Frontier ?? throw new InvalidOperationException("The browser Human Review fixture did not produce a blocked frontier.");
-        var request = CreateRequest(started, blocked, reviewerRoleId, requestLifetime);
+        var request = await CreateRequest(started, blocked, reviewerRoleId, requestLifetime, includePreDispatchEffect, makeEffectAmbiguous, paths).ConfigureAwait(false);
         var admission = await new HumanReviewAdmissionService(store).AdmitAsync(new HumanReviewAdmissionCommand(started.Id, started.LifecycleVersion, request, blocked, parkedEvent)).ConfigureAwait(false);
         if (admission.Status != CustomLoopRunStoreStatus.Updated)
         {
@@ -163,7 +182,7 @@ internal static class HumanReviewBrowserFixture
         }
     }
 
-    private static GovernedLoopGraphRevisionArtifact CreateArtifact(string runId, DateTimeOffset now)
+    private static GovernedLoopGraphRevisionArtifact CreateArtifact(string runId, DateTimeOffset now, ContextualRoleRevisionPin owningRole)
     {
         var nodes = new GovernedLoopNodeDefinition[]
         {
@@ -192,7 +211,6 @@ internal static class HumanReviewBrowserFixture
             new("human-review-to-exit", "human-review", "exit", GovernedLoopControlCondition.Success),
             new("human-review-to-fail", "human-review", "fail", GovernedLoopControlCondition.Failure),
         };
-        var owningRole = new ContextualRoleRevisionPin(new ContextualRoleRevisionIdentity("browser-human-review-role", 1), Hash('b'));
         var graph = GovernedLoopGraphDefinition.Create(
             1,
             "browser-human-review-" + runId,
@@ -221,7 +239,9 @@ internal static class HumanReviewBrowserFixture
         GovernedLoopExecutionBinding execution,
         GovernedLoopAdmissionIntent intent,
         string workspaceId,
-        DateTimeOffset evaluatedAtUtc)
+        DateTimeOffset evaluatedAtUtc,
+        AuthorityGrantProfilePin grantProfile,
+        string dependencyEvidenceHash)
     {
         if (!CapabilityId.TryParse("org.embodysense/loop-" + artifact.ArtifactHash[..32], out var subject, out _)
             || !CapabilityVersionRange.TryParse("*", out var versions, out _)
@@ -247,14 +267,6 @@ internal static class HumanReviewBrowserFixture
             [],
             new CapabilityDependencyArtifactMetadata(checksum, null));
         var capabilities = CreateCapabilityAdmission(manifest, workspaceId, evaluatedAtUtc);
-        if (!AuthorityProfileId.TryParse("profile-browser-human-review", out var profileId, out _)
-            || !AuthorityProfileRevision.TryParse("1", out var profileRevision, out _)
-            || !AuthorityProfileHash.TryParse("sha256:" + Hash('c'), out var profileHash, out _))
-        {
-            throw new InvalidOperationException("The browser Human Review fixture profile identity is invalid.");
-        }
-
-        var grantProfile = new AuthorityGrantProfilePin(new AuthorityProfileReference(profileId!, profileRevision!), profileHash!);
         var grantBoundary = new AuthorityGrantBoundary(evaluatedAtUtc.AddHours(-1), evaluatedAtUtc.AddHours(1), AuthorityGrantCompletionConstraintKind.None);
         var effectiveAuthority = AuthorityCeilingIntersection.EmptyCeiling();
         var evidence = GovernedLoopAdmissionContractHash.CreateEmptyModelRoutingAdmission(
@@ -262,7 +274,7 @@ internal static class HumanReviewBrowserFixture
             execution,
             grantProfile,
             grantBoundary,
-            Hash('d'),
+            dependencyEvidenceHash,
             effectiveAuthority,
             capabilities,
             evaluatedAtUtc);
@@ -272,7 +284,7 @@ internal static class HumanReviewBrowserFixture
             execution,
             grantProfile,
             grantBoundary,
-            Hash('d'),
+            dependencyEvidenceHash,
             effectiveAuthority,
             capabilities,
             evidence,
@@ -285,6 +297,226 @@ internal static class HumanReviewBrowserFixture
             admissionEvidence,
             evaluatedAtUtc,
             string.Empty));
+    }
+
+    private static ContextualRoleRevision CreateBrowserHumanReviewRole(string workspaceId, DateTimeOffset recordedAtUtc)
+    {
+        var revision = new ContextualRoleRevision(
+            ContextualRoleLimits.SchemaVersion,
+            new ContextualRoleRevisionIdentity("browser-human-review-role", 1),
+            string.Empty,
+            "Browser Human Review role",
+            "Test-only role for the exact server-owned browser Human Review authority journey.",
+            ContextualRoleStatus.Published,
+            new ContextualRoleProvenance("browser-e2e", recordedAtUtc, recordedAtUtc),
+            new ContextualRoleWorkspaceApplicability(ImmutableArray.Create(workspaceId)),
+            new ContextualRoleInstructionSourceReference(ContextualRoleInstructionSourceKind.WorkspaceRoleMarkdown, "role", ContextualRoleInstructionClassification.RoleInstruction),
+            new ContextualRolePolicyMaxima(ImmutableArray.Create(ConversationTurnCapabilityId)));
+        return ContextualRoleRevisionContentHash.Apply(revision);
+    }
+
+    private static async Task<(AuthorityGrantReference GrantReference, AuthorityGrantProfilePin GrantProfile, string DependencyEvidenceHash)> SeedCanonicalAuthorityDependenciesAsync(
+        WorkspacePaths paths,
+        string capabilityTrustRoot,
+        GovernedLoopGraphRevisionArtifact artifact,
+        GovernedLoopRevisionPublicationPin publication,
+        ContextualRoleRevision role,
+        string workspaceId,
+        string runId,
+        DateTimeOffset recordedAtUtc)
+    {
+        var transaction = new CapabilityAuthorityTransaction(paths);
+        using var roleStore = new ContextualRoleRevisionStore(paths, workspaceId, authorityTransaction: transaction);
+        var roleRead = await roleStore.ReadAsync(new ContextualRoleRevisionReadRequest(role.Identity)).ConfigureAwait(false);
+        if (roleRead.Status == ContextualRoleRevisionReadStatus.NotFound)
+        {
+            var roleRequest = ContextualRoleRevisionMutationRequestHash.Apply(new ContextualRoleRevisionMutationRequest(
+                "create-browser-human-review-role",
+                string.Empty,
+                ContextualRoleRevisionMutationKind.Create,
+                role.Identity.RoleId,
+                "browser-e2e",
+                role,
+                null,
+                recordedAtUtc));
+            var roleMutation = await roleStore.MutateAsync(roleRequest).ConfigureAwait(false);
+            if (roleMutation.Status != ContextualRoleRevisionMutationStatus.Accepted)
+            {
+                throw new InvalidOperationException($"The browser Human Review fixture role was not persisted: {roleMutation.Status}.");
+            }
+        }
+        else if (roleRead.Status != ContextualRoleRevisionReadStatus.Found || roleRead.Revision is null || !string.Equals(roleRead.Revision.ContentHash, role.ContentHash, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException($"The browser Human Review fixture role could not be reused exactly: {roleRead.Status}.");
+        }
+
+        var trust = new FileCapabilityCatalogTrustProvider(capabilityTrustRoot);
+        var lifecycleStore = new GovernedLoopRevisionLifecycleStore(paths, trust, authorityTransaction: transaction);
+        var graphStore = new GovernedLoopGraphRevisionStore(paths, lifecycleStore, trust, authorityTransaction: transaction);
+        var createOperationId = artifact.RevisionArtifact.CreationOperationId;
+        var createRequestHash = Hash('1');
+        var createAuthoringHash = Hash('2');
+        var draftHead = GovernedLoopRevisionLifecycleHeadFactory.Create(
+            1,
+            artifact.Graph.GraphId,
+            1,
+            GovernedLoopRevisionLifecycleStatus.Draft,
+            artifact.RevisionArtifact.Revision,
+            null,
+            createOperationId,
+            recordedAtUtc);
+        var draftEvidence = GovernedLoopRevisionOperationEvidenceFactory.Create(
+            1,
+            createOperationId,
+            "user-owner",
+            createRequestHash,
+            GovernedLoopRevisionOperationKind.CreateDraft,
+            GovernedLoopRevisionOperationOutcome.Committed,
+            GovernedLoopRevisionOperationFailureCode.None,
+            null,
+            draftHead,
+            artifact.RevisionArtifact.Revision,
+            null,
+            null,
+            Hash('3'),
+            null,
+            recordedAtUtc);
+        var draftRead = await graphStore.ReadForMutationAsync(artifact.Graph.GraphId, createOperationId, createRequestHash, createAuthoringHash).ConfigureAwait(false);
+        if (draftRead.Status != GovernedLoopRevisionStoreReadStatus.NotFound)
+        {
+            var lifecycleRead = await lifecycleStore.ReadForMutationAsync(artifact.Graph.GraphId, createOperationId, createRequestHash).ConfigureAwait(false);
+            throw new InvalidOperationException($"The browser Human Review fixture graph was not empty: {draftRead.Status} (lifecycle {lifecycleRead.Status}, generation {draftRead.StoreGeneration}).");
+        }
+
+        var draftCommit = await graphStore.CommitAsync(new GovernedLoopGraphRevisionStoreMutation(
+            new GovernedLoopRevisionStoreMutation(artifact.Graph.GraphId, draftRead.StoreGeneration, draftEvidence, artifact.RevisionArtifact, draftHead),
+            artifact.Graph,
+            createAuthoringHash,
+            Hash('4'))).ConfigureAwait(false);
+        if (draftCommit.Status is not (GovernedLoopRevisionStoreCommitStatus.Committed or GovernedLoopRevisionStoreCommitStatus.Replayed))
+        {
+            throw new InvalidOperationException($"The browser Human Review fixture graph draft was not persisted: {draftCommit.Status}.");
+        }
+
+        var publishOperationId = publication.PublicationOperationId;
+        var publishRequestHash = Hash('5');
+        var publishAuthoringHash = Hash('6');
+        var publishedHead = GovernedLoopRevisionLifecycleHeadFactory.Create(
+            1,
+            artifact.Graph.GraphId,
+            draftHead.LifecycleVersion + 1,
+            GovernedLoopRevisionLifecycleStatus.Published,
+            null,
+            publication,
+            publishOperationId,
+            recordedAtUtc.AddSeconds(1));
+        var publishEvidence = GovernedLoopRevisionOperationEvidenceFactory.Create(
+            1,
+            publishOperationId,
+            "browser-e2e",
+            publishRequestHash,
+            GovernedLoopRevisionOperationKind.Publish,
+            GovernedLoopRevisionOperationOutcome.Committed,
+            GovernedLoopRevisionOperationFailureCode.None,
+            draftHead,
+            publishedHead,
+            null,
+            artifact.RevisionArtifact.Revision,
+            null,
+            Hash('7'),
+            publication.ValidationEvidenceHash,
+            recordedAtUtc.AddSeconds(1));
+        var publishRead = await graphStore.ReadForMutationAsync(artifact.Graph.GraphId, publishOperationId, publishRequestHash, publishAuthoringHash).ConfigureAwait(false);
+        if (publishRead.Status != GovernedLoopRevisionStoreReadStatus.Ready || publishRead.Snapshot is null)
+        {
+            throw new InvalidOperationException($"The browser Human Review fixture graph draft could not be reread: {publishRead.Status}.");
+        }
+
+        var publishCommit = await graphStore.CommitAsync(new GovernedLoopGraphRevisionStoreMutation(
+            new GovernedLoopRevisionStoreMutation(artifact.Graph.GraphId, publishRead.StoreGeneration, publishEvidence, null, publishedHead),
+            null,
+            publishAuthoringHash,
+            publication.ValidationEvidenceHash)).ConfigureAwait(false);
+        if (publishCommit.Status is not (GovernedLoopRevisionStoreCommitStatus.Committed or GovernedLoopRevisionStoreCommitStatus.Replayed))
+        {
+            throw new InvalidOperationException($"The browser Human Review fixture graph was not published: {publishCommit.Status}.");
+        }
+
+        var authorityStore = new AuthorityProfileStore(paths, trust, authorityTransaction: transaction);
+        var profileRead = await authorityStore.ReadAsync("human-review-browser").ConfigureAwait(false);
+        if (profileRead.Status is not (AuthorityProfileReadStatus.Available or AuthorityProfileReadStatus.RecoveredLastProved) || profileRead.Record is null || profileRead.Record.CurrentProfile.Status != AuthorityProfileStatus.Active)
+        {
+            throw new InvalidOperationException($"The browser Human Review fixture authority profile was not active: {profileRead.Status}.");
+        }
+
+        var profile = profileRead.Record;
+        var binding = new AuthorityGrantBinding(
+            new AuthorityGrantProfilePin(new AuthorityProfileReference(profile.ProfileId, profile.CurrentProfile.Revision), profile.CurrentHash),
+            new ContextualRoleRevisionPin(role.Identity, role.ContentHash),
+            publication);
+        var grantIdText = "grant-browser-human-review-" + runId;
+        if (!AuthorityGrantId.TryParse(grantIdText, out var grantId, out _)
+            || !AuthorityActorId.TryParse("user-owner", out var grantActor, out _)
+            || !AuthorityPurpose.TryParse("Browser Human Review browser grant.", out var grantPurpose, out _))
+        {
+            throw new InvalidOperationException("The browser Human Review fixture grant identity is invalid.");
+        }
+
+        if (!AuthorityGrantRevision.TryParse("1", out var grantRevision, out _))
+        {
+            throw new InvalidOperationException("The browser Human Review fixture grant revision is invalid.");
+        }
+
+        var grant = AuthorityGrantHash.Apply(new AuthorityGrant(
+            AuthorityGrantContractLimits.CurrentSchemaVersion,
+            grantId!,
+            grantRevision!,
+            null,
+            null,
+            AuthorityGrantLifecycleStatus.Active,
+            binding,
+            new AuthorityCeiling([], [], 0, CapabilitySideEffectClass.None, false, false, false),
+            new AuthorityGrantBoundary(recordedAtUtc.AddMinutes(-1), recordedAtUtc.AddHours(1), AuthorityGrantCompletionConstraintKind.None),
+            grantActor!,
+            grantPurpose!,
+            recordedAtUtc,
+            string.Empty));
+        var grantOperationId = "create-browser-human-review-grant-" + runId;
+        var grantRequestHash = Hash('8');
+        var observed = await authorityStore.ReadForMutationAsync(grant.GrantId, grantOperationId, grantRequestHash).ConfigureAwait(false);
+        var grantEvidence = new AuthorityGrantOperationEvidence(
+            AuthorityGrantContractLimits.CurrentSchemaVersion,
+            grantOperationId,
+            grantRequestHash,
+            AuthorityGrantOperationKind.Create,
+            AuthorityGrantOperationOutcome.Committed,
+            AuthorityGrantOperationFailureCode.None,
+            grant.GrantId,
+            0,
+            new AuthorityGrantReference(grant.GrantId, grant.Revision, grant.ContentHash),
+            grantActor!,
+            grantPurpose!,
+            Hash('9'),
+            Hash('a'),
+            recordedAtUtc);
+        var grantCommit = await authorityStore.CommitAsync(new AuthorityGrantStoreMutation(observed.StoreGeneration, grant, grantEvidence)).ConfigureAwait(false);
+        if (grantCommit.Status is not (AuthorityGrantStoreCommitStatus.Committed or AuthorityGrantStoreCommitStatus.Replayed))
+        {
+            throw new InvalidOperationException($"The browser Human Review fixture grant was not persisted: {grantCommit.Status}.");
+        }
+
+        var publicationSource = new GovernedLoopPublishedRevisionSource(lifecycleStore, transaction);
+        var bindingSource = new GovernedLoopGrantBindingSource(publicationSource, graphStore, transaction);
+        var roleSource = new AuthorityGrantRoleSource(workspaceId, roleStore, roleStore, new WorkspaceContextualRoleInstructionSourceProbe(paths), transaction);
+        var resolver = new AuthorityGrantResolver(authorityStore, new AuthorityGrantProfileSource(authorityStore), roleSource, publicationSource, bindingSource, transaction);
+        var reference = new AuthorityGrantReference(grant.GrantId, grant.Revision, grant.ContentHash);
+        var resolution = await resolver.ResolveAsync(reference).ConfigureAwait(false);
+        if (resolution.Status != AuthorityGrantResolutionStatus.Active || string.IsNullOrWhiteSpace(resolution.DependencyEvidenceHash))
+        {
+            throw new InvalidOperationException($"The browser Human Review fixture grant dependencies were not active: {resolution.Status}.");
+        }
+
+        return (reference, binding.Profile, resolution.DependencyEvidenceHash);
     }
 
     private static CustomLoopRunRecord TransitionToRunning(CustomLoopRunRecord admitted)
@@ -320,16 +552,88 @@ internal static class HumanReviewBrowserFixture
         return parked with { SequentialNodeEvidence = evidence };
     }
 
-    private static HumanReviewRequest CreateRequest(CustomLoopRunRecord predecessor, GovernedLoopFrontierPosture blocked, string reviewerRoleId, TimeSpan? requestLifetime)
+    private static async Task<HumanReviewRequest> CreateRequest(CustomLoopRunRecord predecessor, GovernedLoopFrontierPosture blocked, string reviewerRoleId, TimeSpan? requestLifetime, bool includePreDispatchEffect, bool makeEffectAmbiguous, WorkspacePaths paths)
     {
         var activation = Assert.Single(blocked.Payload.Nodes, item => item.Status == GovernedLoopNodeExecutionStatus.ReviewBlocked);
         var hash = Hash('a');
         var binding = HumanReviewContractHash.ApplyBinding(new HumanReviewBinding(1, blocked.WorkspaceId, predecessor.Id, blocked.Binding.Revision.GraphId, blocked.Binding.Revision.RevisionId, blocked.Binding.Revision.ExecutableHash, activation.NodeId, activation.ActivationOrdinal, null, activation.Attempt!.Value, "frontier-" + predecessor.Id, blocked.Payload.FrontierVersion, blocked.Payload.ContentHash, hash, hash, hash, hash, hash, hash, hash, null, string.Empty));
-        var scope = HumanReviewContractHash.ApplyApprovalScope(new HumanReviewApprovalScope(HumanReviewApprovalScopeKind.Continuation, binding.BindingHash, null, string.Empty));
-        var timing = new HumanReviewTiming(predecessor.UpdatedAtUtc, predecessor.UpdatedAtUtc.Add(requestLifetime ?? TimeSpan.FromMinutes(10)), predecessor.UpdatedAtUtc.AddHours(1));
+        GovernedLoopEffectAttempt? effectAttempt = null;
+        if (includePreDispatchEffect)
+        {
+            effectAttempt = CreateEffectAttempt(predecessor, binding);
+            var reviewed = HumanReviewContractHash.ApplyEffectAttempt(new HumanReviewEffectAttemptBinding(effectAttempt.Payload.EffectId, effectAttempt.Payload.OperationId, effectAttempt.Payload.EffectGeneration, effectAttempt.Payload.IntentHash, HumanReviewEffectReleaseContract.CreatePreparation(binding, effectAttempt).PreparationHash, HumanReviewEffectDispatchCertainty.NotDispatched, string.Empty));
+            binding = HumanReviewContractHash.ApplyBinding(binding with { EffectAttempt = reviewed, BindingHash = string.Empty });
+            var effectStore = new GovernedLoopEffectAttemptStore(paths);
+            var begun = await effectStore.BeginAsync(effectAttempt).ConfigureAwait(false);
+            if (begun.Status is not (GovernedLoopEffectAttemptStoreStatus.Created or GovernedLoopEffectAttemptStoreStatus.Replayed))
+            {
+                throw new InvalidOperationException($"The browser Human Review fixture effect attempt was not persisted: {begun.Status}.");
+            }
+
+            if (makeEffectAmbiguous)
+            {
+                using var lease = begun.Lease ?? throw new InvalidOperationException("The browser Human Review fixture effect attempt did not return a lease.");
+                var authorized = GovernedLoopEffectAttemptContract.AttachDispatchAuthority(effectAttempt, Hash('9'), effectAttempt.Payload.UpdatedAtUtc.AddSeconds(1));
+                var advanced = await effectStore.CompareExchangeAsync(effectAttempt.ContentHash, authorized, lease).ConfigureAwait(false);
+                if (advanced.Status != GovernedLoopEffectAttemptStoreStatus.Created)
+                {
+                    throw new InvalidOperationException($"The browser Human Review fixture effect authority was not persisted: {advanced.Status}.");
+                }
+
+                var dispatched = GovernedLoopEffectAttemptContract.Advance(authorized, GovernedLoopEffectPhase.DispatchBoundaryReached, GovernedLoopEffectOutcome.OutcomeUnknown, GovernedLoopEffectEvidenceStatus.Pending, null, null, authorized.Payload.UpdatedAtUtc.AddSeconds(1));
+                var crossed = await effectStore.CompareExchangeAsync(authorized.ContentHash, dispatched, lease).ConfigureAwait(false);
+                if (crossed.Status != GovernedLoopEffectAttemptStoreStatus.Created)
+                {
+                    throw new InvalidOperationException($"The browser Human Review fixture dispatch boundary was not persisted: {crossed.Status}.");
+                }
+
+                var ambiguous = GovernedLoopEffectAttemptContract.Advance(dispatched, GovernedLoopEffectPhase.ReconciliationRequired, GovernedLoopEffectOutcome.OutcomeUnknown, GovernedLoopEffectEvidenceStatus.Incomplete, null, null, dispatched.Payload.UpdatedAtUtc.AddSeconds(1));
+                var reconciled = await effectStore.CompareExchangeAsync(dispatched.ContentHash, ambiguous, lease).ConfigureAwait(false);
+                if (reconciled.Status != GovernedLoopEffectAttemptStoreStatus.Created)
+                {
+                    throw new InvalidOperationException($"The browser Human Review fixture ambiguous evidence was not persisted: {reconciled.Status}.");
+                }
+            }
+        }
+
+        var scope = HumanReviewContractHash.ApplyApprovalScope(new HumanReviewApprovalScope(includePreDispatchEffect ? HumanReviewApprovalScopeKind.PreDispatchEffect : HumanReviewApprovalScopeKind.Continuation, binding.BindingHash, binding.EffectAttempt?.EffectAttemptId, string.Empty));
+        var lifetime = requestLifetime ?? TimeSpan.FromHours(1);
+        var createdAtUtc = blocked.Payload.UpdatedAtUtc;
+        var dueAtUtc = lifetime < TimeSpan.FromMinutes(10) ? createdAtUtc : createdAtUtc.AddMinutes(10);
+        var timing = new HumanReviewTiming(createdAtUtc, dueAtUtc, createdAtUtc.Add(lifetime));
         var requestId = "review-request-" + predecessor.Id;
         var operationId = "review-operation-" + predecessor.Id;
-        return HumanReviewContractHash.ApplyRequest(new HumanReviewRequest(1, requestId, operationId, binding, HumanReviewPurpose.Continuation, ImmutableArray.Create(HumanReviewDecisionKind.Approve, HumanReviewDecisionKind.Reject, HumanReviewDecisionKind.Cancel, HumanReviewDecisionKind.RequestInformation), ImmutableArray.Create(new HumanReviewReviewerScope(reviewerRoleId, ImmutableArray.Create("review-scope-one"))), scope, ImmutableArray.Create(HumanReviewContractHash.ApplyPreview(new HumanReviewRedactedPreview(HumanReviewPreviewKind.Action, "Action", "Redacted action.", string.Empty)), HumanReviewContractHash.ApplyPreview(new HumanReviewRedactedPreview(HumanReviewPreviewKind.Result, "Result", "Redacted result.", string.Empty)), HumanReviewContractHash.ApplyPreview(new HumanReviewRedactedPreview(HumanReviewPreviewKind.Evidence, "Evidence", "Redacted evidence.", string.Empty))), timing, HumanReviewContractHash.ApplyProvenance(new HumanReviewProvenance(HumanReviewProvenanceKind.Server, "human-review-browser-fixture", operationId, timing.CreatedAtUtc, string.Empty)), string.Empty));
+        return HumanReviewContractHash.ApplyRequest(new HumanReviewRequest(1, requestId, operationId, binding, includePreDispatchEffect ? HumanReviewPurpose.PreDispatchEffect : HumanReviewPurpose.Continuation, ImmutableArray.Create(HumanReviewDecisionKind.Approve, HumanReviewDecisionKind.Reject, HumanReviewDecisionKind.Cancel, HumanReviewDecisionKind.RequestInformation), ImmutableArray.Create(new HumanReviewReviewerScope(reviewerRoleId, ImmutableArray.Create("review-scope-one"))), scope, ImmutableArray.Create(HumanReviewContractHash.ApplyPreview(new HumanReviewRedactedPreview(HumanReviewPreviewKind.Action, "Action", "Redacted action.", string.Empty)), HumanReviewContractHash.ApplyPreview(new HumanReviewRedactedPreview(HumanReviewPreviewKind.Result, "Result", "Redacted result.", string.Empty)), HumanReviewContractHash.ApplyPreview(new HumanReviewRedactedPreview(HumanReviewPreviewKind.Evidence, "Evidence", "Redacted evidence.", string.Empty))), timing, HumanReviewContractHash.ApplyProvenance(new HumanReviewProvenance(HumanReviewProvenanceKind.Server, "human-review-browser-fixture", operationId, timing.CreatedAtUtc, string.Empty)), string.Empty));
+    }
+
+    private static GovernedLoopEffectAttempt CreateEffectAttempt(CustomLoopRunRecord predecessor, HumanReviewBinding binding)
+    {
+        if (!CapabilityId.TryParse("org.embodysense/workspace/read-file", out var capabilityId, out _)
+            || !CapabilityVersion.TryParse("1.2.3", out var capabilityVersion, out _)
+            || !CapabilityDescriptorHash.TryParse("sha256:" + Hash('a'), out var capabilityHash, out _)
+            || !CapabilityProviderId.TryParse("org.embodysense", out var providerId, out _)
+            || predecessor.SequentialAdapterBinding is not { } adapter)
+        {
+            throw new InvalidOperationException("The browser Human Review fixture effect identity is invalid.");
+        }
+
+        return GovernedLoopEffectAttemptContract.Prepare(
+            GovernedLoopExecutionBinding.Create(adapter.ExecutionBinding.SchemaVersion, adapter.ExecutionBinding.RunId, adapter.ExecutionBinding.Revision, adapter.ExecutionBinding.ExecutionGeneration),
+            binding.NodeId,
+            binding.Attempt,
+            new CapabilityDescriptorIdentity(capabilityId!, capabilityVersion!, capabilityHash!),
+            new CapabilityImplementationIdentity(providerId!, "workspace/read-file"),
+            "probe/observe",
+            Hash('b'),
+            "effect-browser-human-review",
+            "effect-browser-human-review-operation-" + predecessor.Id,
+            1,
+            Hash('c'),
+            Hash('d'),
+            Hash('e'),
+            binding.AuthorityGrantHash,
+            "before-browser-human-review",
+            predecessor.UpdatedAtUtc.AddSeconds(1));
     }
 
     private static GovernedLoopNodeDefinition Trigger(string id)
