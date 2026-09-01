@@ -6,6 +6,7 @@ const maximumDisplayCharacters = 1024;
 const maximumOperationEntries = 128;
 const maximumOperationStorageCharacters = 64 * 1024;
 const maximumOperationLifecycleVersion = 1_000_000;
+const maximumDecisionFeedbackCharacters = 240;
 const maximumReviewPages = 20;
 const maximumAggregateItems = 500;
 const humanReviewOperationStorageKeyPrefix =
@@ -317,6 +318,8 @@ export function createHumanReviewSurface({
     operationStorageScope: null,
     operationStorageEnabled: false,
     operationStorageStatus: "unconfigured",
+    requestInformationDetails: new Map(),
+    decisionFeedback: null,
     refreshPromise: null,
     selectedRunId: null,
     selectedSummary: null,
@@ -324,6 +327,7 @@ export function createHumanReviewSurface({
     evidenceProjection: null,
     evidenceReady: false,
   };
+  let requestInformationNonce = 0;
 
   function activate() {
     state.active = true;
@@ -467,6 +471,10 @@ export function createHumanReviewSurface({
   function selectReview(runId) {
     if (!state.items.some((item) => item.runId === runId))
       return Promise.resolve(false);
+    if (state.selectedRunId !== runId) {
+      state.requestInformationDetails.clear();
+      state.decisionFeedback = null;
+    }
     state.selectedRunId = runId;
     state.selectedSummary =
       state.items.find((item) => item.runId === runId) ?? null;
@@ -493,6 +501,7 @@ export function createHumanReviewSurface({
       );
       return;
     }
+    state.decisionFeedback = null;
     const intent = humanReviewDecisionIntent(summary, normalizedAction);
     if (
       !state.operationStorageEnabled ||
@@ -507,6 +516,8 @@ export function createHumanReviewSurface({
     state.actionInFlight = true;
     setActionButtonsDisabled(true);
     if (button) button.setAttribute("aria-busy", "true");
+    let submittedOperation = null;
+    let submittedOperationKey = null;
     try {
       const response = await withHumanReviewDecisionLock(
         intent.key,
@@ -516,8 +527,12 @@ export function createHumanReviewSurface({
               intent,
               summary,
               normalizedAction,
+              detail,
             );
             if (!operation) return null;
+            submittedOperation = operation;
+            submittedOperationKey =
+              humanReviewOperationStorageEntryKey(operation);
             const payload = {
               expectedLifecycleVersion: operation.expectedLifecycleVersion,
               operationId: operation.operationId,
@@ -532,11 +547,11 @@ export function createHumanReviewSurface({
                 body: JSON.stringify(payload),
               },
             );
-            await forgetOperation(intent.key);
+            await forgetOperation(submittedOperationKey);
             return result;
           } catch (error) {
             if (isDefinitiveHumanReviewDecisionError(error))
-              await forgetOperation(intent.key);
+              await forgetOperation(submittedOperationKey ?? intent.key);
             throw error;
           }
         },
@@ -548,14 +563,7 @@ export function createHumanReviewSurface({
         );
         return;
       }
-      setActionStatus(
-        humanReviewOutcomeMessage(response?.status),
-        ["accepted", "information-requested", "replayed"].includes(
-          normalizeHumanReviewStatus(response?.status),
-        )
-          ? "success"
-          : "warning",
-      );
+      setDecisionFeedback(summary, submittedOperation, response);
       if (
         normalizedAction === "request-information" &&
         elements.informationDetail
@@ -588,6 +596,8 @@ export function createHumanReviewSurface({
 
   function configureWorkspaceScope(scope) {
     state.operations.clear();
+    state.requestInformationDetails.clear();
+    state.decisionFeedback = null;
     state.operationDecisionLockName = null;
     state.operationStorageScope = null;
     state.operationStorageKey = null;
@@ -635,7 +645,36 @@ export function createHumanReviewSurface({
     return true;
   }
 
-  async function reserveHumanReviewOperation(intent, summary, action) {
+  function humanReviewRequestInformationOperationIdentity(summary) {
+    const stableOperationId = stableHumanReviewOperationIdentity(
+      summary.runId,
+      summary.requestId,
+      summary.requestHash,
+      "request-information",
+      summary.lifecycleVersion,
+    );
+    let operationId;
+    do {
+      const randomUuid =
+        typeof hostWindow?.crypto?.randomUUID === "function"
+          ? hostWindow.crypto.randomUUID()
+          : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+      const nonce = hashOperationIdentity(
+        `${randomUuid}-${++requestInformationNonce}`,
+        2166136261,
+      )
+        .toString(16)
+        .padStart(8, "0");
+      operationId = `${stableOperationId}-u${nonce}`;
+    } while (
+      Array.from(state.operations.values()).some(
+        (operation) => operation.operationId === operationId,
+      )
+    );
+    return operationId;
+  }
+
+  async function reserveHumanReviewOperation(intent, summary, action, detail) {
     if (
       !state.operationStorageEnabled ||
       state.operationStorageStatus !== "ready"
@@ -652,7 +691,29 @@ export function createHumanReviewSurface({
           throw new Error("operation storage unavailable");
         state.operationStorage = current.storage;
         replaceOperations(current.entries);
-        let operation = state.operations.get(intent.key);
+        let operation = null;
+        const candidates = Array.from(state.operations.values()).filter(
+          (candidate) =>
+            humanReviewDecisionIntent(candidate, candidate.action).key ===
+            intent.key,
+        );
+        if (action === "request-information") {
+          operation = candidates.find(
+            (candidate) =>
+              state.requestInformationDetails.get(candidate.operationId) ===
+              detail,
+          );
+          if (
+            !operation &&
+            candidates.some(
+              (candidate) =>
+                !state.requestInformationDetails.has(candidate.operationId),
+            )
+          )
+            return null;
+        } else {
+          operation = candidates[0] ?? null;
+        }
         if (!operation) {
           if (state.operations.size >= maximumOperationEntries)
             throw new Error("operation storage capacity reached");
@@ -661,16 +722,22 @@ export function createHumanReviewSurface({
             requestId: summary.requestId,
             requestHash: summary.requestHash,
             action,
-            operationId: stableHumanReviewOperationIdentity(
-              summary.runId,
-              summary.requestId,
-              summary.requestHash,
-              action,
-              summary.lifecycleVersion,
-            ),
+            operationId:
+              action === "request-information"
+                ? humanReviewRequestInformationOperationIdentity(summary)
+                : stableHumanReviewOperationIdentity(
+                    summary.runId,
+                    summary.requestId,
+                    summary.requestHash,
+                    action,
+                    summary.lifecycleVersion,
+                  ),
             expectedLifecycleVersion: summary.lifecycleVersion,
           });
-          state.operations.set(intent.key, operation);
+          const operationKey = humanReviewOperationStorageEntryKey(operation);
+          state.operations.set(operationKey, operation);
+          if (action === "request-information")
+            state.requestInformationDetails.set(operation.operationId, detail);
           if (!persistHumanReviewOperations(state))
             throw new Error("operation storage unavailable");
         }
@@ -679,6 +746,7 @@ export function createHumanReviewSurface({
     } catch {
       state.operationStorageStatus = "unavailable";
       state.operations.clear();
+      state.requestInformationDetails.clear();
       return null;
     }
   }
@@ -700,7 +768,11 @@ export function createHumanReviewSurface({
           throw new Error("operation storage unavailable");
         state.operationStorage = current.storage;
         replaceOperations(current.entries);
-        if (!state.operations.delete(key)) return;
+        const operation = state.operations.get(key);
+        if (!operation) return;
+        state.operations.delete(key);
+        if (operation.action === "request-information")
+          state.requestInformationDetails.delete(operation.operationId);
         if (!persistHumanReviewOperations(state))
           throw new Error("operation storage unavailable");
       });
@@ -712,9 +784,18 @@ export function createHumanReviewSurface({
   }
 
   function replaceOperations(entries) {
+    const previousDetails = state.requestInformationDetails;
     state.operations.clear();
-    for (const [key, operation] of entries)
+    state.requestInformationDetails = new Map();
+    for (const [, operation] of entries) {
+      const key = humanReviewOperationStorageEntryKey(operation);
       state.operations.set(key, operation);
+      if (operation.action === "request-information") {
+        const detail = previousDetails.get(operation.operationId);
+        if (detail !== undefined)
+          state.requestInformationDetails.set(operation.operationId, detail);
+      }
+    }
   }
 
   function withHumanReviewOperationStorageLock(callback) {
@@ -1012,9 +1093,8 @@ export function createHumanReviewSurface({
     const pending = !terminalLifecycleStatuses.has(lifecycle);
     let hasReplayableOperation = false;
     for (const [action, button] of actionButtons()) {
-      const retainedOperation = state.operations.has(
-        humanReviewDecisionIntent(summary, action).key,
-      );
+      const retainedOperation =
+        findReplayableHumanReviewOperation(summary, action) !== null;
       const replayable = !pending && retainedOperation;
       hasReplayableOperation ||= replayable;
       button.hidden = false;
@@ -1033,7 +1113,9 @@ export function createHumanReviewSurface({
     }
     elements.informationField.hidden =
       !requested.has("request-information") || !pending;
-    if (hasReplayableOperation)
+    const feedback = matchingDecisionFeedback(summary);
+    if (feedback) setActionStatus(feedback.message, feedback.tone);
+    else if (hasReplayableOperation)
       setActionStatus(
         "A recorded decision response remains unresolved. Retry that exact decision to reread its durable receipt; no new decision identity will be created.",
         "warning",
@@ -1055,11 +1137,26 @@ export function createHumanReviewSurface({
       );
   }
 
+  function findReplayableHumanReviewOperation(summary, action) {
+    const intentKey = humanReviewDecisionIntent(summary, action).key;
+    return (
+      Array.from(state.operations.values()).find(
+        (operation) =>
+          humanReviewDecisionIntent(operation, operation.action).key ===
+            intentKey &&
+          (action !== "request-information" ||
+            state.requestInformationDetails.has(operation.operationId)),
+      ) ?? null
+    );
+  }
+
   function clearDetail() {
     state.detail = null;
     state.evidence = null;
     state.posture = null;
     state.selectedSummary = null;
+    state.requestInformationDetails.clear();
+    state.decisionFeedback = null;
     state.selectionGeneration++;
     elements.empty.hidden = false;
     elements.detailPanel.hidden = true;
@@ -1082,6 +1179,34 @@ export function createHumanReviewSurface({
     elements.actionStatus.className = tone
       ? `human-review-action-status ${tone}`
       : "human-review-action-status";
+  }
+
+  function setDecisionFeedback(summary, operation, response) {
+    const status = normalizeHumanReviewStatus(response?.status);
+    state.decisionFeedback = Object.freeze({
+      runId: summary.runId,
+      requestId: summary.requestId,
+      requestHash: summary.requestHash,
+      action: operation?.action ?? null,
+      operationId: operation?.operationId ?? null,
+      message: boundedHumanReviewText(
+        humanReviewOutcomeMessage(status),
+        maximumDecisionFeedbackCharacters,
+      ),
+      tone: ["accepted", "information-requested", "replayed"].includes(status)
+        ? "success"
+        : "warning",
+    });
+  }
+
+  function matchingDecisionFeedback(summary) {
+    const feedback = state.decisionFeedback;
+    return feedback &&
+      feedback.runId === summary.runId &&
+      feedback.requestId === summary.requestId &&
+      feedback.requestHash === summary.requestHash
+      ? feedback
+      : null;
   }
 
   function bind() {
@@ -1258,7 +1383,7 @@ function readHumanReviewOperationStorage(hostWindow, storageKey, storageScope) {
     };
   const entries = new Map();
   for (const entry of parsed.entries) {
-    const key = humanReviewDecisionIntent(entry, entry.action).key;
+    const key = humanReviewOperationStorageEntryKey(entry);
     if (entries.has(key))
       return {
         enabled: true,
@@ -1314,18 +1439,22 @@ function isValidHumanReviewOperationStorageEntry(value) {
     !Number.isSafeInteger(value.expectedLifecycleVersion) ||
     value.expectedLifecycleVersion < 0 ||
     value.expectedLifecycleVersion > maximumOperationLifecycleVersion ||
-    !/^web-human-review-[a-f0-9-]{1,110}$/.test(value.operationId) ||
-    value.operationId !==
-      stableHumanReviewOperationIdentity(
-        value.runId,
-        value.requestId,
-        value.requestHash,
-        value.action,
-        value.expectedLifecycleVersion,
-      )
+    !/^web-human-review-[a-f0-9-u-]{1,110}$/.test(value.operationId)
   )
     return false;
-  return true;
+  const stableOperationId = stableHumanReviewOperationIdentity(
+    value.runId,
+    value.requestId,
+    value.requestHash,
+    value.action,
+    value.expectedLifecycleVersion,
+  );
+  return (
+    value.operationId === stableOperationId ||
+    (value.action === "request-information" &&
+      value.operationId.startsWith(`${stableOperationId}-u`) &&
+      /^-u[a-f0-9]{8}$/.test(value.operationId.slice(stableOperationId.length)))
+  );
 }
 
 function persistHumanReviewOperations(state) {
@@ -1390,6 +1519,13 @@ function humanReviewDecisionIntent(summary, action) {
       "\u001f",
     ),
   };
+}
+
+function humanReviewOperationStorageEntryKey(operation) {
+  const intentKey = humanReviewDecisionIntent(operation, operation.action).key;
+  return operation.action === "request-information"
+    ? `${intentKey}\u001e${operation.operationId}`
+    : intentKey;
 }
 
 function stableHumanReviewOperationIdentity(

@@ -292,7 +292,10 @@ test("Human Review surface rereads canonical detail and submits all four visible
   const infoBody = JSON.parse(infoCall.options.body);
   assert.equal(infoBody.expectedLifecycleVersion, 3);
   assert.equal(infoBody.detail, "Need one more bounded fact.");
-  assert.match(infoBody.operationId, /^web-human-review-[a-f0-9-]+$/);
+  assert.match(
+    infoBody.operationId,
+    /^web-human-review-[a-f0-9-]+-u[a-f0-9]{8}$/,
+  );
   assert.notEqual(infoBody.operationId, firstBody.operationId);
 
   assert.equal(
@@ -304,6 +307,7 @@ test("Human Review surface rereads canonical detail and submits all four visible
 
 test("Human Review replays a committed response after the POST result is lost without using the reread lifecycle", async () => {
   const fixture = createFixture();
+  const storage = new FakeStorage();
   const information =
     "Private reviewer detail that must not enter the operation identity.";
   const calls = [];
@@ -350,6 +354,7 @@ test("Human Review replays a committed response after the POST result is lost wi
   };
   const surface = createHumanReviewSurface({
     document: fixture.document,
+    window: { localStorage: storage },
     requestJson,
   });
 
@@ -373,16 +378,20 @@ test("Human Review replays a committed response after the POST result is lost wi
   assert.equal(firstBody.expectedLifecycleVersion, 3);
   assert.equal(secondBody.expectedLifecycleVersion, 3);
   assert.equal(secondBody.operationId, firstBody.operationId);
-  assert.match(firstBody.operationId, /^web-human-review-[a-f0-9-]+$/);
+  assert.match(
+    firstBody.operationId,
+    /^web-human-review-[a-f0-9-]+-u[a-f0-9]{8}$/,
+  );
   assert.doesNotMatch(firstBody.operationId, /private|reviewer|detail/i);
   assert.equal(secondBody.detail, information);
   assert.match(
     fixture.elements.humanReviewActionStatus.textContent,
     /already recorded/i,
   );
+  assert.equal(storage.value, null);
 });
 
-test("Human Review decision operation identity is deterministic across surfaces while retaining only bounded intent state", async () => {
+test("Human Review binds RequestInformation identity to volatile same-page detail state", async () => {
   const firstFixture = createFixture();
   const secondFixture = createFixture();
   const information = "Same exact bounded request-information intent.";
@@ -438,7 +447,7 @@ test("Human Review decision operation identity is deterministic across surfaces 
   assert.equal(posts.length, 2);
   const firstBody = JSON.parse(posts[0].options.body);
   const secondBody = JSON.parse(posts[1].options.body);
-  assert.equal(firstBody.operationId, secondBody.operationId);
+  assert.notEqual(firstBody.operationId, secondBody.operationId);
   assert.equal(
     firstBody.expectedLifecycleVersion,
     secondBody.expectedLifecycleVersion,
@@ -448,7 +457,7 @@ test("Human Review decision operation identity is deterministic across surfaces 
   assert.ok(requests.length < 32, "surface refresh state must remain bounded");
 });
 
-test("Human Review recovers a response-lost operation after a hard reload through same-profile storage", async () => {
+test("Human Review fails closed after reload when RequestInformation detail cannot be proven", async () => {
   const storage = new FakeStorage();
   const firstFixture = createFixture();
   const secondFixture = createFixture();
@@ -525,12 +534,13 @@ test("Human Review recovers a response-lost operation after a hard reload throug
     secondFixture.elements.humanReviewRequestInformationButton,
   );
   const posts = calls.filter((call) => call.options.method === "POST");
-  assert.equal(posts.length, 2);
-  const firstBody = JSON.parse(posts[0].options.body);
-  const secondBody = JSON.parse(posts[1].options.body);
-  assert.equal(secondBody.operationId, firstBody.operationId);
-  assert.equal(secondBody.expectedLifecycleVersion, 3);
-  assert.equal(storage.value, null);
+  assert.equal(posts.length, 1);
+  assert.match(
+    secondFixture.elements.humanReviewActionStatus.textContent,
+    /operation recovery is unavailable/i,
+  );
+  assert.equal(typeof storage.value, "string");
+  assert.doesNotMatch(storage.value, /Private|detail|hashed/i);
 });
 
 test("Human Review exposes one exact terminal retry after an approved response is lost", async () => {
@@ -627,9 +637,13 @@ test("Human Review exposes one exact terminal retry after an approved response i
     recoveryFixture.elements.humanReviewApproveButton.textContent,
     "Approve",
   );
+  assert.match(
+    recoveryFixture.elements.humanReviewActionStatus.textContent,
+    /already recorded/i,
+  );
 });
 
-test("Human Review keeps changed response-lost detail on the same public operation for server conflict", async () => {
+test("Human Review starts a new operation for changed RequestInformation detail without persisting private text", async () => {
   const storage = new FakeStorage();
   const fixture = createFixture();
   const original = "Original bounded reviewer request.";
@@ -687,10 +701,14 @@ test("Human Review keeps changed response-lost detail on the same public operati
   assert.equal(posts.length, 2);
   const firstBody = JSON.parse(posts[0].options.body);
   const secondBody = JSON.parse(posts[1].options.body);
-  assert.equal(secondBody.operationId, firstBody.operationId);
-  assert.equal(secondBody.expectedLifecycleVersion, 3);
+  assert.notEqual(secondBody.operationId, firstBody.operationId);
+  assert.equal(secondBody.expectedLifecycleVersion, 4);
   assert.equal(secondBody.detail, changed);
-  assert.equal(storage.value, null);
+  assert.equal(typeof storage.value, "string");
+  const retained = JSON.parse(storage.value).entries;
+  assert.equal(retained.length, 1);
+  assert.equal(retained[0].operationId, firstBody.operationId);
+  assert.doesNotMatch(storage.value, /Original|Changed|reviewer|detail/i);
 });
 
 test("Human Review fails closed before dispatch when operation storage is malformed, over-capacity, or unavailable", async () => {
@@ -1207,9 +1225,14 @@ test("Human Review serializes same-profile decisions so one cleanup cannot erase
   const storageKey = `embodysense.human-review.operations.v1.${testHumanReviewScope}`;
   const retained = JSON.parse(storage.values.get(storageKey));
   assert.equal(retained.entries.length, 1);
-  assert.equal(retained.entries[0].operationId, posts[0].operationId);
+  assert.equal(retained.entries[0].operationId, posts[1].operationId);
   assert.equal(retained.entries[0].expectedLifecycleVersion, 3);
   assert.doesNotMatch(storage.values.get(storageKey), /Reread|evidence/i);
+  assert.notEqual(posts[0].operationId, posts[1].operationId);
+  assert.deepEqual(
+    posts.map((post) => post.expectedLifecycleVersion),
+    [3, 3],
+  );
 
   const recoverySurface = create(recoveryFixture);
   await recoverySurface.activate();
@@ -1217,13 +1240,12 @@ test("Human Review serializes same-profile decisions so one cleanup cannot erase
   await clickAndFlush(
     recoveryFixture.elements.humanReviewRequestInformationButton,
   );
-  assert.equal(posts.length, 3);
-  assert.equal(new Set(posts.map((post) => post.operationId)).size, 1);
-  assert.deepEqual(
-    posts.map((post) => post.expectedLifecycleVersion),
-    [3, 3, 3],
+  assert.equal(posts.length, 2);
+  assert.match(
+    recoveryFixture.elements.humanReviewActionStatus.textContent,
+    /operation recovery is unavailable/i,
   );
-  assert.equal(storage.values.has(storageKey), false);
+  assert.equal(storage.values.has(storageKey), true);
 });
 
 test("Human Review conclusive cleanup preserves another tab's scoped operation", async () => {

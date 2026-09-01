@@ -6,6 +6,7 @@ internal sealed class HumanReviewAuthorityParkingLease : IAsyncDisposable
 {
     private const string UnreadableDocument = "{";
     private readonly Entry[] _entries;
+    private readonly SemaphoreSlim _restoreGate = new(1, 1);
     private int _restored;
 
     private HumanReviewAuthorityParkingLease(Entry[] entries)
@@ -46,22 +47,31 @@ internal sealed class HumanReviewAuthorityParkingLease : IAsyncDisposable
 
     internal async Task RestoreAsync(CancellationToken cancellationToken = default)
     {
-        if (Interlocked.Exchange(ref _restored, 1) != 0)
-        {
+        if (Volatile.Read(ref _restored) != 0)
             return;
-        }
-
-        foreach (var entry in _entries)
+        await _restoreGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            if (entry.Exists)
+            if (Volatile.Read(ref _restored) != 0)
+                return;
+            foreach (var entry in _entries)
             {
-                await ReplaceAsync(entry.Path, entry.Content!, cancellationToken).ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
+                if (entry.Exists)
+                {
+                    await ReplaceAsync(entry.Path, entry.Content!, cancellationToken).ConfigureAwait(false);
+                }
+                else if (File.Exists(entry.Path))
+                {
+                    File.Delete(entry.Path);
+                }
             }
-            else if (File.Exists(entry.Path))
-            {
-                File.Delete(entry.Path);
-            }
+
+            Volatile.Write(ref _restored, 1);
+        }
+        finally
+        {
+            _restoreGate.Release();
         }
     }
 
@@ -89,6 +99,8 @@ internal sealed class HumanReviewAuthorityParkingLease : IAsyncDisposable
                     await Task.Delay(50, cancellationToken).ConfigureAwait(false);
                 }
             }
+
+            throw new IOException("The authority artifact could not be restored after the bounded retry window.");
         }
         finally
         {

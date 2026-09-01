@@ -97,9 +97,10 @@ public sealed partial class BrowserFlowTests
             using var reviewDocument = JsonDocument.Parse(await ReadHumanReviewResponseLossAsync(browser, runId));
             Assert.Equal(1, reviewDocument.RootElement.GetProperty("detail").GetProperty("decisions").GetArrayLength());
             Assert.Equal(firstOperationId, reviewDocument.RootElement.GetProperty("detail").GetProperty("decisions")[0].GetProperty("operationId").GetString());
+            await AssertHumanReviewStillBlockedBeforeAuthorityRestoreAsync(paths, runId);
             await authorityParking.RestoreAsync();
             var durable = await WaitForCompletedHumanReviewResponseLossAsync(paths, runId);
-            AssertSingleApprovedPreDispatchEffect(paths, durable);
+            await AssertSingleApprovedPreDispatchEffectAsync(paths, durable);
             app.AssertHealthy();
             await browser.AssertHealthyAsync();
         }
@@ -320,7 +321,26 @@ public sealed partial class BrowserFlowTests
         throw new TimeoutException($"Human Review run `{runId}` did not complete after the response-loss retry ({lastStatus}).");
     }
 
-    private static void AssertSingleApprovedPreDispatchEffect(WorkspacePaths paths, CustomLoopRunRecord durable)
+    private static async Task AssertHumanReviewStillBlockedBeforeAuthorityRestoreAsync(WorkspacePaths paths, string runId)
+    {
+        using var store = new CustomLoopRunStore(paths);
+        var durable = await store.GetAsync(runId).ConfigureAwait(false) ?? throw new InvalidOperationException("The response-loss Human Review run disappeared before authority restore.");
+        Assert.Equal(CustomLoopRunStatus.Paused, durable.Status);
+        Assert.Equal(GovernedLoopFrontierStatus.ReviewBlocked, durable.Frontier?.Payload.Status);
+        var review = Assert.IsType<HumanReviewRunState>(durable.HumanReview);
+        var continuation = Assert.IsType<HumanReviewContinuationState>(review.Continuation);
+        Assert.Null(continuation.Completion);
+        Assert.Null(continuation.Retirement);
+        var effect = Assert.IsType<HumanReviewEffectAttemptBinding>(review.Request.Binding.EffectAttempt);
+        var workspaceId = CapabilityWorkspaceScopeId.Create(paths.RootPath);
+        var read = await new GovernedLoopEffectAttemptStore(paths).ReadAsync(workspaceId, effect.OperationId, effect.EffectGeneration).ConfigureAwait(false);
+        Assert.Equal(GovernedLoopEffectAttemptReadStatus.Current, read.Status);
+        var attempt = Assert.IsType<GovernedLoopEffectAttempt>(read.Attempt);
+        Assert.Contains(attempt.Payload.Phase, new[] { GovernedLoopEffectPhase.IntentPrepared, GovernedLoopEffectPhase.DispatchNotStarted });
+        Assert.DoesNotContain(durable.Events, item => item.Kind == CustomLoopRunEventKind.NodeAttemptCompleted);
+    }
+
+    private static async Task AssertSingleApprovedPreDispatchEffectAsync(WorkspacePaths paths, CustomLoopRunRecord durable)
     {
         var validation = CustomLoopRunValidator.Validate(durable);
         Assert.True(validation.IsValid, string.Join(Environment.NewLine, validation.Errors));
@@ -332,7 +352,7 @@ public sealed partial class BrowserFlowTests
         Assert.Single(durable.Events, item => item.EventId == completion.ReleaseReceipt.ReleaseOperationId);
         var effect = Assert.IsType<HumanReviewEffectAttemptBinding>(review.Request.Binding.EffectAttempt);
         var workspaceId = CapabilityWorkspaceScopeId.Create(paths.RootPath);
-        var read = ((IGovernedLoopEffectAttemptReadStore)new GovernedLoopEffectAttemptStore(paths)).ReadAsync(workspaceId, effect.OperationId, effect.EffectGeneration).GetAwaiter().GetResult();
+        var read = await new GovernedLoopEffectAttemptStore(paths).ReadAsync(workspaceId, effect.OperationId, effect.EffectGeneration).ConfigureAwait(false);
         Assert.Equal(GovernedLoopEffectAttemptReadStatus.Current, read.Status);
         Assert.Equal(GovernedLoopEffectPhase.Committed, Assert.IsType<GovernedLoopEffectAttempt>(read.Attempt).Payload.Phase);
         Assert.Single(durable.Events, item => item.Kind == CustomLoopRunEventKind.NodeAttemptCompleted);
