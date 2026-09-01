@@ -49,6 +49,59 @@ function Get-FanInSingleFile {
     return $files[0]
 }
 
+function Get-FanInReceiptCandidates {
+    param(
+        [string]$ArtifactRoot,
+        [string]$Component,
+        [long]$MaximumAttempt
+    )
+
+    Assert-FanInCondition -Condition (Test-Path -LiteralPath $ArtifactRoot -PathType Container) -Message "Receipt artifact root is missing: $ArtifactRoot"
+    $artifactPrefix = if ($Component -ceq "solution") { "verification-solution-receipt-" } elseif ($Component -ceq "static-contracts") { "verification-contract-receipt-" } else { throw "Unsupported fan-in component: $Component" }
+    $artifactPattern = "^$([regex]::Escape($artifactPrefix))(?<attempt>[1-9][0-9]*)$"
+    $receiptDirectories = @(Get-ChildItem -LiteralPath $ArtifactRoot -Directory -Force | Where-Object { $_.Name.StartsWith($artifactPrefix, [StringComparison]::Ordinal) })
+    $artifactDirectories = @($receiptDirectories | Where-Object { $_.Name -cmatch $artifactPattern })
+    Assert-FanInCondition -Condition ($receiptDirectories.Count -eq $artifactDirectories.Count) -Message "Component receipt artifact directory names must use the canonical '$artifactPrefix<positive-attempt>' form."
+
+    if ($artifactDirectories.Count -eq 0) {
+        $evidenceFile = Get-FanInSingleFile -Root $ArtifactRoot -Name "verification-component-evidence.json" -Description "Component receipt evidence"
+        $evidence = Read-FanInJsonFile -Path $evidenceFile.FullName -Description "Component receipt evidence"
+        $attemptText = [string]$evidence.githubRunAttempt
+        Assert-FanInCondition -Condition ($attemptText -match '^[1-9][0-9]*$') -Message "Component receipt attempt is not a canonical positive integer: $attemptText"
+        try {
+            $attempt = [long]::Parse($attemptText, [Globalization.CultureInfo]::InvariantCulture)
+        }
+        catch {
+            throw "Component receipt attempt is outside the supported integer range: $attemptText"
+        }
+
+        Assert-FanInCondition -Condition ($attempt -le $MaximumAttempt) -Message "Component receipt attempt $attempt is newer than the fan-in workflow attempt $MaximumAttempt."
+        return @([pscustomobject]@{ ArtifactRoot = $ArtifactRoot; Attempt = $attempt })
+    }
+
+    $candidates = @(
+        foreach ($artifactDirectory in $artifactDirectories) {
+            $match = [regex]::Match($artifactDirectory.Name, $artifactPattern)
+            $attemptText = $match.Groups["attempt"].Value
+            try {
+                $attempt = [long]::Parse($attemptText, [Globalization.CultureInfo]::InvariantCulture)
+            }
+            catch {
+                throw "Receipt artifact attempt is outside the supported integer range: $attemptText"
+            }
+
+            Assert-FanInCondition -Condition ($attempt -le $MaximumAttempt) -Message "Component receipt artifact '$($artifactDirectory.Name)' is newer than the fan-in workflow attempt $MaximumAttempt."
+            $null = Get-FanInSingleFile -Root $artifactDirectory.FullName -Name "verification-component-evidence.json" -Description "Component receipt evidence"
+            [pscustomobject]@{ ArtifactRoot = $artifactDirectory.FullName; Attempt = $attempt }
+        }
+    )
+
+    Assert-FanInCondition -Condition ($candidates.Count -le 32) -Message "Component receipt artifact count exceeds the bounded fan-in limit of 32."
+    $duplicateAttempts = @($candidates | Group-Object Attempt | Where-Object Count -gt 1)
+    Assert-FanInCondition -Condition ($duplicateAttempts.Count -eq 0) -Message "Component receipt artifacts contain duplicate workflow attempts."
+    return $candidates
+}
+
 function Assert-FanInComponentIdentity {
     param(
         [object]$Evidence,
@@ -56,12 +109,12 @@ function Assert-FanInComponentIdentity {
         [string]$ExpectedRoot,
         [string]$ExpectedHead,
         [string]$ExpectedRunId,
-        [string]$ExpectedRunAttempt
+        [string]$ExpectedReceiptAttempt
     )
 
     Assert-FanInCondition -Condition ($Evidence.schemaVersion -eq 1 -and [string]$Evidence.component -ceq $Component) -Message "Component evidence schema or component identity is invalid for '$Component'."
     Assert-FanInCondition -Condition ([string]$Evidence.repositoryHead -ceq $ExpectedHead) -Message "Component '$Component' repository SHA does not match the reviewed head."
-    Assert-FanInCondition -Condition ([string]$Evidence.githubRunId -ceq $ExpectedRunId -and [string]$Evidence.githubRunAttempt -ceq $ExpectedRunAttempt) -Message "Component '$Component' workflow run identity does not match the fan-in run."
+    Assert-FanInCondition -Condition ([string]$Evidence.githubRunId -ceq $ExpectedRunId -and [string]$Evidence.githubRunAttempt -ceq $ExpectedReceiptAttempt) -Message "Component '$Component' workflow run identity or receipt attempt does not match the fan-in run."
 }
 
 function Assert-FanInArtifactManifest {
@@ -94,7 +147,7 @@ function Assert-FanInWatchdogEvidence {
         [string]$Component,
         [string]$ExpectedHead,
         [string]$ExpectedRunId,
-        [string]$ExpectedRunAttempt
+        [string]$ExpectedReceiptAttempt
     )
 
     $watchdogEvidenceFile = Get-FanInSingleFile -Root $ResultsRoot -Name "verification-watchdog-evidence.json" -Description "Watchdog evidence"
@@ -104,7 +157,7 @@ function Assert-FanInWatchdogEvidence {
     Assert-FanInCondition -Condition ((@($expectedProperties | Sort-Object) -join "|") -ceq ($actualProperties -join "|")) -Message "Watchdog evidence schema is not exact."
     $expectedDeadlineSeconds = if ($Component -ceq "solution") { 1500 } elseif ($Component -ceq "static-contracts") { 600 } else { throw "Unsupported fan-in component: $Component" }
     $elapsedSeconds = [double]$watchdogEvidence.elapsedSeconds
-    Assert-FanInCondition -Condition ($watchdogEvidence.schemaVersion -eq 1 -and [string]$watchdogEvidence.component -ceq $Component -and [string]$watchdogEvidence.mode -ceq "promotion" -and [string]$watchdogEvidence.repositoryHead -ceq $ExpectedHead -and [string]$watchdogEvidence.githubRunId -ceq $ExpectedRunId -and [string]$watchdogEvidence.githubRunAttempt -ceq $ExpectedRunAttempt -and [int]$watchdogEvidence.deadlineSeconds -eq $expectedDeadlineSeconds -and $elapsedSeconds -ge 0 -and $elapsedSeconds -le $expectedDeadlineSeconds -and [int]$watchdogEvidence.exitCode -eq 0 -and [int]$watchdogEvidence.completionMarkerCount -eq 1 -and [string]$watchdogEvidence.status -ceq "passed") -Message "Watchdog evidence identity, status, or measured bounds are invalid for '$Component'."
+    Assert-FanInCondition -Condition ($watchdogEvidence.schemaVersion -eq 1 -and [string]$watchdogEvidence.component -ceq $Component -and [string]$watchdogEvidence.mode -ceq "promotion" -and [string]$watchdogEvidence.repositoryHead -ceq $ExpectedHead -and [string]$watchdogEvidence.githubRunId -ceq $ExpectedRunId -and [string]$watchdogEvidence.githubRunAttempt -ceq $ExpectedReceiptAttempt -and $ExpectedReceiptAttempt -match '^[1-9][0-9]*$' -and [int]$watchdogEvidence.deadlineSeconds -eq $expectedDeadlineSeconds -and $elapsedSeconds -ge 0 -and $elapsedSeconds -le $expectedDeadlineSeconds -and [int]$watchdogEvidence.exitCode -eq 0 -and [int]$watchdogEvidence.completionMarkerCount -eq 1 -and [string]$watchdogEvidence.status -ceq "passed") -Message "Watchdog evidence identity, receipt attempt, status, or measured bounds are invalid for '$Component'."
 
     $watchdogFile = Get-FanInSingleFile -Root $ResultsRoot -Name "watchdog.log" -Description "Component watchdog evidence"
     $componentEvidenceFile = Get-FanInSingleFile -Root $ResultsRoot -Name "verification-component-evidence.json" -Description "Component evidence"
@@ -198,15 +251,15 @@ function Assert-FanInStaticEvidence {
     Assert-FanInCondition -Condition ([int]$Evidence.staticContractCount -eq 8 -and [bool]$Evidence.frontendComplete -and [bool]$Evidence.formatComplete -and [bool]$Evidence.diffComplete) -Message "Static component evidence is incomplete."
 }
 
-function Read-FanInComponent {
-    param([string]$ArtifactRoot, [string]$Component, [string]$ExpectedHead, [string]$ExpectedRunId, [string]$ExpectedRunAttempt)
+function Read-FanInReceipt {
+    param([string]$ArtifactRoot, [string]$Component, [string]$ExpectedHead, [string]$ExpectedRunId, [long]$ReceiptAttempt)
 
     $evidenceFile = Get-FanInSingleFile -Root $ArtifactRoot -Name "verification-component-evidence.json" -Description "Component evidence"
     $resultsRoot = $evidenceFile.DirectoryName
     $evidence = Read-FanInJsonFile -Path $evidenceFile.FullName -Description "Component evidence"
-    Assert-FanInComponentIdentity -Evidence $evidence -Component $Component -ExpectedRoot $resultsRoot -ExpectedHead $ExpectedHead -ExpectedRunId $ExpectedRunId -ExpectedRunAttempt $ExpectedRunAttempt
+    Assert-FanInComponentIdentity -Evidence $evidence -Component $Component -ExpectedRoot $resultsRoot -ExpectedHead $ExpectedHead -ExpectedRunId $ExpectedRunId -ExpectedReceiptAttempt $ReceiptAttempt.ToString([Globalization.CultureInfo]::InvariantCulture)
     Assert-FanInArtifactManifest -ResultsRoot $resultsRoot -Evidence $evidence
-    Assert-FanInWatchdogEvidence -ResultsRoot $resultsRoot -Component $Component -ExpectedHead $ExpectedHead -ExpectedRunId $ExpectedRunId -ExpectedRunAttempt $ExpectedRunAttempt
+    Assert-FanInWatchdogEvidence -ResultsRoot $resultsRoot -Component $Component -ExpectedHead $ExpectedHead -ExpectedRunId $ExpectedRunId -ExpectedReceiptAttempt $ReceiptAttempt.ToString([Globalization.CultureInfo]::InvariantCulture)
     $componentManifest = Read-FanInJsonFile -Path (Join-Path $resultsRoot "verification-component-manifest.json") -Description "Component manifest"
     Assert-FanInReceiptClosedWorld -ResultsRoot $resultsRoot -Manifest $componentManifest
     Assert-FanInCompletionEvidence -ResultsRoot $resultsRoot -Component $Component
@@ -216,6 +269,26 @@ function Read-FanInComponent {
     else {
         Assert-FanInStaticEvidence -ResultsRoot $resultsRoot -Evidence $evidence
     }
+}
+
+function Read-FanInComponent {
+    param([string]$ArtifactRoot, [string]$Component, [string]$ExpectedHead, [string]$ExpectedRunId, [string]$ExpectedRunAttempt)
+
+    Assert-FanInCondition -Condition ($ExpectedRunAttempt -match '^[1-9][0-9]*$') -Message "Fan-in workflow attempt is not a canonical positive integer: $ExpectedRunAttempt"
+    try {
+        $maximumAttempt = [long]::Parse($ExpectedRunAttempt, [Globalization.CultureInfo]::InvariantCulture)
+    }
+    catch {
+        throw "Fan-in workflow attempt is outside the supported integer range: $ExpectedRunAttempt"
+    }
+
+    $candidates = @(Get-FanInReceiptCandidates -ArtifactRoot $ArtifactRoot -Component $Component -MaximumAttempt $maximumAttempt)
+    foreach ($candidate in $candidates) {
+        Read-FanInReceipt -ArtifactRoot $candidate.ArtifactRoot -Component $Component -ExpectedHead $ExpectedHead -ExpectedRunId $ExpectedRunId -ReceiptAttempt $candidate.Attempt
+    }
+
+    $selected = $candidates | Sort-Object Attempt -Descending | Select-Object -First 1
+    Write-Output "VERIFY_PROMOTION_FAN_IN_RECEIPT component=$Component attempt=$($selected.Attempt)"
 }
 
 function Invoke-VerificationPromotionFanIn {
