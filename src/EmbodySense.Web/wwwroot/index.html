@@ -7,6 +7,7 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="stylesheet" href="/styles.css?v=shared-loop-builder-v3" />
     <link rel="stylesheet" href="/loop-builder.css?v=governed-graph-v4" />
+    <link rel="stylesheet" href="/human-review.css?v=human-review-v1" />
   </head>
   <body>
     <div id="appShell" class="app-shell">
@@ -43,6 +44,19 @@
           >
             <span class="rail-glyph" aria-hidden="true">&#10227;</span
             ><span>Loops</span>
+          </button>
+          <button
+            id="humanReviewNav"
+            class="rail-button"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="humanReviewView"
+            data-app-view="reviews"
+            data-testid="human-review-nav"
+          >
+            <span class="rail-glyph" aria-hidden="true">&#10003;</span
+            ><span>Reviews</span>
           </button>
           <a id="capabilitiesNav" class="rail-button" href="/capabilities.html">
             <span class="rail-glyph" aria-hidden="true">&#9711;</span
@@ -1095,6 +1109,230 @@
           </section>
 
           <section
+            id="humanReviewView"
+            class="app-view human-review-view"
+            role="tabpanel"
+            aria-labelledby="humanReviewNav"
+            hidden
+          >
+            <div class="human-review-shell">
+              <aside
+                class="human-review-catalog"
+                aria-label="Human Review catalog"
+              >
+                <header class="human-review-catalog-header">
+                  <div>
+                    <p class="eyebrow">Durable human authority</p>
+                    <h1>Reviews</h1>
+                  </div>
+                  <button
+                    id="humanReviewRefreshButton"
+                    class="secondary-button"
+                    type="button"
+                    data-testid="human-review-refresh"
+                  >
+                    Refresh
+                  </button>
+                </header>
+                <p
+                  id="humanReviewListStatus"
+                  class="human-review-status"
+                  role="status"
+                  aria-live="polite"
+                >
+                  Loading durable reviews…
+                </p>
+                <div
+                  id="humanReviewList"
+                  class="human-review-list"
+                  role="listbox"
+                  aria-label="Durable Human Review requests"
+                  aria-describedby="humanReviewListStatus"
+                ></div>
+              </aside>
+
+              <section
+                class="human-review-detail"
+                aria-label="Human Review detail"
+                aria-live="polite"
+              >
+                <div id="humanReviewEmpty" class="human-review-empty">
+                  <p class="eyebrow">Canonical review state</p>
+                  <h2>Select a review</h2>
+                  <p>
+                    Choose a durable request to inspect its redacted evidence
+                    and current decision posture.
+                  </p>
+                </div>
+                <article
+                  id="humanReviewDetailPanel"
+                  class="human-review-detail-panel"
+                  hidden
+                >
+                  <header class="human-review-detail-header">
+                    <div>
+                      <p id="humanReviewPurpose" class="eyebrow">
+                        Human Review
+                      </p>
+                      <h2 id="humanReviewTitle">Review detail</h2>
+                      <p
+                        id="humanReviewIdentity"
+                        class="human-review-identity"
+                      ></p>
+                    </div>
+                    <button
+                      id="humanReviewDetailRefreshButton"
+                      class="secondary-button"
+                      type="button"
+                      data-testid="human-review-detail-refresh"
+                    >
+                      Reread canonical state
+                    </button>
+                  </header>
+                  <p
+                    id="humanReviewDetailStatus"
+                    class="human-review-status"
+                    role="status"
+                    aria-live="polite"
+                  ></p>
+                  <dl id="humanReviewSummary" class="human-review-summary"></dl>
+
+                  <section
+                    class="human-review-section"
+                    aria-labelledby="humanReviewPreviewTitle"
+                  >
+                    <div class="human-review-section-heading">
+                      <h3 id="humanReviewPreviewTitle">Request summary</h3>
+                      <span class="human-review-redaction-note"
+                        >Server-redacted</span
+                      >
+                    </div>
+                    <div
+                      id="humanReviewPreviews"
+                      class="human-review-preview-list"
+                    ></div>
+                  </section>
+
+                  <section
+                    class="human-review-section"
+                    aria-labelledby="humanReviewEvidenceTitle"
+                  >
+                    <div class="human-review-section-heading">
+                      <h3 id="humanReviewEvidenceTitle">Evidence</h3>
+                      <span
+                        id="humanReviewEvidencePosture"
+                        class="human-review-redaction-note"
+                      ></span>
+                    </div>
+                    <div
+                      id="humanReviewEffectEvidence"
+                      class="human-review-effect-evidence"
+                    ></div>
+                    <ol
+                      id="humanReviewEvidence"
+                      class="human-review-evidence-list"
+                    ></ol>
+                  </section>
+
+                  <section
+                    class="human-review-section"
+                    aria-labelledby="humanReviewDecisionHistoryTitle"
+                  >
+                    <div class="human-review-section-heading">
+                      <h3 id="humanReviewDecisionHistoryTitle">
+                        Decision history
+                      </h3>
+                      <span class="human-review-redaction-note"
+                        >Append-only</span
+                      >
+                    </div>
+                    <ol
+                      id="humanReviewDecisionHistory"
+                      class="human-review-decision-list"
+                    ></ol>
+                  </section>
+
+                  <section
+                    id="humanReviewActionSection"
+                    class="human-review-actions-section"
+                    aria-labelledby="humanReviewActionTitle"
+                  >
+                    <div class="human-review-section-heading">
+                      <div>
+                        <h3 id="humanReviewActionTitle">Decision</h3>
+                        <p>
+                          Each action is revalidated against the exact version
+                          shown above.
+                        </p>
+                      </div>
+                      <span
+                        id="humanReviewLifecycleStatus"
+                        class="human-review-state-chip"
+                      ></span>
+                    </div>
+                    <p
+                      id="humanReviewActionStatus"
+                      class="human-review-action-status"
+                      role="status"
+                      aria-live="assertive"
+                    ></p>
+                    <label
+                      id="humanReviewInformationField"
+                      class="human-review-information-field"
+                      hidden
+                    >
+                      <span>What information should be considered?</span>
+                      <textarea
+                        id="humanReviewInformationDetail"
+                        maxlength="1024"
+                        rows="3"
+                      ></textarea>
+                    </label>
+                    <div id="humanReviewActions" class="human-review-actions">
+                      <button
+                        id="humanReviewApproveButton"
+                        class="primary-button"
+                        type="button"
+                        data-human-review-action="approve"
+                        data-testid="human-review-approve"
+                      >
+                        Approve
+                      </button>
+                      <button
+                        id="humanReviewRejectButton"
+                        class="danger-button"
+                        type="button"
+                        data-human-review-action="reject"
+                        data-testid="human-review-reject"
+                      >
+                        Reject
+                      </button>
+                      <button
+                        id="humanReviewCancelButton"
+                        class="secondary-button"
+                        type="button"
+                        data-human-review-action="cancel"
+                        data-testid="human-review-cancel"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        id="humanReviewRequestInformationButton"
+                        class="secondary-button"
+                        type="button"
+                        data-human-review-action="request-information"
+                        data-testid="human-review-request-information"
+                      >
+                        Request information
+                      </button>
+                    </div>
+                  </section>
+                </article>
+              </section>
+            </div>
+          </section>
+
+          <section
             id="configurationView"
             class="app-view configuration-view"
             role="tabpanel"
@@ -1186,20 +1424,23 @@
     <aside
       id="loopApprovalPanel"
       class="approval-panel"
+      data-legacy-non-authoritative="true"
       aria-labelledby="loopApprovalPanelTitle"
       aria-live="polite"
       hidden
     >
       <div class="approval-panel-header">
         <div>
-          <p class="eyebrow">Governed workspace access</p>
-          <h2 id="loopApprovalPanelTitle">Run approval required</h2>
+          <p class="eyebrow">Legacy surface retired</p>
+          <h2 id="loopApprovalPanelTitle">
+            Governed approvals are unavailable here
+          </h2>
         </div>
         <span id="loopApprovalCount" class="version-chip">0 pending</span>
       </div>
       <p class="approval-panel-copy">
-        This run is waiting for your decision. Review the resolved target before
-        allowing the request.
+        Durable Human Review decisions are available in Reviews. Default
+        conversation approvals remain in Chat.
       </p>
       <div id="loopApprovals" class="approval-list"></div>
     </aside>
@@ -1207,5 +1448,6 @@
 
     <script src="/app.js?v=shared-loop-builder-v3" type="module"></script>
     <script src="/loop-builder.js?v=governed-graph-v4" type="module"></script>
+    <script src="/human-review.js?v=human-review-v1" type="module"></script>
   </body>
 </html>

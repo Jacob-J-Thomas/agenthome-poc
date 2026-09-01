@@ -57,6 +57,7 @@ const elements = {
   configurationView: document.getElementById("configurationView"),
   appTabs: Array.from(document.querySelectorAll("[data-app-view]")),
   chatView: document.getElementById("chatView"),
+  humanReviewView: document.getElementById("humanReviewView"),
   initButton: document.getElementById("initButton"),
   loopsView: document.getElementById("loopsView"),
   messageForm: document.getElementById("messageForm"),
@@ -103,7 +104,7 @@ function isConfigurationTabName(value) {
 
 function selectAppView(view, sourceTab = null) {
   const previousAppView = activeAppView;
-  activeAppView = ["chat", "loops", "configuration"].includes(view)
+  activeAppView = ["chat", "loops", "reviews", "configuration"].includes(view)
     ? view
     : "chat";
   if (previousAppView === "loops" && activeAppView !== "loops") {
@@ -111,9 +112,12 @@ function selectAppView(view, sourceTab = null) {
   }
   elements.chatView.hidden = activeAppView !== "chat";
   elements.loopsView.hidden = activeAppView !== "loops";
+  elements.humanReviewView.hidden = activeAppView !== "reviews";
   elements.configurationView.hidden = activeAppView !== "configuration";
   if (activeAppView === "loops") {
     void window.embodySenseLoopBuilder?.activate();
+  } else if (activeAppView === "reviews") {
+    void window.embodySenseHumanReview?.activate();
   }
 
   let selectedTab = null;
@@ -144,7 +148,11 @@ function selectAppView(view, sourceTab = null) {
     renderConfiguration();
   } else {
     elements.surfaceTitle.textContent =
-      activeAppView === "loops" ? "Loops" : "Chat";
+      activeAppView === "loops"
+        ? "Loops"
+        : activeAppView === "reviews"
+          ? "Reviews"
+          : "Chat";
   }
 
   if (sourceTab && window.history?.replaceState) {
@@ -416,6 +424,7 @@ async function runSessionRecoveryAttempt(generation) {
         `Transcript unavailable: ${transcriptHydrationError.message}`,
       );
     renderApprovals(pendingApprovals);
+    void window.embodySenseHumanReview?.sessionRecovered?.();
     candidateEvents.promote();
     sessionRecoveryAttempts = 0;
     applyConnectedState();
@@ -561,6 +570,12 @@ function bindHubEvents(connection, generation, closeCandidate) {
   });
   connection.on("ConversationChanged", (notification) => {
     dispatch(queueConversationPublicationSynchronization, notification);
+  });
+  connection.on("HumanReviewChanged", (notification) => {
+    dispatch(
+      (value) => window.embodySenseHumanReview?.notifyChanged?.(value),
+      notification,
+    );
   });
   connection.on("StreamEvent", (event) => {
     dispatch(handleStreamEvent, event);
@@ -2322,8 +2337,10 @@ activeConfigTab = isConfigurationTabName(requestedView)
 selectAppView(
   requestedView === "loops"
     ? "loops"
-    : isConfigurationTabName(requestedView)
-      ? "configuration"
-      : "chat",
+    : requestedView === "reviews"
+      ? "reviews"
+      : isConfigurationTabName(requestedView)
+        ? "configuration"
+        : "chat",
 );
 boot().catch((error) => appendMessage("error", error.message));

@@ -367,22 +367,20 @@ function refreshWorkspace() {
   );
 }
 
-async function rehydrateSession({
-  approvals = [],
-  signal = null,
-  workspaceRoot = null,
-} = {}) {
+async function rehydrateSession({ signal = null, workspaceRoot = null } = {}) {
   if (!loopBuilderSessionAvailable && !signal?.aborted) {
     if (loopBuilderSessionAbortController.signal.aborted)
       loopBuilderSessionAbortController = new AbortController();
     loopBuilderSessionAvailable = true;
   }
-  renderLoopApprovals(approvals);
+  // Default-conversation approvals are rendered by app.js in Chat. Governed-loop
+  // approval state is durable Human Review and is rendered by human-review.js.
+  renderLoopApprovals([]);
   if (!loopBuilderEventsBound) return { refreshed: false, skipped: true };
   if (loopBuilderRefresh) {
     await loopBuilderRefresh;
     if (signal?.aborted) return { refreshed: false };
-    return await rehydrateSession({ approvals, signal, workspaceRoot });
+    return await rehydrateSession({ signal, workspaceRoot });
   }
   if (
     workspaceRoot &&
@@ -3940,7 +3938,7 @@ function appendRunProgressEvidence(run, definition) {
   appendEvidenceSection(
     "Status and checkpoint",
     `${formatStatus(run.status)} · ${current}`,
-    `run ${run.id}\nloop ${run.loopId} · role ${definitionRoleId(definition)} · ${run.surface} surface\nlifecycle version ${run.lifecycleVersion}\nexecution ${deadlineText}\nnext proved boundary ${nextStep}\niteration ${checkpoint?.iteration ?? "unknown"} · accepted repeats ${checkpoint?.acceptedRepeatCount ?? "unknown"} · tool requests ${checkpoint?.toolRequestsUsed ?? "unknown"}\nlast committed sequence ${checkpoint?.lastCommittedSequence ?? "none"} · latest event ${latest?.sequence ?? "none"} ${latest?.kind ? formatStatus(latest.kind) : ""}\npending approvals visible to this connection ${elements.approvals.children.length}`,
+    `run ${run.id}\nloop ${run.loopId} · role ${definitionRoleId(definition)} · ${run.surface} surface\nlifecycle version ${run.lifecycleVersion}\nexecution ${deadlineText}\nnext proved boundary ${nextStep}\niteration ${checkpoint?.iteration ?? "unknown"} · accepted repeats ${checkpoint?.acceptedRepeatCount ?? "unknown"} · tool requests ${checkpoint?.toolRequestsUsed ?? "unknown"}\nlast committed sequence ${checkpoint?.lastCommittedSequence ?? "none"} · latest event ${latest?.sequence ?? "none"} ${latest?.kind ? formatStatus(latest.kind) : ""}\ndurable Human Review state is available in Reviews; Chat approvals remain in Chat`,
   );
 }
 
@@ -7181,18 +7179,12 @@ async function getHub() {
     const sharedConnection = await window.embodySenseSession.getHub();
     if (hub !== sharedConnection) {
       hub = sharedConnection;
-      sharedConnection.on("ApprovalsChanged", (approvals) => {
-        if (hub === sharedConnection) renderLoopApprovals(approvals);
-      });
     }
     return sharedConnection;
   }
   if (hub?.connected) return hub;
   const connection = new JsonSignalRConnection(createHubUrl());
   hub = connection;
-  connection.on("ApprovalsChanged", (approvals) => {
-    if (hub === connection) renderLoopApprovals(approvals);
-  });
   connection.onclose = () => {
     if (hub !== connection) return;
     renderLoopApprovals([]);
@@ -7215,68 +7207,14 @@ async function getHub() {
 }
 
 function renderLoopApprovals(approvals) {
-  const pending = Array.isArray(approvals) ? approvals : [];
-  elements.approvalCount.textContent = `${pending.length} pending`;
-  elements.approvalPanel.hidden = pending.length === 0;
-  elements.approvals.replaceChildren(...pending.map(renderLoopApproval));
-  if (currentView === "runs" && selectedRun) renderRunEvidence();
-}
-
-function renderLoopApproval(approval) {
-  const item = node("article", "approval-item");
-  item.append(
-    node(
-      "strong",
-      "",
-      `${formatStatus(approval.command)} ${approval.operation}`,
-    ),
-  );
-  item.append(
-    node(
-      "div",
-      "evidence-code",
-      [
-        `target ${approval.targetPath}`,
-        `resolved ${approval.resolvedPath}`,
-        `matched permission ${approval.matchedPath}`,
-        approval.reason,
-      ]
-        .filter(Boolean)
-        .join("\n"),
-    ),
-  );
-  const actions = node("div", "approval-actions");
-  const reject = actionButton(
-    "Reject",
-    () => decideLoopApproval(approval.requestId, false, reject),
-    false,
-    "danger-button",
-  );
-  const approve = actionButton(
-    "Approve",
-    () => decideLoopApproval(approval.requestId, true, approve),
-    false,
-    "primary-button",
-  );
-  actions.append(reject, approve);
-  item.append(actions);
-  return item;
-}
-
-async function decideLoopApproval(requestId, approved, button) {
-  button.disabled = true;
-  try {
-    const connection = await getHub();
-    const result = await connection.invoke("DecideApproval", requestId, {
-      approved,
-    });
-    if (!result?.accepted)
-      showBanner(result?.message ?? "The approval decision was not accepted.");
-  } catch (error) {
-    showBanner(`Approval decision failed: ${error.message}`);
-  } finally {
-    button.disabled = false;
-  }
+  // This legacy panel remains a hidden compatibility shell for existing saved
+  // layouts, but it is intentionally non-authoritative and never renders or
+  // submits connection-owned approval decisions.
+  void approvals;
+  if (!elements.approvalPanel || !elements.approvals) return;
+  elements.approvalCount.textContent = "0 pending";
+  elements.approvalPanel.hidden = true;
+  elements.approvals.replaceChildren();
 }
 
 function createHubUrl() {

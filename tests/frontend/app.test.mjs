@@ -44,12 +44,21 @@ test("the shared shell owns primary navigation while Builder and Runs stay local
 test("shared-shell navigation switches views and keeps the refresh route aligned", async () => {
   const app = await loadApp();
   const loopsTab = app.appTabs.find((tab) => tab.dataset.appView === "loops");
+  const reviewsTab = app.appTabs.find(
+    (tab) => tab.dataset.appView === "reviews",
+  );
   const chatTab = app.appTabs.find((tab) => tab.dataset.appView === "chat");
 
   await loopsTab.click();
   assert.equal(app.elements.chatView.hidden, true);
   assert.equal(app.elements.loopsView.hidden, false);
   assert.match(app.context.window.location.href, /\?view=loops$/);
+
+  await reviewsTab.click();
+  assert.equal(app.elements.loopsView.hidden, true);
+  assert.equal(app.elements.humanReviewView.hidden, false);
+  assert.equal(app.elements.surfaceTitle.textContent, "Reviews");
+  assert.match(app.context.window.location.href, /\?view=reviews$/);
 
   await chatTab.click();
   assert.equal(app.elements.chatView.hidden, false);
