@@ -11,6 +11,8 @@ using EmbodySense.Core.Startup.Inference.Profiles.Models;
 using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Runtime.Models;
 using EmbodySense.Core.Startup.Workspace;
+using EmbodySense.Core.Startup.HumanReview;
+using EmbodySense.Core.Startup.HumanReview.Models;
 using EmbodySense.Web.Models;
 using EmbodySense.Web.Services;
 
@@ -23,13 +25,14 @@ namespace EmbodySense.Web;
 /// <remarks>
 /// Default-conversation turns are serialized. Authoring borrows an inference-independent canonical run store for the
 /// host lifetime, while custom-loop operations may share the retained runtime and
-/// cross SignalR disconnects, but approval ownership remains bound to the initiating connection. A cancelled
+/// cross SignalR disconnects. Connection-owned approval applies only to default-conversation tools; approval-required
+/// custom-loop effects fail closed until represented by canonical durable Human Review. A cancelled
 /// conversation discards an unpinned runtime at the next safe boundary without disposing a runtime still used by a
 /// custom operation. The process background host can instead pin that same runtime until it has stopped durable
 /// admission. Evidence reads recover interrupted runs before returning state. The application container owns this host
 /// and must dispose it asynchronously.
 /// </remarks>
-public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvoker
+public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvoker, IWebHumanReviewRuntime
 {
     private readonly WebRunOptions _options;
     private readonly string _configuredModel;
@@ -563,6 +566,45 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         return new LoopRunModelSnapshot("OpenAiCodex", _configuredModel);
     }
 
+    /// <summary>Gets whether the Web workspace is initialized for durable Human Review operations.</summary>
+    public bool IsWorkspaceInitialized
+        => _statusReader.Read(_options.WorkingDirectory).IsInitialized;
+
+    /// <summary>Lists one bounded detached Human Review page through the retained runtime.</summary>
+    /// <param name="request">The bounded page size and opaque continuation cursor.</param>
+    /// <param name="cancellationToken">Cancels host recovery, runtime acquisition, or the durable read.</param>
+    /// <returns>The detached canonical Human Review page.</returns>
+    public Task<HumanReviewPage> ListHumanReviewsAsync(HumanReviewPageRequest request, CancellationToken cancellationToken = default)
+        => UseHumanReviewRuntimeAsync((humanReview, token) => humanReview.ListAsync(request, token), cancellationToken);
+
+    /// <summary>Reads one exact detached Human Review detail through the retained runtime.</summary>
+    /// <param name="runId">The exact durable run identity.</param>
+    /// <param name="cancellationToken">Cancels host recovery, runtime acquisition, or the durable read.</param>
+    /// <returns>The detached canonical Human Review detail result.</returns>
+    public Task<HumanReviewReadResult> ReadHumanReviewAsync(string runId, CancellationToken cancellationToken = default)
+        => UseHumanReviewRuntimeAsync((humanReview, token) => humanReview.ReadAsync(runId, token), cancellationToken);
+
+    /// <summary>Reads one exact detached Human Review evidence projection through the retained runtime.</summary>
+    /// <param name="runId">The exact durable run identity.</param>
+    /// <param name="cancellationToken">Cancels host recovery, runtime acquisition, or the durable read.</param>
+    /// <returns>The detached canonical Human Review evidence result.</returns>
+    public Task<HumanReviewEvidenceReadResult> ReadHumanReviewEvidenceAsync(string runId, CancellationToken cancellationToken = default)
+        => UseHumanReviewRuntimeAsync((humanReview, token) => humanReview.ReadEvidenceAsync(runId, token), cancellationToken);
+
+    /// <summary>Reads one exact detached Human Review runtime posture through the retained runtime.</summary>
+    /// <param name="runId">The exact durable run identity.</param>
+    /// <param name="cancellationToken">Cancels host recovery, runtime acquisition, or the durable read.</param>
+    /// <returns>The detached canonical Human Review runtime posture.</returns>
+    public Task<HumanReviewRuntimePostureReadResult> ReadHumanReviewPostureAsync(string runId, CancellationToken cancellationToken = default)
+        => UseHumanReviewRuntimeAsync((humanReview, token) => humanReview.ReadRuntimePostureAsync(runId, token), cancellationToken);
+
+    /// <summary>Submits one authority-free Human Review decision through the retained runtime.</summary>
+    /// <param name="input">The route-derived run, version, operation, decision, and optional detail.</param>
+    /// <param name="cancellationToken">Cancels host recovery, runtime acquisition, or the durable decision.</param>
+    /// <returns>The detached canonical Human Review decision result.</returns>
+    public Task<HumanReviewDecisionResult> DecideHumanReviewAsync(HumanReviewDecisionOperationInput input, CancellationToken cancellationToken = default)
+        => UseHumanReviewRuntimeAsync((humanReview, token) => humanReview.DecideAsync(input, token), cancellationToken);
+
     internal async Task<T> UseLoopAuthoringAsync<T>(Func<LoopAuthoringFacade, Task<T>> operation, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(operation);
@@ -1075,10 +1117,10 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     }
 
     /// <summary>
-    /// Invokes an exact saved custom-loop definition under one live browser connection's approval ownership.
+    /// Invokes an exact saved custom-loop definition for one authenticated browser connection.
     /// </summary>
     /// <param name="input">The invocation operation identity, definition binding, and context selection.</param>
-    /// <param name="ownerConnectionId">The live SignalR connection that owns governed approvals.</param>
+    /// <param name="ownerConnectionId">The live SignalR connection correlated with the surface request; it is not approval authority.</param>
     /// <param name="cancellationToken">The caller token linked with host shutdown for the full operation.</param>
     /// <returns>The durable admission or rejection response.</returns>
     /// <exception cref="InvalidOperationException">The workspace is not initialized or a compatible runtime cannot be created.</exception>
@@ -1092,7 +1134,6 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         ArgumentException.ThrowIfNullOrWhiteSpace(ownerConnectionId);
 
         using var executionCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _hostLifetimeCancellation.Token);
-        using var approvalScope = _approvalCoordinator.BeginApprovalScope(ownerConnectionId);
         var runtime = await BeginCustomRuntimeOperationAsync(executionCancellation.Token);
         try
         {
@@ -1104,9 +1145,9 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         }
     }
 
-    /// <summary>Invokes one exact published governed-loop revision under one live browser connection's approval ownership.</summary>
+    /// <summary>Invokes one exact published governed-loop revision for one authenticated browser connection.</summary>
     /// <param name="input">The immutable publication, authority-grant, operation, and prompt coordinates.</param>
-    /// <param name="ownerConnectionId">The live SignalR connection that owns governed approvals.</param>
+    /// <param name="ownerConnectionId">The live SignalR connection correlated with the surface request; it is not approval authority.</param>
     /// <param name="cancellationToken">The caller token linked with host shutdown for runtime acquisition and pre-boundary work.</param>
     /// <returns>The canonical governed admission, execution, replay, or recovery-required response.</returns>
     public async Task<GovernedLoopRunInvocationResponse> InvokeGovernedLoopAsync(GovernedLoopRunInvocationInput input, string ownerConnectionId, CancellationToken cancellationToken = default)
@@ -1115,7 +1156,6 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         ArgumentException.ThrowIfNullOrWhiteSpace(ownerConnectionId);
 
         using var executionCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _hostLifetimeCancellation.Token);
-        using var approvalScope = _approvalCoordinator.BeginApprovalScope(ownerConnectionId);
         var runtime = await BeginCustomRuntimeOperationAsync(executionCancellation.Token);
         try
         {
@@ -1129,7 +1169,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
 
     /// <summary>Confirms a server preview when required and invokes using only the exact server-returned grant.</summary>
     /// <param name="request">The browser-held object selector, preview hash, operation identity, and Manual Trigger prompt.</param>
-    /// <param name="ownerConnectionId">The live SignalR connection that owns any governed approval interaction.</param>
+    /// <param name="ownerConnectionId">The live SignalR connection correlated with the surface request; it is not approval authority.</param>
     /// <param name="cancellationToken">The token used until durable authority or invocation boundaries are reached.</param>
     /// <returns>The canonical invocation projection, or a fail-closed safe rejection.</returns>
     public async Task<GovernedLoopRunInvocationResponse> ConfirmAndInvokeGovernedLoopAsync(
@@ -1141,7 +1181,6 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         ArgumentException.ThrowIfNullOrWhiteSpace(ownerConnectionId);
 
         using var executionCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _hostLifetimeCancellation.Token);
-        using var approvalScope = _approvalCoordinator.BeginApprovalScope(ownerConnectionId);
         var runtime = await BeginGraphAuthoringRuntimeOperationAsync(executionCancellation.Token);
         try
         {
@@ -1267,10 +1306,10 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     }
 
     /// <summary>
-    /// Explicitly resumes a paused custom-loop run under one live browser connection's approval ownership.
+    /// Explicitly resumes a paused custom-loop run for one authenticated browser connection.
     /// </summary>
     /// <param name="input">The optimistic, idempotent resume request.</param>
-    /// <param name="ownerConnectionId">The live SignalR connection that owns governed approvals.</param>
+    /// <param name="ownerConnectionId">The live SignalR connection correlated with the surface request; it is not approval authority.</param>
     /// <param name="cancellationToken">The caller token linked with host shutdown for the full operation.</param>
     /// <returns>The durable lifecycle-control response.</returns>
     /// <exception cref="InvalidOperationException">The workspace is not initialized or a compatible runtime cannot be created.</exception>
@@ -1281,7 +1320,6 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         ArgumentException.ThrowIfNullOrWhiteSpace(ownerConnectionId);
 
         using var executionCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _hostLifetimeCancellation.Token);
-        using var approvalScope = _approvalCoordinator.BeginApprovalScope(ownerConnectionId);
         var runtime = await BeginCustomRuntimeOperationAsync(executionCancellation.Token);
         try
         {
@@ -1671,6 +1709,23 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         }
     }
 
+    private async Task<TResult> UseHumanReviewRuntimeAsync<TResult>(Func<HumanReviewRuntimeFacade, CancellationToken, Task<TResult>> operation, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        using var operationCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _hostLifetimeCancellation.Token);
+        EnsureWorkspaceInitialized("using Human Review");
+        await EnsureLoopRecoveryAsync(operationCancellation.Token).ConfigureAwait(false);
+        var runtime = await BeginCustomRuntimeOperationAsync(operationCancellation.Token).ConfigureAwait(false);
+        try
+        {
+            return await operation(runtime.HumanReview, operationCancellation.Token).ConfigureAwait(false);
+        }
+        finally
+        {
+            await EndCustomRuntimeOperationAsync().ConfigureAwait(false);
+        }
+    }
+
     private async Task<AgentRuntime> BeginGraphAuthoringRuntimeOperationAsync(CancellationToken cancellationToken)
     {
         EnsureWorkspaceInitialized("authoring governed graphs");
@@ -1742,6 +1797,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
                         _capabilityTrustRootPath,
                         codexRuntimeStatus,
                         _conversationPublicationObserver)))
+                .WithoutLegacyCustomLoopToolApprovals()
                 .WithCustomLoopRunStoreProvider(_customLoopRunStoreProvider);
             var preserveCurrentConversation = _preserveCurrentConversationOnNextRuntimeCreation;
             _runtime = await factory.CreateAsync(

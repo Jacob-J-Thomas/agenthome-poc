@@ -614,7 +614,7 @@ Assert-True -Condition ($linkedApplicationFixturePlan.TestProjects -ccontains "t
 Assert-True -Condition (@($linkedApplicationFixturePlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 -or @($_.Classes).Count -ne 0 }).Count -eq 0) -Message "Linked Application test inputs must run every consuming suite without focused filtering."
 
 $linkedModelProfileFixturePlan = Get-QualificationPlan -ChangedPaths @("tests/EmbodySense.Core.Application.Tests/GovernedModelProfileApplicationTestFixture.cs")
-Assert-Equal -Actual ($linkedModelProfileFixturePlan.TestProjects -join "|") -Expected "tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj|tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj|tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj" -Message "The linked model-profile fixture must select its Application owner plus Persistence and Startup consumers."
+Assert-Equal -Actual ($linkedModelProfileFixturePlan.TestProjects -join "|") -Expected "tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj|tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj|tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj|tests/EmbodySense.Web.Tests/EmbodySense.Web.Tests.csproj" -Message "The linked model-profile fixture must select its Application owner plus Persistence, Startup, and Web consumers."
 Assert-True -Condition (@($linkedModelProfileFixturePlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 -or @($_.Classes).Count -ne 0 }).Count -eq 0) -Message "The linked model-profile fixture must run every consuming suite without focused filtering."
 
 $linkedEffectFixturePlan = Get-QualificationPlan -ChangedPaths @("tests/EmbodySense.Core.Application.Tests/Loops/Execution/Effects/GovernedLoopEffectAttemptTestFixture.cs")
@@ -624,12 +624,25 @@ Assert-True -Condition ($linkedEffectFixturePlan.TestProjects -ccontains "tests/
 Assert-True -Condition (@($linkedEffectFixturePlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 -or @($_.Classes).Count -ne 0 }).Count -eq 0) -Message "Linked effect-attempt inputs must run every consuming suite without focused filtering."
 
 $linkedCommandActionFixturePlan = Get-QualificationPlan -ChangedPaths @("tests/EmbodySense.Core.Application.Tests/CommandActions/CommandActionApplicationTestData.cs")
-Assert-Equal -Actual ($linkedCommandActionFixturePlan.TestProjects -join "|") -Expected "tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj|tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj|tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj" -Message "The linked command-Action fixture must select its Application owner plus Persistence and Startup consumers."
+Assert-Equal -Actual ($linkedCommandActionFixturePlan.TestProjects -join "|") -Expected "tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj|tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj|tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj|tests/EmbodySense.Web.Tests/EmbodySense.Web.Tests.csproj" -Message "The linked command-Action fixture must select its Application owner plus Persistence, Startup, and Web consumers."
 Assert-True -Condition (@($linkedCommandActionFixturePlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 -or @($_.Classes).Count -ne 0 }).Count -eq 0) -Message "The linked command-Action fixture must run every consuming suite without focused filtering."
 
 $linkedSequentialFixturePlan = Get-QualificationPlan -ChangedPaths @("tests/EmbodySense.Core.Application.Tests/Loops/Sequential/GovernedLoopSequentialApplicationTestFixture.cs")
-Assert-Equal -Actual ($linkedSequentialFixturePlan.TestProjects -join "|") -Expected "tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj|tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj|tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj" -Message "The linked sequential fixture must select its Application owner plus Persistence and Startup consumers."
+Assert-Equal -Actual ($linkedSequentialFixturePlan.TestProjects -join "|") -Expected "tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj|tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj|tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj|tests/EmbodySense.Web.Tests/EmbodySense.Web.Tests.csproj" -Message "The linked sequential fixture must select its Application owner plus Persistence, Startup, and Web consumers."
 Assert-True -Condition (@($linkedSequentialFixturePlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 -or @($_.Classes).Count -ne 0 }).Count -eq 0) -Message "The linked sequential fixture must run every consuming suite without focused filtering."
+
+foreach ($humanReviewLinkedFixturePath in @(
+    "tests/EmbodySense.Core.Startup.Tests/Loops/Execution/Sleep/HumanReviewRecoveryCanonicalAuditRecorder.cs",
+    "tests/EmbodySense.Core.Startup.Tests/Loops/Execution/Sleep/HumanReviewRecoveryCanonicalRunFactory.cs",
+    "tests/EmbodySense.Core.Startup.Tests/Loops/Execution/Sleep/HumanReviewRecoveryCanonicalRunStore.cs",
+    "tests/EmbodySense.Core.Startup.Tests/Loops/Execution/Sleep/HumanReviewRecoveryCanonicalTimeProvider.cs",
+    "tests/EmbodySense.Core.Startup.Tests/Loops/Execution/Sleep/HumanReviewRecoveryServerAuthorizer.cs",
+    "tests/EmbodySense.Core.Startup.Tests/Loops/Execution/Sleep/HumanReviewRecoveryTrustedClock.cs"
+)) {
+    $humanReviewLinkedFixturePlan = Get-QualificationPlan -ChangedPaths @($humanReviewLinkedFixturePath)
+    Assert-Equal -Actual ($humanReviewLinkedFixturePlan.TestProjects -join "|") -Expected "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj|tests/EmbodySense.Web.Tests/EmbodySense.Web.Tests.csproj" -Message "The linked Human Review fixture '$humanReviewLinkedFixturePath' must select its Startup owner and Web consumer."
+    Assert-True -Condition (@($humanReviewLinkedFixturePlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 -or @($_.Classes).Count -ne 0 }).Count -eq 0) -Message "The linked Human Review fixture '$humanReviewLinkedFixturePath' must run every consuming suite without focused filtering."
+}
 
 $browserHostPlan = Get-QualificationPlan -ChangedPaths @("tests/EmbodySense.E2EBrowserHost/Program.cs", "tests/EmbodySense.E2EBrowserHost/EmbodySense.E2EBrowserHost.csproj")
 Assert-True -Condition $browserHostPlan.RequiresBuild -Message "The external browser host must compile during qualification."

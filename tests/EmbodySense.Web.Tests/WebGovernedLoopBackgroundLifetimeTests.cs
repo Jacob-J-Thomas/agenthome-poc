@@ -304,7 +304,7 @@ public sealed class WebGovernedLoopBackgroundLifetimeTests
     }
 
     [Fact]
-    public async Task Shutdown_cancels_a_held_governed_approval_before_disposing_the_pinned_runtime()
+    public async Task Shutdown_has_no_connection_owned_custom_loop_approval_to_drain_before_disposing_the_pinned_runtime()
     {
         using var workspace = new TestWorkspace();
         var codexPath = await FakeCodexExecutable.CreateBrowserApprovalAsync(workspace);
@@ -321,13 +321,17 @@ public sealed class WebGovernedLoopBackgroundLifetimeTests
             var definition = await CreateInvocationLoopAsync(workspace, [LoopToolAssignment.Read]);
             var input = new LoopRunInvocationInput(definition.Id, definition.DefinitionVersion, definition.ContentHash, "shutdown-held-approval", "browser-approval");
 
-            var invocation = runtimeHost.InvokeLoopAsync(input, "connection-1");
-            await WaitForPendingAsync(approvals, "connection-1");
+            var response = await runtimeHost.InvokeLoopAsync(input, "connection-1").WaitAsync(TimeSpan.FromSeconds(30));
+            var toolResponse = await File.ReadAllTextAsync(workspace.File("fake-codex", "tool-response.json"));
+
+            Assert.Equal("Completed", response.ExecutionStatus);
+            Assert.Empty(approvals.GetPending("connection-1"));
+            Assert.Contains("canonical_governed_loop_approval_unavailable", toolResponse, StringComparison.Ordinal);
+            Assert.DoesNotContain("shutdown approval evidence", toolResponse, StringComparison.Ordinal);
+
             await app.StopAsync().WaitAsync(TimeSpan.FromSeconds(30));
 
             Assert.Empty(approvals.GetPending("connection-1"));
-            var response = await invocation.WaitAsync(TimeSpan.FromSeconds(10));
-            Assert.Contains(response.ExecutionStatus, new[] { "Cancelled", "NeedsReview", "Failed" });
             Assert.Equal(WebGovernedLoopBackgroundPosture.Stopped, runtimeHost.GetStatus().BackgroundPosture);
         }
         finally
@@ -672,28 +676,13 @@ public sealed class WebGovernedLoopBackgroundLifetimeTests
         var created = Assert.IsType<LoopDefinitionSnapshot>((await facade.CreateAsync("create-shutdown-approval-loop")).Definition);
         var input = new LoopDefinitionInput(
             "Shutdown approval loop",
-            "Verifies host-lifetime cancellation of a held governed approval.",
+            "Verifies legacy custom-loop approval fails closed before host shutdown.",
             new LoopTriggerPolicy(LoopTriggerPromptSource.Invocation, string.Empty, false),
             [new LoopInferenceStep(created.InferenceSteps.Single().Id, "Read", "Read the approved evidence.", new LoopNodeContextPolicy(LoopContextPolicyMode.Inherit, null))],
             toolAssignments ?? [],
             new LoopExitPolicy(0, created.ExitPolicy.DecisionInstruction, new LoopNodeContextPolicy(LoopContextPolicyMode.Inherit, null)));
         var updated = await facade.UpdateAsync(created.Id, created.DefinitionVersion, "update-shutdown-approval-loop", input);
         return Assert.IsType<LoopDefinitionSnapshot>(updated.Definition);
-    }
-
-    private static async Task WaitForPendingAsync(WebApprovalCoordinator approvals, string ownerConnectionId)
-    {
-        for (var attempt = 0; attempt < 200; attempt++)
-        {
-            if (approvals.GetPending(ownerConnectionId).Count > 0)
-            {
-                return;
-            }
-
-            await Task.Delay(25);
-        }
-
-        throw new TimeoutException("The governed approval was not queued.");
     }
 
     private static GovernedLoopCoordinatorAcquisitionRequest ExpiredPeerAcquisition()

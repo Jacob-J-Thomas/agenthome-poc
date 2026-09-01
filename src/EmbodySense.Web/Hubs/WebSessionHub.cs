@@ -13,10 +13,10 @@ namespace EmbodySense.Web.Hubs;
 /// Owns the authenticated SignalR connection contract for browser conversation, approval, and custom-loop operations.
 /// </summary>
 /// <remarks>
-/// Each connection is registered as an independent approval owner. Disconnecting rejects that owner's
-/// pending approvals but does not cancel an already admitted durable custom-loop run. Conversation turns
-/// use the connection-aborted token; durable invocation and resume operations cross the connection lifetime
-/// and instead rely on server-owned runtime and approval state.
+/// Each connection is registered as an independent default-conversation approval owner. Disconnecting rejects that
+/// owner's pending conversation approvals but does not cancel an already admitted durable custom-loop run. Conversation
+/// turns use the connection-aborted token; durable invocation and resume operations cross the connection lifetime and
+/// rely on server-owned runtime state. Custom-loop review authority is canonical and durable, never connection-owned.
 /// </remarks>
 [Authorize(Policy = WebAuthPolicies.LocalSession)]
 public sealed class WebSessionHub : Hub<IWebSessionClient>
@@ -235,7 +235,7 @@ public sealed class WebSessionHub : Hub<IWebSessionClient>
     }
 
     /// <summary>
-    /// Admits a saved custom-loop definition under the calling connection's approval ownership.
+    /// Admits a saved custom-loop definition for the calling authenticated connection.
     /// </summary>
     /// <param name="input">The exact invocation identity, definition binding, and context selection.</param>
     /// <returns>The durable admission or rejection response.</returns>
@@ -243,8 +243,8 @@ public sealed class WebSessionHub : Hub<IWebSessionClient>
     /// Invocation is cancelled, uses unsupported persisted evidence, or fails bounded validation or persistence safety checks.
     /// </exception>
     /// <remarks>
-    /// Admission is not tied to the SignalR disconnect token. A disconnect rejects connection-owned
-    /// approvals while allowing the durable run to continue through its defined failure behavior.
+    /// Admission is not tied to the SignalR disconnect token. Custom-loop review authority is canonical and durable;
+    /// the connection identity is surface correlation only.
     /// </remarks>
     public async Task<LoopRunInvocationResponse> InvokeLoop(LoopRunInvocationInput input)
     {
@@ -292,7 +292,7 @@ public sealed class WebSessionHub : Hub<IWebSessionClient>
     }
 
     /// <summary>
-    /// Explicitly resumes a paused custom-loop run under the calling connection's approval ownership.
+    /// Explicitly resumes a paused custom-loop run for the calling authenticated connection.
     /// </summary>
     /// <param name="input">The optimistic, idempotent resume request.</param>
     /// <returns>The durable lifecycle-control response.</returns>
@@ -300,8 +300,8 @@ public sealed class WebSessionHub : Hub<IWebSessionClient>
     /// Resume is cancelled, uses unsupported persisted evidence, or fails bounded validation or persistence safety checks.
     /// </exception>
     /// <remarks>
-    /// Resume is not tied to the SignalR disconnect token. Any approval left pending by a disconnect
-    /// is rejected by the coordinator rather than silently transferring ownership.
+    /// Resume is not tied to the SignalR disconnect token. Custom-loop review authority is canonical and durable;
+    /// the connection identity is surface correlation only.
     /// </remarks>
     public async Task<LoopRunControlResponse> ResumeLoop(LoopRunControlInput input)
     {

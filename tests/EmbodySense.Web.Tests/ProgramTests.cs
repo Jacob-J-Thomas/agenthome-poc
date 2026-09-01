@@ -5,12 +5,17 @@ using EmbodySense.Core.Startup.Loops;
 using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Capabilities;
+using EmbodySense.Core.Startup.HumanReview;
 using EmbodySense.Web.Hubs;
 using EmbodySense.Web.Services;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using System.Text.Json;
 
 namespace EmbodySense.Web.Tests;
 
@@ -68,6 +73,59 @@ public sealed class ProgramTests
         Assert.Equal(LoopRunTransportLimits.MaxSignalRInvocationMessageUtf8Bytes, hubOptions.MaximumReceiveMessageSize);
         Assert.Null(provider.GetService<LoopAuthoringFacade>());
         Assert.NotNull(provider.GetRequiredService<ICapabilityCatalogFacade>());
+    }
+
+    [Fact]
+    public async Task ConfigureServices_composes_one_human_review_runtime_and_singleton_authority_services()
+    {
+        using var workspace = new TestWorkspace();
+        var options = WebRunOptions.FromArguments(["--workdir", workspace.RootPath, "--model", "gpt-test"]);
+        var services = new ServiceCollection();
+        services.AddLogging();
+
+        Program.ConfigureServices(services, options);
+        await using var provider = services.BuildServiceProvider();
+
+        var host = provider.GetRequiredService<WebAgentRuntimeHost>();
+        Assert.Same(host, provider.GetRequiredService<IWebHumanReviewRuntime>());
+        Assert.Same(host, provider.GetRequiredService<IWebLoopRuntimeInvoker>());
+        var hostedServices = provider.GetServices<IHostedService>().ToArray();
+        var governedHostedServices = hostedServices.Where(service => service.GetType().Name == "WebGovernedLoopBackgroundHostedService").ToArray();
+        Assert.Single(governedHostedServices);
+        Assert.Same(governedHostedServices[0], provider.GetServices<IHostedService>().Single(service => service.GetType().Name == "WebGovernedLoopBackgroundHostedService"));
+        Assert.Same(provider.GetRequiredService<WebApprovalCoordinator>(), provider.GetRequiredService<WebApprovalCoordinator>());
+        Assert.Same(provider.GetRequiredService<HumanReviewLocalDecisionAuthorizationPolicy>(), provider.GetRequiredService<HumanReviewLocalDecisionAuthorizationPolicy>());
+        Assert.Same(provider.GetRequiredService<IHumanReviewDecisionAuthorizationProvider>(), provider.GetRequiredService<IHumanReviewDecisionAuthorizationProvider>());
+        Assert.Same(provider.GetRequiredService<IWebHumanReviewNotifier>(), provider.GetRequiredService<IWebHumanReviewNotifier>());
+        Assert.Same(provider.GetRequiredService<IAgentRuntimeConversationPublicationObserver>(), provider.GetRequiredService<IAgentRuntimeConversationPublicationObserver>());
+        Assert.IsAssignableFrom<IHttpContextAccessor>(provider.GetRequiredService<IHttpContextAccessor>());
+
+        Assert.Single(services, descriptor => descriptor.ServiceType == typeof(WebAgentRuntimeHost) && descriptor.Lifetime == ServiceLifetime.Singleton);
+        Assert.Single(services, descriptor => descriptor.ServiceType == typeof(WebApprovalCoordinator) && descriptor.Lifetime == ServiceLifetime.Singleton);
+        Assert.Single(services, descriptor => descriptor.ServiceType == typeof(IWebHumanReviewRuntime) && descriptor.Lifetime == ServiceLifetime.Singleton);
+        Assert.Single(services, descriptor => descriptor.ServiceType == typeof(IHumanReviewDecisionAuthorizationProvider) && descriptor.Lifetime == ServiceLifetime.Singleton);
+        Assert.Single(services, descriptor => descriptor.ServiceType == typeof(IWebHumanReviewNotifier) && descriptor.Lifetime == ServiceLifetime.Singleton);
+    }
+
+    [Fact]
+    public async Task ConfigureServices_rejects_duplicate_properties_for_mvc_and_signalr_json()
+    {
+        using var workspace = new TestWorkspace();
+        var options = WebRunOptions.FromArguments(["--workdir", workspace.RootPath, "--model", "gpt-test"]);
+        var services = new ServiceCollection();
+        services.AddLogging();
+
+        Program.ConfigureServices(services, options);
+        await using var provider = services.BuildServiceProvider();
+
+        var mvcJson = provider.GetRequiredService<IOptions<JsonOptions>>().Value.JsonSerializerOptions;
+        var signalRJson = provider.GetRequiredService<IOptions<JsonHubProtocolOptions>>().Value.PayloadSerializerOptions;
+        const string DuplicateRequest = "{\"expectedLifecycleVersion\":1,\"expectedLifecycleVersion\":2,\"operationId\":\"op-1\"}";
+
+        Assert.False(mvcJson.AllowDuplicateProperties);
+        Assert.False(signalRJson.AllowDuplicateProperties);
+        Assert.Throws<JsonException>(() => JsonSerializer.Deserialize<WebHumanReviewDecisionRequest>(DuplicateRequest, mvcJson));
+        Assert.Throws<JsonException>(() => JsonSerializer.Deserialize<WebHumanReviewDecisionRequest>(DuplicateRequest, signalRJson));
     }
 
     [Fact]

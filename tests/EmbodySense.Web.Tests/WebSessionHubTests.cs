@@ -309,25 +309,26 @@ public sealed class WebSessionHubTests
     }
 
     [Fact]
-    public async Task Disconnect_during_custom_loop_approval_returns_denial_to_the_run_without_cancelling_it()
+    public async Task Disconnect_during_custom_loop_execution_does_not_cancel_the_durable_run()
     {
         using var workspace = new TestWorkspace();
         var approvals = new WebApprovalCoordinator();
         await using var host = CreateHost(workspace, approvals);
-        var invoker = new ApprovalContinuingLoopRuntimeInvoker(approvals);
+        var invoker = new DisconnectTolerantLoopRuntimeInvoker();
         var hub = CreateHub(host, approvals, new RecordingHubClients(), invoker);
         await hub.OnConnectedAsync();
         var invocation = new LoopRunInvocationInput("loop-one", 1, new string('a', 64), "invoke-disconnect", "prompt");
 
         var invocationTask = hub.InvokeLoop(invocation);
-        _ = await WaitForPendingAsync(approvals, "connection-1");
+        await invoker.WaitUntilInvokedAsync();
         await hub.OnDisconnectedAsync(exception: null);
+        invoker.Complete();
         var response = await invocationTask;
 
         Assert.Equal("Completed", response.ExecutionStatus);
-        Assert.True(invoker.ContinuedAfterDenial);
         Assert.False(invoker.InvocationCancellationToken.IsCancellationRequested);
-        Assert.Equal("owner_disconnected", invoker.ApprovalDetail);
+        Assert.Equal("connection-1", invoker.SurfaceConnectionId);
+        Assert.Empty(approvals.GetPending("connection-1"));
     }
 
     [Fact]
@@ -343,7 +344,7 @@ public sealed class WebSessionHubTests
     }
 
     [Fact]
-    public async Task Invoke_and_resume_bind_approval_ownership_only_to_the_authenticated_hub_connection()
+    public async Task Invoke_and_resume_forward_only_the_authenticated_hub_connection_as_surface_context()
     {
         using var workspace = new TestWorkspace();
         var approvals = new WebApprovalCoordinator();
@@ -548,22 +549,32 @@ public sealed class WebSessionHubTests
         }
     }
 
-    private sealed class ApprovalContinuingLoopRuntimeInvoker(WebApprovalCoordinator approvals) : IWebLoopRuntimeInvoker
+    private sealed class DisconnectTolerantLoopRuntimeInvoker : IWebLoopRuntimeInvoker
     {
-        public string? ApprovalDetail { get; private set; }
-
-        public bool ContinuedAfterDenial { get; private set; }
+        private readonly TaskCompletionSource _entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public CancellationToken InvocationCancellationToken { get; private set; }
+
+        public string? SurfaceConnectionId { get; private set; }
 
         public async Task<LoopRunInvocationResponse> InvokeLoopAsync(LoopRunInvocationInput input, string ownerConnectionId, CancellationToken cancellationToken = default)
         {
             InvocationCancellationToken = cancellationToken;
-            using var scope = approvals.BeginApprovalScope(ownerConnectionId);
-            var approval = await approvals.RequestApprovalAsync(CreateRequest("req-run-disconnect"), cancellationToken);
-            ApprovalDetail = approval.Detail;
-            ContinuedAfterDenial = !approval.Approved && !cancellationToken.IsCancellationRequested;
-            return new LoopRunInvocationResponse("Admitted", "Completed", false, null, [], "Run continued after governed denial.");
+            SurfaceConnectionId = ownerConnectionId;
+            _entered.TrySetResult();
+            await _release.Task.WaitAsync(cancellationToken);
+            return new LoopRunInvocationResponse("Admitted", "Completed", false, null, [], "Run continued after surface disconnect.");
+        }
+
+        public Task WaitUntilInvokedAsync()
+        {
+            return _entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        }
+
+        public void Complete()
+        {
+            _release.TrySetResult();
         }
 
         public Task<GovernedLoopRunInvocationResponse> InvokeGovernedLoopAsync(GovernedLoopRunInvocationInput input, string ownerConnectionId, CancellationToken cancellationToken = default)
@@ -656,6 +667,8 @@ public sealed class WebSessionHubTests
 
         public List<WebConversationChanged> ConversationChanges { get; } = [];
 
+        public List<WebHumanReviewChanged> HumanReviewChanges { get; } = [];
+
         public List<WebStreamEvent> StreamEvents { get; } = [];
 
         public Exception? StreamEventFailure { get; set; }
@@ -675,6 +688,12 @@ public sealed class WebSessionHubTests
         public Task ConversationChanged(WebConversationChanged notification)
         {
             ConversationChanges.Add(notification);
+            return Task.CompletedTask;
+        }
+
+        public Task HumanReviewChanged(WebHumanReviewChanged notification)
+        {
+            HumanReviewChanges.Add(notification);
             return Task.CompletedTask;
         }
 
