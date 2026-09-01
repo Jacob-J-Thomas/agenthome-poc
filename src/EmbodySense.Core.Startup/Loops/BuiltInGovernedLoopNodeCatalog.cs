@@ -39,9 +39,11 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
         GovernedLoopValueKindSet.Create([GovernedLoopValueKind.Text]);
     private readonly GovernedLoopNodeCatalogSnapshot _initialSnapshot;
     private readonly IReadOnlyList<CommandActionRegistration> _commandActions;
+    private readonly Func<CommandActionRegistration, bool>? _isCommandActionExecutable;
     private readonly ICapabilityCatalogStore? _capabilityCatalog;
     private readonly ICommandActionNativeHost? _commandActionNativeHost;
     private readonly Func<bool>? _isHumanInputExecutable;
+    private readonly Func<bool>? _isHumanReviewExecutable;
 
     internal BuiltInGovernedLoopNodeCatalog() : this(Array.Empty<CommandActionRegistration>(), isHumanInputExecutable: static () => false)
     {
@@ -52,7 +54,8 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
         Func<CommandActionRegistration, bool>? isCommandActionExecutable = null,
         ICapabilityCatalogStore? capabilityCatalog = null,
         ICommandActionNativeHost? commandActionNativeHost = null,
-        Func<bool>? isHumanInputExecutable = null)
+        Func<bool>? isHumanInputExecutable = null,
+        Func<bool>? isHumanReviewExecutable = null)
     {
         ArgumentNullException.ThrowIfNull(commandActions);
         var registrations = commandActions.Take(257).ToArray();
@@ -61,10 +64,12 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
             throw new ArgumentException("The finite command Action catalog is too large.", nameof(commandActions));
         }
         _commandActions = Array.AsReadOnly(registrations);
+        _isCommandActionExecutable = isCommandActionExecutable;
         _capabilityCatalog = capabilityCatalog;
         _commandActionNativeHost = commandActionNativeHost;
         _isHumanInputExecutable = isHumanInputExecutable;
-        _initialSnapshot = CreateSnapshot(registrations, isCommandActionExecutable, isHumanInputExecutable: IsHumanInputExecutable);
+        _isHumanReviewExecutable = isHumanReviewExecutable;
+        _initialSnapshot = CreateSnapshot(registrations, isCommandActionExecutable, isHumanInputExecutable: IsHumanInputExecutable, isHumanReviewExecutable: IsHumanReviewExecutable);
     }
 
     /// <inheritdoc />
@@ -73,7 +78,9 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
         cancellationToken.ThrowIfCancellationRequested();
         if (_capabilityCatalog is null)
         {
-            return _initialSnapshot;
+            return _isHumanReviewExecutable is null
+                ? _initialSnapshot
+                : CreateSnapshot(_commandActions, _isCommandActionExecutable, isHumanInputExecutable: IsHumanInputExecutable, isHumanReviewExecutable: IsHumanReviewExecutable);
         }
 
         try
@@ -136,7 +143,8 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
                 _commandActions,
                 registration => executableCommandActions.Contains(registration.Template.ContentHash),
                 capabilityId => HasCurrentExecutableCapabilities(capabilityId, current),
-                IsHumanInputExecutable);
+                IsHumanInputExecutable,
+                IsHumanReviewExecutable);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -152,9 +160,11 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
         IReadOnlyList<CommandActionRegistration> commandActions,
         Func<CommandActionRegistration, bool>? isCommandActionExecutable,
         Func<string, bool>? isCapabilityExecutable = null,
-        Func<bool>? isHumanInputExecutable = null)
+        Func<bool>? isHumanInputExecutable = null,
+        Func<bool>? isHumanReviewExecutable = null)
     {
         var humanInputExecutable = IsHumanInputExecutable(isHumanInputExecutable);
+        var humanReviewExecutable = IsHumanReviewExecutable(isHumanReviewExecutable);
         var graphCompatibleCommandActions = commandActions
             .Select(registration => new
             {
@@ -168,7 +178,7 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
             .Concat(GovernedLoopPureNodeCatalogContract.Descriptors)
             .Concat(GovernedLoopTopologyNodeCatalogContract.Descriptors)
             .Concat(GovernedLoopWaitNodeCatalogContract.Descriptors)
-            .Append(GovernedLoopHumanReviewNodeCatalogContract.Descriptor)
+            .Append(GovernedLoopHumanReviewNodeCatalogContract.Descriptor with { IsExecutable = humanReviewExecutable })
             .Append(GovernedLoopHumanInputNodeCatalogContract.Descriptor with { IsExecutable = humanInputExecutable })
             .Concat(GovernedLoopFailNodeCatalogContract.Descriptors)
             .Concat(graphCompatibleCommandActions.Select(candidate => CommandAction(candidate.Registration, candidate.PayloadCharacters, isCommandActionExecutable?.Invoke(candidate.Registration) == true)))
@@ -213,6 +223,21 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
         => IsHumanInputExecutable(_isHumanInputExecutable);
 
     private static bool IsHumanInputExecutable(Func<bool>? probe)
+    {
+        try
+        {
+            return probe?.Invoke() ?? false;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private bool IsHumanReviewExecutable()
+        => IsHumanReviewExecutable(_isHumanReviewExecutable);
+
+    private static bool IsHumanReviewExecutable(Func<bool>? probe)
     {
         try
         {

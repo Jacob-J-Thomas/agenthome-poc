@@ -33,7 +33,8 @@ public sealed class GovernedLoopCoordinatorRepairDependencyProbe : IGovernedLoop
             ProbeAsync(GovernedLoopLocalWorkFamily.Schedule, cancellationToken),
             ProbeAsync(GovernedLoopLocalWorkFamily.Trigger, cancellationToken),
             ProbeAsync(GovernedLoopLocalWorkFamily.Wake, cancellationToken),
-            ProbeAsync(GovernedLoopLocalWorkFamily.HumanInput, cancellationToken)).ConfigureAwait(false);
+            ProbeAsync(GovernedLoopLocalWorkFamily.HumanInput, cancellationToken),
+            ProbeAsync(GovernedLoopLocalWorkFamily.HumanReview, cancellationToken)).ConfigureAwait(false);
         return GovernedLoopSleepContractHash.Apply(new GovernedLoopCoordinatorRepairReadiness(
             GovernedLoopCoordinatorRepairReadiness.CurrentSchemaVersion,
             workspaceId,
@@ -42,6 +43,7 @@ public sealed class GovernedLoopCoordinatorRepairDependencyProbe : IGovernedLoop
             IsReady(results[1]),
             IsReady(results[2]),
             IsReady(results[3]),
+            IsReady(results[4]),
             evaluatedAtUtc,
             string.Empty));
     }

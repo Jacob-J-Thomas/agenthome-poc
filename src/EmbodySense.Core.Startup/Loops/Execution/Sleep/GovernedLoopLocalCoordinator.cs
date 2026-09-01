@@ -25,7 +25,8 @@ public sealed class GovernedLoopLocalCoordinator : IAsyncDisposable
         GovernedLoopLocalWorkFamily.Schedule,
         GovernedLoopLocalWorkFamily.Trigger,
         GovernedLoopLocalWorkFamily.Wake,
-        GovernedLoopLocalWorkFamily.HumanInput
+        GovernedLoopLocalWorkFamily.HumanInput,
+        GovernedLoopLocalWorkFamily.HumanReview
     ];
 
     private readonly SemaphoreSlim _evidenceGate = new(1, 1);
@@ -1454,6 +1455,7 @@ public sealed class GovernedLoopLocalCoordinator : IAsyncDisposable
             GovernedLoopLocalWorkFamily.Trigger => "trigger",
             GovernedLoopLocalWorkFamily.Wake => "wake",
             GovernedLoopLocalWorkFamily.HumanInput => "human-input",
+            GovernedLoopLocalWorkFamily.HumanReview => "human-review",
             _ => "work"
         };
 

@@ -678,6 +678,7 @@ public sealed class GovernedLoopCoordinatorEvidenceStoreTests
                 true,
                 true,
                 true,
+                true,
                 snapshot.LatestHeartbeat.LeaseExpiresAtUtc,
                 string.Empty));
             var repair = GovernedLoopSleepContractHash.Apply(new GovernedLoopCoordinatorRepairDisposition(

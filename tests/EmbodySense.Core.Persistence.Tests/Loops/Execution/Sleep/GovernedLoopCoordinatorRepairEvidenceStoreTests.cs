@@ -1,3 +1,5 @@
+using System.Text;
+using System.Text.Json.Nodes;
 using EmbodySense.Core.Application.Loops.Sleep.Models;
 using EmbodySense.Core.Common.Loops.Execution.Sleep;
 using EmbodySense.Core.Common.Loops.Execution.Sleep.Models;
@@ -84,6 +86,29 @@ public sealed class GovernedLoopCoordinatorRepairEvidenceStoreTests
         Assert.Equal(GovernedLoopCoordinatorRepairMutationStatus.Conflict, operationConflict!.Status);
         Assert.Equal(GovernedLoopCoordinatorRepairMutationStatus.Conflict, evidenceConflict!.Status);
         Assert.Equal(repair, retained!.Disposition);
+    }
+
+    [Fact]
+    public async Task Persisted_repair_readiness_without_human_review_field_fails_closed()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var store = new GovernedLoopCoordinatorEvidenceStore(paths);
+        var failed = await CreateFailedSnapshotAsync(store);
+        var repair = Repair(failed, failed.LatestHeartbeat.LeaseExpiresAtUtc);
+        Assert.Equal(GovernedLoopCoordinatorRepairMutationStatus.Appended, (await store.AppendAsync(repair))!.Status);
+
+        var ledgerDirectory = paths.AgentFile(Path.Combine("loops", "execution", "coordinator"));
+        var ledger = Directory.EnumerateFiles(ledgerDirectory, "ledger-*.json").Order(StringComparer.Ordinal).Last();
+        var root = JsonNode.Parse(await File.ReadAllBytesAsync(ledger))!.AsObject();
+        var entry = (JsonObject)((JsonArray)root["entries"]!)[0]!;
+        var persistedRepair = (JsonObject)((JsonArray)entry["repairs"]!)[0]!;
+        ((JsonObject)persistedRepair["dependencyReadiness"]!).Remove("humanReviewReady");
+        await File.WriteAllTextAsync(ledger, root.ToJsonString(), Encoding.UTF8);
+
+        var read = await new GovernedLoopCoordinatorEvidenceStore(paths).ReadAsync(failed.Ownership.CoordinatorId);
+
+        Assert.Equal(GovernedLoopCoordinatorReadStatus.Corrupt, read!.Status);
     }
 
     [Fact]
@@ -224,6 +249,7 @@ public sealed class GovernedLoopCoordinatorRepairEvidenceStoreTests
             1,
             _workspaceId,
             failed.Ownership.CoordinatorId,
+            true,
             true,
             true,
             true,

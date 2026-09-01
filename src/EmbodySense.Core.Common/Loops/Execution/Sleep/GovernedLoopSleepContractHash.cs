@@ -254,6 +254,7 @@ public static class GovernedLoopSleepContractHash
         Append(canonical, readiness.TriggerReady);
         Append(canonical, readiness.WakeReady);
         Append(canonical, readiness.HumanInputReady);
+        Append(canonical, readiness.HumanReviewReady);
         Append(canonical, readiness.EvaluatedAtUtc);
         return Digest(canonical);
     }

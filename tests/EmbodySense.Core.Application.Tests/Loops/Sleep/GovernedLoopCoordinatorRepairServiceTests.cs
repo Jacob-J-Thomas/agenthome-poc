@@ -230,7 +230,7 @@ public sealed class GovernedLoopCoordinatorRepairServiceTests
     }
 
     private static GovernedLoopCoordinatorRepairReadiness Ready()
-        => GovernedLoopSleepContractHash.Apply(new GovernedLoopCoordinatorRepairReadiness(1, _workspaceId, "coordinator", true, true, true, true, _now, string.Empty));
+        => GovernedLoopSleepContractHash.Apply(new GovernedLoopCoordinatorRepairReadiness(1, _workspaceId, "coordinator", true, true, true, true, true, _now, string.Empty));
 
     private static string Hash(char value) => new(value, 64);
 

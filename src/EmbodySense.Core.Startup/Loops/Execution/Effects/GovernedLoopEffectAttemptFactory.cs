@@ -77,18 +77,13 @@ public static class GovernedLoopEffectAttemptFactory
         ArgumentNullException.ThrowIfNull(hostContractVersion);
         ArgumentNullException.ThrowIfNull(hostPlatform);
 
-        var resolver = new GovernedActuatorCatalogResolver(
-            catalogStore,
-            registry,
-            hostContractVersion,
-            hostPlatform);
-        var attempts = new GovernedLoopEffectAttemptStore(paths);
-        var service = new GovernedLoopEffectAttemptService(
-            resolver,
-            attempts,
-            authorityBoundary,
-            new CanonicalHumanReviewEffectEvidenceSource(runStore, attempts),
-            timeProvider);
-        return new GovernedLoopEffectAttemptFacade(resolver, service);
+        return GovernedLoopEffectAttemptComposition.Create(paths, runStore)
+            .CreateFacade(
+                catalogStore,
+                registry,
+                authorityBoundary,
+                hostContractVersion,
+                hostPlatform,
+                timeProvider);
     }
 }

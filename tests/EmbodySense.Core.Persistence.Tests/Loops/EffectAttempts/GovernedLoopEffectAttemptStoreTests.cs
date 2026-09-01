@@ -256,6 +256,104 @@ public sealed class GovernedLoopEffectAttemptStoreTests
     }
 
     [Fact]
+    public async Task Storage_availability_probe_initializes_only_the_canonical_lock_and_rejects_corrupt_inventory()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        Directory.CreateDirectory(paths.GovernedLoopEffectAttemptsPath);
+        var store = new GovernedLoopEffectAttemptStore(paths);
+
+        var available = await store.ProbeStorageAvailabilityAsync();
+
+        Assert.True(available);
+        Assert.Equal(
+            [Path.Combine(paths.GovernedLoopEffectAttemptsPath, ".custom-loop-mutations.lock")],
+            Directory.EnumerateFileSystemEntries(paths.GovernedLoopEffectAttemptsPath).ToArray());
+
+        await File.WriteAllTextAsync(Path.Combine(paths.GovernedLoopEffectAttemptsPath, "unexpected-artifact"), "corrupt");
+
+        Assert.False(await store.ProbeStorageAvailabilityAsync());
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => store.ProbeStorageAvailabilityAsync(cancellation.Token));
+    }
+
+    [Fact]
+    public async Task Storage_availability_probe_validates_retained_attempt_without_repairing_evidence()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var prepared = Prepare();
+        var store = new GovernedLoopEffectAttemptStore(paths);
+        var begun = await store.BeginAsync(prepared);
+        begun.Lease!.Dispose();
+        var before = Directory.EnumerateFiles(paths.GovernedLoopEffectAttemptsPath)
+            .Order(StringComparer.Ordinal)
+            .ToDictionary(path => path, File.ReadAllBytes);
+
+        Assert.True(await store.ProbeStorageAvailabilityAsync());
+        Assert.Equal(before.Keys.Order(StringComparer.Ordinal), Directory.EnumerateFiles(paths.GovernedLoopEffectAttemptsPath).Order(StringComparer.Ordinal));
+        foreach (var entry in before)
+        {
+            Assert.Equal(entry.Value, await File.ReadAllBytesAsync(entry.Key));
+        }
+    }
+
+    [Fact]
+    public async Task Storage_availability_probe_rejects_malformed_version_and_head_evidence_without_repairing()
+    {
+        using (var versionWorkspace = new TestWorkspace())
+        {
+            var paths = new WorkspacePaths(versionWorkspace.RootPath);
+            var prepared = Prepare();
+            var store = new GovernedLoopEffectAttemptStore(paths);
+            var begun = await store.BeginAsync(prepared);
+            begun.Lease!.Dispose();
+            var versionPath = Directory.EnumerateFiles(paths.GovernedLoopEffectAttemptsPath, "*.json").Single();
+            await File.WriteAllTextAsync(versionPath, "{}");
+
+            Assert.False(await store.ProbeStorageAvailabilityAsync());
+            Assert.Equal("{}", await File.ReadAllTextAsync(versionPath));
+        }
+
+        using var headWorkspace = new TestWorkspace();
+        var headPaths = new WorkspacePaths(headWorkspace.RootPath);
+        var headPrepared = Prepare();
+        var headStore = new GovernedLoopEffectAttemptStore(headPaths);
+        var headBegun = await headStore.BeginAsync(headPrepared);
+        headBegun.Lease!.Dispose();
+        var headPath = Directory.EnumerateFiles(headPaths.GovernedLoopEffectAttemptsPath, "*.head").Single();
+        var malformedHead = new string('g', GovernedLoopExecutionLimits.Sha256HexCharacters);
+        await File.WriteAllTextAsync(headPath, malformedHead);
+
+        Assert.False(await headStore.ProbeStorageAvailabilityAsync());
+        Assert.Equal(malformedHead, await File.ReadAllTextAsync(headPath));
+    }
+
+    [Fact]
+    public async Task Storage_availability_probe_rejects_broken_retained_chain_without_repairing_evidence()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var prepared = Prepare();
+        var store = new GovernedLoopEffectAttemptStore(paths);
+        var begun = await store.BeginAsync(prepared);
+        var authorized = GovernedLoopEffectAttemptContract.AttachDispatchAuthority(prepared, Hash('8'), _now.AddSeconds(1));
+        Assert.Equal(GovernedLoopEffectAttemptStoreStatus.Created, (await store.CompareExchangeAsync(prepared.ContentHash, authorized, begun.Lease!)).Status);
+        begun.Lease!.Dispose();
+        var initialPath = Directory.EnumerateFiles(paths.GovernedLoopEffectAttemptsPath, "*.json")
+            .Single(path => Path.GetFileName(path).Contains(prepared.ContentHash, StringComparison.Ordinal));
+        File.Delete(initialPath);
+        var before = Directory.EnumerateFiles(paths.GovernedLoopEffectAttemptsPath)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.False(await new GovernedLoopEffectAttemptStore(paths).ProbeStorageAvailabilityAsync());
+        Assert.Equal(before, Directory.EnumerateFiles(paths.GovernedLoopEffectAttemptsPath).Order(StringComparer.Ordinal));
+        Assert.DoesNotContain(initialPath, Directory.EnumerateFiles(paths.GovernedLoopEffectAttemptsPath));
+    }
+
+    [Fact]
     public async Task Read_only_current_head_rejects_initialized_directories_without_a_mutation_lock()
     {
         using var workspace = new TestWorkspace();

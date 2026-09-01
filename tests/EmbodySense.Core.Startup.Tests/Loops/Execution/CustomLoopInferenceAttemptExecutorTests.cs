@@ -910,12 +910,101 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
             await File.WriteAllTextAsync(paths.PermissionsPath, "{}", cancellationToken);
             outcomes.Add((await broker.ExecuteAsync(new ToolRequest(ToolCommand.Read, Path.Combine("system", "note.txt")), cancellationToken)).Outcome);
             return Response();
-        }, approvalPrompt: approvalPrompt);
+        }, approvalPrompt: approvalPrompt, canonicalExecution: false);
 
-        var result = await executor.ExecuteAsync(CreateRequest(allowTools: true, assignments: [CustomLoopToolAssignment.Read]));
+        var result = await executor.ExecuteAsync(CreateLegacyRequest(allowTools: true, assignments: [CustomLoopToolAssignment.Read]));
 
         Assert.Equal([ToolExecutionOutcome.Succeeded, ToolExecutionOutcome.ApprovalRejected], outcomes);
         Assert.Equal(2, result.ToolRequestsConsumed);
+        var approval = Assert.Single(approvalPrompt.Requests);
+        Assert.Equal("read", approval.Command);
+        Assert.Equal(Path.Combine("system", "note.txt"), approval.TargetPath);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_canonical_permission_approval_rejects_without_legacy_prompt_or_actuation()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = await InitializeWorkspaceAsync(workspace);
+        await File.WriteAllTextAsync(paths.PermissionsPath, "{}");
+        await File.WriteAllTextAsync(Path.Combine(paths.WorkspaceSystemPath, "note.txt"), "must remain unread");
+        var approvalPrompt = new RecordingApprovalPrompt(approved: true);
+        var boundary = new RecordingEffectAuthorityBoundary(EffectBoundaryBehavior.Direct);
+        ToolResult? observed = null;
+        var executor = CreateExecutor(
+            workspace,
+            async (broker, _, cancellationToken) =>
+            {
+                observed = await Assert.IsAssignableFrom<IToolBroker>(broker).ExecuteAsync(new ToolRequest(ToolCommand.Read, Path.Combine("system", "note.txt")), cancellationToken);
+                return Response();
+            },
+            approvalPrompt: approvalPrompt,
+            effectAuthorityBoundary: boundary);
+
+        var result = await executor.ExecuteAsync(CreateRequest(allowTools: true, assignments: [CustomLoopToolAssignment.Read]));
+
+        Assert.Equal(1, result.ToolRequestsConsumed);
+        var rejected = Assert.IsType<ToolResult>(observed);
+        Assert.Equal(ToolExecutionOutcome.ApprovalRejected, rejected.Outcome);
+        Assert.Equal(ToolApprovalDecision.Rejected, rejected.Governance?.ApprovalDecision);
+        Assert.Equal("system.governed-loop", rejected.Governance?.ApprovalDecisionBy);
+        Assert.Empty(approvalPrompt.Requests);
+        Assert.DoesNotContain(boundary.Requests, item => item.BoundaryKind == GovernedLoopEffectBoundaryKind.WorkspaceActuation);
+        var events = await new AuditLog(paths).ReadTailAsync(100);
+        Assert.DoesNotContain(events, item => item.Action == AuditSchema.Actions.ToolExecutionIntent);
+        Assert.Contains(events, item => item.Action == AuditSchema.Actions.ToolApprovalDecision && item.Outcome == AuditSchema.Outcomes.Rejected);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_canonical_allowed_read_only_tool_succeeds_without_legacy_prompt()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = await InitializeWorkspaceAsync(workspace);
+        await File.WriteAllTextAsync(Path.Combine(paths.WorkspaceSystemPath, "note.txt"), "safe read");
+        var approvalPrompt = new RecordingApprovalPrompt(approved: true);
+        ToolResult? observed = null;
+        var executor = CreateExecutor(
+            workspace,
+            async (broker, _, cancellationToken) =>
+            {
+                observed = await Assert.IsAssignableFrom<IToolBroker>(broker).ExecuteAsync(new ToolRequest(ToolCommand.Read, Path.Combine("system", "note.txt")), cancellationToken);
+                return Response();
+            },
+            approvalPrompt: approvalPrompt);
+
+        var result = await executor.ExecuteAsync(CreateRequest(allowTools: true, assignments: [CustomLoopToolAssignment.Read]));
+
+        Assert.Equal(1, result.ToolRequestsConsumed);
+        var succeeded = Assert.IsType<ToolResult>(observed);
+        Assert.Equal(ToolExecutionOutcome.Succeeded, succeeded.Outcome);
+        Assert.Contains("safe read", succeeded.OutputText, StringComparison.Ordinal);
+        Assert.Empty(approvalPrompt.Requests);
+        Assert.DoesNotContain(await new AuditLog(paths).ReadTailAsync(100), item => item.Action == AuditSchema.Actions.ToolApprovalRequest);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_legacy_dispatch_preserves_supplied_approval_prompt()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = await InitializeWorkspaceAsync(workspace);
+        await File.WriteAllTextAsync(paths.PermissionsPath, "{}");
+        await File.WriteAllTextAsync(Path.Combine(paths.WorkspaceSystemPath, "note.txt"), "legacy read");
+        var approvalPrompt = new RecordingApprovalPrompt(approved: false);
+        ToolResult? observed = null;
+        var executor = CreateExecutor(
+            workspace,
+            async (broker, _, cancellationToken) =>
+            {
+                observed = await Assert.IsAssignableFrom<IToolBroker>(broker).ExecuteAsync(new ToolRequest(ToolCommand.Read, Path.Combine("system", "note.txt")), cancellationToken);
+                return Response();
+            },
+            approvalPrompt: approvalPrompt,
+            canonicalExecution: false);
+
+        var result = await executor.ExecuteAsync(CreateLegacyRequest(allowTools: true, assignments: [CustomLoopToolAssignment.Read]));
+
+        Assert.Equal(1, result.ToolRequestsConsumed);
+        Assert.Equal(ToolExecutionOutcome.ApprovalRejected, Assert.IsType<ToolResult>(observed).Outcome);
         var approval = Assert.Single(approvalPrompt.Requests);
         Assert.Equal("read", approval.Command);
         Assert.Equal(Path.Combine("system", "note.txt"), approval.TargetPath);
@@ -946,20 +1035,14 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
     }
 
     [Fact]
-    public async Task ExecuteAsync_revalidates_governed_authority_after_approval_and_retains_revocation_denial()
+    public async Task ExecuteAsync_canonical_permission_approval_does_not_cross_the_actuation_boundary()
     {
         using var workspace = new TestWorkspace();
         var paths = await InitializeWorkspaceAsync(workspace);
         await File.WriteAllTextAsync(paths.PermissionsPath, "{}");
         await File.WriteAllTextAsync(Path.Combine(paths.WorkspaceSystemPath, "note.txt"), "must remain unread");
         var boundary = new RoutingEffectAuthorityBoundary();
-        var approvalPrompt = new RecordingApprovalPrompt(approved: true, beforeDecision: () =>
-        {
-            Assert.Equal(0, boundary.ActiveBoundaryCount);
-            Assert.Contains(boundary.Requests, item => item.BoundaryKind == GovernedLoopEffectBoundaryKind.WorkspaceToolIntake);
-            Assert.DoesNotContain(boundary.Requests, item => item.BoundaryKind == GovernedLoopEffectBoundaryKind.WorkspaceActuation);
-            boundary.ActuationBehavior = ScriptedEffectAuthorityBehavior.Deny;
-        });
+        var approvalPrompt = new RecordingApprovalPrompt(approved: true);
         var evidenceSink = new RecordingEvidenceSink();
         ToolResult? observed = null;
         var executor = CreateExecutor(
@@ -978,40 +1061,34 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
 
         Assert.Equal(1, result.ToolRequestsConsumed);
         var toolResult = Assert.IsType<ToolResult>(observed);
-        Assert.Equal(ToolExecutionOutcome.Denied, toolResult.Outcome);
+        Assert.Equal(ToolExecutionOutcome.ApprovalRejected, toolResult.Outcome);
         Assert.Equal(ToolResultRetentionStatus.Retained, toolResult.Retention?.Status);
         Assert.DoesNotContain("must remain unread", toolResult.OutputText, StringComparison.Ordinal);
-        Assert.Equal(ToolAuthorityDecision.Denied, toolResult.Governance?.AuthorityDecision);
-        Assert.Equal(ToolApprovalDecision.Approved, toolResult.Governance?.ApprovalDecision);
-        Assert.Single(approvalPrompt.Requests);
+        Assert.Equal(ToolAuthorityDecision.Allowed, toolResult.Governance?.AuthorityDecision);
+        Assert.Equal(ToolApprovalDecision.Rejected, toolResult.Governance?.ApprovalDecision);
+        Assert.Equal("system.governed-loop", toolResult.Governance?.ApprovalDecisionBy);
+        Assert.Empty(approvalPrompt.Requests);
         var refreshedEvidence = evidenceSink.Evidence.Where(item => item.Phase is CustomLoopToolEvidencePhase.GovernanceDecided or CustomLoopToolEvidencePhase.OutcomeObserved).ToArray();
         Assert.NotEmpty(refreshedEvidence);
-        Assert.Contains(refreshedEvidence, item => item is { Phase: CustomLoopToolEvidencePhase.OutcomeObserved, Governance.AuthorityDecision: ToolAuthorityDecision.Denied, Governance.ApprovalDecision: ToolApprovalDecision.Approved });
+        Assert.Contains(refreshedEvidence, item => item is { Phase: CustomLoopToolEvidencePhase.OutcomeObserved, Governance.AuthorityDecision: ToolAuthorityDecision.Allowed, Governance.ApprovalDecision: ToolApprovalDecision.Rejected });
 
         var events = await new AuditLog(paths).ReadTailAsync(100);
-        var revalidation = Assert.Single(events, item => item.Action == AuditSchema.Actions.ToolLoopAuthorityEvaluate && Metadata(item, "authority_phase") == "actuation_boundary");
-        Assert.Equal(AuditSchema.Outcomes.Denied, revalidation.Outcome);
-        Assert.Equal("workspaceactuation", Metadata(revalidation, "effect_boundary_kind"));
-        Assert.Equal("deny", Metadata(revalidation, "effect_authority_disposition"));
         Assert.DoesNotContain(events, item => item.Action == AuditSchema.Actions.ToolExecutionIntent);
         var deniedExecution = Assert.Single(events, item => item.Action == AuditSchema.Actions.ToolExecute);
-        Assert.Equal(AuditSchema.Outcomes.Denied, deniedExecution.Outcome);
-        Assert.Equal("true", Metadata(deniedExecution, "approved_by_human")?.ToLowerInvariant());
+        Assert.Equal(AuditSchema.Outcomes.ApprovalRejected, deniedExecution.Outcome);
+        Assert.Equal("false", Metadata(deniedExecution, "approved_by_human")?.ToLowerInvariant());
+        Assert.DoesNotContain(boundary.Requests, item => item.BoundaryKind == GovernedLoopEffectBoundaryKind.WorkspaceActuation);
     }
 
     [Fact]
-    public async Task ExecuteAsync_post_approval_ambiguous_actuation_retains_review_trace_without_workspace_execution()
+    public async Task ExecuteAsync_canonical_permission_approval_never_reaches_ambiguous_actuation()
     {
         using var workspace = new TestWorkspace();
         var paths = await InitializeWorkspaceAsync(workspace);
         await File.WriteAllTextAsync(paths.PermissionsPath, "{}");
         await File.WriteAllTextAsync(Path.Combine(paths.WorkspaceSystemPath, "note.txt"), "must remain unread");
         var boundary = new RoutingEffectAuthorityBoundary();
-        var approvalPrompt = new RecordingApprovalPrompt(approved: true, beforeDecision: () =>
-        {
-            Assert.Equal(0, boundary.ActiveBoundaryCount);
-            boundary.ActuationBehavior = ScriptedEffectAuthorityBehavior.ReplayAmbiguous;
-        });
+        var approvalPrompt = new RecordingApprovalPrompt(approved: true);
         var evidenceSink = new RecordingEvidenceSink();
         var executor = CreateExecutor(
             workspace,
@@ -1025,18 +1102,16 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
             evidenceSink: evidenceSink,
             effectAuthorityBoundary: boundary);
 
-        await Assert.ThrowsAsync<ToolActuationReviewRequiredException>(() =>
-            executor.ExecuteAsync(CreateRequest(allowTools: true, assignments: [CustomLoopToolAssignment.Read])));
+        var result = await executor.ExecuteAsync(CreateRequest(allowTools: true, assignments: [CustomLoopToolAssignment.Read]));
 
-        Assert.Single(approvalPrompt.Requests);
+        Assert.Equal(1, result.ToolRequestsConsumed);
+        Assert.Empty(approvalPrompt.Requests);
         Assert.Contains(evidenceSink.Evidence, item => item.Phase == CustomLoopToolEvidencePhase.RequestReserved);
-        Assert.DoesNotContain(evidenceSink.Evidence, item => item.Phase == CustomLoopToolEvidencePhase.OutcomeObserved);
+        Assert.Contains(evidenceSink.Evidence, item => item is { Phase: CustomLoopToolEvidencePhase.OutcomeObserved, Governance.ApprovalDecision: ToolApprovalDecision.Rejected });
         var events = await new AuditLog(paths).ReadTailAsync(100);
-        Assert.Contains(events, item => item.Action == AuditSchema.Actions.ToolApprovalDecision && item.Outcome == AuditSchema.Outcomes.Approved);
-        var ambiguous = Assert.Single(events, item => item.Action == AuditSchema.Actions.ToolLoopAuthorityEvaluate && Metadata(item, "authority_phase") == "actuation_boundary");
-        Assert.Equal(AuditSchema.Outcomes.NeedsReview, ambiguous.Outcome);
-        Assert.Equal("alreadypresent", Metadata(ambiguous, "effect_authority_evidence_status"));
-        Assert.DoesNotContain(events, item => item.Action == AuditSchema.Actions.ToolExecute);
+        Assert.Contains(events, item => item.Action == AuditSchema.Actions.ToolApprovalDecision && item.Outcome == AuditSchema.Outcomes.Rejected);
+        Assert.DoesNotContain(events, item => item.Action == AuditSchema.Actions.ToolExecutionIntent);
+        Assert.DoesNotContain(boundary.Requests, item => item.BoundaryKind == GovernedLoopEffectBoundaryKind.WorkspaceActuation);
     }
 
     [Fact]
@@ -1558,7 +1633,8 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
         RecordingApprovalPrompt? approvalPrompt = null,
         ICustomLoopToolEvidenceSink? evidenceSink = null,
         ICustomLoopToolAuthorityProvider? authorityProvider = null,
-        IGovernedLoopEffectAuthorityBoundary? effectAuthorityBoundary = null)
+        IGovernedLoopEffectAuthorityBoundary? effectAuthorityBoundary = null,
+        bool canonicalExecution = true)
     {
         var effectivePrompt = approvalPrompt ?? new RecordingApprovalPrompt();
         return new CustomLoopInferenceAttemptExecutor(
@@ -1569,7 +1645,7 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
             new TestCapabilityAdmissionService(),
             (options, broker) => factory?.Invoke(options, broker, behavior) ?? new AsyncFakeInferenceClient(broker, behavior),
             capabilityAuthorityTransaction: null,
-            effectAuthorityBoundary: effectAuthorityBoundary ?? new RecordingEffectAuthorityBoundary(EffectBoundaryBehavior.Direct));
+            effectAuthorityBoundary: canonicalExecution ? effectAuthorityBoundary ?? new RecordingEffectAuthorityBoundary(EffectBoundaryBehavior.Direct) : null);
     }
 
     private static CustomLoopInferenceAttemptExecutor CreateInjectedExecutor(
@@ -1611,6 +1687,20 @@ public sealed class CustomLoopInferenceAttemptExecutorTests
             assignments,
             attempt,
             attemptCorrelationId);
+    }
+
+    private static CustomLoopInferenceAttemptRequest CreateLegacyRequest(
+        bool allowTools = false,
+        IReadOnlyList<CustomLoopToolAssignment>? assignments = null,
+        int attempt = 1,
+        string? attemptCorrelationId = null)
+    {
+        return CreateRequest(allowTools, assignments, attempt, attemptCorrelationId) with
+        {
+            AdmissionReceipt = null,
+            ExecutionBinding = null,
+            GraphArtifact = null,
+        };
     }
 
     private static async Task<CustomLoopRunRecord> CreateAdmittedRunAsync(CustomLoopRunStore store)

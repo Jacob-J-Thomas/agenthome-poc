@@ -8,6 +8,7 @@ namespace EmbodySense.Core.Common.Loops.Execution.Sleep.Models;
 /// <param name="TriggerReady">Whether the trigger work family is currently safe to admit.</param>
 /// <param name="WakeReady">Whether the wake work family is currently safe to admit.</param>
 /// <param name="HumanInputReady">Whether the Human Input work family is currently safe to admit.</param>
+/// <param name="HumanReviewReady">Whether the Human Review work family is currently safe to admit.</param>
 /// <param name="EvaluatedAtUtc">The trusted UTC instant at which the dependencies were inspected.</param>
 /// <param name="ContentHash">The canonical hash over this readiness evidence except this field.</param>
 public sealed record GovernedLoopCoordinatorRepairReadiness(
@@ -18,6 +19,7 @@ public sealed record GovernedLoopCoordinatorRepairReadiness(
     bool TriggerReady,
     bool WakeReady,
     bool HumanInputReady,
+    bool HumanReviewReady,
     DateTimeOffset EvaluatedAtUtc,
     string ContentHash)
 {

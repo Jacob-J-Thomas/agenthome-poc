@@ -29,6 +29,7 @@ using EmbodySense.Core.Startup.Loops.Posture;
 using EmbodySense.Core.Startup.Loops.GraphAuthoring;
 using EmbodySense.Core.Startup.Inference.Profiles;
 using EmbodySense.Core.Startup.HumanInput;
+using EmbodySense.Core.Startup.HumanReview;
 using EmbodySense.Core.Startup.Loops.InvocationPreparation;
 using EmbodySense.Core.Startup.Loops.InvocationPreparation.Models;
 using EmbodySense.Core.Startup.Loops.Schedules;
@@ -65,6 +66,7 @@ public sealed class AgentRuntime : IAsyncDisposable
     private readonly GovernedLoopScheduleAuthoringFacade _governedLoopScheduleAuthoring;
     private readonly IModelProfileCatalogFacade _modelProfiles;
     private readonly HumanInputRuntimeFacade _humanInput;
+    private readonly HumanReviewRuntimeFacade _humanReview;
     private readonly HumanInputConversationCommandAdapter? _humanInputConversationCommands;
     private readonly DefaultConversationTurnReviewService _defaultConversationReviews;
     private readonly ITriggerWorkerCurrentEvidenceAuthorizer _triggerWorkerCurrentEvidenceAuthorizer;
@@ -94,6 +96,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         GovernedLoopScheduleAuthoringFacade governedLoopScheduleAuthoring,
         IModelProfileCatalogFacade modelProfiles,
         HumanInputRuntimeFacade humanInput,
+        HumanReviewRuntimeFacade humanReview,
         DefaultConversationTurnReviewService defaultConversationReviews,
         CodexRuntimeStatus codexRuntimeStatus,
         ITriggerWorkerCurrentEvidenceAuthorizer triggerWorkerCurrentEvidenceAuthorizer,
@@ -118,6 +121,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(governedLoopScheduleAuthoring);
         ArgumentNullException.ThrowIfNull(modelProfiles);
         ArgumentNullException.ThrowIfNull(humanInput);
+        ArgumentNullException.ThrowIfNull(humanReview);
         ArgumentNullException.ThrowIfNull(defaultConversationReviews);
         ArgumentNullException.ThrowIfNull(triggerWorkerCurrentEvidenceAuthorizer);
         ArgumentNullException.ThrowIfNull(governedBackgroundRuntimeHost);
@@ -143,6 +147,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         _governedLoopScheduleAuthoring = governedLoopScheduleAuthoring;
         _modelProfiles = modelProfiles;
         _humanInput = humanInput;
+        _humanReview = humanReview;
         _humanInputConversationCommands = surface == AgentRuntimeSurface.Cli
             ? new HumanInputConversationCommandAdapter(humanInput)
             : null;
@@ -196,6 +201,13 @@ public sealed class AgentRuntime : IAsyncDisposable
 
     /// <summary>Gets the bounded surface-neutral Human Input posture and operation facade over this runtime's canonical ledger.</summary>
     public HumanInputRuntimeFacade HumanInput => _humanInput;
+
+    /// <summary>Gets the bounded surface-neutral Human Review posture and decision facade over this runtime's canonical run ledger.</summary>
+    /// <remarks>
+    /// The facade borrows the runtime's canonical stores and server-owned authority composition. It does not own a separate
+    /// store or background worker and remains valid only while this runtime is retained.
+    /// </remarks>
+    public HumanReviewRuntimeFacade HumanReview => _humanReview;
 
     /// <summary>Gets the surface-neutral preview and submit facade for governed recovery of a durably failed local coordinator.</summary>
     public GovernedLoopCoordinatorRepairFacade GovernedLoopCoordinatorRepair => _governedLoopCoordinatorRepair;

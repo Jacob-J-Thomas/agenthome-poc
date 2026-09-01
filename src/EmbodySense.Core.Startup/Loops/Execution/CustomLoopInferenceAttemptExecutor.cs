@@ -284,7 +284,7 @@ public sealed class CustomLoopInferenceAttemptExecutor : ICustomLoopInferenceAtt
                 var broker = new ToolBroker(
                     _paths,
                     permissionService,
-                    _approvalPrompt,
+                    CanonicalGovernedLoopApprovalPrompt.Instance,
                     new LocalWorkspaceClient(_paths),
                     _auditLog,
                     loopDefinition,

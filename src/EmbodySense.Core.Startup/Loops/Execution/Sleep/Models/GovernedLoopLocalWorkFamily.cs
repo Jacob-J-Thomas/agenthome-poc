@@ -13,5 +13,8 @@ public enum GovernedLoopLocalWorkFamily
     Wake = 3,
 
     /// <summary>One durable Human Input response continuation recovery attempt.</summary>
-    HumanInput = 4
+    HumanInput = 4,
+
+    /// <summary>One durable Human Review continuation or decision-action recovery attempt.</summary>
+    HumanReview = 5
 }

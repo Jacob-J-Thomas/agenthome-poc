@@ -416,14 +416,21 @@ public sealed partial class AgentRuntimeFactoryTests
         Assert.Equal(GovernedLoopCoordinatorLifecycleMutationStatus.Appended, mutation!.Status);
 
         await using var runtime = await CreateRuntimeAsync(workspace);
+        Directory.CreateDirectory(paths.CustomLoopRunsPath);
+        var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
+        await File.WriteAllTextAsync(indexPath, "{\"schemaVersion\":2,\"revision\":1,\"entries\":[]}");
         var status = await runtime.ReadGovernedLoopLocalBackgroundStatusAsync();
         var typedStart = await runtime.StartGovernedLoopLocalBackgroundWithStatusAsync();
         var legacyStart = await runtime.StartGovernedLoopLocalBackgroundAsync();
+        const string ExpectedDetail = "governed_local_background_failed: the prior coordinator session durably terminated fail closed and requires explicit repair before restart.";
 
         Assert.Equal(AgentRuntimeGovernedLoopBackgroundReadiness.Degraded, status.Readiness);
         Assert.Equal(AgentRuntimeGovernedLoopBackgroundOwnership.None, status.Ownership);
         Assert.Equal(AgentRuntimeGovernedLoopBackgroundStartStatus.RepairRequired, typedStart.Status);
+        Assert.Equal(AgentRuntimeGovernedLoopBackgroundReadiness.Degraded, typedStart.Readiness);
+        Assert.Equal(AgentRuntimeGovernedLoopBackgroundOwnership.None, typedStart.Ownership);
         Assert.False(typedStart.RetryAllowed);
+        Assert.Equal(ExpectedDetail, typedStart.Detail);
         Assert.False(legacyStart.Available);
         Assert.Equal("Failed", legacyStart.Status);
     }

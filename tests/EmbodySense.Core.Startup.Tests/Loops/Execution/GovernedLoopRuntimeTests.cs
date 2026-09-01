@@ -97,7 +97,7 @@ namespace EmbodySense.Core.Startup.Tests.Loops.Execution;
 
 // Scenario methods stay centralized so the scheduling wrappers preserve the exact existing behavior.
 // Every scenario owns its fixture and provider process; this type must not gain mutable shared state.
-internal static class GovernedLoopRuntimeTests
+internal static partial class GovernedLoopRuntimeTests
 {
     private const string WaitRestartChildMode = "EMBODYSENSE_WAIT_RESTART_CHILD";
     private const string WaitRestartCodexPath = "EMBODYSENSE_WAIT_RESTART_CODEX_PATH";
@@ -2729,6 +2729,27 @@ internal static class GovernedLoopRuntimeTests
                 recurrencePermitted: true,
                 payload);
             return new ScheduleScenario(definition, evidence, scheduledLocal, scheduledAtUtc);
+        }
+
+        internal ScheduleScenario WithActorRole(string roleId)
+        {
+            Assert.True(TriggerDeliveryFactory.TryCreateActorContext(
+                Evidence.ActorContext.ActorId,
+                Evidence.ActorContext.SurfaceId,
+                Evidence.ActorContext.WorkspaceId,
+                roleId,
+                out var actorContext,
+                out _));
+            var evidence = new ScheduleCurrentEvidence(
+                Evidence.EvidenceHash,
+                Evidence.ObservedAtUtc,
+                Evidence.Target,
+                Evidence.Adapter,
+                actorContext!,
+                Evidence.Authority,
+                Evidence.RecurrencePermitted,
+                Evidence.GetResolvedPayload());
+            return new ScheduleScenario(Definition with { RoleId = roleId }, evidence, ScheduledLocal, Occurrence.ScheduledAtUtc);
         }
 
         internal TriggerDeliveryEnvelope CreateEnvelope()

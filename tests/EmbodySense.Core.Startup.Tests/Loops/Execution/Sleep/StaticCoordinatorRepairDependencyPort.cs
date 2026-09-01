@@ -26,6 +26,7 @@ internal sealed class StaticCoordinatorRepairDependencyPort : IGovernedLoopCoord
                 Ready,
                 Ready,
                 Ready,
+                Ready,
                 new DateTimeOffset(2026, 8, 30, 12, 0, 0, TimeSpan.Zero),
                 string.Empty)));
     }

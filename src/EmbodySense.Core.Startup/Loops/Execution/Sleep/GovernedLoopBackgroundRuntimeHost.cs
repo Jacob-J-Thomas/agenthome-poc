@@ -37,6 +37,7 @@ internal sealed class GovernedLoopBackgroundRuntimeHost : ICustomLoopExecutionAc
     private readonly GovernedLoopWaitExecutionService _wait;
     private readonly GovernedLoopRetryExecutionService _retry;
     private readonly IGovernedLoopLocalCoordinatorBoundaryObserver? _coordinatorBoundaryObserver;
+    private IHumanReviewRecoveryRunner? _humanReviewRecoveryRunner;
     private GovernedLoopLocalCoordinator? _coordinator;
     private Task<GovernedLoopLocalCoordinatorStopResult>? _stopTask;
     private AgentRuntimeGovernedLoopBackgroundStopResult? _completedStopResult;
@@ -74,6 +75,7 @@ internal sealed class GovernedLoopBackgroundRuntimeHost : ICustomLoopExecutionAc
             throw new InvalidOperationException("The canonical local background work composition is already bound.");
         }
 
+        _humanReviewRecoveryRunner = work as IHumanReviewRecoveryRunner;
         var instanceId = Guid.NewGuid().ToString("N");
         _ownerId = "agent-runtime-" + instanceId;
         _coordinator = new GovernedLoopLocalCoordinator(
@@ -273,6 +275,32 @@ internal sealed class GovernedLoopBackgroundRuntimeHost : ICustomLoopExecutionAc
 
             try
             {
+                var current = await ReadStatusCoreAsync(cancellationToken, preserveTerminalLivePeer: true).ConfigureAwait(false);
+                if (current.Readiness == AgentRuntimeGovernedLoopBackgroundReadiness.Degraded
+                    && current.Ownership == AgentRuntimeGovernedLoopBackgroundOwnership.LivePeer)
+                {
+                    // No recovery lane may publish while a predecessor's fenced lease still excludes this runtime.
+                    // Return standby immediately, then perform bounded recovery on the first takeover-eligible retry.
+                    return PublishActivation(new AgentRuntimeGovernedLoopBackgroundStartResult(
+                        AgentRuntimeGovernedLoopBackgroundStartStatus.OwnedByLivePeer,
+                        AgentRuntimeGovernedLoopBackgroundReadiness.Degraded,
+                        AgentRuntimeGovernedLoopBackgroundOwnership.LivePeer,
+                        true,
+                        "governed_local_background_owned_by_live_peer: another process retains the active fenced coordinator lease."));
+                }
+
+                if (!startAfterRepair
+                    && current.Readiness == AgentRuntimeGovernedLoopBackgroundReadiness.Degraded
+                    && current.Ownership == AgentRuntimeGovernedLoopBackgroundOwnership.None)
+                {
+                    return PublishActivation(new AgentRuntimeGovernedLoopBackgroundStartResult(
+                        AgentRuntimeGovernedLoopBackgroundStartStatus.RepairRequired,
+                        AgentRuntimeGovernedLoopBackgroundReadiness.Degraded,
+                        AgentRuntimeGovernedLoopBackgroundOwnership.None,
+                        false,
+                        "governed_local_background_failed: the prior coordinator session durably terminated fail closed and requires explicit repair before restart."));
+                }
+
                 var recoveryFailure = await RecoverAsync(cancellationToken).ConfigureAwait(false);
                 if (recoveryFailure is not null)
                 {
@@ -370,18 +398,65 @@ internal sealed class GovernedLoopBackgroundRuntimeHost : ICustomLoopExecutionAc
         }
 
         var retryRecovery = await _retry.RecoverAsync(256, cancellationToken).ConfigureAwait(false);
-        return retryRecovery.NeedsReview > 0
-            ? new AgentRuntimeGovernedLoopBackgroundStartResult(
+        if (retryRecovery.NeedsReview > 0)
+        {
+            return new AgentRuntimeGovernedLoopBackgroundStartResult(
                 AgentRuntimeGovernedLoopBackgroundStartStatus.RepairRequired,
                 AgentRuntimeGovernedLoopBackgroundReadiness.Unavailable,
                 AgentRuntimeGovernedLoopBackgroundOwnership.Unknown,
                 false,
-                $"governed_retry_recovery_requires_review: {retryRecovery.NeedsReview} retained retry schedule(s) could not be reconciled safely.")
-            : null;
+                $"governed_retry_recovery_requires_review: {retryRecovery.NeedsReview} retained retry schedule(s) could not be reconciled safely.");
+        }
+
+        if (_humanReviewRecoveryRunner is null)
+        {
+            return null;
+        }
+
+        HumanReviewRecoveryPassResult? humanReviewRecovery;
+        try
+        {
+            humanReviewRecovery = await _humanReviewRecoveryRunner.RecoverAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            return new AgentRuntimeGovernedLoopBackgroundStartResult(
+                AgentRuntimeGovernedLoopBackgroundStartStatus.Unavailable,
+                AgentRuntimeGovernedLoopBackgroundReadiness.Unavailable,
+                AgentRuntimeGovernedLoopBackgroundOwnership.Unknown,
+                true,
+                $"governed_human_review_recovery_unavailable: bounded recovery failed closed ({exception.GetType().Name}).");
+        }
+
+        return humanReviewRecovery?.Status switch
+        {
+            HumanReviewRecoveryPassStatus.Current => null,
+            HumanReviewRecoveryPassStatus.Unavailable => new AgentRuntimeGovernedLoopBackgroundStartResult(
+                AgentRuntimeGovernedLoopBackgroundStartStatus.Unavailable,
+                AgentRuntimeGovernedLoopBackgroundReadiness.Unavailable,
+                AgentRuntimeGovernedLoopBackgroundOwnership.Unknown,
+                true,
+                "governed_human_review_recovery_unavailable: bounded recovery dependencies are unavailable."),
+            HumanReviewRecoveryPassStatus.Invalid => HumanReviewRecoveryRepairRequired(
+                "governed_human_review_recovery_requires_repair: bounded recovery produced malformed or corrupt evidence; inspect the canonical Human Review evidence before retrying activation."),
+            _ => HumanReviewRecoveryRepairRequired(
+                "governed_human_review_recovery_requires_repair: bounded recovery produced an unknown outcome; inspect the canonical Human Review evidence before retrying activation."),
+        };
     }
 
-    private async Task<AgentRuntimeGovernedLoopBackgroundStatus> ReadStatusCoreAsync(
-        CancellationToken cancellationToken)
+    private static AgentRuntimeGovernedLoopBackgroundStartResult HumanReviewRecoveryRepairRequired(string detail)
+        => new(
+            AgentRuntimeGovernedLoopBackgroundStartStatus.RepairRequired,
+            AgentRuntimeGovernedLoopBackgroundReadiness.Unavailable,
+            AgentRuntimeGovernedLoopBackgroundOwnership.Unknown,
+            false,
+            detail);
+
+    private async Task<AgentRuntimeGovernedLoopBackgroundStatus> ReadStatusCoreAsync(CancellationToken cancellationToken, bool preserveTerminalLivePeer = false)
     {
         var read = await _coordinatorEvidenceStore.ReadAsync(CoordinatorId, cancellationToken).ConfigureAwait(false);
         if (read is null)
@@ -402,13 +477,23 @@ internal sealed class GovernedLoopBackgroundRuntimeHost : ICustomLoopExecutionAc
             return UnavailableStatus("governed_local_background_unavailable: coordinator evidence requires repair or is unavailable.");
         }
 
-        return MapStatus(read.Snapshot);
+        return MapStatus(read.Snapshot, preserveTerminalLivePeer);
     }
 
-    private AgentRuntimeGovernedLoopBackgroundStatus MapStatus(GovernedLoopCoordinatorSnapshot snapshot)
+    private AgentRuntimeGovernedLoopBackgroundStatus MapStatus(GovernedLoopCoordinatorSnapshot snapshot, bool preserveTerminalLivePeer)
     {
         if (snapshot.LatestLifecycle.Status == GovernedLoopCoordinatorStatus.Stopped)
         {
+            if (preserveTerminalLivePeer
+                && HasLiveLease(snapshot)
+                && !string.Equals(snapshot.Ownership.OwnerId, _ownerId, StringComparison.Ordinal))
+            {
+                return new AgentRuntimeGovernedLoopBackgroundStatus(
+                    AgentRuntimeGovernedLoopBackgroundReadiness.Degraded,
+                    AgentRuntimeGovernedLoopBackgroundOwnership.LivePeer,
+                    "governed_local_background_owned_by_live_peer: a stopped predecessor retains the active fenced coordinator lease until takeover is eligible.");
+            }
+
             return new AgentRuntimeGovernedLoopBackgroundStatus(
                 AgentRuntimeGovernedLoopBackgroundReadiness.Stopped,
                 AgentRuntimeGovernedLoopBackgroundOwnership.None,

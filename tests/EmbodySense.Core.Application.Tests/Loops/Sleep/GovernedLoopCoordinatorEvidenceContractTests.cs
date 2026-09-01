@@ -130,6 +130,7 @@ public sealed class GovernedLoopCoordinatorEvidenceContractTests
             true,
             true,
             true,
+            true,
             recordedAtUtc,
             string.Empty));
         var repair = GovernedLoopSleepContractHash.Apply(new GovernedLoopCoordinatorRepairDisposition(

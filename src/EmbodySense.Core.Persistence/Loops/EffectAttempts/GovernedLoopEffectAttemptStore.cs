@@ -73,6 +73,49 @@ public sealed class GovernedLoopEffectAttemptStore : IGovernedLoopEffectAttemptS
         _guard = new CustomLoopArtifactPathGuard(paths.RootPath);
     }
 
+    /// <summary>Performs one bounded, non-evidence-mutating readiness probe over the canonical storage envelope.</summary>
+    /// <remarks>
+    /// The probe may initialize the store's zero-byte coordination lock, but it never creates, claims, resumes, or
+    /// advances an effect attempt. It validates the contained non-reparse directory and the complete bounded artifact
+    /// inventory while holding the same cross-process lease used by canonical reads and mutations.
+    /// </remarks>
+    /// <param name="cancellationToken">Cancels bounded lock acquisition and validation.</param>
+    /// <returns><see langword="true"/> when the canonical storage envelope is readable and structurally valid; otherwise, <see langword="false"/>.</returns>
+    public async Task<bool> ProbeStorageAvailabilityAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        try
+        {
+            using var readLock = await _guard.AcquireExclusiveReadLockAsync(_root, cancellationToken).ConfigureAwait(false);
+            ValidateDirectory(cancellationToken, out var retainedIdentities, out _);
+            foreach (var storageKey in retainedIdentities.Order(StringComparer.Ordinal))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var versions = VersionPaths(storageKey);
+                if (versions.Count == 0)
+                {
+                    throw new FormatException("Effect-attempt storage contains a head without immutable intent evidence.");
+                }
+                var identity = await ReadUnboundVersionAsync(versions[0], storageKey, cancellationToken).ConfigureAwait(false);
+                _ = await ReadCurrentStrictlyAsync(
+                    versions,
+                    storageKey,
+                    identity.Payload.OperationId,
+                    identity.Payload.EffectGeneration,
+                    cancellationToken).ConfigureAwait(false);
+            }
+            return true;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception) when (IsCorrupt(exception) || IsUnavailable(exception))
+        {
+            return false;
+        }
+    }
+
     /// <inheritdoc />
     public async Task<GovernedLoopEffectAttemptStoreResult> ResumeAsync(
         string operationId,
@@ -505,10 +548,23 @@ public sealed class GovernedLoopEffectAttemptStore : IGovernedLoopEffectAttemptS
     }
 
     private void ValidateDirectory(out HashSet<string> retainedIdentities, out long retainedBytes)
+        => ValidateDirectory(CancellationToken.None, out retainedIdentities, out retainedBytes);
+
+    private void ValidateDirectory(CancellationToken cancellationToken, out HashSet<string> retainedIdentities, out long retainedBytes)
     {
         var maximumArtifacts = checked(MaximumConfiguredAttempts * (MaximumConfiguredVersionsPerAttempt + 2) + 2);
-        var entries = Directory.EnumerateFileSystemEntries(_root).Take(maximumArtifacts + 1).ToArray();
-        if (entries.Length > maximumArtifacts || entries.Any(Directory.Exists))
+        var entries = new List<string>(Math.Min(maximumArtifacts, 1024));
+        foreach (var entry in Directory.EnumerateFileSystemEntries(_root))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            entries.Add(entry);
+            if (entries.Count > maximumArtifacts)
+            {
+                throw new FormatException("Effect-attempt storage exceeds its finite artifact bounds.");
+            }
+        }
+
+        if (entries.Any(Directory.Exists))
         {
             throw new FormatException("Effect-attempt storage exceeds its finite artifact bounds.");
         }
@@ -518,6 +574,7 @@ public sealed class GovernedLoopEffectAttemptStore : IGovernedLoopEffectAttemptS
         retainedBytes = 0;
         foreach (var entry in entries)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var fileName = Path.GetFileName(entry);
             if (fileName == ".custom-loop-mutations.lock")
             {
