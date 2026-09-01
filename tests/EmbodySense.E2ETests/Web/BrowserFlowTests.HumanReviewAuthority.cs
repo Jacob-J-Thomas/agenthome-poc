@@ -100,7 +100,7 @@ public sealed partial class BrowserFlowTests
             await browser.WaitForExpressionAsync("document.getElementById('clientStatus').textContent === 'Web primary'");
             await browser.ReloadAsync();
             await InitializeWorkspaceAsyncIfNeededAsync(browser);
-            browser.EndExpectedServerRestart();
+            await browser.EndExpectedServerRestartAsync();
             await OpenHumanReviewAsync(browser);
             await SelectHumanReviewAsync(browser, runId);
             await WaitForCanonicalHumanReviewAsync(browser, "approved", 1);
@@ -228,7 +228,7 @@ public sealed partial class BrowserFlowTests
     {
         var runFragment = "/api/human-reviews/" + Uri.EscapeDataString(runId);
         var evidenceFragment = runFragment + "/evidence";
-        var diagnostics = browser.GetDiagnosticsSnapshot();
+        var diagnostics = browser.DiagnosticsSnapshot();
         var evidence409 = diagnostics.Any(item => item.Contains(evidenceFragment, StringComparison.Ordinal) && (item.Contains("\"status\":409", StringComparison.Ordinal) || item.Contains("status of 409", StringComparison.Ordinal)));
         var evidence503 = diagnostics.Any(item => item.Contains(evidenceFragment, StringComparison.Ordinal) && item.Contains("\"status\":503", StringComparison.Ordinal));
         var detail409 = diagnostics.Any(item => item.Contains(runFragment, StringComparison.Ordinal) && !item.Contains(evidenceFragment, StringComparison.Ordinal) && (item.Contains("\"status\":409", StringComparison.Ordinal) || item.Contains("status of 409", StringComparison.Ordinal)));

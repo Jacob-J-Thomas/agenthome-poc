@@ -24,7 +24,7 @@ public sealed partial class BrowserFlowTests
         await InstallBrowserModelProfilesAsync(workspace.RootPath, capabilityTrustRoot, [BrowserProfileWebHost.CreateDescriptor(profile)]);
         await SeedHumanReviewReadinessAuthorityAsync(paths, capabilityTrustRoot);
         var runId = "browser-human-review-pre-send-loss";
-        await HumanReviewBrowserFixture.SeedPendingAsync(paths, runId, "pre-send transport loss");
+        await HumanReviewBrowserFixture.SeedPendingAsync(paths, runId, "pre-send transport loss", capabilityTrustRoot: capabilityTrustRoot);
         await using var app = await ExternalWebApplicationProcess.StartBrowserProfileHostAsync(workspace.RootPath, GetFreePort(), codexExecutable, "gpt-test", capabilityTrustRoot, [profile]);
         await using var browser = await HeadlessBrowserSession.StartAsync(app.BaseUrl);
 
@@ -79,7 +79,7 @@ public sealed partial class BrowserFlowTests
         await InstallBrowserModelProfilesAsync(workspace.RootPath, capabilityTrustRoot, [BrowserProfileWebHost.CreateDescriptor(profile)]);
         await SeedHumanReviewReadinessAuthorityAsync(paths, capabilityTrustRoot);
         var runId = "browser-human-review-stale-tab";
-        await HumanReviewBrowserFixture.SeedPendingAsync(paths, runId, "stale same-profile tab");
+        await HumanReviewBrowserFixture.SeedPendingAsync(paths, runId, "stale same-profile tab", capabilityTrustRoot: capabilityTrustRoot);
         await using var app = await ExternalWebApplicationProcess.StartBrowserProfileHostAsync(workspace.RootPath, GetFreePort(), codexExecutable, "gpt-test", capabilityTrustRoot, [profile]);
         await using var browser = await HeadlessBrowserSession.StartAsync(app.BaseUrl);
         try
@@ -136,7 +136,7 @@ public sealed partial class BrowserFlowTests
         await InstallBrowserModelProfilesAsync(workspace.RootPath, capabilityTrustRoot, [BrowserProfileWebHost.CreateDescriptor(profile)]);
         await SeedHumanReviewReadinessAuthorityAsync(paths, capabilityTrustRoot);
         var runId = "browser-human-review-stale-session";
-        await HumanReviewBrowserFixture.SeedPendingAsync(paths, runId, "stale session token");
+        await HumanReviewBrowserFixture.SeedPendingAsync(paths, runId, "stale session token", capabilityTrustRoot: capabilityTrustRoot);
         var port = GetFreePort();
         ExternalWebApplicationProcess? app = await ExternalWebApplicationProcess.StartBrowserProfileHostAsync(workspace.RootPath, port, codexExecutable, "gpt-test", capabilityTrustRoot, [profile]);
         HeadlessBrowserSession? browser = null;
@@ -158,7 +158,7 @@ public sealed partial class BrowserFlowTests
             await browser.WaitForExpressionAsync("document.getElementById('clientStatus').textContent === 'Web primary'");
             await browser.ReloadAsync();
             await InitializeWorkspaceAsyncIfNeededAsync(browser);
-            browser.EndExpectedServerRestart();
+            await browser.EndExpectedServerRestartAsync();
             var replacementCookie = await browser.ReadCookieValueAsync(cookieName);
             Assert.False(string.IsNullOrWhiteSpace(replacementCookie));
             Assert.NotEqual(oldCookie, replacementCookie);

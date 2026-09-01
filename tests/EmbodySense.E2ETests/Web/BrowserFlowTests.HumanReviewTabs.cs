@@ -23,6 +23,8 @@ public sealed partial class BrowserFlowTests
             return value.ValueKind == JsonValueKind.True;
         }
 
+        internal IReadOnlyList<string> DiagnosticsSnapshot() => GetDiagnosticsSnapshot();
+
         internal async Task PressKeyAsync(string key)
         {
             ArgumentException.ThrowIfNullOrWhiteSpace(key);

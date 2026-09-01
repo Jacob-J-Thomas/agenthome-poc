@@ -137,7 +137,7 @@ public sealed partial class BrowserFlowTests
             await browser.WaitForExpressionAsync("document.getElementById('clientStatus').textContent === 'Web primary'");
             await browser.ReloadAsync();
             await InitializeWorkspaceAsyncIfNeededAsync(browser);
-            browser.EndExpectedServerRestart();
+            await browser.EndExpectedServerRestartAsync();
             await OpenHumanReviewAsync(browser);
             await SelectHumanReviewAsync(browser, runId);
             await browser.WaitForExpressionAsync("document.getElementById('humanReviewDetailStatus').textContent.includes('Canonical state reread')");
