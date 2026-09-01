@@ -10,6 +10,7 @@ using EmbodySense.Core.Application.HumanInput.Lifecycle.Models;
 using EmbodySense.Core.Application.HumanInput.Responses;
 using EmbodySense.Core.Application.HumanInput.Responses.Models;
 using EmbodySense.Core.Common.Authority;
+using EmbodySense.Core.Common.HumanInput;
 using EmbodySense.Core.Common.HumanInput.Lifecycle;
 using EmbodySense.Core.Common.HumanInput.Lifecycle.Models;
 using EmbodySense.Core.Common.HumanInput.Models;
@@ -139,9 +140,14 @@ public sealed class HumanInputRuntimeFacade
     /// <returns>The canonical redacted lifecycle outcome.</returns>
     public Task<HumanInputOperationResult> SubmitSurfaceLifecycleAsync(HumanInputSurfaceLifecycleOperationInput? input, CancellationToken cancellationToken = default)
     {
-        if (input is null
-            || !TryParseEnum(input.Kind, out HumanInputRequestLifecycleOperationKind kind)
-            || !TryParseEnum(input.ExpectedLifecycleStatus, out HumanInputRequestLifecycleStatus status))
+        if (input is null)
+        {
+            return Task.FromResult(Invalid(null));
+        }
+
+        if (!TryParseEnum(input.Kind, out HumanInputRequestLifecycleOperationKind kind)
+            || !TryParseEnum(input.ExpectedLifecycleStatus, out HumanInputRequestLifecycleStatus status)
+            || !HumanInputIdentifier.IsValid(input.OperationId))
         {
             return Task.FromResult(Invalid(input?.OperationId));
         }
@@ -156,10 +162,15 @@ public sealed class HumanInputRuntimeFacade
     /// <returns>The canonical redacted response outcome.</returns>
     public Task<HumanInputOperationResult> SubmitSurfaceResponseAsync(HumanInputSurfaceResponseOperationInput? input, CancellationToken cancellationToken = default)
     {
-        if (input is null
-            || !TryParseEnum(input.Kind, out HumanInputResponseOperationKind kind)
+        if (input is null)
+        {
+            return Task.FromResult(Invalid(null));
+        }
+
+        if (!TryParseEnum(input.Kind, out HumanInputResponseOperationKind kind)
             || !TryParseEnum(input.ExpectedLifecycleStatus, out HumanInputRequestLifecycleStatus status)
-            || input.ExpectedRequest is null)
+            || input.ExpectedRequest is null
+            || !HumanInputIdentifier.IsValid(input.OperationId))
         {
             return Task.FromResult(Invalid(input?.OperationId));
         }
@@ -202,7 +213,12 @@ public sealed class HumanInputRuntimeFacade
         HumanInputLifecycleOperationInput? input,
         CancellationToken cancellationToken = default)
     {
-        if (input is null || !AuthorityPurpose.TryParse(input.Reason, out var reason, out _))
+        if (input is null)
+        {
+            return Invalid(null);
+        }
+
+        if (!HumanInputIdentifier.IsValid(input.OperationId) || !AuthorityPurpose.TryParse(input.Reason, out var reason, out _))
         {
             return Invalid(input?.OperationId);
         }
@@ -343,7 +359,12 @@ public sealed class HumanInputRuntimeFacade
         HumanInputResponseOperationInput? input,
         CancellationToken cancellationToken = default)
     {
-        if (input is null || input.ExpectedRequest is null)
+        if (input is null)
+        {
+            return Invalid(null);
+        }
+
+        if (input.ExpectedRequest is null || !HumanInputIdentifier.IsValid(input.OperationId))
         {
             return Invalid(input?.OperationId);
         }
@@ -946,7 +967,7 @@ public sealed class HumanInputRuntimeFacade
 
     private static JsonSerializerOptions SurfaceJsonOptions()
     {
-        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web) { UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow };
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web) { AllowDuplicateProperties = false, UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow };
         options.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.KebabCaseLower, allowIntegerValues: false));
         return options;
     }

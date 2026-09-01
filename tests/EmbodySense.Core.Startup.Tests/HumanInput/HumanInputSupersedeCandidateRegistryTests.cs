@@ -29,6 +29,9 @@ public sealed class HumanInputSupersedeCandidateRegistryTests
         Assert.Equal(candidate.RequestId, resolution.CandidateRequest.RequestId);
         Assert.Equal(registration.GrantReference, resolution.GrantReference);
         Assert.False(registry.TryResolve(key, current.Binding.WorkspaceId, "embodysense.cli", registration.OperationId, registration.RequestId, registration.ExpectedLifecycleVersion, expected.RequestVersionId, expected.RequestHash, DateTimeOffset.UtcNow, out _));
+        Assert.False(registry.TryResolve(key, current.Binding.WorkspaceId, Actor, "operation-two", registration.RequestId, registration.ExpectedLifecycleVersion, expected.RequestVersionId, expected.RequestHash, DateTimeOffset.UtcNow, out _));
+        Assert.False(registry.TryResolve(key, current.Binding.WorkspaceId, Actor, registration.OperationId, registration.RequestId, registration.ExpectedLifecycleVersion + 1, expected.RequestVersionId, expected.RequestHash, DateTimeOffset.UtcNow, out _));
+        Assert.False(registry.TryResolve(key, current.Binding.WorkspaceId, Actor, registration.OperationId, registration.RequestId, registration.ExpectedLifecycleVersion, expected.RequestVersionId, "different-hash", DateTimeOffset.UtcNow, out _));
     }
 
     [Fact]
@@ -57,5 +60,40 @@ public sealed class HumanInputSupersedeCandidateRegistryTests
 
         Assert.False(registry.TryRegister(registration, out var key));
         Assert.Empty(key);
+    }
+
+    [Theory]
+    [InlineData("operation/invalid")]
+    [InlineData("operation\\invalid")]
+    [InlineData("operation with spaces")]
+    public void Invalid_operation_ids_cannot_occupy_or_replay_registry_slots(string operationId)
+    {
+        var registry = new HumanInputSupersedeCandidateRegistry();
+        var current = HumanInputRequestStoreTestData.Request("request-one", "version-one", HumanInputRequestStoreTestData.Time);
+        var candidate = HumanInputRequestStoreTestData.Request("request-two", "version-two", HumanInputRequestStoreTestData.Time, current.Binding);
+        var mutation = HumanInputRequestStoreTestData.CreateMutation();
+        var registration = new HumanInputSupersedeCandidateRegistration(current.Binding.WorkspaceId, Actor, operationId, current.RequestId, 1, HumanInputRequestStoreTestData.Reference(current), candidate, mutation.Operation.GrantReference!, DateTimeOffset.UtcNow.AddMinutes(5));
+
+        Assert.False(registry.TryRegister(registration, out var key));
+        Assert.Empty(key);
+        Assert.False(registry.TryResolve("candidate", registration.WorkspaceId, Actor, operationId, registration.RequestId, 1, registration.ExpectedRequest.RequestVersionId, registration.ExpectedRequest.RequestHash, DateTimeOffset.UtcNow, out _));
+    }
+
+    [Fact]
+    public void Injected_clock_controls_expiry_purge_and_exact_re_registration()
+    {
+        var initial = DateTimeOffset.UtcNow.AddHours(1);
+        var clock = new HumanInputFixedTimeProvider(initial);
+        var registry = new HumanInputSupersedeCandidateRegistry(clock);
+        var current = HumanInputRequestStoreTestData.Request("request-one", "version-one", HumanInputRequestStoreTestData.Time);
+        var candidate = HumanInputRequestStoreTestData.Request("request-two", "version-two", HumanInputRequestStoreTestData.Time, current.Binding);
+        var mutation = HumanInputRequestStoreTestData.CreateMutation();
+        var registration = new HumanInputSupersedeCandidateRegistration(current.Binding.WorkspaceId, Actor, "operation-clock", current.RequestId, 1, HumanInputRequestStoreTestData.Reference(current), candidate, mutation.Operation.GrantReference!, initial.AddMinutes(5));
+
+        Assert.True(registry.TryRegister(registration, out var first));
+        clock.SetUtcNow(initial.AddMinutes(6));
+
+        Assert.True(registry.TryRegister(registration, out var second));
+        Assert.NotEqual(first, second);
     }
 }

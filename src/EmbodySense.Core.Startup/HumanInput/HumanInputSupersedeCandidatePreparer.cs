@@ -240,7 +240,7 @@ public sealed class HumanInputSupersedeCandidatePreparer : IHumanInputSupersedeC
 
     private static JsonSerializerOptions JsonOptions()
     {
-        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web) { UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow };
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web) { AllowDuplicateProperties = false, UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow };
         options.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.KebabCaseLower, allowIntegerValues: false));
         return options;
     }
@@ -253,7 +253,7 @@ public sealed class HumanInputSupersedeCandidatePreparer : IHumanInputSupersedeC
 
     private static bool IsShapeValid(HumanInputSupersedePreparationInput? input)
         => input is not null
-            && !string.IsNullOrWhiteSpace(input.OperationId)
+            && HumanInputIdentifier.IsValid(input.OperationId)
             && !string.IsNullOrWhiteSpace(input.RequestId)
             && input.ExpectedRequest is not null
             && string.Equals(input.ExpectedRequest.RequestId, input.RequestId, StringComparison.Ordinal)

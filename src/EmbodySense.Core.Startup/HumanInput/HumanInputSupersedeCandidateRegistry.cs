@@ -10,9 +10,17 @@ namespace EmbodySense.Core.Startup.HumanInput;
 public sealed class HumanInputSupersedeCandidateRegistry : IHumanInputSupersedeCandidateRegistry
 {
     private const int MaximumEntries = 256;
+    private readonly TimeProvider _timeProvider;
     private readonly object _gate = new();
     private readonly Dictionary<string, Entry> _entries = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> _operationKeys = new(StringComparer.Ordinal);
+
+    /// <summary>Creates a bounded registry using the system trusted clock unless a composed clock is supplied.</summary>
+    /// <param name="timeProvider">The trusted clock used for expiry and capacity purging.</param>
+    public HumanInputSupersedeCandidateRegistry(TimeProvider? timeProvider = null)
+    {
+        _timeProvider = timeProvider ?? TimeProvider.System;
+    }
 
     /// <inheritdoc />
     public bool TryRegister(HumanInputSupersedeCandidateRegistration candidate, out string candidateKey)
@@ -26,7 +34,7 @@ public sealed class HumanInputSupersedeCandidateRegistry : IHumanInputSupersedeC
         var binding = BindingKey(candidate);
         lock (_gate)
         {
-            Purge(DateTimeOffset.UtcNow);
+            Purge(_timeProvider.GetUtcNow());
             if (_operationKeys.TryGetValue(binding, out var existingKey)
                 && _entries.TryGetValue(existingKey, out var existing)
                 && existing.ExpiresAtUtc == candidate.ExpiresAtUtc
@@ -75,7 +83,7 @@ public sealed class HumanInputSupersedeCandidateRegistry : IHumanInputSupersedeC
         if (string.IsNullOrWhiteSpace(candidateKey)
             || string.IsNullOrWhiteSpace(workspaceId)
             || string.IsNullOrWhiteSpace(actor)
-            || string.IsNullOrWhiteSpace(operationId)
+            || !HumanInputIdentifier.IsValid(operationId)
             || string.IsNullOrWhiteSpace(requestId)
             || string.IsNullOrWhiteSpace(expectedRequestVersionId)
             || string.IsNullOrWhiteSpace(expectedRequestHash)
@@ -158,7 +166,7 @@ public sealed class HumanInputSupersedeCandidateRegistry : IHumanInputSupersedeC
         if (candidate is null
             || string.IsNullOrWhiteSpace(candidate.WorkspaceId)
             || string.IsNullOrWhiteSpace(candidate.Actor)
-            || string.IsNullOrWhiteSpace(candidate.OperationId)
+            || !HumanInputIdentifier.IsValid(candidate.OperationId)
             || string.IsNullOrWhiteSpace(candidate.RequestId)
             || candidate.ExpectedLifecycleVersion < 1
             || candidate.ExpiresAtUtc == default

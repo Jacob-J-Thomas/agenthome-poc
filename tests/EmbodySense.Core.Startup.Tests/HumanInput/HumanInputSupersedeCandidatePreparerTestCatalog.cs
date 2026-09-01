@@ -9,11 +9,14 @@ internal sealed class HumanInputSupersedeCandidatePreparerTestCatalog : IHumanIn
 
     internal Exception? ReadException { get; set; }
 
+    internal int ReadCount { get; private set; }
+
     public Task<HumanInputRequestCatalogPage> ListAsync(HumanInputRequestCatalogPageRequest? request, CancellationToken cancellationToken = default)
         => Task.FromResult(new HumanInputRequestCatalogPage(HumanInputRequestCatalogPageStatus.Ready, 0, [], null));
 
     public Task<HumanInputRequestCatalogReadResult> ReadAsync(string requestId, CancellationToken cancellationToken = default)
     {
+        ReadCount++;
         cancellationToken.ThrowIfCancellationRequested();
         if (ReadException is not null)
         {

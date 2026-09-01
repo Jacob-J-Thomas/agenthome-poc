@@ -6,9 +6,17 @@ namespace EmbodySense.Core.Startup.Tests.HumanInput;
 
 internal sealed class HumanInputSupersedeCandidatePreparerTestGrantResolver(AuthorityGrantResolution resolution) : IAuthorityGrantResolver
 {
+    internal AuthorityGrantResolution Resolution { get; set; } = resolution;
+    internal Exception? ResolveException { get; set; }
+
     public Task<AuthorityGrantResolution> ResolveAsync(AuthorityGrantReference? reference, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        return Task.FromResult(resolution);
+        if (ResolveException is not null)
+        {
+            throw ResolveException;
+        }
+
+        return Task.FromResult(Resolution);
     }
 }

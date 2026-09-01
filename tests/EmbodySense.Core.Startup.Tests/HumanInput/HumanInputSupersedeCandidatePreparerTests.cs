@@ -99,6 +99,36 @@ public sealed class HumanInputSupersedeCandidatePreparerTests
         Assert.NotEqual(input.RequestId, resolution!.CandidateRequest.RequestId);
         Assert.Equal(input.Purpose, resolution.CandidateRequest.Purpose);
         Assert.Equal(input.Prompt, resolution.CandidateRequest.Prompt);
+
+        var duplicateNestedProperty = input with { ResponseSchema = Json("""{"kind":"text","choices":[{"choiceId":"choice","displayText":"one","displayText":"two"}]}""") };
+        Assert.Equal(HumanInputSupersedePreparationStatus.Invalid, (await preparer.PrepareAsync(duplicateNestedProperty)).Status);
+        Assert.Equal(HumanInputSupersedePreparationStatus.Invalid, (await preparer.PrepareAsync(input with { ResponseSchema = Json("[]") })).Status);
+        foreach (var (grantStatus, expectedStatus) in new[]
+        {
+            (AuthorityGrantResolutionStatus.NotFound, HumanInputSupersedePreparationStatus.NotFound),
+            (AuthorityGrantResolutionStatus.Invalid, HumanInputSupersedePreparationStatus.NotFound),
+            (AuthorityGrantResolutionStatus.Revoked, HumanInputSupersedePreparationStatus.Denied),
+            (AuthorityGrantResolutionStatus.Unavailable, HumanInputSupersedePreparationStatus.Denied)
+        })
+        {
+            resolver.Resolution = new AuthorityGrantResolution(grantStatus, grant, null!, EmptyCeiling(), string.Empty, mutation.Operation.RecordedAtUtc);
+            Assert.Equal(expectedStatus, (await preparer.PrepareAsync(input with { OperationId = $"prepare-grant-{grantStatus.ToString().ToLowerInvariant()}" })).Status);
+        }
+
+        resolver.ResolveException = new InvalidOperationException("private grant detail");
+        Assert.Equal(HumanInputSupersedePreparationStatus.Unavailable, (await preparer.PrepareAsync(input with { OperationId = "prepare-grant-error" })).Status);
+    }
+
+    [Fact]
+    public async Task Invalid_operation_id_is_rejected_before_catalog_access()
+    {
+        var catalog = new HumanInputSupersedeCandidatePreparerTestCatalog();
+        var preparer = CreatePreparer(catalog, new AuthorityGrantResolution(AuthorityGrantResolutionStatus.Unknown, null, null!, EmptyCeiling(), string.Empty, default));
+
+        var result = await preparer.PrepareAsync(Input(DateTimeOffset.UtcNow.AddMinutes(2)) with { OperationId = "operation/invalid" });
+
+        Assert.Equal(HumanInputSupersedePreparationStatus.Invalid, result.Status);
+        Assert.Equal(0, catalog.ReadCount);
     }
 
     private static HumanInputSupersedeCandidatePreparer CreatePreparer(HumanInputSupersedeCandidatePreparerTestCatalog catalog, AuthorityGrantResolution resolution)

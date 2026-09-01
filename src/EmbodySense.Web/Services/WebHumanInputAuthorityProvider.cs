@@ -42,9 +42,10 @@ public sealed class WebHumanInputAuthorityProvider : IAgentRuntimeHumanInputAuth
     {
         ArgumentNullException.ThrowIfNull(request);
         cancellationToken.ThrowIfCancellationRequested();
-        if (!IsAuthenticated())
+        var sessionStatus = GetSessionStatus();
+        if (sessionStatus != AgentRuntimeHumanInputAuthorityStatus.Ready)
         {
-            return Task.FromResult(new AgentRuntimeHumanInputLifecycleTerms(AgentRuntimeHumanInputAuthorityStatus.Denied, null, null));
+            return Task.FromResult(new AgentRuntimeHumanInputLifecycleTerms(sessionStatus, null, null));
         }
 
         if (string.Equals(request.Kind.ToString(), "Reject", StringComparison.Ordinal)
@@ -71,7 +72,10 @@ public sealed class WebHumanInputAuthorityProvider : IAgentRuntimeHumanInputAuth
     {
         ArgumentNullException.ThrowIfNull(request);
         cancellationToken.ThrowIfCancellationRequested();
-        return Task.FromResult(HumanInputWebAuthority.AuthorizeLifecycle(IsAuthenticated(), request.OperationId, request.RequestHash, request.WorkspaceId, request.EvaluatedAtUtc));
+        var sessionStatus = GetSessionStatus();
+        return sessionStatus == AgentRuntimeHumanInputAuthorityStatus.Ready
+            ? Task.FromResult(HumanInputWebAuthority.AuthorizeLifecycle(true, request.OperationId, request.RequestHash, request.WorkspaceId, request.EvaluatedAtUtc))
+            : Task.FromResult(new AgentRuntimeHumanInputLifecycleAuthorization(sessionStatus, null, string.Empty));
     }
 
     /// <inheritdoc />
@@ -79,13 +83,45 @@ public sealed class WebHumanInputAuthorityProvider : IAgentRuntimeHumanInputAuth
     {
         ArgumentNullException.ThrowIfNull(request);
         cancellationToken.ThrowIfCancellationRequested();
-        return Task.FromResult(HumanInputWebAuthority.AuthenticateResponse(IsAuthenticated(), request.OperationId, request.CommandHash, request.WorkspaceId, request.EvaluatedAtUtc));
+        var sessionStatus = GetSessionStatus();
+        return sessionStatus == AgentRuntimeHumanInputAuthorityStatus.Ready
+            ? Task.FromResult(HumanInputWebAuthority.AuthenticateResponse(true, request.OperationId, request.CommandHash, request.WorkspaceId, request.EvaluatedAtUtc))
+            : Task.FromResult(new AgentRuntimeHumanInputResponseAuthentication(sessionStatus, null, string.Empty));
     }
 
-    private bool IsAuthenticated()
+    private AgentRuntimeHumanInputAuthorityStatus GetSessionStatus()
     {
-        var identity = _httpContextAccessor.HttpContext?.User?.Identity;
-        return identity?.IsAuthenticated == true && string.Equals(identity.AuthenticationType, WebSessionAuthenticationDefaults.Scheme, StringComparison.Ordinal);
+        HttpContext? context;
+        try
+        {
+            context = _httpContextAccessor.HttpContext;
+        }
+        catch
+        {
+            return AgentRuntimeHumanInputAuthorityStatus.Unavailable;
+        }
+
+        if (context is null || context.RequestAborted.IsCancellationRequested)
+        {
+            return AgentRuntimeHumanInputAuthorityStatus.Unavailable;
+        }
+
+        try
+        {
+            var identities = context.User?.Identities?.ToArray();
+            if (identities is null || identities.Length != 1 || !identities[0].IsAuthenticated)
+            {
+                return AgentRuntimeHumanInputAuthorityStatus.Unavailable;
+            }
+
+            return string.Equals(identities[0].AuthenticationType, WebSessionAuthenticationDefaults.Scheme, StringComparison.Ordinal)
+                ? AgentRuntimeHumanInputAuthorityStatus.Ready
+                : AgentRuntimeHumanInputAuthorityStatus.Denied;
+        }
+        catch
+        {
+            return AgentRuntimeHumanInputAuthorityStatus.Unavailable;
+        }
     }
 
 }

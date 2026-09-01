@@ -27,6 +27,7 @@
     <Compile Include="..\EmbodySense.Core.Application.Tests\CommandActions\CommandActionApplicationTestData.cs" Link="Support\CommandActionApplicationTestData.cs" />
     <Compile Include="..\EmbodySense.Core.Application.Tests\GovernedModelProfileApplicationTestFixture.cs" Link="Support\GovernedModelProfileApplicationTestFixture.cs" />
     <Compile Include="..\EmbodySense.Core.Application.Tests\Loops\Sequential\GovernedLoopSequentialApplicationTestFixture.cs" Link="Support\GovernedLoopSequentialApplicationTestFixture.cs" />
+    <Compile Include="..\EmbodySense.Core.Persistence.Tests\HumanInput\Requests\HumanInputRequestStoreTestData.cs" Link="Support\HumanInputRequestStoreTestData.cs" />
     <Compile Include="..\EmbodySense.Core.Startup.Tests\Loops\Execution\Sleep\HumanReviewRecoveryCanonicalAuditRecorder.cs" Link="Support\HumanReviewRecoveryCanonicalAuditRecorder.cs" />
     <Compile Include="..\EmbodySense.Core.Startup.Tests\Loops\Execution\Sleep\HumanReviewRecoveryCanonicalRunFactory.cs" Link="Support\HumanReviewRecoveryCanonicalRunFactory.cs" />
     <Compile Include="..\EmbodySense.Core.Startup.Tests\Loops\Execution\Sleep\HumanReviewRecoveryCanonicalRunStore.cs" Link="Support\HumanReviewRecoveryCanonicalRunStore.cs" />
