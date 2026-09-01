@@ -5,8 +5,11 @@ using EmbodySense.Core.Application.Loops.EffectAttempts.Models;
 using EmbodySense.Core.Common.Authority;
 using EmbodySense.Core.Common.Authority.Models;
 using EmbodySense.Core.Common.Workspace;
+using EmbodySense.Core.Common.Loops.Execution.Effects.Models;
+using EmbodySense.Core.Common.Loops.Execution.Models;
 using EmbodySense.Core.Persistence.Authority;
 using EmbodySense.Core.Persistence.Capabilities;
+using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Core.Persistence.Loops.EffectAttempts;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.E2EBrowserHost;
@@ -30,8 +33,9 @@ public sealed partial class BrowserFlowTests
         await InstallBrowserModelProfilesAsync(workspace.RootPath, capabilityTrustRoot, [BrowserProfileWebHost.CreateDescriptor(profile)]);
         await SeedHumanReviewReadinessAuthorityAsync(paths, capabilityTrustRoot);
         var runId = "browser-human-review-expiry-boundary";
-        await HumanReviewBrowserFixture.SeedPendingAsync(paths, runId, "exact expiry boundary", requestLifetime: TimeSpan.FromSeconds(5), capabilityTrustRoot: capabilityTrustRoot);
-        await using var app = await ExternalWebApplicationProcess.StartBrowserProfileHostAsync(workspace.RootPath, GetFreePort(), codexExecutable, "gpt-test", capabilityTrustRoot, [profile]);
+        var exactExpiryUtc = DateTimeOffset.UtcNow.AddMinutes(1);
+        await HumanReviewBrowserFixture.SeedPendingAsync(paths, runId, "exact expiry boundary", capabilityTrustRoot: capabilityTrustRoot, requestExpiresAtUtc: exactExpiryUtc);
+        await using var app = await ExternalWebApplicationProcess.StartBrowserProfileHostAsync(workspace.RootPath, GetFreePort(), codexExecutable, "gpt-test", capabilityTrustRoot, [profile], humanReviewTestClockUtc: exactExpiryUtc);
         await using var browser = await HeadlessBrowserSession.StartAsync(app.BaseUrl);
 
         try
@@ -147,6 +151,11 @@ public sealed partial class BrowserFlowTests
         await SeedHumanReviewReadinessAuthorityAsync(paths, capabilityTrustRoot);
         var runId = "browser-human-review-ambiguous-effect";
         await HumanReviewBrowserFixture.SeedPendingAsync(paths, runId, "ambiguous effect boundary", includePreDispatchEffect: true, makeEffectAmbiguous: true, capabilityTrustRoot: capabilityTrustRoot);
+        var canonicalBefore = await ReadCanonicalRunAsync(paths, runId);
+        var effectBefore = await ReadCanonicalEffectAttemptAsync(paths, runId);
+        var effectArtifactCountBefore = CountEffectAttemptArtifacts(paths);
+        Assert.Equal(GovernedLoopEffectPhase.ReconciliationRequired, effectBefore.Payload.Phase);
+        Assert.Equal(GovernedLoopEffectEvidenceStatus.Incomplete, effectBefore.Payload.EvidenceStatus);
         await using var app = await ExternalWebApplicationProcess.StartBrowserProfileHostAsync(workspace.RootPath, GetFreePort(), codexExecutable, "gpt-test", capabilityTrustRoot, [profile]);
         await using var browser = await HeadlessBrowserSession.StartAsync(app.BaseUrl);
 
@@ -158,6 +167,9 @@ public sealed partial class BrowserFlowTests
             await browser.EvaluateWithUserGestureAsync($"(() => {{ const item = document.querySelector({selector}); if (!item) throw new Error('Ambiguous Human Review item was not rendered.'); item.click(); }})()");
             await browser.WaitForExpressionAsync("document.getElementById('humanReviewDetailPanel').hidden === false && document.querySelector('[data-testid=\"human-review-approve\"]')?.getAttribute('aria-disabled') === 'true'");
             Assert.True(await browser.EvaluateBooleanAsync("document.querySelector('[data-testid=\"human-review-approve\"]')?.getAttribute('aria-disabled') === 'true'"));
+            var expectedLifecycleVersion = await browser.EvaluateInt32Async($"(async () => {{ const response = await fetch('/api/human-reviews/{Uri.EscapeDataString(runId)}', {{ cache: 'no-store' }}); const body = await response.json(); return body.detail.summary.lifecycleVersion; }})()");
+            var tamperedDecisionStatus = await browser.EvaluateInt32Async($"(async () => {{ const response = await fetch('/api/human-reviews/{Uri.EscapeDataString(runId)}/approve', {{ method: 'POST', headers: {{ 'Content-Type': 'application/json' }}, body: JSON.stringify({{ expectedLifecycleVersion: {expectedLifecycleVersion}, operationId: 'ambiguous-effect-negative', effectAttemptId: 'forged-effect', effectEvidence: 'conclusive' }}) }}); return response.status; }})()");
+            Assert.Equal(400, tamperedDecisionStatus);
             var detailStatus = (await browser.EvaluateStringAsync("document.getElementById('humanReviewDetailStatus').textContent")).ToLowerInvariant();
             Assert.True(detailStatus.Contains("conflicting", StringComparison.Ordinal) || detailStatus.Contains("unavailable", StringComparison.Ordinal));
             var evidence = await ReadHumanReviewEndpointAsync(browser, $"/api/human-reviews/{Uri.EscapeDataString(runId)}/evidence");
@@ -172,6 +184,12 @@ public sealed partial class BrowserFlowTests
             await browser.WaitForExpressionAsync("document.getElementById('humanReviewDetailPanel').hidden === false && document.querySelector('[data-testid=\"human-review-approve\"]')?.getAttribute('aria-disabled') === 'true'");
             var afterReloadEvidence = await ReadHumanReviewEndpointAsync(browser, $"/api/human-reviews/{Uri.EscapeDataString(runId)}/evidence");
             Assert.Equal(evidence, afterReloadEvidence);
+            var effectAfter = await ReadCanonicalEffectAttemptAsync(paths, runId);
+            Assert.Equal(effectBefore.ContentHash, effectAfter.ContentHash);
+            Assert.Equal(effectBefore.Payload.Phase, effectAfter.Payload.Phase);
+            Assert.Equal(effectBefore.Payload.EvidenceStatus, effectAfter.Payload.EvidenceStatus);
+            Assert.Equal(effectArtifactCountBefore, CountEffectAttemptArtifacts(paths));
+            Assert.Equal(canonicalBefore, await ReadCanonicalRunAsync(paths, runId));
             app.AssertHealthy();
             await AssertAmbiguousBrowserHealthyAsync(browser, runId);
         }
@@ -217,6 +235,22 @@ public sealed partial class BrowserFlowTests
         return browser.EvaluateStringAsync($"(async () => {{ const response = await fetch({encodedRoute}, {{ cache: 'no-store' }}); return response.status + '|' + await response.text(); }})()");
     }
 
+    private static async Task<GovernedLoopEffectAttempt> ReadCanonicalEffectAttemptAsync(WorkspacePaths paths, string runId)
+    {
+        using var runs = new CustomLoopRunStore(paths);
+        var run = await runs.GetAsync(runId);
+        var effectBinding = run?.HumanReview?.Request.Binding.EffectAttempt
+            ?? throw new InvalidOperationException($"Canonical Human Review effect binding for {runId} was not found.");
+        var read = await new GovernedLoopEffectAttemptStore(paths).ReadAsync(run!.HumanReview!.Request.Binding.WorkspaceId, effectBinding.OperationId, effectBinding.EffectGeneration);
+        Assert.Equal(GovernedLoopEffectAttemptReadStatus.Current, read.Status);
+        return Assert.IsType<GovernedLoopEffectAttempt>(read.Attempt);
+    }
+
+    private static int CountEffectAttemptArtifacts(WorkspacePaths paths)
+        => Directory.Exists(paths.GovernedLoopEffectAttemptsPath)
+            ? Directory.EnumerateFiles(paths.GovernedLoopEffectAttemptsPath, "*", SearchOption.AllDirectories).Count()
+            : 0;
+
     private static string ReadApprovalDecision(string serializedReview)
     {
         using var document = JsonDocument.Parse(serializedReview);
@@ -228,11 +262,13 @@ public sealed partial class BrowserFlowTests
     {
         var runFragment = "/api/human-reviews/" + Uri.EscapeDataString(runId);
         var evidenceFragment = runFragment + "/evidence";
+        var decisionFragment = runFragment + "/approve";
         var diagnostics = browser.DiagnosticsSnapshot();
         var evidence409 = diagnostics.Any(item => item.Contains(evidenceFragment, StringComparison.Ordinal) && (item.Contains("\"status\":409", StringComparison.Ordinal) || item.Contains("status of 409", StringComparison.Ordinal)));
         var evidence503 = diagnostics.Any(item => item.Contains(evidenceFragment, StringComparison.Ordinal) && item.Contains("\"status\":503", StringComparison.Ordinal));
         var detail409 = diagnostics.Any(item => item.Contains(runFragment, StringComparison.Ordinal) && !item.Contains(evidenceFragment, StringComparison.Ordinal) && (item.Contains("\"status\":409", StringComparison.Ordinal) || item.Contains("status of 409", StringComparison.Ordinal)));
         var detail503 = diagnostics.Any(item => item.Contains(runFragment, StringComparison.Ordinal) && !item.Contains(evidenceFragment, StringComparison.Ordinal) && (item.Contains("\"status\":503", StringComparison.Ordinal) || item.Contains("status of 503", StringComparison.Ordinal)));
+        var decision400 = diagnostics.Any(item => item.Contains(decisionFragment, StringComparison.Ordinal) && (item.Contains("\"status\":400", StringComparison.Ordinal) || item.Contains("status of 400", StringComparison.Ordinal)));
         var expectedFailures = new List<(string UrlFragment, int StatusCode)>();
         if (evidence409)
         {
@@ -252,6 +288,11 @@ public sealed partial class BrowserFlowTests
         if (detail503)
         {
             expectedFailures.Add((runFragment, 503));
+        }
+
+        if (decision400)
+        {
+            expectedFailures.Add((decisionFragment, 400));
         }
 
         await browser.AssertHealthyAsync(expectedFailures.ToArray());

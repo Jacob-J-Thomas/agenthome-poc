@@ -6,6 +6,7 @@ using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Authority;
 using EmbodySense.Core.Persistence.Capabilities;
+using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.E2EBrowserHost;
 using EmbodySense.Tests.Support;
@@ -250,7 +251,8 @@ public sealed partial class BrowserFlowTests
         await InstallBrowserModelProfilesAsync(workspace.RootPath, capabilityTrustRoot, [BrowserProfileWebHost.CreateDescriptor(profile)]);
         await SeedHumanReviewReadinessAuthorityAsync(paths, capabilityTrustRoot);
         var runId = "browser-human-review-security";
-        await HumanReviewBrowserFixture.SeedPendingAsync(paths, runId, "<script>secret-canary</script>", capabilityTrustRoot: capabilityTrustRoot);
+        const string PublicPreview = "<script>window.__humanReviewXssExecuted = true;</script><img src=x onerror=\"window.__humanReviewXssExecuted = true\">public-review-canary";
+        await HumanReviewBrowserFixture.SeedPendingAsync(paths, runId, "<script>secret-canary</script>", capabilityTrustRoot: capabilityTrustRoot, publicPreviewDetail: PublicPreview);
         await using var app = await ExternalWebApplicationProcess.StartBrowserProfileHostAsync(workspace.RootPath, GetFreePort(), codexExecutable, "gpt-test", capabilityTrustRoot, [profile]);
         await using var browser = await HeadlessBrowserSession.StartAsync(app.BaseUrl);
         try
@@ -258,17 +260,23 @@ public sealed partial class BrowserFlowTests
             await InitializeWorkspaceAsyncIfNeededAsync(browser);
             await OpenHumanReviewAsync(browser);
             await SelectHumanReviewAsync(browser, runId);
+            var canonicalBefore = await ReadCanonicalRunAsync(paths, runId);
+            using var beforeDocument = JsonDocument.Parse(await ReadHumanReviewAsync(browser, runId));
+            var expectedLifecycleVersion = beforeDocument.RootElement.GetProperty("detail").GetProperty("summary").GetProperty("lifecycleVersion").GetInt32();
             var anonymousStatus = await browser.EvaluateInt32Async($"(async () => {{ const response = await fetch('/api/human-reviews/{Uri.EscapeDataString(runId)}/approve', {{ method: 'POST', credentials: 'omit', headers: {{ 'Content-Type': 'application/json' }}, body: JSON.stringify({{ expectedLifecycleVersion: 1, operationId: 'anonymous-operation' }}) }}); return response.status; }})()");
             Assert.Equal(401, anonymousStatus);
-            var forgedStatus = await browser.EvaluateInt32Async($"(async () => {{ const response = await fetch('/api/human-reviews/{Uri.EscapeDataString(runId)}/reject', {{ method: 'POST', headers: {{ 'Content-Type': 'application/json' }}, body: JSON.stringify({{ expectedLifecycleVersion: 999, operationId: 'forged-operation', actor: 'forged', role: 'admin', scope: 'all' }}) }}); return response.status; }})()");
+            var forgedStatus = await browser.EvaluateInt32Async($"(async () => {{ const response = await fetch('/api/human-reviews/{Uri.EscapeDataString(runId)}/reject', {{ method: 'POST', headers: {{ 'Content-Type': 'application/json' }}, body: JSON.stringify({{ expectedLifecycleVersion: {expectedLifecycleVersion}, operationId: 'forged-authority-body', actor: 'forged', role: 'admin', scope: 'all' }}) }}); return response.status; }})()");
             Assert.Equal(400, forgedStatus);
             var body = await browser.EvaluateStringAsync("document.body.textContent");
             Assert.DoesNotContain("secret-canary", body, StringComparison.Ordinal);
             Assert.DoesNotContain("grantReference", body, StringComparison.Ordinal);
             Assert.DoesNotContain("eligibleRespondents", body, StringComparison.Ordinal);
-            Assert.False(await browser.EvaluateBooleanAsync("document.body.innerHTML.includes('<script>')"));
+            Assert.Contains(PublicPreview, body, StringComparison.Ordinal);
+            Assert.False(await browser.EvaluateBooleanAsync("document.querySelectorAll('#humanReviewPreviews script, #humanReviewPreviews img, #humanReviewPreviews [onerror], #humanReviewPreviews [onload]').length > 0"));
+            Assert.False(await browser.EvaluateBooleanAsync("window.__humanReviewXssExecuted === true"));
             Assert.True(await browser.EvaluateBooleanAsync("document.querySelector('[data-testid=\\\"human-review-nav\\\"]')?.getAttribute('aria-controls') === 'humanReviewView'"));
             Assert.True(await browser.EvaluateBooleanAsync("document.getElementById('humanReviewActionStatus').getAttribute('aria-live') === 'assertive'"));
+            Assert.Equal(canonicalBefore, await ReadCanonicalRunAsync(paths, runId));
             app.AssertHealthy();
             await browser.AssertHealthyAsync(
                 ($"/api/human-reviews/{runId}/approve", 401),
@@ -381,6 +389,13 @@ public sealed partial class BrowserFlowTests
     {
         var route = JsonSerializer.Serialize($"/api/human-reviews/{Uri.EscapeDataString(runId)}");
         return browser.EvaluateStringAsync($"(async () => {{ const response = await fetch({route}, {{ cache: 'no-store' }}); if (!response.ok) throw new Error('Human Review read failed: ' + response.status); return JSON.stringify(await response.json()); }})()");
+    }
+
+    private static async Task<string> ReadCanonicalRunAsync(WorkspacePaths paths, string runId)
+    {
+        using var store = new CustomLoopRunStore(paths);
+        var run = await store.GetAsync(runId);
+        return Convert.ToBase64String(CustomLoopRunArtifactSerializer.Serialize(run ?? throw new InvalidOperationException($"Canonical run {runId} was not found.")));
     }
 
     private static void AssertCanonicalApproval(string serializedReview)

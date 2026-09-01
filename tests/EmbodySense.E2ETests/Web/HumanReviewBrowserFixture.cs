@@ -62,7 +62,7 @@ namespace EmbodySense.E2ETests.Web;
 internal static class HumanReviewBrowserFixture
 {
     private const string ConversationTurnCapabilityId = "org.embodysense/conversation-turn";
-    public static async Task SeedPendingAsync(WorkspacePaths paths, string runId, string prompt, string reviewerRoleId = "governed-reviewer", TimeSpan? requestLifetime = null, bool includePreDispatchEffect = false, bool makeEffectAmbiguous = false, string? capabilityTrustRoot = null)
+    public static async Task SeedPendingAsync(WorkspacePaths paths, string runId, string prompt, string reviewerRoleId = "governed-reviewer", TimeSpan? requestLifetime = null, bool includePreDispatchEffect = false, bool makeEffectAmbiguous = false, string? capabilityTrustRoot = null, DateTimeOffset? requestExpiresAtUtc = null, string? publicPreviewDetail = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
         ArgumentException.ThrowIfNullOrWhiteSpace(runId);
@@ -174,7 +174,7 @@ internal static class HumanReviewBrowserFixture
             CustomLoopSequentialOutcomeArtifactHash.Compute(parkedEvent),
             parkedEvent.TimestampUtc);
         var blocked = blockedTransition.Frontier ?? throw new InvalidOperationException("The browser Human Review fixture did not produce a blocked frontier.");
-        var request = await CreateRequest(started, blocked, reviewerRoleId, requestLifetime, includePreDispatchEffect, makeEffectAmbiguous, paths).ConfigureAwait(false);
+        var request = await CreateRequest(started, blocked, reviewerRoleId, requestLifetime, includePreDispatchEffect, makeEffectAmbiguous, paths, requestExpiresAtUtc, publicPreviewDetail).ConfigureAwait(false);
         var admission = await new HumanReviewAdmissionService(store).AdmitAsync(new HumanReviewAdmissionCommand(started.Id, started.LifecycleVersion, request, blocked, parkedEvent)).ConfigureAwait(false);
         if (admission.Status != CustomLoopRunStoreStatus.Updated)
         {
@@ -552,7 +552,7 @@ internal static class HumanReviewBrowserFixture
         return parked with { SequentialNodeEvidence = evidence };
     }
 
-    private static async Task<HumanReviewRequest> CreateRequest(CustomLoopRunRecord predecessor, GovernedLoopFrontierPosture blocked, string reviewerRoleId, TimeSpan? requestLifetime, bool includePreDispatchEffect, bool makeEffectAmbiguous, WorkspacePaths paths)
+    private static async Task<HumanReviewRequest> CreateRequest(CustomLoopRunRecord predecessor, GovernedLoopFrontierPosture blocked, string reviewerRoleId, TimeSpan? requestLifetime, bool includePreDispatchEffect, bool makeEffectAmbiguous, WorkspacePaths paths, DateTimeOffset? requestExpiresAtUtc, string? publicPreviewDetail)
     {
         var activation = Assert.Single(blocked.Payload.Nodes, item => item.Status == GovernedLoopNodeExecutionStatus.ReviewBlocked);
         var hash = Hash('a');
@@ -599,11 +599,15 @@ internal static class HumanReviewBrowserFixture
         var scope = HumanReviewContractHash.ApplyApprovalScope(new HumanReviewApprovalScope(includePreDispatchEffect ? HumanReviewApprovalScopeKind.PreDispatchEffect : HumanReviewApprovalScopeKind.Continuation, binding.BindingHash, binding.EffectAttempt?.EffectAttemptId, string.Empty));
         var lifetime = requestLifetime ?? TimeSpan.FromHours(1);
         var createdAtUtc = blocked.Payload.UpdatedAtUtc;
-        var dueAtUtc = lifetime < TimeSpan.FromMinutes(10) ? createdAtUtc : createdAtUtc.AddMinutes(10);
-        var timing = new HumanReviewTiming(createdAtUtc, dueAtUtc, createdAtUtc.Add(lifetime));
+        var expiresAtUtc = requestExpiresAtUtc ?? createdAtUtc.Add(lifetime);
+        var dueAtUtc = requestExpiresAtUtc is null
+            ? lifetime < TimeSpan.FromMinutes(10) ? createdAtUtc : createdAtUtc.AddMinutes(10)
+            : createdAtUtc;
+        var timing = new HumanReviewTiming(createdAtUtc, dueAtUtc, expiresAtUtc);
         var requestId = "review-request-" + predecessor.Id;
         var operationId = "review-operation-" + predecessor.Id;
-        return HumanReviewContractHash.ApplyRequest(new HumanReviewRequest(1, requestId, operationId, binding, includePreDispatchEffect ? HumanReviewPurpose.PreDispatchEffect : HumanReviewPurpose.Continuation, ImmutableArray.Create(HumanReviewDecisionKind.Approve, HumanReviewDecisionKind.Reject, HumanReviewDecisionKind.Cancel, HumanReviewDecisionKind.RequestInformation), ImmutableArray.Create(new HumanReviewReviewerScope(reviewerRoleId, ImmutableArray.Create("review-scope-one"))), scope, ImmutableArray.Create(HumanReviewContractHash.ApplyPreview(new HumanReviewRedactedPreview(HumanReviewPreviewKind.Action, "Action", "Redacted action.", string.Empty)), HumanReviewContractHash.ApplyPreview(new HumanReviewRedactedPreview(HumanReviewPreviewKind.Result, "Result", "Redacted result.", string.Empty)), HumanReviewContractHash.ApplyPreview(new HumanReviewRedactedPreview(HumanReviewPreviewKind.Evidence, "Evidence", "Redacted evidence.", string.Empty))), timing, HumanReviewContractHash.ApplyProvenance(new HumanReviewProvenance(HumanReviewProvenanceKind.Server, "human-review-browser-fixture", operationId, timing.CreatedAtUtc, string.Empty)), string.Empty));
+        var previewDetail = publicPreviewDetail ?? "Redacted action.";
+        return HumanReviewContractHash.ApplyRequest(new HumanReviewRequest(1, requestId, operationId, binding, includePreDispatchEffect ? HumanReviewPurpose.PreDispatchEffect : HumanReviewPurpose.Continuation, ImmutableArray.Create(HumanReviewDecisionKind.Approve, HumanReviewDecisionKind.Reject, HumanReviewDecisionKind.Cancel, HumanReviewDecisionKind.RequestInformation), ImmutableArray.Create(new HumanReviewReviewerScope(reviewerRoleId, ImmutableArray.Create("review-scope-one"))), scope, ImmutableArray.Create(HumanReviewContractHash.ApplyPreview(new HumanReviewRedactedPreview(HumanReviewPreviewKind.Action, "Action", previewDetail, string.Empty)), HumanReviewContractHash.ApplyPreview(new HumanReviewRedactedPreview(HumanReviewPreviewKind.Result, "Result", "Redacted result.", string.Empty)), HumanReviewContractHash.ApplyPreview(new HumanReviewRedactedPreview(HumanReviewPreviewKind.Evidence, "Evidence", "Redacted evidence.", string.Empty))), timing, HumanReviewContractHash.ApplyProvenance(new HumanReviewProvenance(HumanReviewProvenanceKind.Server, "human-review-browser-fixture", operationId, timing.CreatedAtUtc, string.Empty)), string.Empty));
     }
 
     private static GovernedLoopEffectAttempt CreateEffectAttempt(CustomLoopRunRecord predecessor, HumanReviewBinding binding)

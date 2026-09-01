@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Globalization;
 using EmbodySense.Core.Application.Capabilities.Models;
 using EmbodySense.Core.Application.CommandActions.Models;
 using EmbodySense.Core.Application.Inference.Profiles;
@@ -53,6 +54,7 @@ namespace EmbodySense.E2EBrowserHost
                 .ToArray();
             var providers = specs.Select(CreateRuntimeProvider).ToArray();
             var options = WebRunOptions.FromArguments(args);
+            var humanReviewTestClockUtc = ParseOptionalUtcClock(args);
             var commandActionProvider = commandActions.Length == 0
                 ? null
                 : new CommandActionRuntimeProvider(
@@ -83,6 +85,14 @@ namespace EmbodySense.E2EBrowserHost
                         commandActionRuntimeProvider: commandActionProvider)
                         .WithHumanReviewDecisionAuthorizationProvider(decisionAuthorizationProvider));
             });
+            if (humanReviewTestClockUtc is { } testClock)
+            {
+                builder.Services.RemoveAll<IWebHumanReviewRuntime>();
+                builder.Services.AddSingleton<IWebHumanReviewRuntime>(provider => new DeterministicHumanReviewRuntime(
+                    provider.GetRequiredService<WebAgentRuntimeHost>(),
+                    options.WorkingDirectory,
+                    testClock));
+            }
             await using var application = builder.Build();
             EmbodySense.Web.Program.ConfigurePipeline(application);
             await application.RunAsync();
@@ -251,6 +261,23 @@ namespace EmbodySense.E2EBrowserHost
         private static string RequiredOption(string[] args, string name)
             => OptionValues(args, name).SingleOrDefault()
                 ?? throw new ArgumentException($"Option {name} is required exactly once.");
+
+        private static DateTimeOffset? ParseOptionalUtcClock(string[] args)
+        {
+            var value = OptionValues(args, "--human-review-test-clock-utc").SingleOrDefault();
+            if (value is null)
+            {
+                return null;
+            }
+
+            if (!DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var parsed)
+                || parsed.Offset != TimeSpan.Zero)
+            {
+                throw new ArgumentException("The Human Review test clock must be an exact UTC timestamp.", nameof(args));
+            }
+
+            return parsed;
+        }
 
         private static IEnumerable<string> OptionValues(string[] args, string name)
         {

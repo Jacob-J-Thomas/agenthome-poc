@@ -61,7 +61,8 @@ internal sealed class ExternalWebApplicationProcess : IAsyncDisposable
         string model,
         string capabilityTrustRoot,
         IReadOnlyList<BrowserModelProfileSpec> profiles,
-        IReadOnlyList<BrowserCommandActionSpec>? commandActions = null)
+        IReadOnlyList<BrowserCommandActionSpec>? commandActions = null,
+        DateTimeOffset? humanReviewTestClockUtc = null)
     {
         var hostAssemblyPath = typeof(BrowserProfileWebHost).Assembly.Location;
         if (!File.Exists(hostAssemblyPath))
@@ -83,6 +84,11 @@ internal sealed class ExternalWebApplicationProcess : IAsyncDisposable
         {
             additionalArguments.Add("--command-action-registration");
             additionalArguments.Add(BrowserProfileWebHost.Serialize(commandAction));
+        }
+        if (humanReviewTestClockUtc is { } testClock)
+        {
+            additionalArguments.Add("--human-review-test-clock-utc");
+            additionalArguments.Add(testClock.ToUniversalTime().ToString("O", System.Globalization.CultureInfo.InvariantCulture));
         }
 
         var runtimeConfigPath = Path.Combine(AppContext.BaseDirectory, "EmbodySense.E2ETests.runtimeconfig.json");
