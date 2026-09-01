@@ -30,11 +30,16 @@ public sealed class HumanReviewsHttpIntegrationTests
             var token = app.Services.GetRequiredService<WebSessionSecurity>().Token;
             using var missingToken = await client.GetAsync("/api/human-reviews");
             using var invalidToken = await SendAsync(client, HttpMethod.Get, "/api/human-reviews", "invalid-token");
+            using var queryToken = await client.GetAsync($"/api/human-reviews?access_token={Uri.EscapeDataString(token)}");
             using var authorized = await SendAsync(client, HttpMethod.Get, "/api/human-reviews?maximumCount=1", token);
             using var invalidPage = await SendAsync(client, HttpMethod.Get, "/api/human-reviews?maximumCount=51", token);
 
             Assert.Equal(HttpStatusCode.Unauthorized, missingToken.StatusCode);
             Assert.Equal(HttpStatusCode.Unauthorized, invalidToken.StatusCode);
+            Assert.Equal(HttpStatusCode.Unauthorized, queryToken.StatusCode);
+            AssertNoStore(missingToken);
+            AssertNoStore(invalidToken);
+            AssertNoStore(queryToken);
             Assert.Equal(HttpStatusCode.OK, authorized.StatusCode);
             AssertNoStore(authorized);
             Assert.Equal(HttpStatusCode.BadRequest, invalidPage.StatusCode);
