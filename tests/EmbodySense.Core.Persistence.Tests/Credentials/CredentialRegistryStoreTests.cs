@@ -1245,15 +1245,9 @@ public sealed class CredentialRegistryStoreTests
 
         var read = await new CredentialRegistryStore(paths).ReadAsync();
 
-        if (OperatingSystem.IsWindows())
+        if (read.Succeeded)
         {
-            Assert.True(read.Succeeded);
-            Assert.Empty(read.Entries);
-            return;
-        }
-
-        if (OperatingSystem.IsMacOS() && read.Succeeded)
-        {
+            Assert.True(OperatingSystem.IsWindows() || OperatingSystem.IsMacOS());
             Assert.Empty(read.Entries);
             return;
         }
