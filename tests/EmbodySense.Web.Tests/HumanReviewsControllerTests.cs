@@ -4,6 +4,7 @@ using EmbodySense.Web.Controllers;
 using EmbodySense.Web.Models;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace EmbodySense.Web.Tests;
 
@@ -28,7 +29,7 @@ public sealed class HumanReviewsControllerTests
     public async Task List_projects_bounds_and_all_closed_statuses()
     {
         var runtime = new HumanReviewControllerTestRuntime();
-        var controller = new HumanReviewsController(runtime, new HumanReviewControllerTestNotifier());
+        var controller = CreateController(runtime, new HumanReviewControllerTestNotifier());
 
         Assert.Equal(StatusCodes.Status400BadRequest, (await controller.List(0)).ResultStatusCode());
         Assert.Equal(StatusCodes.Status400BadRequest, (await controller.List(51)).ResultStatusCode());
@@ -54,7 +55,7 @@ public sealed class HumanReviewsControllerTests
     public async Task Reads_project_all_statuses_and_nested_effect_failures_without_dropping_projection()
     {
         var runtime = new HumanReviewControllerTestRuntime();
-        var controller = new HumanReviewsController(runtime, new HumanReviewControllerTestNotifier());
+        var controller = CreateController(runtime, new HumanReviewControllerTestNotifier());
         foreach (var (status, expected) in new[]
         {
             (HumanReviewReadStatus.Ready, StatusCodes.Status200OK),
@@ -99,7 +100,7 @@ public sealed class HumanReviewsControllerTests
     {
         var runtime = new HumanReviewControllerTestRuntime();
         var notifier = new HumanReviewControllerTestNotifier();
-        var controller = new HumanReviewsController(runtime, notifier);
+        var controller = CreateController(runtime, notifier);
         var valid = new WebHumanReviewDecisionRequest(3, "operation-1", null);
 
         Assert.Equal(StatusCodes.Status400BadRequest, (await controller.Approve("run-1", valid with { Detail = "not-allowed" })).ResultStatusCode());
@@ -147,7 +148,7 @@ public sealed class HumanReviewsControllerTests
             DecisionResponse = new HumanReviewDecisionResult(HumanReviewDecisionStatus.InformationRequested, "operation-1", null)
         };
         var notifier = new HumanReviewControllerTestNotifier { Exception = new InvalidOperationException("private notifier detail") };
-        var controller = new HumanReviewsController(runtime, notifier);
+        var controller = CreateController(runtime, notifier);
         var response = await controller.RequestInformation("run-1", new WebHumanReviewDecisionRequest(1, "operation-1", "need context"));
 
         Assert.Equal(StatusCodes.Status200OK, response.ResultStatusCode());
@@ -163,7 +164,7 @@ public sealed class HumanReviewsControllerTests
     public async Task Uninitialized_workspace_returns_established_conflict_before_runtime_operations()
     {
         var runtime = new HumanReviewControllerTestRuntime { IsWorkspaceInitialized = false };
-        var controller = new HumanReviewsController(runtime, new HumanReviewControllerTestNotifier());
+        var controller = CreateController(runtime, new HumanReviewControllerTestNotifier());
 
         Assert.Equal(StatusCodes.Status409Conflict, (await controller.List(1)).ResultStatusCode());
         Assert.Equal(StatusCodes.Status409Conflict, (await controller.Read("run-1")).ResultStatusCode());
@@ -192,4 +193,7 @@ public sealed class HumanReviewsControllerTests
             HumanReviewReadStatus.Corrupt => HumanReviewEvidenceReadStatus.Corrupt,
             _ => HumanReviewEvidenceReadStatus.Unavailable,
         };
+
+    private static HumanReviewsController CreateController(HumanReviewControllerTestRuntime runtime, HumanReviewControllerTestNotifier notifier)
+        => new(runtime, notifier, NullLogger<HumanReviewsController>.Instance);
 }

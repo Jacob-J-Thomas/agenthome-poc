@@ -3,7 +3,6 @@ using EmbodySense.Web.Models;
 using EmbodySense.Web.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.Extensions.Logging.Abstractions;
 
 namespace EmbodySense.Web.Controllers;
 
@@ -35,14 +34,6 @@ public sealed class HumanReviewsController : ControllerBase
         _runtime = runtime ?? throw new ArgumentNullException(nameof(runtime));
         _notifier = notifier ?? throw new ArgumentNullException(nameof(notifier));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
-    }
-
-    /// <summary>Creates the projection with a no-op logger for direct composition and focused tests.</summary>
-    /// <param name="runtime">The process-wide runtime facade that owns canonical Human Review operations.</param>
-    /// <param name="notifier">The value-free refresh notifier used after a new durable decision.</param>
-    public HumanReviewsController(IWebHumanReviewRuntime runtime, IWebHumanReviewNotifier notifier)
-        : this(runtime, notifier, NullLogger<HumanReviewsController>.Instance)
-    {
     }
 
     /// <summary>Lists one bounded page of detached Human Review projections.</summary>
