@@ -42,6 +42,10 @@ public enum RuntimeCommandId
     /// </summary>
     DefaultConversationReview,
     /// <summary>
+    /// Identifies default-conversation Human Input inspection and response commands projected by the Startup runtime.
+    /// </summary>
+    HumanInput,
+    /// <summary>
     /// Identifies the cancel pending input runtime command ID.
     /// </summary>
     CancelPendingInput

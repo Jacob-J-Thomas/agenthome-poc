@@ -447,6 +447,8 @@ public sealed class AgentRuntimeFactory
             var permissionService = new ToolPermissionService(paths, permissionPolicy);
             var auditLog = new AuditLog(paths);
             var actor = ResolveActor(runtimeSurface);
+            var humanInputAuthorityProvider = _humanInputAuthorityProvider
+                ?? (runtimeSurface == AgentRuntimeSurface.Cli ? new AgentRuntimeSurfaceHumanInputAuthorityProvider(actor) : null);
             customRunStore = _customLoopRunStoreProvider?.Borrow(paths) ?? new CustomLoopRunStore(paths);
             _capabilityTrustProvider.RequireDisjointWorkspace(paths.RootPath);
             var capabilityAuthority = new CapabilityAuthorityTransaction(paths);
@@ -738,7 +740,7 @@ public sealed class AgentRuntimeFactory
                 governedGrantResolver,
                 capabilityAuthority,
                 operationalClock,
-                _humanInputAuthorityProvider);
+                humanInputAuthorityProvider);
             var humanInputBindingSource = new HumanInputResponseContinuationBindingSource(humanInputResponses);
             var humanInputRecovery = new HumanInputResponseContinuationRecoveryStore(customRunStore);
             var humanInputReadiness = new HumanInputContinuationReadinessSignal();

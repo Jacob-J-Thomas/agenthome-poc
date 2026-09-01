@@ -11,6 +11,7 @@ using EmbodySense.Core.Common.Authority;
 using EmbodySense.Core.Common.HumanInput.Lifecycle;
 using EmbodySense.Core.Common.HumanInput.Lifecycle.Models;
 using EmbodySense.Core.Common.HumanInput.Models;
+using EmbodySense.Core.Common.HumanInput.Responses;
 using EmbodySense.Core.Common.HumanInput.Responses.Models;
 using EmbodySense.Core.Startup.HumanInput.Models;
 using EmbodySense.Core.Startup.Runtime;
@@ -251,6 +252,9 @@ public sealed class HumanInputRuntimeFacade
     /// <param name="cancellationToken">A token that cancels before durable response intent begins.</param>
     /// <returns>The canonical redacted response operation result.</returns>
     /// <exception cref="OperationCanceledException">Thrown when cancellation is requested before durable intent begins.</exception>
+    /// <remarks>When an exact response operation is already durable, the facade verifies the caller's complete input against
+    /// its canonical command hash and reconstructs the original optimistic request terms from authenticated evidence. A later
+    /// lifecycle posture therefore cannot turn an ambiguous-transport retry into a different operation.</remarks>
     public async Task<HumanInputOperationResult> SubmitResponseAsync(
         HumanInputResponseOperationInput? input,
         CancellationToken cancellationToken = default)
@@ -269,6 +273,29 @@ public sealed class HumanInputRuntimeFacade
         if (observed.Status != HumanInputResponseLifecycleStoreReadStatus.Ready || observed.Snapshot is null)
         {
             return MapResponseReadFailure(input.OperationId, observed.Status);
+        }
+
+        HumanInputResponseOperationEvidence[] persisted;
+        try
+        {
+            persisted = observed.Snapshot.Operations
+                .Where(operation => string.Equals(operation.OperationId, input.OperationId, StringComparison.Ordinal))
+                .Take(2)
+                .ToArray();
+        }
+        catch (Exception)
+        {
+            return Ambiguous(input.OperationId);
+        }
+
+        if (persisted.Length > 1)
+        {
+            return Ambiguous(input.OperationId);
+        }
+
+        if (persisted.Length == 1)
+        {
+            return await SubmitPersistedResponseReplayAsync(input, observed.Snapshot, persisted[0], cancellationToken).ConfigureAwait(false);
         }
 
         var expectedRequest = observed.Snapshot.Request.RequestVersions.SingleOrDefault(
@@ -320,12 +347,7 @@ public sealed class HumanInputRuntimeFacade
             return Invalid(input.OperationId);
         }
 
-        var service = new HumanInputResponseLifecycleService(
-            _responseStore,
-            new AgentRuntimeHumanInputResponseActorAuthenticator(_provider),
-            _authorityTransaction,
-            _workspaceId,
-            _timeProvider);
+        var service = CreateResponseLifecycleService();
         var result = await service.MutateAsync(command, cancellationToken).ConfigureAwait(false);
         return await MapResponseResultAsync(result, input.RequestId, CancellationToken.None).ConfigureAwait(false);
     }
@@ -449,6 +471,62 @@ public sealed class HumanInputRuntimeFacade
         return await MutateLifecycleAsync(command, input.RequestId, cancellationToken).ConfigureAwait(false);
     }
 
+    private async Task<HumanInputOperationResult> SubmitPersistedResponseReplayAsync(
+        HumanInputResponseOperationInput input,
+        HumanInputResponseLifecycleStoreSnapshot snapshot,
+        HumanInputResponseOperationEvidence evidence,
+        CancellationToken cancellationToken)
+    {
+        if (!HumanInputResponseOperationEvidenceSnapshot.TryCapture(evidence, out var captured, out _)
+            || captured is null
+            || !HumanInputResponseEligibilityEvidenceHash.Matches(captured)
+            || !HumanInputResponseOperationCausality.Matches(captured, snapshot))
+        {
+            return Ambiguous(input.OperationId);
+        }
+
+        if (!MatchesResponseReplayIntent(input, captured))
+        {
+            return await ConflictResponseReplayAsync(input, cancellationToken).ConfigureAwait(false);
+        }
+
+        HumanInputResponseLifecycleCommand command;
+        try
+        {
+            command = HumanInputResponseLifecycleCommandHash.Apply(new HumanInputResponseLifecycleCommand(
+                HumanInputResponseLifecycleCommand.CurrentSchemaVersion,
+                input.OperationId,
+                input.Kind,
+                input.RequestId,
+                captured.ExpectedLifecycleVersion,
+                captured.ExpectedLifecycleStatus,
+                captured.Request,
+                captured.ExpectedBinding,
+                input.Kind == HumanInputResponseOperationKind.Submit ? input.ResponseId : null,
+                input.Kind == HumanInputResponseOperationKind.Submit ? input.Value : null,
+                input.Kind == HumanInputResponseOperationKind.Submit ? input.Explanation : null,
+                captured.TargetResponses,
+                string.Empty));
+        }
+        catch (ArgumentException)
+        {
+            return Invalid(input.OperationId);
+        }
+
+        var result = await CreateResponseLifecycleService().MutateAsync(command, cancellationToken).ConfigureAwait(false);
+        return await MapResponseResultAsync(result, input.RequestId, CancellationToken.None).ConfigureAwait(false);
+    }
+
+    private async Task<HumanInputOperationResult> ConflictResponseReplayAsync(
+        HumanInputResponseOperationInput input,
+        CancellationToken cancellationToken)
+        => new(
+            HumanInputOperationStatus.Conflict,
+            input.OperationId,
+            null,
+            await TryReadPostureAsync(input.RequestId, cancellationToken).ConfigureAwait(false),
+            []);
+
     private async Task<HumanInputOperationResult> MutateLifecycleAsync(
         HumanInputRequestLifecycleCommand command,
         string requestId,
@@ -464,6 +542,14 @@ public sealed class HumanInputRuntimeFacade
         var result = await service.MutateAsync(command, cancellationToken).ConfigureAwait(false);
         return await MapLifecycleResultAsync(result, requestId, CancellationToken.None).ConfigureAwait(false);
     }
+
+    private HumanInputResponseLifecycleService CreateResponseLifecycleService()
+        => new(
+            _responseStore,
+            new AgentRuntimeHumanInputResponseActorAuthenticator(_provider!),
+            _authorityTransaction,
+            _workspaceId,
+            _timeProvider);
 
     private async Task<HumanInputOperationResult> MapLifecycleResultAsync(
         HumanInputRequestLifecycleMutationResult result,
@@ -615,6 +701,28 @@ public sealed class HumanInputRuntimeFacade
             && input.ExpectedLifecycleStatus == evidence.ExpectedLifecycleStatus
             && Equals(input.ExpectedRequest, evidence.ExpectedRequest)
             && Equals(surfaceReason, evidence.Reason);
+
+    private static bool MatchesResponseReplayIntent(
+        HumanInputResponseOperationInput input,
+        HumanInputResponseOperationEvidence evidence)
+    {
+        if (input.Kind != evidence.Kind
+            || !string.Equals(input.RequestId, evidence.Request.RequestId, StringComparison.Ordinal)
+            || input.ExpectedLifecycleVersion != evidence.ExpectedLifecycleVersion
+            || input.ExpectedLifecycleStatus != evidence.ExpectedLifecycleStatus
+            || !Equals(input.ExpectedRequest, evidence.Request))
+        {
+            return false;
+        }
+
+        return input.Kind switch
+        {
+            HumanInputResponseOperationKind.Submit => true,
+            HumanInputResponseOperationKind.Withdraw or HumanInputResponseOperationKind.Select => evidence.TargetResponses.Length == 1
+                && string.Equals(input.ResponseId, evidence.TargetResponses[0].ResponseId, StringComparison.Ordinal),
+            _ => false,
+        };
+    }
 
     private static bool RequiresCandidate(HumanInputRequestLifecycleOperationKind kind)
         => kind is HumanInputRequestLifecycleOperationKind.Create

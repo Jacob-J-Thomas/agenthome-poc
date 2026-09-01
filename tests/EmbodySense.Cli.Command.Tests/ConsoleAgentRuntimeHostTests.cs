@@ -26,6 +26,21 @@ public sealed class ConsoleAgentRuntimeHostTests
         Assert.Contains("runtime guide missing: hello", client.Output, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task RunAsync_projects_the_canonical_human_input_catalog_without_a_model_turn()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        await using var runtime = await CreateRuntimeAsync(workspace);
+        var client = new ScriptedRuntimeClient("/human-input list", "/exit");
+
+        var exitCode = await new AgentRuntimeConsoleHost(runtime, client).RunAsync();
+
+        Assert.Equal(0, exitCode);
+        Assert.Contains("No Human Input requests were found.", client.Output, StringComparison.Ordinal);
+        Assert.DoesNotContain("Assistant:", client.Output, StringComparison.Ordinal);
+    }
+
     private static async Task<AgentRuntime> CreateRuntimeAsync(TestWorkspace workspace, AgentRuntimeSurface? runtimeSurface = null)
     {
         return await AgentRuntimeFactory.ForFileCapabilityTrustRoot(new RejectingApprovalPrompt(), workspace.ServerStatePath).CreateAsync(

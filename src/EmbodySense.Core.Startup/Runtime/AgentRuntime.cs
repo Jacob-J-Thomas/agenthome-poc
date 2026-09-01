@@ -65,6 +65,7 @@ public sealed class AgentRuntime : IAsyncDisposable
     private readonly GovernedLoopScheduleAuthoringFacade _governedLoopScheduleAuthoring;
     private readonly IModelProfileCatalogFacade _modelProfiles;
     private readonly HumanInputRuntimeFacade _humanInput;
+    private readonly HumanInputConversationCommandAdapter? _humanInputConversationCommands;
     private readonly DefaultConversationTurnReviewService _defaultConversationReviews;
     private readonly ITriggerWorkerCurrentEvidenceAuthorizer _triggerWorkerCurrentEvidenceAuthorizer;
     private readonly GovernedLoopBackgroundRuntimeHost _governedBackgroundRuntimeHost;
@@ -142,6 +143,9 @@ public sealed class AgentRuntime : IAsyncDisposable
         _governedLoopScheduleAuthoring = governedLoopScheduleAuthoring;
         _modelProfiles = modelProfiles;
         _humanInput = humanInput;
+        _humanInputConversationCommands = surface == AgentRuntimeSurface.Cli
+            ? new HumanInputConversationCommandAdapter(humanInput)
+            : null;
         _defaultConversationReviews = defaultConversationReviews;
         _triggerWorkerCurrentEvidenceAuthorizer = triggerWorkerCurrentEvidenceAuthorizer;
         _governedBackgroundRuntimeHost = governedBackgroundRuntimeHost;
@@ -239,6 +243,21 @@ public sealed class AgentRuntime : IAsyncDisposable
         if (reviewCommand is not null)
         {
             return reviewCommand;
+        }
+
+        if (_humanInputConversationCommands is not null)
+        {
+            var humanInputCommand = await _humanInputConversationCommands.TryHandleAsync(input, cancellationToken);
+            if (humanInputCommand is not null)
+            {
+                _commandService.ClearPendingInput();
+                return humanInputCommand;
+            }
+        }
+        else if (HumanInputConversationCommandAdapter.MatchesCommand(input))
+        {
+            _commandService.ClearPendingInput();
+            return AgentRuntimeTurnResult.CommandOutput("Human Input commands are available only through the CLI runtime.");
         }
 
         var commandResult = await _commandService.TryHandleAsync(input, _conversationState, _state, cancellationToken);
