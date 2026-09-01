@@ -1,4 +1,6 @@
 using System.Collections.Immutable;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Application.Governance.Authority.Grants;
 using EmbodySense.Core.Application.HumanInput.Catalog;
@@ -8,6 +10,7 @@ using EmbodySense.Core.Application.HumanInput.Lifecycle.Models;
 using EmbodySense.Core.Application.HumanInput.Responses;
 using EmbodySense.Core.Application.HumanInput.Responses.Models;
 using EmbodySense.Core.Common.Authority;
+using EmbodySense.Core.Common.HumanInput;
 using EmbodySense.Core.Common.HumanInput.Lifecycle;
 using EmbodySense.Core.Common.HumanInput.Lifecycle.Models;
 using EmbodySense.Core.Common.HumanInput.Models;
@@ -34,6 +37,7 @@ public sealed class HumanInputRuntimeFacade
     private readonly IHumanInputResponseLifecycleStore _responseStore;
     private readonly TimeProvider _timeProvider;
     private readonly string _workspaceId;
+    private readonly IHumanInputSupersedeCandidatePreparer? _candidatePreparer;
 
     internal HumanInputRuntimeFacade(
         string workspaceId,
@@ -44,6 +48,20 @@ public sealed class HumanInputRuntimeFacade
         ICapabilityAuthorityTransaction authorityTransaction,
         TimeProvider timeProvider,
         IAgentRuntimeHumanInputAuthorityProvider? provider)
+        : this(workspaceId, catalog, lifecycleStore, responseStore, grantResolver, authorityTransaction, timeProvider, provider, null)
+    {
+    }
+
+    internal HumanInputRuntimeFacade(
+        string workspaceId,
+        IHumanInputRequestCatalog catalog,
+        IHumanInputRequestLifecycleStore lifecycleStore,
+        IHumanInputResponseLifecycleStore responseStore,
+        IAuthorityGrantResolver grantResolver,
+        ICapabilityAuthorityTransaction authorityTransaction,
+        TimeProvider timeProvider,
+        IAgentRuntimeHumanInputAuthorityProvider? provider,
+        IHumanInputSupersedeCandidatePreparer? candidatePreparer)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(workspaceId);
         _workspaceId = workspaceId;
@@ -54,6 +72,7 @@ public sealed class HumanInputRuntimeFacade
         _authorityTransaction = authorityTransaction ?? throw new ArgumentNullException(nameof(authorityTransaction));
         _timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
         _provider = provider;
+        _candidatePreparer = candidatePreparer;
     }
 
     /// <summary>Reads the first bounded canonical Human Input posture page.</summary>
@@ -106,6 +125,82 @@ public sealed class HumanInputRuntimeFacade
             result.Entry is null ? null : MapPosture(result.Entry));
     }
 
+    /// <summary>Prepares one exact successor candidate while retaining binding and grant material inside Startup.</summary>
+    /// <param name="input">The bounded successor proposal and exact optimistic target terms.</param>
+    /// <param name="cancellationToken">A token that cancels preparation before registry retention.</param>
+    /// <returns>An opaque candidate key or a fail-closed preparation disposition.</returns>
+    public Task<HumanInputSupersedePreparationResult> PrepareSupersedeAsync(HumanInputSupersedePreparationInput? input, CancellationToken cancellationToken = default)
+        => _candidatePreparer is null
+            ? Task.FromResult(new HumanInputSupersedePreparationResult(HumanInputSupersedePreparationStatus.Unavailable, input?.RequestId ?? string.Empty, null, null, "candidate_preparer_unavailable"))
+            : _candidatePreparer.PrepareAsync(input, cancellationToken);
+
+    /// <summary>Submits one Web/other surface lifecycle intent using Startup-owned primitive boundary types.</summary>
+    /// <param name="input">The surface operation with no lower-layer or authority types.</param>
+    /// <param name="cancellationToken">A token that cancels before durable intent begins.</param>
+    /// <returns>The canonical redacted lifecycle outcome.</returns>
+    public Task<HumanInputOperationResult> SubmitSurfaceLifecycleAsync(HumanInputSurfaceLifecycleOperationInput? input, CancellationToken cancellationToken = default)
+    {
+        if (input is null)
+        {
+            return Task.FromResult(Invalid(null));
+        }
+
+        if (!TryParseEnum(input.Kind, out HumanInputRequestLifecycleOperationKind kind)
+            || !TryParseEnum(input.ExpectedLifecycleStatus, out HumanInputRequestLifecycleStatus status)
+            || !HumanInputIdentifier.IsValid(input.OperationId))
+        {
+            return Task.FromResult(Invalid(input?.OperationId));
+        }
+
+        var expected = ToReference(input.ExpectedRequest);
+        return SubmitLifecycleAsync(new HumanInputLifecycleOperationInput(input.OperationId, kind, input.RequestId, input.ExpectedLifecycleVersion, status, expected, input.CandidateKey, input.Reason), cancellationToken);
+    }
+
+    /// <summary>Submits one Web/other surface response intent using Startup-owned primitive boundary types.</summary>
+    /// <param name="input">The surface operation with an untrusted JSON response value.</param>
+    /// <param name="cancellationToken">A token that cancels before durable intent begins.</param>
+    /// <returns>The canonical redacted response outcome.</returns>
+    public Task<HumanInputOperationResult> SubmitSurfaceResponseAsync(HumanInputSurfaceResponseOperationInput? input, CancellationToken cancellationToken = default)
+    {
+        if (input is null)
+        {
+            return Task.FromResult(Invalid(null));
+        }
+
+        if (!TryParseEnum(input.Kind, out HumanInputResponseOperationKind kind)
+            || !TryParseEnum(input.ExpectedLifecycleStatus, out HumanInputRequestLifecycleStatus status)
+            || input.ExpectedRequest is null
+            || !HumanInputIdentifier.IsValid(input.OperationId))
+        {
+            return Task.FromResult(Invalid(input?.OperationId));
+        }
+
+        HumanInputResponseValue? value = null;
+        if (kind == HumanInputResponseOperationKind.Submit)
+        {
+            try
+            {
+                if (input.Value.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null)
+                {
+                    return Task.FromResult(Invalid(input.OperationId));
+                }
+
+                value = JsonSerializer.Deserialize<HumanInputResponseValue>(input.Value.GetRawText(), SurfaceJsonOptions());
+            }
+            catch (JsonException)
+            {
+                return Task.FromResult(Invalid(input.OperationId));
+            }
+
+            if (value is null)
+            {
+                return Task.FromResult(Invalid(input.OperationId));
+            }
+        }
+
+        return SubmitResponseAsync(new HumanInputResponseOperationInput(input.OperationId, kind, input.RequestId, input.ExpectedLifecycleVersion, status, ToReference(input.ExpectedRequest)!, input.ResponseId, value, input.Explanation), cancellationToken);
+    }
+
     /// <summary>Submits one exact lifecycle operation through canonical persistence and server-owned authority.</summary>
     /// <param name="input">The authority-free interface operation intent.</param>
     /// <param name="cancellationToken">A token that cancels before durable lifecycle intent begins.</param>
@@ -118,7 +213,12 @@ public sealed class HumanInputRuntimeFacade
         HumanInputLifecycleOperationInput? input,
         CancellationToken cancellationToken = default)
     {
-        if (input is null || !AuthorityPurpose.TryParse(input.Reason, out var reason, out _))
+        if (input is null)
+        {
+            return Invalid(null);
+        }
+
+        if (!HumanInputIdentifier.IsValid(input.OperationId) || !AuthorityPurpose.TryParse(input.Reason, out var reason, out _))
         {
             return Invalid(input?.OperationId);
         }
@@ -259,7 +359,12 @@ public sealed class HumanInputRuntimeFacade
         HumanInputResponseOperationInput? input,
         CancellationToken cancellationToken = default)
     {
-        if (input is null || input.ExpectedRequest is null)
+        if (input is null)
+        {
+            return Invalid(null);
+        }
+
+        if (input.ExpectedRequest is null || !HumanInputIdentifier.IsValid(input.OperationId))
         {
             return Invalid(input?.OperationId);
         }
@@ -845,4 +950,25 @@ public sealed class HumanInputRuntimeFacade
 
     private static HumanInputOperationResult Unavailable(string? operationId)
         => new(HumanInputOperationStatus.Unavailable, operationId ?? string.Empty, null, null, []);
+
+    private static HumanInputRequestReference? ToReference(HumanInputSurfaceRequestReference? reference)
+        => reference is null
+            ? null
+            : new HumanInputRequestReference(HumanInputRequestReference.CurrentSchemaVersion, reference.RequestId, reference.RequestVersionId, reference.RequestHash);
+
+    private static bool TryParseEnum<T>(string? value, out T parsed) where T : struct, Enum
+    {
+        parsed = default;
+        return !string.IsNullOrWhiteSpace(value)
+            && Enum.TryParse(value, ignoreCase: true, out parsed)
+            && Enum.IsDefined(parsed)
+            && string.Equals(value, parsed.ToString(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static JsonSerializerOptions SurfaceJsonOptions()
+    {
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web) { AllowDuplicateProperties = false, UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow };
+        options.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.KebabCaseLower, allowIntegerValues: false));
+        return options;
+    }
 }

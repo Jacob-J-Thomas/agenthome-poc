@@ -5,6 +5,7 @@ using EmbodySense.Core.Startup.Loops;
 using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Capabilities;
+using EmbodySense.Core.Startup.HumanInput;
 using EmbodySense.Core.Startup.HumanReview;
 using EmbodySense.Web.Hubs;
 using EmbodySense.Web.Services;
@@ -88,6 +89,7 @@ public sealed class ProgramTests
 
         var host = provider.GetRequiredService<WebAgentRuntimeHost>();
         Assert.Same(host, provider.GetRequiredService<IWebHumanReviewRuntime>());
+        Assert.NotNull(provider.GetRequiredService<IWebHumanInputRuntime>());
         Assert.Same(host, provider.GetRequiredService<IWebLoopRuntimeInvoker>());
         var hostedServices = provider.GetServices<IHostedService>().ToArray();
         var governedHostedServices = hostedServices.Where(service => service.GetType().Name == "WebGovernedLoopBackgroundHostedService").ToArray();
@@ -99,12 +101,16 @@ public sealed class ProgramTests
         Assert.Same(provider.GetRequiredService<IWebHumanReviewNotifier>(), provider.GetRequiredService<IWebHumanReviewNotifier>());
         Assert.Same(provider.GetRequiredService<IAgentRuntimeConversationPublicationObserver>(), provider.GetRequiredService<IAgentRuntimeConversationPublicationObserver>());
         Assert.IsAssignableFrom<IHttpContextAccessor>(provider.GetRequiredService<IHttpContextAccessor>());
+        Assert.IsType<WebHumanInputAuthorityProvider>(provider.GetRequiredService<IAgentRuntimeHumanInputAuthorityProvider>());
+        Assert.Same(provider.GetRequiredService<IHumanInputSupersedeCandidateRegistry>(), provider.GetRequiredService<IHumanInputSupersedeCandidateRegistry>());
 
         Assert.Single(services, descriptor => descriptor.ServiceType == typeof(WebAgentRuntimeHost) && descriptor.Lifetime == ServiceLifetime.Singleton);
         Assert.Single(services, descriptor => descriptor.ServiceType == typeof(WebApprovalCoordinator) && descriptor.Lifetime == ServiceLifetime.Singleton);
         Assert.Single(services, descriptor => descriptor.ServiceType == typeof(IWebHumanReviewRuntime) && descriptor.Lifetime == ServiceLifetime.Singleton);
         Assert.Single(services, descriptor => descriptor.ServiceType == typeof(IHumanReviewDecisionAuthorizationProvider) && descriptor.Lifetime == ServiceLifetime.Singleton);
         Assert.Single(services, descriptor => descriptor.ServiceType == typeof(IWebHumanReviewNotifier) && descriptor.Lifetime == ServiceLifetime.Singleton);
+        Assert.Single(services, descriptor => descriptor.ServiceType == typeof(IWebHumanInputRuntime) && descriptor.Lifetime == ServiceLifetime.Singleton);
+        Assert.Single(services, descriptor => descriptor.ServiceType == typeof(IHumanInputSupersedeCandidateRegistry) && descriptor.Lifetime == ServiceLifetime.Singleton);
     }
 
     [Fact]

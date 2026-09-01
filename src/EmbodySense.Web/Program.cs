@@ -8,6 +8,7 @@ using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Core.Startup.Capabilities;
+using EmbodySense.Core.Startup.HumanInput;
 using EmbodySense.Core.Startup.HumanReview;
 using EmbodySense.Web.Hubs;
 using EmbodySense.Web.Services;
@@ -115,20 +116,32 @@ public static class Program
         services.AddSingleton<IWebHumanReviewNotifier, SignalRWebHumanReviewNotifier>();
         services.AddSingleton<IAgentRuntimeConversationPublicationObserver, WebConversationPublicationObserver>();
         services.AddSingleton<WebApprovalCoordinator>();
+        services.AddSingleton<IHumanInputSupersedeCandidateRegistry, HumanInputSupersedeCandidateRegistry>();
+        services.AddSingleton<WebHumanInputAuthorityProvider>(provider => new WebHumanInputAuthorityProvider(
+            provider.GetRequiredService<IHttpContextAccessor>(),
+            provider.GetRequiredService<IHumanInputSupersedeCandidateRegistry>(),
+            options.WorkingDirectory));
+        services.AddSingleton<IAgentRuntimeHumanInputAuthorityProvider>(provider => provider.GetRequiredService<WebHumanInputAuthorityProvider>());
         services.AddSingleton(provider =>
         {
             var approvals = provider.GetRequiredService<WebApprovalCoordinator>();
             var observer = provider.GetRequiredService<IAgentRuntimeConversationPublicationObserver>();
             var decisionAuthorizationProvider = provider.GetRequiredService<IHumanReviewDecisionAuthorizationProvider>();
+            var humanInputAuthorityProvider = provider.GetRequiredService<IAgentRuntimeHumanInputAuthorityProvider>();
+            var humanInputCandidateRegistry = provider.GetRequiredService<IHumanInputSupersedeCandidateRegistry>();
             return new WebAgentRuntimeHost(
                 options,
                 approvals,
                 WorkspaceInitializer.ForWeb(),
                 observer,
                 runtimeStatus => new AgentRuntimeFactory(approvals, observer, runtimeStatus)
-                    .WithHumanReviewDecisionAuthorizationProvider(decisionAuthorizationProvider));
+                    .WithHumanReviewDecisionAuthorizationProvider(decisionAuthorizationProvider)
+                    .WithHumanInputAuthorityProvider(humanInputAuthorityProvider)
+                    .WithHumanInputSupersedeCandidateRegistry(humanInputCandidateRegistry)
+                    .WithoutLegacyCustomLoopToolApprovals());
         });
         services.AddSingleton<IWebHumanReviewRuntime>(provider => provider.GetRequiredService<WebAgentRuntimeHost>());
+        services.AddSingleton<IWebHumanInputRuntime>(provider => new WebHumanInputRuntimeAdapter(provider.GetRequiredService<WebAgentRuntimeHost>()));
         services.AddSingleton(provider => new WebGovernedLoopBackgroundHostedService(provider.GetRequiredService<WebAgentRuntimeHost>()));
         services.AddSingleton<IHostedService>(provider => provider.GetRequiredService<WebGovernedLoopBackgroundHostedService>());
         services.AddSingleton<IWebLoopRuntimeInvoker>(provider => provider.GetRequiredService<WebAgentRuntimeHost>());

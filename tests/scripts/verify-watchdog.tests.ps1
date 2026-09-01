@@ -871,7 +871,8 @@ $humanInputContinuationLinkedSourceExpectations = @(
         Path = "tests/EmbodySense.Core.Persistence.Tests/HumanInput/Requests/HumanInputRequestStoreTestData.cs"
         TestProjects = @(
             "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj",
-            "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj"
+            "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj",
+            "tests/EmbodySense.Web.Tests/EmbodySense.Web.Tests.csproj"
         )
     },
     [pscustomobject]@{
