@@ -149,6 +149,29 @@ public sealed partial class AgentRuntimeFactoryTests
     }
 
     [Fact]
+    public async Task Background_restart_defers_recovery_while_a_stopped_predecessor_retains_the_fenced_lease()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        await using var owner = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Web);
+        await using var replacement = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Web);
+
+        Assert.Equal(AgentRuntimeGovernedLoopBackgroundStartStatus.Started, (await owner.StartGovernedLoopLocalBackgroundWithStatusAsync()).Status);
+        Assert.Equal(AgentRuntimeGovernedLoopBackgroundStopStatus.Stopped, (await owner.StopGovernedLoopLocalBackgroundAsync()).Status);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        Directory.CreateDirectory(paths.CustomLoopRunsPath);
+        await File.WriteAllTextAsync(Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json"), "{\"schemaVersion\":2,\"revision\":1,\"entries\":[]}");
+
+        var start = await replacement.StartGovernedLoopLocalBackgroundWithStatusAsync();
+
+        Assert.Equal(AgentRuntimeGovernedLoopBackgroundStartStatus.OwnedByLivePeer, start.Status);
+        Assert.Equal(AgentRuntimeGovernedLoopBackgroundReadiness.Degraded, start.Readiness);
+        Assert.Equal(AgentRuntimeGovernedLoopBackgroundOwnership.LivePeer, start.Ownership);
+        Assert.True(start.RetryAllowed);
+        Assert.Equal(AgentRuntimeGovernedLoopBackgroundStopStatus.AlreadyStopped, (await replacement.StopGovernedLoopLocalBackgroundAsync()).Status);
+    }
+
+    [Fact]
     public async Task Background_start_fails_closed_when_a_current_human_review_page_contains_an_invalid_claim_item()
     {
         using var workspace = new TestWorkspace();

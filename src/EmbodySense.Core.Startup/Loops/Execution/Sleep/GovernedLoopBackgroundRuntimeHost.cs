@@ -275,7 +275,20 @@ internal sealed class GovernedLoopBackgroundRuntimeHost : ICustomLoopExecutionAc
 
             try
             {
-                var current = await ReadStatusCoreAsync(cancellationToken).ConfigureAwait(false);
+                var current = await ReadStatusCoreAsync(cancellationToken, preserveTerminalLivePeer: true).ConfigureAwait(false);
+                if (current.Readiness == AgentRuntimeGovernedLoopBackgroundReadiness.Degraded
+                    && current.Ownership == AgentRuntimeGovernedLoopBackgroundOwnership.LivePeer)
+                {
+                    // No recovery lane may publish while a predecessor's fenced lease still excludes this runtime.
+                    // Return standby immediately, then perform bounded recovery on the first takeover-eligible retry.
+                    return PublishActivation(new AgentRuntimeGovernedLoopBackgroundStartResult(
+                        AgentRuntimeGovernedLoopBackgroundStartStatus.OwnedByLivePeer,
+                        AgentRuntimeGovernedLoopBackgroundReadiness.Degraded,
+                        AgentRuntimeGovernedLoopBackgroundOwnership.LivePeer,
+                        true,
+                        "governed_local_background_owned_by_live_peer: another process retains the active fenced coordinator lease."));
+                }
+
                 if (!startAfterRepair
                     && current.Readiness == AgentRuntimeGovernedLoopBackgroundReadiness.Degraded
                     && current.Ownership == AgentRuntimeGovernedLoopBackgroundOwnership.None)
@@ -443,8 +456,7 @@ internal sealed class GovernedLoopBackgroundRuntimeHost : ICustomLoopExecutionAc
             false,
             detail);
 
-    private async Task<AgentRuntimeGovernedLoopBackgroundStatus> ReadStatusCoreAsync(
-        CancellationToken cancellationToken)
+    private async Task<AgentRuntimeGovernedLoopBackgroundStatus> ReadStatusCoreAsync(CancellationToken cancellationToken, bool preserveTerminalLivePeer = false)
     {
         var read = await _coordinatorEvidenceStore.ReadAsync(CoordinatorId, cancellationToken).ConfigureAwait(false);
         if (read is null)
@@ -465,13 +477,23 @@ internal sealed class GovernedLoopBackgroundRuntimeHost : ICustomLoopExecutionAc
             return UnavailableStatus("governed_local_background_unavailable: coordinator evidence requires repair or is unavailable.");
         }
 
-        return MapStatus(read.Snapshot);
+        return MapStatus(read.Snapshot, preserveTerminalLivePeer);
     }
 
-    private AgentRuntimeGovernedLoopBackgroundStatus MapStatus(GovernedLoopCoordinatorSnapshot snapshot)
+    private AgentRuntimeGovernedLoopBackgroundStatus MapStatus(GovernedLoopCoordinatorSnapshot snapshot, bool preserveTerminalLivePeer)
     {
         if (snapshot.LatestLifecycle.Status == GovernedLoopCoordinatorStatus.Stopped)
         {
+            if (preserveTerminalLivePeer
+                && HasLiveLease(snapshot)
+                && !string.Equals(snapshot.Ownership.OwnerId, _ownerId, StringComparison.Ordinal))
+            {
+                return new AgentRuntimeGovernedLoopBackgroundStatus(
+                    AgentRuntimeGovernedLoopBackgroundReadiness.Degraded,
+                    AgentRuntimeGovernedLoopBackgroundOwnership.LivePeer,
+                    "governed_local_background_owned_by_live_peer: a stopped predecessor retains the active fenced coordinator lease until takeover is eligible.");
+            }
+
             return new AgentRuntimeGovernedLoopBackgroundStatus(
                 AgentRuntimeGovernedLoopBackgroundReadiness.Stopped,
                 AgentRuntimeGovernedLoopBackgroundOwnership.None,
