@@ -20,6 +20,10 @@ const indexSource = fs.readFileSync(
   new URL("../../src/EmbodySense.Web/wwwroot/index.html", import.meta.url),
   "utf8",
 );
+const appSource = fs.readFileSync(
+  new URL("../../src/EmbodySense.Web/wwwroot/app.js", import.meta.url),
+  "utf8",
+);
 const loopBuilderSource = fs.readFileSync(
   new URL("../../src/EmbodySense.Web/wwwroot/loop-builder.js", import.meta.url),
   "utf8",
@@ -49,6 +53,11 @@ test("Human Review exposes stable semantic controls and retires loop-builder app
   assert.match(indexSource, /data-legacy-non-authoritative="true"/);
   assert.doesNotMatch(loopBuilderSource, /DecideApproval/);
   assert.doesNotMatch(loopBuilderSource, /ApprovalsChanged/);
+  assert.match(
+    appSource,
+    /embodySenseWorkspaceRequestScope = nextChatRequestScope/,
+  );
+  assert.match(appSource, /embodySenseHumanReview\?\.configureWorkspaceScope/);
 });
 
 function summary(overrides = {}) {
@@ -524,6 +533,102 @@ test("Human Review recovers a response-lost operation after a hard reload throug
   assert.equal(storage.value, null);
 });
 
+test("Human Review exposes one exact terminal retry after an approved response is lost", async () => {
+  const storage = new FakeStorage();
+  const locks = new FakeLocks();
+  const firstFixture = createFixture();
+  const recoveryFixture = createFixture();
+  const posts = [];
+  let canonical = summary();
+  const requestJson = async (url, options = {}) => {
+    if (url === "/api/human-reviews?maximumCount=50")
+      return { status: "ready", items: [canonical], continuationCursor: null };
+    if (url.endsWith("/evidence"))
+      return {
+        status: "ready",
+        evidence: [],
+        effectEvidence: {
+          status:
+            canonical.lifecycleStatus === "pending"
+              ? "exact-not-started"
+              : "ambiguous",
+          certainty:
+            canonical.lifecycleStatus === "pending"
+              ? "not-started"
+              : "ambiguous",
+        },
+      };
+    if (url.endsWith("/posture"))
+      return {
+        status: "ready",
+        posture: { lifecycleStatus: canonical.lifecycleStatus },
+      };
+    if (options.method === "POST") {
+      posts.push(JSON.parse(options.body));
+      if (posts.length === 1) {
+        canonical = summary({
+          lifecycleStatus: "approved",
+          lifecycleVersion: 4,
+        });
+        throw new Error("approved response lost after commit");
+      }
+      return { status: "replayed" };
+    }
+    return {
+      status: "ready",
+      detail: {
+        summary: canonical,
+        previews: [],
+        decisions: [],
+        evidence: [],
+        runtime: { lifecycleStatus: canonical.lifecycleStatus },
+        effectEvidence: null,
+      },
+    };
+  };
+  const create = (fixture) =>
+    createHumanReviewSurface({
+      document: fixture.document,
+      window: { localStorage: storage, navigator: { locks } },
+      requestJson,
+    });
+
+  const firstSurface = create(firstFixture);
+  await firstSurface.activate();
+  await clickAndFlush(firstFixture.elements.humanReviewApproveButton);
+  assert.equal(posts.length, 1);
+  assert.equal(firstFixture.elements.humanReviewApproveButton.disabled, false);
+  assert.equal(
+    firstFixture.elements.humanReviewApproveButton.textContent,
+    "Retry recorded approve",
+  );
+  assert.match(
+    firstFixture.elements.humanReviewActionStatus.textContent,
+    /recorded decision response remains unresolved/i,
+  );
+  assert.equal(typeof storage.value, "string");
+
+  const recoverySurface = create(recoveryFixture);
+  await recoverySurface.activate();
+  assert.equal(
+    recoveryFixture.elements.humanReviewApproveButton.textContent,
+    "Retry recorded approve",
+  );
+  await clickAndFlush(recoveryFixture.elements.humanReviewApproveButton);
+  assert.equal(posts.length, 2);
+  assert.equal(posts[1].operationId, posts[0].operationId);
+  assert.equal(posts[1].expectedLifecycleVersion, 3);
+  assert.equal(storage.value, null);
+  assert.equal(
+    recoveryFixture.elements.humanReviewApproveButton.disabled,
+    true,
+  );
+  assert.equal(
+    recoveryFixture.elements.humanReviewApproveButton.textContent,
+    "Approve",
+  );
+});
+
 test("Human Review keeps changed response-lost detail on the same public operation for server conflict", async () => {
   const storage = new FakeStorage();
   const fixture = createFixture();
@@ -771,9 +876,10 @@ test("Human Review operation storage separates distinct public requests and prof
   assert.equal(JSON.parse(separateStorage.value).entries.length, 1);
 });
 
-test("Human Review operation storage evicts the oldest unresolved entries at its bounded cap", async () => {
+test("Human Review operation storage preserves unresolved entries and fails closed at its bounded cap", async () => {
   const storage = new FakeStorage();
-  for (let index = 0; index < 130; index++) {
+  let postCount = 0;
+  for (let index = 0; index < 129; index++) {
     const item = summary({
       runId: `run-bounded-${index}`,
       requestId: `request-bounded-${index}`,
@@ -781,7 +887,10 @@ test("Human Review operation storage evicts the oldest unresolved entries at its
     });
     const fixture = createFixture();
     const requestJson = async (url, options = {}) => {
-      if (options.method === "POST") throw new Error("transport lost");
+      if (options.method === "POST") {
+        postCount++;
+        throw new Error("transport lost");
+      }
       if (url === "/api/human-reviews?maximumCount=50")
         return { status: "ready", items: [item], continuationCursor: null };
       if (url.endsWith("/evidence"))
@@ -807,16 +916,22 @@ test("Human Review operation storage evicts the oldest unresolved entries at its
     });
     await surface.activate();
     await clickAndFlush(fixture.elements.humanReviewApproveButton);
+    if (index === 128)
+      assert.match(
+        fixture.elements.humanReviewActionStatus.textContent,
+        /operation recovery is unavailable/i,
+      );
   }
   const entries = JSON.parse(storage.value).entries;
   assert.equal(entries.length, 128);
+  assert.equal(postCount, 128);
   assert.equal(
     entries.some((entry) => entry.runId === "run-bounded-0"),
-    false,
+    true,
   );
   assert.equal(
-    entries.some((entry) => entry.runId === "run-bounded-129"),
-    true,
+    entries.some((entry) => entry.runId === "run-bounded-128"),
+    false,
   );
 });
 
@@ -1024,6 +1139,91 @@ test("Human Review lock rereads and merges interleaved different requests while 
     sameRequestPosts[2].body.operationId,
   );
   assert.equal(sameRequestPosts[1].body.expectedLifecycleVersion, 3);
+});
+
+test("Human Review serializes same-profile decisions so one cleanup cannot erase another tab's response-loss recovery", async () => {
+  const storage = new FakeScopedStorage();
+  const locks = new FakeLocks();
+  const firstFixture = createFixture();
+  const secondFixture = createFixture();
+  const recoveryFixture = createFixture();
+  const information = "Reread the canonical evidence before continuing.";
+  const posts = [];
+  let canonical = summary();
+  const requestJson = async (url, options = {}) => {
+    if (url === "/api/human-reviews?maximumCount=50")
+      return { status: "ready", items: [canonical], continuationCursor: null };
+    if (url.endsWith("/evidence"))
+      return { status: "ready", evidence: [], effectEvidence: null };
+    if (url.endsWith("/posture"))
+      return {
+        status: "ready",
+        posture: { lifecycleStatus: canonical.lifecycleStatus },
+      };
+    if (options.method === "POST") {
+      posts.push(JSON.parse(options.body));
+      if (posts.length === 1) {
+        canonical = summary({
+          lifecycleStatus: "awaiting-information",
+          lifecycleVersion: 4,
+        });
+        return { status: "information-requested" };
+      }
+      if (posts.length === 2)
+        throw new Error("response lost after durable replay");
+      return { status: "replayed" };
+    }
+    return {
+      status: "ready",
+      detail: {
+        summary: canonical,
+        previews: [],
+        decisions: [],
+        evidence: [],
+        runtime: { lifecycleStatus: canonical.lifecycleStatus },
+        effectEvidence: null,
+      },
+    };
+  };
+  const create = (fixture) => {
+    const surface = createRawHumanReviewSurface({
+      document: fixture.document,
+      window: { localStorage: storage, navigator: { locks } },
+      requestJson,
+    });
+    surface.configureWorkspaceScope(testHumanReviewScope);
+    return surface;
+  };
+  const firstSurface = create(firstFixture);
+  const secondSurface = create(secondFixture);
+  await Promise.all([firstSurface.activate(), secondSurface.activate()]);
+  firstFixture.elements.humanReviewInformationDetail.value = information;
+  secondFixture.elements.humanReviewInformationDetail.value = information;
+  await Promise.all([
+    clickAndFlush(firstFixture.elements.humanReviewRequestInformationButton),
+    clickAndFlush(secondFixture.elements.humanReviewRequestInformationButton),
+  ]);
+
+  const storageKey = `embodysense.human-review.operations.v1.${testHumanReviewScope}`;
+  const retained = JSON.parse(storage.values.get(storageKey));
+  assert.equal(retained.entries.length, 1);
+  assert.equal(retained.entries[0].operationId, posts[0].operationId);
+  assert.equal(retained.entries[0].expectedLifecycleVersion, 3);
+  assert.doesNotMatch(storage.values.get(storageKey), /Reread|evidence/i);
+
+  const recoverySurface = create(recoveryFixture);
+  await recoverySurface.activate();
+  recoveryFixture.elements.humanReviewInformationDetail.value = information;
+  await clickAndFlush(
+    recoveryFixture.elements.humanReviewRequestInformationButton,
+  );
+  assert.equal(posts.length, 3);
+  assert.equal(new Set(posts.map((post) => post.operationId)).size, 1);
+  assert.deepEqual(
+    posts.map((post) => post.expectedLifecycleVersion),
+    [3, 3, 3],
+  );
+  assert.equal(storage.values.has(storageKey), false);
 });
 
 test("Human Review conclusive cleanup preserves another tab's scoped operation", async () => {
@@ -1400,12 +1600,15 @@ async function clickAndFlush(element) {
 
 class FakeLocks {
   constructor() {
-    this.tail = Promise.resolve();
+    this.tails = new Map();
   }
 
-  request(_name, _options, callback) {
-    const result = this.tail.then(callback);
-    this.tail = result.catch(() => {});
+  request(name, _options, callback) {
+    const result = (this.tails.get(name) ?? Promise.resolve()).then(callback);
+    this.tails.set(
+      name,
+      result.catch(() => {}),
+    );
     return result;
   }
 }
