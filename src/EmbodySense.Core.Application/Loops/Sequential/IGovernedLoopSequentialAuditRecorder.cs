@@ -13,7 +13,9 @@ public interface IGovernedLoopSequentialAuditRecorder
     /// An implementation must bind <paramref name="operationId"/>, <paramref name="evidenceHash"/>, and the complete
     /// <paramref name="auditEvent"/> atomically. Reuse of an operation identifier with any divergent identity or event
     /// returns <see cref="GovernedLoopSequentialAuditRecordStatus.Conflict"/>. An uncertain or unavailable durable result
-    /// returns <see cref="GovernedLoopSequentialAuditRecordStatus.Unavailable"/>; callers must fail closed.
+    /// returns <see cref="GovernedLoopSequentialAuditRecordStatus.Unavailable"/>; callers must fail closed. Cancellation is
+    /// honored before an integrity commit begins. Once complete-record or tail-repair writing begins, an implementation must
+    /// finish the durable commit with non-cancellable I/O.
     /// </remarks>
     Task<GovernedLoopSequentialAuditRecordResult> RecordOnceAsync(
         string operationId,

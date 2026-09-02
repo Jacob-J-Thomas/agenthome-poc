@@ -5,6 +5,7 @@
     <ProjectReference Include="..\..\src\EmbodySense.Core.Common\EmbodySense.Core.Common.csproj" />
     <ProjectReference Include="..\..\src\EmbodySense.Core.Persistence\EmbodySense.Core.Persistence.csproj" />
     <ProjectReference Include="..\..\src\EmbodySense.Core.Startup\EmbodySense.Core.Startup.csproj" />
+    <ProjectReference Include="..\EmbodySense.Tests.Support\EmbodySense.Tests.Support.csproj" />
   </ItemGroup>
 
   <ItemGroup>

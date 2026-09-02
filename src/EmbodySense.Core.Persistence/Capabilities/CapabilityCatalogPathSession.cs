@@ -89,7 +89,12 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
         }
     }
 
-    public async Task<bool> TryAcquireLockAsync(string path, bool createParent, CancellationToken cancellationToken)
+    public async Task<bool> TryAcquireLockAsync(
+        string path,
+        bool createParent,
+        CancellationToken cancellationToken,
+        bool throwOnContentionTimeout = true,
+        bool retryInitializationRaces = false)
     {
         var safePath = RequireContained(path);
         var parentPath = Path.GetDirectoryName(safePath) ?? throw new IOException("Capability catalog lock has no parent directory.");
@@ -99,10 +104,19 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
             return false;
         }
         var name = Path.GetFileName(safePath);
+        var initializationRaceAttempts = 0;
         for (var attempt = 0; attempt < 250; attempt++)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            _lock = CapabilityCatalogNativeFileSystem.TryAcquireExclusiveLock(safePath, parent, name);
+            try
+            {
+                _lock = CapabilityCatalogNativeFileSystem.TryAcquireExclusiveLock(safePath, parent, name);
+            }
+            catch (IOException exception) when (retryInitializationRaces && IsTransientInitializationRace(exception) && initializationRaceAttempts++ < 3)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(20), _timeProvider, cancellationToken);
+                continue;
+            }
             if (_lock is not null)
             {
                 _lockPath = safePath;
@@ -127,7 +141,12 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
             }
         }
 
-        throw new IOException("The capability catalog lock is unavailable.");
+        if (throwOnContentionTimeout)
+        {
+            throw new IOException("The capability catalog lock is unavailable.");
+        }
+
+        return false;
     }
 
     public void ReleaseLock()
@@ -408,6 +427,56 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
         {
             stream?.Dispose();
         }
+    }
+
+    public FileStream OpenBoundUpdateLease(string path)
+    {
+        EnsureLockBinding();
+        var safePath = RequireContained(path);
+        var parentPath = Path.GetDirectoryName(safePath)!;
+        var parent = GetDirectory(parentPath, create: false) ?? throw new DirectoryNotFoundException("Capability catalog artifact parent is unavailable.");
+        EnsurePhysicalDirectoryBinding(parentPath);
+        var name = Path.GetFileName(safePath);
+        SafeFileHandle? handle = OpenRegularFile(safePath, parent, name, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read, writeThrough: true) ?? throw new IOException("Capability catalog update artifact could not be opened safely.");
+        FileStream? stream = null;
+        try
+        {
+            CapabilityCatalogNativeFileSystem.RequireSingleLink(handle, name);
+            stream = new FileStream(handle, FileAccess.ReadWrite, 4096, isAsync: false);
+            handle = null;
+            EnsureBoundUpdateLease(safePath, stream);
+            var result = stream;
+            stream = null;
+            return result;
+        }
+        finally
+        {
+            stream?.Dispose();
+            handle?.Dispose();
+        }
+    }
+
+    public void EnsureBoundUpdateLease(string path, FileStream stream)
+    {
+        ArgumentNullException.ThrowIfNull(stream);
+        EnsureLockBinding();
+        var safePath = RequireContained(path);
+        var parentPath = Path.GetDirectoryName(safePath)!;
+        var parent = GetDirectory(parentPath, create: false) ?? throw new DirectoryNotFoundException("Capability catalog update artifact parent is unavailable.");
+        EnsurePhysicalDirectoryBinding(parentPath);
+        var name = Path.GetFileName(safePath);
+        CapabilityCatalogNativeFileSystem.RequireSingleLink(stream.SafeFileHandle, name);
+        var expected = CapabilityCatalogNativeFileSystem.GetPathBindingIdentityMaterial(stream.SafeFileHandle);
+        using var current = OpenRegularFile(safePath, parent, name, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, writeThrough: false)
+            ?? throw new IOException("Capability catalog update artifact disappeared during its retained lease.");
+        CapabilityCatalogNativeFileSystem.RequireSingleLink(current, name);
+        if (!string.Equals(expected, CapabilityCatalogNativeFileSystem.GetPathBindingIdentityMaterial(current), StringComparison.Ordinal))
+        {
+            throw new IOException("Capability catalog update artifact was substituted during its retained lease.");
+        }
+
+        EnsurePhysicalDirectoryBinding(parentPath);
+        EnsureLockBinding();
     }
 
     private async Task<byte[]?> ReadAllBytesAsync(string path, int maximumBytes, bool allowEmpty, bool missingIsNull, CancellationToken cancellationToken, bool requireStableBinding = false)
@@ -754,6 +823,8 @@ internal sealed class CapabilityCatalogPathSession : IAsyncDisposable, IDisposab
     }
 
     private static int ProbeLimit(int maximumEntries) => maximumEntries == int.MaxValue ? int.MaxValue : maximumEntries + 1;
+
+    private static bool IsTransientInitializationRace(IOException exception) => (exception.HResult & 0xFFFF) is 2 or 13;
 
     private SafeFileHandle? OpenRegularFile(string fullPath, SafeFileHandle parent, string name, FileMode mode, FileAccess access, FileShare share, bool writeThrough)
     {

@@ -95,9 +95,9 @@ Budgets may be revised only from retained Windows and CI evidence. A narrower en
 
 ## Cancellation and host monopolization
 
-The async persistence boundaries accept cancellation tokens and pass them through mutation-lock acquisition and file I/O. Validation and canonical serialization/deserialization are synchronous and currently have no cooperative cancellation token. Directory enumeration and ordering of deletion-operation paths are also synchronous segments inside cancellable store operations. Cancellation therefore remains fail-closed at the public operation boundary but is not guaranteed to interrupt those CPU/enumeration segments immediately.
+The async persistence boundaries accept cancellation tokens. Most pass them through mutation-lock acquisition and file I/O; `AuditLog` instead honors cancellation during bounded ownership acquisition and tail validation, then deliberately completes record or tail-repair commit I/O through durable flush without caller cancellation once writing begins. Other validation and canonical serialization/deserialization are synchronous and currently have no cooperative cancellation token. Directory enumeration and ordering of deletion-operation paths are also synchronous segments inside cancellable store operations. Cancellation therefore remains fail-closed at the public operation boundary but is not guaranteed to interrupt an integrity commit or those CPU/enumeration segments immediately.
 
-The required tier bounds each test project so one workspace cannot occupy the verifier indefinitely. Expensive adversarial amplification runs in its own scheduled job, with each owned test in a separate bounded process. This ticket does not change production cancellation, limits, persistence algorithms, or integrity behavior.
+The required tier bounds each test project so one workspace cannot occupy the verifier indefinitely. Expensive adversarial amplification runs in its own scheduled job, with each owned test in a separate bounded process. This verification contract does not itself authorize changes to production cancellation, limits, persistence algorithms, or integrity behavior; those changes require their owning implementation contracts and tests.
 
 ## Baseline ledger
 
