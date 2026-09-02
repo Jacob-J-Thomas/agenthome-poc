@@ -10,6 +10,7 @@ using EmbodySense.Core.Common.CommandActions.Models;
 using EmbodySense.Core.Common.Inference.Profiles.Models;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Startup.Capabilities;
+using EmbodySense.Core.Startup.HumanReview;
 using EmbodySense.Core.Startup.Inference.Profiles;
 using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Core.Startup.Loops.Execution.Effects;
@@ -62,11 +63,25 @@ namespace EmbodySense.E2EBrowserHost
                         BrowserCommandActionArtifactTrustVerifier.Instance),
                     BrowserCommandActionProcessIsolationBoundary.Instance);
             var builder = EmbodySense.Web.Program.CreateBuilder(args, options);
+            if (args.Contains("--suppress-governed-background-host-for-test", StringComparer.Ordinal))
+            {
+                var backgroundHostRegistrations = builder.Services
+                    .Where(service => service.ServiceType == typeof(Microsoft.Extensions.Hosting.IHostedService) && service.ImplementationFactory is not null)
+                    .ToArray();
+                if (backgroundHostRegistrations.Length != 1)
+                {
+                    throw new InvalidOperationException("The test host could not identify exactly one application-owned governed background registration.");
+                }
+
+                builder.Services.Remove(backgroundHostRegistrations[0]);
+            }
+
             builder.Services.RemoveAll<WebAgentRuntimeHost>();
             builder.Services.AddSingleton(provider =>
             {
                 var approval = provider.GetRequiredService<WebApprovalCoordinator>();
                 var publication = provider.GetRequiredService<IAgentRuntimeConversationPublicationObserver>();
+                var decisionAuthorizationProvider = provider.GetRequiredService<IHumanReviewDecisionAuthorizationProvider>();
                 return new WebAgentRuntimeHost(
                     options,
                     approval,
@@ -78,7 +93,8 @@ namespace EmbodySense.E2EBrowserHost
                         status,
                         publication,
                         additionalModelProfileProviders: providers,
-                        commandActionRuntimeProvider: commandActionProvider));
+                        commandActionRuntimeProvider: commandActionProvider)
+                        .WithHumanReviewDecisionAuthorizationProvider(decisionAuthorizationProvider));
             });
             await using var application = builder.Build();
             EmbodySense.Web.Program.ConfigurePipeline(application);

@@ -329,6 +329,10 @@ async function runSessionRecoveryAttempt(generation) {
     );
     ensureWorkspaceDidNotChange(nextStatus.workspaceRoot);
     configureChatRequestStorageScope(nextChatRequestScope);
+    window.embodySenseWorkspaceRequestScope = nextChatRequestScope;
+    await window.embodySenseHumanReview?.configureWorkspaceScope?.(
+      nextChatRequestScope,
+    );
     try {
       await initializeChatRequestStorage();
       chatRequestStorageReady = true;

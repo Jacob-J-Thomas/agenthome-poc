@@ -636,7 +636,7 @@ public sealed class HumanReviewOrderedReleaseService : IHumanReviewContinuationR
     private static bool MatchesContext(CustomLoopRunRecord run, GovernedLoopWaitOrderedContext context)
     {
         if (run.SequentialAdapterBinding is not { } binding
-            || !Equals(context.Anchor.AdapterBinding, binding)
+            || !string.Equals(context.Anchor.AdapterBinding.ContentHash, binding.ContentHash, StringComparison.Ordinal)
             || !Equals(context.Plan.Revision, binding.ExecutionBinding.Revision)
             || !string.Equals(context.Plan.GraphArtifactHash, binding.GraphArtifactHash, StringComparison.Ordinal)
             || !string.Equals(context.Plan.GraphLayoutHash, binding.GraphLayoutHash, StringComparison.Ordinal)

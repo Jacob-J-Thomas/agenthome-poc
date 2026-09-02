@@ -61,7 +61,7 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace EmbodySense.E2ETests.Web;
 
-public sealed class BrowserFlowTests
+public sealed partial class BrowserFlowTests
 {
     private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly TimeSpan _visibleGovernedInvocationTimeout = TimeSpan.FromSeconds(150);
@@ -2197,10 +2197,11 @@ public sealed class BrowserFlowTests
         }
     }
 
-    private sealed class HeadlessBrowserSession : IAsyncDisposable
+    private sealed partial class HeadlessBrowserSession : IAsyncDisposable
     {
         private readonly Process _process;
         private readonly ClientWebSocket _socket;
+        private readonly int _debugPort;
         private readonly string _userDataDirectory;
         private readonly BoundedProcessOutput _output;
         private readonly BoundedProcessOutput _error;
@@ -2218,10 +2219,11 @@ public sealed class BrowserFlowTests
         private int _nextCommandId;
         private int _disposed;
 
-        private HeadlessBrowserSession(Process process, ClientWebSocket socket, string userDataDirectory, BoundedProcessOutput output, BoundedProcessOutput error, string targetUrl)
+        private HeadlessBrowserSession(Process process, ClientWebSocket socket, string userDataDirectory, BoundedProcessOutput output, BoundedProcessOutput error, string targetUrl, int debugPort)
         {
             _process = process;
             _socket = socket;
+            _debugPort = debugPort;
             _userDataDirectory = userDataDirectory;
             _output = output;
             _error = error;
@@ -2292,7 +2294,7 @@ public sealed class BrowserFlowTests
                 var websocketUrl = await GetInitialPageWebSocketUrlAsync(debugPort);
                 var socket = new ClientWebSocket();
                 await socket.ConnectAsync(new Uri(websocketUrl), CancellationToken.None);
-                session = new HeadlessBrowserSession(process, socket, userDataDirectory, output, error, targetUrl);
+                session = new HeadlessBrowserSession(process, socket, userDataDirectory, output, error, targetUrl, debugPort);
                 await session.SendCommandAsync("Page.enable");
                 await session.SendCommandAsync("Runtime.enable");
                 await session.SendCommandAsync("Log.enable");
@@ -2493,6 +2495,8 @@ public sealed class BrowserFlowTests
             {
                 return;
             }
+
+            await DisposeChildTabsAsync();
 
             if (_socket.State == WebSocketState.Open)
             {
