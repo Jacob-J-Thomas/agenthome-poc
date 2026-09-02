@@ -62,4 +62,21 @@ internal static class HumanInputBrowserTransportScripts
             })()
             """;
     }
+
+    internal static string ReplayExactOperation(string actionPath, string payload)
+    {
+        var route = JsonSerializer.Serialize(actionPath);
+        var body = JsonSerializer.Serialize(payload);
+        return $$"""
+            (async () => {
+              const response = await fetch({{route}}, {
+                method: "POST",
+                credentials: "same-origin",
+                headers: { "Content-Type": "application/json" },
+                body: {{body}}
+              });
+              return JSON.stringify({ status: response.status, body: await response.text() });
+            })()
+            """;
+    }
 }

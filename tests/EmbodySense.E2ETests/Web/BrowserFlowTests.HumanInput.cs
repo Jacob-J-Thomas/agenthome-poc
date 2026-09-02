@@ -90,7 +90,7 @@ public sealed partial class BrowserFlowTests
     }
 
     [InstalledBrowserFact]
-    public async Task Human_input_browser_uses_two_same_profile_tabs_for_stale_keyboard_conflict_and_accessibility()
+    public async Task Human_input_browser_uses_two_same_profile_tabs_for_concurrent_valid_response_winner_replay_conflict_and_accessibility()
     {
         using var workspace = new TestWorkspace();
         using var serverAccount = new BrowserServerAccountDirectory(workspace.ServerStatePath);
@@ -117,29 +117,57 @@ public sealed partial class BrowserFlowTests
             await OpenHumanInputAsync(staleTab);
             await SelectHumanInputAsync(staleTab, RequestId);
             Assert.True(await staleTab.EvaluateBooleanAsync("document.querySelector('[data-testid=\"human-input-item\"]')?.getAttribute('aria-selected') === 'true' && document.querySelector('#humanInputResponseEditor textarea')?.tagName === 'TEXTAREA' && document.getElementById('humanInputResponseStatus')?.getAttribute('aria-live') === 'assertive'"));
+            Assert.True(await browser.EvaluateBooleanAsync("!document.getElementById('humanInputView').hidden && document.getElementById('loopApprovalPanel')?.hidden === true && !document.querySelector('[data-human-input-action=\"approve\"]')"));
 
-            await browser.EvaluateWithUserGestureAsync("document.querySelector('[data-testid=\"human-input-cancel\"]')?.focus()");
-            Assert.True(await browser.EvaluateBooleanAsync("document.activeElement?.getAttribute('data-testid') === 'human-input-cancel'"));
+            await browser.EvaluateWithUserGestureAsync("document.querySelector('[data-testid=\"human-input-refresh\"]')?.focus()");
+            Assert.True(await browser.EvaluateBooleanAsync("document.activeElement?.getAttribute('data-testid') === 'human-input-refresh'"));
             await browser.PressKeyAsync("Enter");
-            await WaitForHumanInputLifecycleAsync(browser, "cancelled");
+            await browser.WaitForExpressionAsync("document.getElementById('humanInputListStatus')?.textContent?.length > 0");
 
-            await SetValueForTabAsync(staleTab, "#humanInputResponseEditor textarea", "stale answer");
+            await SetValueAsync(browser, "#humanInputResponseEditor textarea", "answer from the first tab");
+            await SetValueForTabAsync(staleTab, "#humanInputResponseEditor textarea", "answer from the second tab");
             var actionPath = $"/api/human-input/{Uri.EscapeDataString(RequestId)}/answer";
+            await browser.EvaluateWithUserGestureAsync(HumanInputBrowserTransportScripts.InstallPostCapture(actionPath));
             await staleTab.EvaluateWithUserGestureAsync(HumanInputBrowserTransportScripts.InstallPostCapture(actionPath));
-            await staleTab.EvaluateWithUserGestureAsync("document.querySelector('[data-testid=\"human-input-response-submit\"]')?.click()");
-            await staleTab.WaitForExpressionAsync("window.__humanInputPostCapture?.statuses.length === 1 && window.__humanInputPostCapture.statuses[0] === 409");
-            await staleTab.WaitForExpressionAsync("document.getElementById('humanInputResponseStatus').textContent.toLowerCase().includes('changed') || document.getElementById('humanInputResponseStatus').textContent.toLowerCase().includes('conflict')");
+            await Task.WhenAll(
+                browser.EvaluateWithUserGestureAsync("document.querySelector('[data-testid=\"human-input-response-submit\"]')?.click()"),
+                staleTab.EvaluateWithUserGestureAsync("document.querySelector('[data-testid=\"human-input-response-submit\"]')?.click()"));
+            await Task.WhenAll(
+                browser.WaitForExpressionAsync("window.__humanInputPostCapture?.statuses.length === 1"),
+                staleTab.WaitForExpressionAsync("window.__humanInputPostCapture?.statuses.length === 1"));
+            var firstTabStatus = await browser.EvaluateInt32Async("window.__humanInputPostCapture.statuses[0]");
+            var secondTabStatus = await staleTab.EvaluateInt32Async("window.__humanInputPostCapture.statuses[0]");
+            Assert.True((firstTabStatus == 200 && secondTabStatus == 409) || (firstTabStatus == 409 && secondTabStatus == 200), $"Expected one accepted and one conflicting response, got {firstTabStatus} and {secondTabStatus}.");
+            var winnerPayload = firstTabStatus == 200
+                ? await browser.EvaluateStringAsync("window.__humanInputPostCapture.payloads[0]")
+                : await staleTab.EvaluateStringAsync("window.__humanInputPostCapture.payloads[0]");
+            using var winnerPayloadDocument = JsonDocument.Parse(winnerPayload);
+            var winnerOperationId = winnerPayloadDocument.RootElement.GetProperty("operationId").GetString();
+            Assert.False(string.IsNullOrWhiteSpace(winnerOperationId));
+            await Task.WhenAll(WaitForHumanInputLifecycleAsync(browser, "answered"), WaitForHumanInputLifecycleAsync(staleTab, "answered"));
+
+            var replayScript = HumanInputBrowserTransportScripts.ReplayExactOperation(actionPath, winnerPayload);
+            var replayRaw = firstTabStatus == 200
+                ? await browser.EvaluateStringAsync(replayScript)
+                : await staleTab.EvaluateStringAsync(replayScript);
+            using var replay = JsonDocument.Parse(replayRaw);
+            Assert.Equal(200, replay.RootElement.GetProperty("status").GetInt32());
+            Assert.Contains("replayed", replay.RootElement.GetProperty("body").GetString(), StringComparison.OrdinalIgnoreCase);
 
             var lifecycle = await HumanInputBrowserFixture.ReadAsync(paths, capabilityTrustRoot, RequestId);
-            Assert.Equal(HumanInputRequestLifecycleStatus.Cancelled, lifecycle.PrimarySnapshot?.Head.Status);
+            Assert.Equal(HumanInputRequestLifecycleStatus.Answered, lifecycle.PrimarySnapshot?.Head.Status);
             var responses = await HumanInputBrowserFixture.ReadResponsesAsync(paths, capabilityTrustRoot, RequestId);
-            Assert.Empty(Assert.IsType<HumanInputResponseLifecycleStoreSnapshot>(responses.Snapshot).Responses);
+            var responseSnapshot = Assert.IsType<HumanInputResponseLifecycleStoreSnapshot>(responses.Snapshot);
+            var response = Assert.Single(responseSnapshot.Responses);
+            var operation = responseSnapshot.Operations.Single(item => string.Equals(item.OperationId, winnerOperationId, StringComparison.Ordinal));
+            Assert.Equal(winnerOperationId, operation.OperationId);
+            Assert.Equal(response.ResponseId, operation.SubmittedResponse?.ResponseId);
             app.AssertHealthy();
             await browser.AssertHealthyAsync();
         }
         catch
         {
-            await WriteFailureDiagnosticsAsync(nameof(Human_input_browser_uses_two_same_profile_tabs_for_stale_keyboard_conflict_and_accessibility), browser, app);
+            await WriteFailureDiagnosticsAsync(nameof(Human_input_browser_uses_two_same_profile_tabs_for_concurrent_valid_response_winner_replay_conflict_and_accessibility), browser, app);
             throw;
         }
     }
@@ -386,6 +414,12 @@ public sealed partial class BrowserFlowTests
     {
         var token = JsonSerializer.Serialize(lifecycle.Replace('-', ' '));
         await browser.WaitForExpressionAsync($"document.getElementById('humanInputLifecycleStatus').textContent.toLowerCase().includes({token})");
+    }
+
+    private static async Task WaitForHumanInputLifecycleAsync(HeadlessBrowserTab tab, string lifecycle)
+    {
+        var token = JsonSerializer.Serialize(lifecycle.Replace('-', ' '));
+        await tab.WaitForExpressionAsync($"document.getElementById('humanInputLifecycleStatus').textContent.toLowerCase().includes({token})");
     }
 
     private static async Task<JsonElement> ReadHumanInputPayloadAsync(HeadlessBrowserSession browser, string expression)
