@@ -1,4 +1,6 @@
 using System.Text.Json;
+using EmbodySense.Core.Application.Loops.Models;
+using EmbodySense.Core.Application.Loops.Protocol;
 using EmbodySense.Core.Common.Loops;
 using EmbodySense.Core.Common.Loops.Execution.Wait;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
@@ -45,7 +47,9 @@ public sealed partial class AgentRuntimeFactoryTests
 
         var turn = runtime.RunTurnAsync("inspect the authority file", requestId: "authority-revalidation-narrowed");
         await WaitForMarkerAsync(turnStartedPath, turn);
-        await new LoopDefinitionStore(new WorkspacePaths(workspace.RootPath)).SaveAsync(LoopDefinition.CreateDefaultConversation() with
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await WaitForProviderDispatchStartedAsync(paths, "authority-revalidation-narrowed", turn);
+        await new LoopDefinitionStore(paths).SaveAsync(LoopDefinition.CreateDefaultConversation() with
         {
             CapabilityIds = [LoopCapabilityIds.ConversationTurn],
         });
@@ -280,5 +284,41 @@ public sealed partial class AgentRuntimeFactoryTests
         }
 
         throw new Xunit.Sdk.XunitException($"The tool-calling turn did not publish its synchronization marker within the bounded wait: {markerPath}");
+    }
+
+    private static async Task WaitForProviderDispatchStartedAsync(WorkspacePaths paths, string requestId, Task<AgentRuntimeTurnResult> turn)
+    {
+        var turnId = DefaultConversationTurnProtocol.CreateTurnId(requestId);
+        var store = new DefaultConversationTurnStore(paths);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        try
+        {
+            while (true)
+            {
+                var record = await store.LoadAsync(turnId, timeout.Token);
+                if (record?.Checkpoint == DefaultConversationTurnCheckpoint.ProviderDispatchStarted)
+                {
+                    return;
+                }
+
+                if (record?.Checkpoint > DefaultConversationTurnCheckpoint.ProviderDispatchStarted)
+                {
+                    throw new Xunit.Sdk.XunitException($"The tool-calling turn advanced past the required provider-dispatch synchronization boundary: {record.Checkpoint}");
+                }
+
+                if (turn.IsCompleted)
+                {
+                    var result = await turn;
+                    throw new Xunit.Sdk.XunitException($"The tool-calling turn completed before the durable provider-dispatch checkpoint: {result.Status}; {result.FailureDetail}");
+                }
+
+                await Task.Delay(TimeSpan.FromMilliseconds(25), timeout.Token);
+            }
+        }
+        catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+        {
+        }
+
+        throw new Xunit.Sdk.XunitException($"The tool-calling turn did not reach durable checkpoint `{DefaultConversationTurnCheckpoint.ProviderDispatchStarted}` within the bounded wait: {turnId}");
     }
 }
