@@ -258,7 +258,7 @@ public static class GovernedLoopEffectAttemptContract
         {
             throw new ArgumentException("After-evidence references must be bounded canonical identifiers.", nameof(afterEvidenceId));
         }
-        if (afterEvidenceId is not null && payload.Phase is not (GovernedLoopEffectPhase.OutcomeObserved or GovernedLoopEffectPhase.Committed or GovernedLoopEffectPhase.ReconciliationRequired))
+        if (afterEvidenceId is not null && payload.Phase is not (GovernedLoopEffectPhase.OutcomeObserved or GovernedLoopEffectPhase.Committed or GovernedLoopEffectPhase.ReconciliationRequired or GovernedLoopEffectPhase.Reconciled))
         {
             throw new InvalidOperationException("After-state evidence may appear only after an outcome was observed or reconciliation became necessary.");
         }
@@ -381,7 +381,7 @@ public static class GovernedLoopEffectAttemptContract
             || attempt.Payload.Phase is not (GovernedLoopEffectPhase.IntentPrepared or GovernedLoopEffectPhase.DispatchNotStarted)
                 && attempt.DispatchAuthorityEvidenceHash is null
             || attempt.AfterEvidenceId is not null
-                && attempt.Payload.Phase is not (GovernedLoopEffectPhase.OutcomeObserved or GovernedLoopEffectPhase.Committed or GovernedLoopEffectPhase.ReconciliationRequired))
+                && attempt.Payload.Phase is not (GovernedLoopEffectPhase.OutcomeObserved or GovernedLoopEffectPhase.Committed or GovernedLoopEffectPhase.ReconciliationRequired or GovernedLoopEffectPhase.Reconciled))
         {
             return "effect-attempt-authority-phase-invalid";
         }
