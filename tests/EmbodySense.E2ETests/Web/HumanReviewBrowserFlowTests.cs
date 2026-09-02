@@ -359,9 +359,16 @@ public sealed partial class BrowserFlowTests
                 return;
 
             if (refresh && await browser.EvaluateBooleanAsync("document.getElementById('humanReviewDetailStatus').textContent.toLowerCase().includes('invalid') || document.getElementById('humanReviewDetailStatus').textContent.toLowerCase().includes('failed')", timeout.Token).ConfigureAwait(false))
-                await ClickAsync(browser, "[data-testid=\"human-review-detail-refresh\"]").ConfigureAwait(false);
+                await ClickAsync(browser, "[data-testid=\"human-review-refresh\"]").ConfigureAwait(false);
 
-            await Task.Delay(100, timeout.Token).ConfigureAwait(false);
+            try
+            {
+                await Task.Delay(100, timeout.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+            {
+                break;
+            }
         }
 
         throw new TimeoutException($"Canonical Human Review {lifecycle} state did not become visible with {decisionCount} decision(s).");
@@ -377,9 +384,16 @@ public sealed partial class BrowserFlowTests
                 return;
 
             if (refresh && await tab.EvaluateBooleanAsync("document.getElementById('humanReviewDetailStatus').textContent.toLowerCase().includes('invalid') || document.getElementById('humanReviewDetailStatus').textContent.toLowerCase().includes('failed')", timeout.Token).ConfigureAwait(false))
-                await tab.EvaluateWithUserGestureAsync("document.querySelector('[data-testid=\"human-review-detail-refresh\"]').click()").ConfigureAwait(false);
+                await tab.EvaluateWithUserGestureAsync("document.querySelector('[data-testid=\"human-review-refresh\"]').click()").ConfigureAwait(false);
 
-            await Task.Delay(100, timeout.Token).ConfigureAwait(false);
+            try
+            {
+                await Task.Delay(100, timeout.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+            {
+                break;
+            }
         }
 
         throw new TimeoutException($"Canonical Human Review {lifecycle} state did not become visible with {decisionCount} decision(s).");
