@@ -89,7 +89,7 @@ public sealed class GovernedLoopEffectAttemptStore : IGovernedLoopEffectAttemptS
             throw new InvalidOperationException("The physical workspace did not produce a canonical workspace scope.");
         }
         _guard = new CustomLoopArtifactPathGuard(paths.RootPath);
-        _reconciliationProofReader = new GovernedLoopEffectReconciliationProofReader(_guard, _root);
+        _reconciliationProofReader = new GovernedLoopEffectReconciliationProofReader(_guard, _root, _maximumStoreBytes);
     }
 
     /// <summary>Performs one bounded, non-evidence-mutating readiness probe over the canonical storage envelope.</summary>
@@ -522,7 +522,8 @@ public sealed class GovernedLoopEffectAttemptStore : IGovernedLoopEffectAttemptS
     internal async Task ValidateCurrentEffectChainsForReconciliationAsync(CancellationToken cancellationToken)
     {
         ValidateDirectory(cancellationToken, out var retainedIdentities, out _);
-        if (!_reconciliationProofReader.TryReadCurrentCases(out var reconciliationCases))
+        var reconciliationCases = await _reconciliationProofReader.ReadCurrentCasesAsync(cancellationToken).ConfigureAwait(false);
+        if (reconciliationCases is null)
         {
             throw new FormatException("Reconciliation case evidence is not a valid canonical inventory.");
         }
@@ -824,13 +825,13 @@ public sealed class GovernedLoopEffectAttemptStore : IGovernedLoopEffectAttemptS
                 {
                     throw new FormatException("Effect-attempt storage contains too many immutable versions for one operation.");
                 }
-                retainedBytes = checked(retainedBytes + _guard.GetFileLength(_root, entry));
+                retainedBytes = AddRetainedBytes(retainedBytes, entry);
                 continue;
             }
             if (TryParseHeadFile(fileName, out var headStorageKey))
             {
                 identities.Add(headStorageKey);
-                retainedBytes = checked(retainedBytes + _guard.GetFileLength(_root, entry));
+                retainedBytes = AddRetainedBytes(retainedBytes, entry);
                 continue;
             }
             if (GovernedLoopEffectReconciliationArtifactNames.TryParseCaseVersionFile(fileName, out _, out _, out _)
@@ -838,7 +839,7 @@ public sealed class GovernedLoopEffectAttemptStore : IGovernedLoopEffectAttemptS
                 || GovernedLoopEffectReconciliationArtifactNames.TryParseReceiptFile(fileName, out _)
                 || GovernedLoopEffectReconciliationArtifactNames.TryParseJournalFile(fileName, out _))
             {
-                retainedBytes = checked(retainedBytes + _guard.GetFileLength(_root, entry));
+                retainedBytes = AddRetainedBytes(retainedBytes, entry);
                 continue;
             }
             if (TryParseOwnerFile(fileName, out var ownerStorageKey))
@@ -852,7 +853,22 @@ public sealed class GovernedLoopEffectAttemptStore : IGovernedLoopEffectAttemptS
 
             throw new FormatException("Effect-attempt storage contains an unsupported artifact.");
         }
+        if (retainedBytes > _maximumStoreBytes)
+        {
+            throw new FormatException("Effect-attempt storage exceeds its configured aggregate byte bound.");
+        }
         retainedIdentities = identities;
+    }
+
+    private long AddRetainedBytes(long retainedBytes, string path)
+    {
+        var total = checked(retainedBytes + _guard.GetFileLength(_root, path));
+        if (total > _maximumStoreBytes)
+        {
+            throw new FormatException("Effect-attempt storage exceeds its configured aggregate byte bound.");
+        }
+
+        return total;
     }
 
     private static bool IsInterruptedAtomicWrite(string fileName)
@@ -993,10 +1009,13 @@ public sealed class GovernedLoopEffectAttemptStore : IGovernedLoopEffectAttemptS
         }
 
         IReadOnlyDictionary<string, GovernedLoopEffectReconciliationCase>? reconciliationCases = null;
-        if (versions.Values.Any(version => version.Payload.Phase == GovernedLoopEffectPhase.Reconciled)
-            && !_reconciliationProofReader.TryReadCurrentCases(out reconciliationCases))
+        if (versions.Values.Any(version => version.Payload.Phase == GovernedLoopEffectPhase.Reconciled))
         {
-            throw new FormatException("Reconciled effect-attempt evidence is not attached to a valid canonical reconciliation case.");
+            reconciliationCases = await _reconciliationProofReader.ReadCurrentCasesAsync(cancellationToken).ConfigureAwait(false);
+            if (reconciliationCases is null)
+            {
+                throw new FormatException("Reconciled effect-attempt evidence is not attached to a valid canonical reconciliation case.");
+            }
         }
 
         var roots = versions.Values.Where(version => version.PreviousContentHash is null).ToArray();
@@ -1074,10 +1093,13 @@ public sealed class GovernedLoopEffectAttemptStore : IGovernedLoopEffectAttemptS
         }
 
         if (reconciliationCases is null
-            && versions.Values.Any(version => version.Payload.Phase == GovernedLoopEffectPhase.Reconciled)
-            && !_reconciliationProofReader.TryReadCurrentCases(out reconciliationCases))
+            && versions.Values.Any(version => version.Payload.Phase == GovernedLoopEffectPhase.Reconciled))
         {
-            throw new FormatException("Reconciled effect-attempt evidence is not attached to a valid canonical reconciliation case.");
+            reconciliationCases = await _reconciliationProofReader.ReadCurrentCasesAsync(cancellationToken).ConfigureAwait(false);
+            if (reconciliationCases is null)
+            {
+                throw new FormatException("Reconciled effect-attempt evidence is not attached to a valid canonical reconciliation case.");
+            }
         }
 
         var roots = versions.Values.Where(version => version.PreviousContentHash is null).ToArray();

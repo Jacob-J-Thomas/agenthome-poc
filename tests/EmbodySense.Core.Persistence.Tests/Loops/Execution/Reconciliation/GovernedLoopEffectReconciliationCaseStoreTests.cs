@@ -306,6 +306,45 @@ public sealed class GovernedLoopEffectReconciliationCaseStoreTests
     }
 
     [Fact]
+    public async Task Public_effect_probe_propagates_cancellation_before_reconciliation_proof_inventory()
+    {
+        using var workspace = new TestWorkspace();
+        var scenario = await CreateScenarioAsync(workspace);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => scenario.EffectStore.ProbeStorageAvailabilityAsync(cancellation.Token));
+    }
+
+    [Fact]
+    public async Task Readiness_fails_closed_when_retained_reconciliation_artifacts_exceed_store_quota()
+    {
+        using var workspace = new TestWorkspace();
+        var scenario = await CreateScenarioAsync(workspace);
+        var initialStore = new GovernedLoopEffectReconciliationCaseStore(scenario.EffectStore);
+        var openRequest = Mutation(scenario.Open, null, null, "open", "operation-quota");
+        Assert.Equal(GovernedLoopEffectReconciliationCaseMutationStatus.Applied, (await initialStore.CompareExchangeAsync(openRequest)).Status);
+
+        var artifactPaths = Directory.EnumerateFiles(scenario.Paths.GovernedLoopEffectAttemptsPath).ToArray();
+        var retainedBytes = artifactPaths.Sum(path => new FileInfo(path).Length);
+        var maximumRecordBytes = artifactPaths.Max(path => new FileInfo(path).Length);
+        Assert.True(retainedBytes > maximumRecordBytes);
+        var constrainedOptions = new GovernedLoopEffectAttemptStoreOptions
+        {
+            MaxRecordUtf8Bytes = checked((int)maximumRecordBytes),
+            MaxStoreUtf8Bytes = retainedBytes - 1,
+        };
+        var constrainedEffectStore = new GovernedLoopEffectAttemptStore(new WorkspacePaths(workspace.RootPath), constrainedOptions);
+        var constrainedCaseStore = new GovernedLoopEffectReconciliationCaseStore(constrainedEffectStore);
+
+        var read = await constrainedEffectStore.ReadAsync(scenario.WorkspaceId, scenario.Attempt.Payload.OperationId, scenario.Attempt.Payload.EffectGeneration);
+
+        Assert.Equal(GovernedLoopEffectAttemptReadStatus.Corrupt, read.Status);
+        Assert.False(await constrainedEffectStore.ProbeStorageAvailabilityAsync());
+        Assert.False(await constrainedCaseStore.ProbeStorageAvailabilityAsync());
+    }
+
+    [Fact]
     public async Task Missing_expected_case_cannot_return_payload_bearing_conflict()
     {
         using var workspace = new TestWorkspace();

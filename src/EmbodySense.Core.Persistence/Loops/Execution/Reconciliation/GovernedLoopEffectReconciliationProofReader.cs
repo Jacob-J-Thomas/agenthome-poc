@@ -19,59 +19,69 @@ namespace EmbodySense.Core.Persistence.Loops.Execution.Reconciliation;
 internal sealed class GovernedLoopEffectReconciliationProofReader
 {
     private readonly CustomLoopArtifactPathGuard _guard;
+    private readonly long _maximumStoreBytes;
     private readonly string _root;
 
-    internal GovernedLoopEffectReconciliationProofReader(CustomLoopArtifactPathGuard guard, string root)
+    internal GovernedLoopEffectReconciliationProofReader(CustomLoopArtifactPathGuard guard, string root, long maximumStoreBytes)
     {
         ArgumentNullException.ThrowIfNull(guard);
         ArgumentException.ThrowIfNullOrWhiteSpace(root);
+        ArgumentOutOfRangeException.ThrowIfLessThan(maximumStoreBytes, 1);
         _guard = guard;
+        _maximumStoreBytes = maximumStoreBytes;
         _root = root;
     }
 
     /// <summary>Reads every current canonical reconciliation case under the caller's shared persistence lock.</summary>
-    internal bool TryReadCurrentCases(out IReadOnlyDictionary<string, GovernedLoopEffectReconciliationCase> currentCases)
+    internal async Task<IReadOnlyDictionary<string, GovernedLoopEffectReconciliationCase>?> ReadCurrentCasesAsync(CancellationToken cancellationToken)
     {
-        currentCases = new Dictionary<string, GovernedLoopEffectReconciliationCase>(StringComparer.Ordinal);
-
+        cancellationToken.ThrowIfCancellationRequested();
         try
         {
             var casesByStorageKey = new Dictionary<string, List<(long Version, string Hash, GovernedLoopEffectReconciliationCase Value)>>(StringComparer.Ordinal);
             var versionFileCount = 0;
+            long proofBytes = 0;
             foreach (var path in Directory.EnumerateFiles(_root, GovernedLoopEffectReconciliationPersistenceLimits.CaseFilePrefix + "*.json", SearchOption.TopDirectoryOnly))
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 if (++versionFileCount > checked(GovernedLoopEffectReconciliationPersistenceLimits.MaximumCases * GovernedLoopEffectReconciliationPersistenceLimits.MaximumCaseVersions))
                 {
-                    return false;
+                    return null;
                 }
 
                 var fileName = Path.GetFileName(path);
                 if (!GovernedLoopEffectReconciliationArtifactNames.TryParseCaseVersionFile(fileName, out var storageKey, out var version, out var hash))
                 {
-                    return false;
+                    return null;
                 }
 
                 var safePath = _guard.GetFilePath(_root, fileName);
-                if (_guard.GetFileLength(_root, safePath) > GovernedLoopEffectReconciliationContractLimits.MaxRecordUtf8Bytes)
+                var fileLength = _guard.GetFileLength(_root, safePath);
+                if (fileLength > GovernedLoopEffectReconciliationContractLimits.MaxRecordUtf8Bytes || !TryAddProofBytes(ref proofBytes, fileLength))
                 {
-                    return false;
+                    return null;
                 }
 
-                var bytes = File.ReadAllBytes(safePath);
+                var bytes = await _guard.ReadAllBytesAsync(
+                    _root,
+                    safePath,
+                    GovernedLoopEffectReconciliationContractLimits.MaxRecordUtf8Bytes,
+                    "Reconciliation case proof",
+                    cancellationToken).ConfigureAwait(false);
                 if (!GovernedLoopEffectReconciliationRecordCodec.TryDecode(bytes, out var value, out _)
                     || value is null
                     || value.CaseVersion != version
                     || !string.Equals(value.ContentHash, hash, StringComparison.Ordinal)
                     || !string.Equals(GovernedLoopEffectReconciliationArtifactNames.StorageKey(value.CaseId), storageKey, StringComparison.Ordinal))
                 {
-                    return false;
+                    return null;
                 }
 
                 if (!casesByStorageKey.TryGetValue(storageKey, out var versions))
                 {
                     if (casesByStorageKey.Count >= GovernedLoopEffectReconciliationPersistenceLimits.MaximumCases)
                     {
-                        return false;
+                        return null;
                     }
 
                     versions = [];
@@ -79,7 +89,7 @@ internal sealed class GovernedLoopEffectReconciliationProofReader
                 }
                 if (versions.Count >= GovernedLoopEffectReconciliationPersistenceLimits.MaximumCaseVersions)
                 {
-                    return false;
+                    return null;
                 }
                 versions.Add((version, hash, value));
             }
@@ -87,27 +97,39 @@ internal sealed class GovernedLoopEffectReconciliationProofReader
             var caseHeads = new Dictionary<string, string>(StringComparer.Ordinal);
             foreach (var path in Directory.EnumerateFiles(_root, GovernedLoopEffectReconciliationPersistenceLimits.CaseFilePrefix + "*.head", SearchOption.TopDirectoryOnly))
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 var fileName = Path.GetFileName(path);
-                if (!GovernedLoopEffectReconciliationArtifactNames.TryParseCaseHeadFile(fileName, out var storageKey)
-                    || _guard.GetFileLength(_root, _guard.GetFilePath(_root, fileName)) != GovernedLoopEffectReconciliationContractLimits.Sha256HexCharacters)
+                if (!GovernedLoopEffectReconciliationArtifactNames.TryParseCaseHeadFile(fileName, out var storageKey))
                 {
-                    return false;
+                    return null;
                 }
                 if (caseHeads.Count >= GovernedLoopEffectReconciliationPersistenceLimits.MaximumCases)
                 {
-                    return false;
+                    return null;
                 }
 
                 var headPath = _guard.GetFilePath(_root, fileName);
-                var head = Encoding.ASCII.GetString(File.ReadAllBytes(headPath));
+                var headLength = _guard.GetFileLength(_root, headPath);
+                if (headLength != GovernedLoopEffectReconciliationContractLimits.Sha256HexCharacters || !TryAddProofBytes(ref proofBytes, headLength))
+                {
+                    return null;
+                }
+
+                var head = Encoding.ASCII.GetString(await _guard.ReadAllBytesAsync(
+                    _root,
+                    headPath,
+                    GovernedLoopEffectReconciliationContractLimits.Sha256HexCharacters,
+                    "Reconciliation case head proof",
+                    cancellationToken).ConfigureAwait(false));
                 if (!IsHash(head) || !caseHeads.TryAdd(storageKey, head))
                 {
-                    return false;
+                    return null;
                 }
             }
 
             foreach (var pair in casesByStorageKey)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 var versions = pair.Value.OrderBy(item => item.Version).ToArray();
                 if (!caseHeads.TryGetValue(pair.Key, out var head)
                     || versions.Length == 0
@@ -116,34 +138,37 @@ internal sealed class GovernedLoopEffectReconciliationProofReader
                     || versions[0].Value.PreviousContentHash is not null
                     || !string.Equals(head, versions[^1].Hash, StringComparison.Ordinal))
                 {
-                    return false;
+                    return null;
                 }
 
                 for (var index = 1; index < versions.Length; index++)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     if (versions[index].Version != versions[index - 1].Version + 1
                         || !GovernedLoopEffectReconciliationContractValidator.ValidateTransition(versions[index - 1].Value, versions[index].Value).IsValid)
                     {
-                        return false;
+                        return null;
                     }
                 }
             }
 
             if (caseHeads.Count != casesByStorageKey.Count)
             {
-                return false;
+                return null;
             }
 
-            currentCases = casesByStorageKey.ToDictionary(
+            return casesByStorageKey.ToDictionary(
                 pair => pair.Key,
                 pair => pair.Value.OrderBy(item => item.Version).Last().Value,
                 StringComparer.Ordinal);
-            return true;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception exception) when (exception is not OutOfMemoryException and not StackOverflowException)
         {
-            currentCases = new Dictionary<string, GovernedLoopEffectReconciliationCase>(StringComparer.Ordinal);
-            return false;
+            return null;
         }
     }
 
@@ -173,4 +198,15 @@ internal sealed class GovernedLoopEffectReconciliationProofReader
     private static bool IsHash(string value)
         => value.Length == GovernedLoopEffectReconciliationContractLimits.Sha256HexCharacters
             && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
+
+    private bool TryAddProofBytes(ref long retainedBytes, long bytes)
+    {
+        if (bytes < 0 || retainedBytes > _maximumStoreBytes - bytes)
+        {
+            return false;
+        }
+
+        retainedBytes += bytes;
+        return true;
+    }
 }
