@@ -217,6 +217,26 @@ if (args is ["sequential-audit-record-then-exit", var auditWorkspaceRoot])
     return await SequentialAuditCrossProcessHost.RecordThenExitAsync(auditWorkspaceRoot);
 }
 
+if (args is ["audit-append", var auditAppendWorkspaceRoot, var auditAppendIdentity, var auditAppendReadyPath, var auditAppendReleasePath, var auditAppendResultPath])
+{
+    return await SequentialAuditCrossProcessHost.AppendAsync(auditAppendWorkspaceRoot, auditAppendIdentity, auditAppendReadyPath, auditAppendReleasePath, auditAppendResultPath);
+}
+
+if (args is ["sequential-audit-record", var sequentialAuditWorkspaceRoot, var sequentialAuditReadyPath, var sequentialAuditReleasePath, var sequentialAuditResultPath])
+{
+    return await SequentialAuditCrossProcessHost.RecordAsync(sequentialAuditWorkspaceRoot, sequentialAuditReadyPath, sequentialAuditReleasePath, sequentialAuditResultPath);
+}
+
+if (args is ["audit-hold-lock", var auditLockPath, var auditLockReadyPath, var auditLockReleasePath])
+{
+    return await SequentialAuditCrossProcessHost.HoldLockAsync(auditLockPath, auditLockReadyPath, auditLockReleasePath);
+}
+
+if (args is ["audit-append-incomplete-tail-and-hold", var incompleteAuditWorkspaceRoot, var incompleteAuditReadyPath, var incompleteAuditReleasePath])
+{
+    return await SequentialAuditCrossProcessHost.AppendIncompleteTailAndHoldAsync(incompleteAuditWorkspaceRoot, incompleteAuditReadyPath, incompleteAuditReleasePath);
+}
+
 if (args is ["sequential-evidence-resolve", var evidenceWorkspaceRoot, var evidenceHash, var evidenceResultPath])
 {
     return await CustomLoopSequentialEvidenceCrossProcessHost.ResolveAsync(evidenceWorkspaceRoot, evidenceHash, evidenceResultPath);

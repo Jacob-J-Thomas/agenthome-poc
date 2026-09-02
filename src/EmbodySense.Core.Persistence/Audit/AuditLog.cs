@@ -3,7 +3,6 @@ using System.Security;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using System.Collections.Concurrent;
 using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Application.Loops.Sequential;
 using EmbodySense.Core.Application.Loops.Sequential.Models;
@@ -15,9 +14,12 @@ namespace EmbodySense.Core.Persistence.Audit;
 /// Persists append-only audit events as newline-delimited JSON beneath the workspace audit directory.
 /// </summary>
 /// <remarks>
-/// Appends targeting the same file are serialized across instances in this process. The store does not claim a cross-process
-/// transaction. Tail reads preserve file order and ignore blank or malformed lines. A missing path, or one for which the
-/// existence probe returns <see langword="false"/>, produces an empty result; cancellation and read failures after open propagate.
+/// Mutations targeting the same file are serialized across instances and processes on Windows, macOS, and Linux. Mutation lock
+/// order is the process-local path semaphore, the adjacent cross-process sidecar lease, and the ledger stream; disposal reverses
+/// that order. A caller that already owns a domain lock acquires the audit boundary after that domain lock; the audit log never
+/// calls back into domain persistence while it owns the audit boundary. Tail reads do not acquire mutation ownership, preserve
+/// file order, and ignore blank or malformed lines. A missing path, or one for which the existence probe returns
+/// <see langword="false"/>, produces an empty result; cancellation and read failures after open propagate.
 /// </remarks>
 public sealed class AuditLog : IAuditLog, IGovernedLoopSequentialAuditRecorder
 {
@@ -34,7 +36,6 @@ public sealed class AuditLog : IAuditLog, IGovernedLoopSequentialAuditRecorder
     private const int MaxAuditMetadataStringCharacters = 16 * 1024;
     private const int MaxAuditFieldCharacters = 4096;
     private const int MaxAuditDetailCharacters = 16 * 1024;
-    private static readonly ConcurrentDictionary<string, SemaphoreSlim> _fileLocks = new(StringComparer.OrdinalIgnoreCase);
     private static readonly UTF8Encoding _strictUtf8 = new(false, true);
     private static readonly JsonSerializerOptions _jsonOptions = new()
     {
@@ -83,26 +84,34 @@ public sealed class AuditLog : IAuditLog, IGovernedLoopSequentialAuditRecorder
     /// <summary>
     /// Appends one canonical audit event as a single newline-delimited JSON record.
     /// </summary>
+    /// <remarks>
+    /// A successful call commits one complete record relative to cooperating mutations, but the call has no idempotency
+    /// identity. Callers must not retry an uncertain append as though it had <see cref="RecordOnceAsync"/> semantics.
+    /// </remarks>
     /// <param name="auditEvent">The audit event.</param>
-    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <param name="cancellationToken">The token honored while acquiring ownership and validating the existing tail. Once complete-record writing begins, non-cancellable I/O finishes the integrity commit durably.</param>
     /// <returns>A task that completes after the record has been appended to the workspace audit file.</returns>
     public async Task AppendAsync(AuditEvent auditEvent, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(auditEvent);
 
-        Directory.CreateDirectory(_paths.AuditPath);
-        var fileLock = _fileLocks.GetOrAdd(_paths.EventsLogPath, _ => new SemaphoreSlim(1, 1));
+        var record = _strictUtf8.GetBytes(JsonSerializer.Serialize(auditEvent, _jsonOptions) + Environment.NewLine);
+        await using var mutation = await AuditMutationBoundary.AcquireAsync(_paths, cancellationToken);
+        await using var stream = mutation.OpenLedgerStream();
+        if (!await RepairIncompleteTailAsync(mutation, stream, cancellationToken))
+        {
+            throw new IOException("The authoritative audit ledger has an incomplete or corrupt final record that cannot be reconciled safely.");
+        }
 
-        await fileLock.WaitAsync(cancellationToken);
-        try
-        {
-            var line = JsonSerializer.Serialize(auditEvent, _jsonOptions);
-            await File.AppendAllTextAsync(_paths.EventsLogPath, line + Environment.NewLine, cancellationToken);
-        }
-        finally
-        {
-            fileLock.Release();
-        }
+        cancellationToken.ThrowIfCancellationRequested();
+        mutation.RequireLedgerBinding(stream);
+        stream.Position = stream.Length;
+        await stream.WriteAsync(record, CancellationToken.None);
+        mutation.RequireLedgerBinding(stream);
+        await stream.FlushAsync(CancellationToken.None);
+        mutation.RequireLedgerBinding(stream);
+        stream.Flush(flushToDisk: true);
+        mutation.RequireLedgerBinding(stream);
     }
 
     /// <summary>
@@ -111,7 +120,7 @@ public sealed class AuditLog : IAuditLog, IGovernedLoopSequentialAuditRecorder
     /// <param name="operationId">The stable domain-separated sequential audit operation identity.</param>
     /// <param name="evidenceHash">The exact lowercase SHA-256 evidence identity.</param>
     /// <param name="auditEvent">The complete deterministic audit event.</param>
-    /// <param name="cancellationToken">The token used while waiting, scanning, restoring a missing newline after a complete final record, and appending.</param>
+    /// <param name="cancellationToken">The token honored while waiting, scanning, and validating repair. Once complete-record or repair writing begins, non-cancellable I/O finishes the integrity commit durably.</param>
     /// <returns>The closed durable record disposition.</returns>
     public async Task<GovernedLoopSequentialAuditRecordResult> RecordOnceAsync(
         string operationId,
@@ -128,17 +137,14 @@ public sealed class AuditLog : IAuditLog, IGovernedLoopSequentialAuditRecorder
 
         try
         {
-            Directory.CreateDirectory(_paths.AuditPath);
-            var fileLock = _fileLocks.GetOrAdd(_paths.EventsLogPath, _ => new SemaphoreSlim(1, 1));
-            await fileLock.WaitAsync(cancellationToken);
-            try
-            {
-                return await RecordSequentialAuditUnderLockAsync(operationId, evidenceHash, preparedEvent, canonicalLine, cancellationToken);
-            }
-            finally
-            {
-                fileLock.Release();
-            }
+            await using var mutation = await AuditMutationBoundary.AcquireAsync(_paths, cancellationToken);
+            return await RecordSequentialAuditUnderLockAsync(
+                mutation,
+                operationId,
+                evidenceHash,
+                preparedEvent,
+                canonicalLine,
+                cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -150,7 +156,8 @@ public sealed class AuditLog : IAuditLog, IGovernedLoopSequentialAuditRecorder
             or FormatException
             or DecoderFallbackException
             or NotSupportedException
-            or SecurityException)
+            or SecurityException
+            or TimeoutException)
         {
             return Result(GovernedLoopSequentialAuditRecordStatus.Unavailable, "Sequential audit durability could not be proved from the authoritative ledger.");
         }
@@ -217,25 +224,20 @@ public sealed class AuditLog : IAuditLog, IGovernedLoopSequentialAuditRecorder
     }
 
     private async Task<GovernedLoopSequentialAuditRecordResult> RecordSequentialAuditUnderLockAsync(
+        AuditMutationBoundary mutation,
         string operationId,
         string evidenceHash,
         AuditEvent preparedEvent,
         string canonicalLine,
         CancellationToken cancellationToken)
     {
-        await using var stream = new FileStream(
-            _paths.EventsLogPath,
-            FileMode.OpenOrCreate,
-            FileAccess.ReadWrite,
-            FileShare.Read,
-            bufferSize: 4096,
-            FileOptions.Asynchronous | FileOptions.WriteThrough);
+        await using var stream = mutation.OpenLedgerStream();
         if (stream.Length > MaxSequentialAuditLedgerUtf8Bytes)
         {
             return Result(GovernedLoopSequentialAuditRecordStatus.Unavailable, "The authoritative audit ledger exceeds the bounded sequential reconciliation limit.");
         }
 
-        if (!await RepairIncompleteTailAsync(stream, cancellationToken))
+        if (!await RepairIncompleteTailAsync(mutation, stream, cancellationToken))
         {
             return Result(GovernedLoopSequentialAuditRecordStatus.Unavailable, "The authoritative audit ledger has an incomplete or corrupt final record that cannot be reconciled safely.");
         }
@@ -274,6 +276,7 @@ public sealed class AuditLog : IAuditLog, IGovernedLoopSequentialAuditRecorder
                     && string.Equals(SerializeCanonical(existingEvent), canonicalLine, StringComparison.Ordinal);
                 if (matchingOperationCount > 1 || !exactMatch)
                 {
+                    mutation.RequireLedgerBinding(stream);
                     return Result(GovernedLoopSequentialAuditRecordStatus.Conflict, "Sequential audit operation identity is already bound to divergent or duplicate durable content.");
                 }
             }
@@ -281,6 +284,7 @@ public sealed class AuditLog : IAuditLog, IGovernedLoopSequentialAuditRecorder
 
         if (matchingOperationCount == 1)
         {
+            mutation.RequireLedgerBinding(stream);
             return Result(GovernedLoopSequentialAuditRecordStatus.AlreadyRecorded, "The exact sequential audit operation, evidence, and event were already durable.");
         }
 
@@ -291,13 +295,18 @@ public sealed class AuditLog : IAuditLog, IGovernedLoopSequentialAuditRecorder
         }
 
         stream.Position = stream.Length;
-        await stream.WriteAsync(record, cancellationToken);
-        await stream.FlushAsync(cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        mutation.RequireLedgerBinding(stream);
+        await stream.WriteAsync(record, CancellationToken.None);
+        mutation.RequireLedgerBinding(stream);
+        await stream.FlushAsync(CancellationToken.None);
+        mutation.RequireLedgerBinding(stream);
         stream.Flush(flushToDisk: true);
+        mutation.RequireLedgerBinding(stream);
         return Result(GovernedLoopSequentialAuditRecordStatus.Recorded, "The exact sequential audit operation, evidence, and event were recorded durably.");
     }
 
-    private static async Task<bool> RepairIncompleteTailAsync(FileStream stream, CancellationToken cancellationToken)
+    private static async Task<bool> RepairIncompleteTailAsync(AuditMutationBoundary mutation, FileStream stream, CancellationToken cancellationToken)
     {
         if (stream.Length == 0)
         {
@@ -362,15 +371,20 @@ public sealed class AuditLog : IAuditLog, IGovernedLoopSequentialAuditRecorder
             }
 
             stream.Position = stream.Length;
-            await stream.WriteAsync("\n"u8.ToArray(), cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            mutation.RequireLedgerBinding(stream);
+            await stream.WriteAsync("\n"u8.ToArray(), CancellationToken.None);
+            mutation.RequireLedgerBinding(stream);
         }
         else
         {
             return false;
         }
 
-        await stream.FlushAsync(cancellationToken);
+        await stream.FlushAsync(CancellationToken.None);
+        mutation.RequireLedgerBinding(stream);
         stream.Flush(flushToDisk: true);
+        mutation.RequireLedgerBinding(stream);
         return true;
     }
 

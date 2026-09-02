@@ -2,6 +2,7 @@ using EmbodySense.Core.Application.Loops.Models;
 using System.Diagnostics;
 using System.Collections.Immutable;
 using System.Security.Cryptography;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using EmbodySense.Core.Application.Governance.Audit;
 using EmbodySense.Core.Application.Loops;
@@ -13,6 +14,7 @@ using EmbodySense.Core.Common.Loops.Custom.Retention;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Retention;
 using EmbodySense.Core.Common.Workspace;
+using EmbodySense.Core.Persistence.Audit;
 using EmbodySense.Core.Persistence.Loops;
 using EmbodySense.Core.Persistence.Tests.Verification;
 using EmbodySense.Tests.Support;
@@ -264,6 +266,54 @@ public sealed class CustomLoopControlOperationStoreTests
         Assert.Equal(0, posture.ArtifactCount);
         Assert.Equal(1, posture.Categories.Single(item => item.Category == CustomLoopReceiptArtifactCategory.ExpiredIdempotency).ArtifactCount);
         Assert.Equal(2, audit.Events.Count);
+    }
+
+    [Fact]
+    public async Task Cleanup_holds_its_receipt_domain_lock_before_the_shared_audit_boundary_without_deadlock()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var completedAtUtc = _timestamp;
+        var time = new MutableTimeProvider(completedAtUtc);
+        var audit = new AuditLog(paths);
+        await audit.AppendAsync(AuditEvent.Create("test", "lock-order-seed", "audit", "succeeded", "Create the canonical audit boundary."));
+        var store = new CustomLoopControlOperationStore(paths, audit, time);
+        var pending = Pending("control-lock-order", AuditSchema.Actors.Web);
+        var created = await store.BeginAsync(pending);
+        using var lease = Assert.IsAssignableFrom<ICustomLoopControlOperationLease>(created.Lease);
+        var completed = Complete(created.Operation!, completedAtUtc);
+        Assert.Equal(CustomLoopControlOperationStoreStatus.Completed, (await store.CompleteAsync(completed)).Status);
+        lease.Dispose();
+        time.UtcNow = completedAtUtc + CustomLoopReceiptRetentionPolicy.ExactReplayDuration;
+        var journalPath = Path.Combine(paths.CustomLoopControlReceiptCleanupPath, "active.json");
+        using var externalAuditOwnership = CrossProcessExclusiveFileLock.Acquire(Path.Combine(paths.AuditPath, ".events.ndjson.mutation.lock"));
+        Task<CustomLoopReceiptCleanupResult>? cleanupTask = null;
+        Task? directAppendTask = null;
+
+        try
+        {
+            cleanupTask = store.CleanupAsync(CleanupCommand("cleanup-lock-order"));
+            await WaitForCleanupStageAsync(journalPath, CustomLoopReceiptCleanupStage.IntentAuditStarted, TimeSpan.FromSeconds(10));
+            directAppendTask = audit.AppendAsync(AuditEvent.Create("test", "direct-audit", "audit", "succeeded", "Concurrent direct append."));
+            externalAuditOwnership.Dispose();
+            await Task.WhenAll(cleanupTask, directAppendTask).WaitAsync(TimeSpan.FromSeconds(30));
+        }
+        finally
+        {
+            externalAuditOwnership.Dispose();
+            await DrainStartedTasksAsync(cleanupTask, directAppendTask);
+        }
+
+        var cleanup = await cleanupTask;
+        Assert.Equal(CustomLoopReceiptCleanupStatus.Pruned, cleanup.Status);
+        Assert.Equal(CustomLoopReceiptCleanupStage.Completed, cleanup.Journal!.Stage);
+        var rawLines = await File.ReadAllLinesAsync(paths.EventsLogPath);
+        Assert.Equal(4, rawLines.Length);
+        var events = rawLines.Select(line => JsonSerializer.Deserialize<AuditEvent>(line, new JsonSerializerOptions(JsonSerializerDefaults.Web))).ToArray();
+        Assert.All(events, Assert.NotNull);
+        Assert.Single(events, auditEvent => auditEvent!.Action == AuditSchema.Actions.LoopControlReceiptRetentionIntent);
+        Assert.Single(events, auditEvent => auditEvent!.Action == AuditSchema.Actions.LoopControlReceiptRetentionOutcome);
+        Assert.Single(events, auditEvent => auditEvent!.Action == "direct-audit");
     }
 
     [Fact]
@@ -1955,6 +2005,42 @@ public sealed class CustomLoopControlOperationStoreTests
     {
         Directory.CreateDirectory(paths.CustomLoopControlReceiptCleanupPath);
         await File.WriteAllBytesAsync(Path.Combine(paths.CustomLoopControlReceiptCleanupPath, "active.json"), CustomLoopReceiptRetentionContractCodec.SerializeCleanupJournal(journal));
+    }
+
+    private static async Task WaitForCleanupStageAsync(string journalPath, CustomLoopReceiptCleanupStage expectedStage, TimeSpan timeout)
+    {
+        var started = Stopwatch.StartNew();
+        while (started.Elapsed < timeout)
+        {
+            try
+            {
+                if (File.Exists(journalPath) && ReadCleanupJournal(journalPath).Stage == expectedStage)
+                {
+                    return;
+                }
+            }
+            catch (Exception exception) when (exception is IOException or FormatException)
+            {
+            }
+
+            await Task.Delay(10);
+        }
+
+        throw new TimeoutException($"Cleanup did not reach {expectedStage} within {timeout}.");
+    }
+
+    private static async Task DrainStartedTasksAsync(params Task?[] tasks)
+    {
+        foreach (var task in tasks.Where(task => task is not null))
+        {
+            try
+            {
+                await task!.WaitAsync(TimeSpan.FromSeconds(30));
+            }
+            catch (Exception)
+            {
+            }
+        }
     }
 
     private static bool IsRemovalWriteAheadOfJournal(string journalPath, IReadOnlyCollection<string> receiptPaths, int crashAfterRemovalCount)

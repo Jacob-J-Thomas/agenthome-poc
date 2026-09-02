@@ -10,8 +10,16 @@ public interface IAuditLog
     /// <summary>
     /// Appends one immutable audit event.
     /// </summary>
+    /// <remarks>
+    /// A successful call commits one complete physical record atomically relative to other governed audit mutations. This
+    /// operation has no idempotency identity: callers must not retry an uncertain append as though it had exact-once
+    /// <c>RecordOnceAsync</c> reconciliation semantics.
+    /// </remarks>
     /// <param name="auditEvent">The event to persist.</param>
-    /// <param name="cancellationToken">The token used to cancel the operation.</param>
+    /// <param name="cancellationToken">
+    /// The token honored before the integrity commit begins. Once complete-record writing begins, the implementation finishes
+    /// the durable commit with non-cancellable I/O.
+    /// </param>
     /// <returns>A task that represents the asynchronous operation.</returns>
     Task AppendAsync(AuditEvent auditEvent, CancellationToken cancellationToken = default);
 

@@ -343,7 +343,7 @@ public sealed class CodexAppServerInferenceTests
             Response(3, """{"turn":{"id":"turn-1","status":"inProgress","items":[]}}"""),
             Notification("turn/completed", """{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed","items":[{"id":"item-1","type":"agentMessage","text":"observed answer","phase":"final_answer"}]}}"""));
         var client = CreateClient(transport, workingDirectory: workspace.RootPath);
-        FileStream? auditLock = null;
+        CrossProcessExclusiveFileLock? auditLock = null;
 
         try
         {
@@ -353,7 +353,7 @@ public sealed class CodexAppServerInferenceTests
                 CancellationToken.None,
                 async (commitTransportWrite, token) =>
                 {
-                    auditLock = new FileStream(paths.EventsLogPath, FileMode.Open, FileAccess.Read, FileShare.None);
+                    auditLock = CrossProcessExclusiveFileLock.Acquire(Path.Combine(paths.AuditPath, ".events.ndjson.mutation.lock"));
                     await commitTransportWrite(token);
                 }));
 
@@ -363,10 +363,7 @@ public sealed class CodexAppServerInferenceTests
         }
         finally
         {
-            if (auditLock is not null)
-            {
-                await auditLock.DisposeAsync();
-            }
+            auditLock?.Dispose();
         }
     }
 
@@ -382,7 +379,7 @@ public sealed class CodexAppServerInferenceTests
             Response(3, """{"turn":{"id":"turn-1","status":"inProgress","items":[]}}"""),
             Notification("turn/completed", """{"threadId":"thread-1","turn":{"id":"turn-1","status":"failed","error":{"message":"provider rejected the turn"},"items":[]}}"""));
         var client = CreateClient(transport, workingDirectory: workspace.RootPath);
-        FileStream? auditLock = null;
+        CrossProcessExclusiveFileLock? auditLock = null;
 
         try
         {
@@ -392,7 +389,7 @@ public sealed class CodexAppServerInferenceTests
                 CancellationToken.None,
                 async (commitTransportWrite, token) =>
                 {
-                    auditLock = new FileStream(paths.EventsLogPath, FileMode.Open, FileAccess.Read, FileShare.None);
+                    auditLock = CrossProcessExclusiveFileLock.Acquire(Path.Combine(paths.AuditPath, ".events.ndjson.mutation.lock"));
                     await commitTransportWrite(token);
                 }));
 
@@ -402,10 +399,7 @@ public sealed class CodexAppServerInferenceTests
         }
         finally
         {
-            if (auditLock is not null)
-            {
-                await auditLock.DisposeAsync();
-            }
+            auditLock?.Dispose();
         }
     }
 
