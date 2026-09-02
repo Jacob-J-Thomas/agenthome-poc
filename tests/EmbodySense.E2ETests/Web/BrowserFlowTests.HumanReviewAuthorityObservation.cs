@@ -24,6 +24,7 @@ public sealed partial class BrowserFlowTests
                     runId,
                     pending: 0,
                     completed: 0,
+                    completedByRoute: Object.create(null),
                 };
                 window.__embodySenseHumanReviewCanonicalObservation = observation;
                 window.fetch = async (input, init = {}) => {
@@ -42,6 +43,7 @@ public sealed partial class BrowserFlowTests
                     } finally {
                         observation.pending -= 1;
                         observation.completed += 1;
+                        observation.completedByRoute[pathname] = (observation.completedByRoute[pathname] ?? 0) + 1;
                     }
                 };
                 return true;
@@ -49,9 +51,15 @@ public sealed partial class BrowserFlowTests
             """);
     }
 
+    private static Task RefreshHumanReviewCanonicalRereadAsync(HeadlessBrowserSession browser)
+        => browser.EvaluateWithUserGestureAsync("(() => { const button = document.querySelector('[data-testid=\"human-review-detail-refresh\"]'); if (!button || button.disabled) throw new Error('The Human Review detail refresh was unavailable.'); button.click(); })()");
+
     private static Task WaitForHumanReviewCanonicalRereadIdleAsync(HeadlessBrowserSession browser, string runId)
     {
         var runIdJson = JsonSerializer.Serialize(runId);
+        var detailRouteJson = JsonSerializer.Serialize($"/api/human-reviews/{Uri.EscapeDataString(runId)}");
+        var evidenceRouteJson = JsonSerializer.Serialize($"/api/human-reviews/{Uri.EscapeDataString(runId)}/evidence");
+        var postureRouteJson = JsonSerializer.Serialize($"/api/human-reviews/{Uri.EscapeDataString(runId)}/posture");
         return browser.WaitForExpressionAsync($$"""
             (() => {
                 const observation = window.__embodySenseHumanReviewCanonicalObservation;
@@ -63,6 +71,9 @@ public sealed partial class BrowserFlowTests
                     && observation.runId === {{runIdJson}}
                     && observation.completed > 0
                     && observation.pending === 0
+                    && observation.completedByRoute?.[{{detailRouteJson}}] > 0
+                    && observation.completedByRoute?.[{{evidenceRouteJson}}] > 0
+                    && observation.completedByRoute?.[{{postureRouteJson}}] > 0
                     && detailStatus?.textContent.includes("Canonical state reread") === true
                     && identity?.textContent.includes({{runIdJson}}) === true
                     && lifecycle?.textContent.toLowerCase().includes("approved") === true

@@ -124,6 +124,7 @@ public sealed partial class BrowserFlowTests
             await InstallHumanReviewCanonicalRereadObservationAsync(browser, runId);
             await OpenHumanReviewAsync(browser);
             await SelectHumanReviewAfterAuthorityRevocationAsync(browser, runId);
+            await RefreshHumanReviewCanonicalRereadAsync(browser);
             var reread = await ReadHumanReviewAsync(browser, runId);
             AssertCanonicalApproval(reread);
             Assert.Equal(approvedDecision, ReadApprovalDecision(reread));
