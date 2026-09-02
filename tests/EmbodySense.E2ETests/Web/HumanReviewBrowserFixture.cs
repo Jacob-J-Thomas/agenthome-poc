@@ -870,17 +870,4 @@ internal static class HumanReviewBrowserFixture
         return new CapabilityAdmissionSnapshot(1, workspaceId, requirements, requirementsHash!.Value, pins, evidence, admittedAtUtc);
     }
 
-    private sealed class BrowserTimeProvider(DateTimeOffset now) : TimeProvider
-    {
-        public override DateTimeOffset GetUtcNow() => now;
-    }
-
-    private sealed class BrowserAuditRecorder : IGovernedLoopSequentialAuditRecorder
-    {
-        public Task<GovernedLoopSequentialAuditRecordResult> RecordOnceAsync(string operationId, string evidenceHash, AuditEvent auditEvent, CancellationToken cancellationToken = default)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            return Task.FromResult(new GovernedLoopSequentialAuditRecordResult(GovernedLoopSequentialAuditRecordStatus.Recorded, "recorded"));
-        }
-    }
 }
