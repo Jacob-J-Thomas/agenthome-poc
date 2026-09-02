@@ -752,7 +752,9 @@ public sealed class HumanInputRuntimeFacade
                 request.PrivacyClass,
                 request.Timing,
                 request.ResponsePolicy.Kind,
-                request.ResponsePolicy.RequiredResponseCount),
+                request.ResponsePolicy.RequiredResponseCount,
+                BoundedEligibleRespondentCount(request.EligibleRespondents),
+                BoundedContinuationPolicyKind(request.ContinuationBinding)),
             head.ReminderCount,
             head.SupersedesRequestId,
             head.SupersededByRequestId,
@@ -763,6 +765,16 @@ public sealed class HumanInputRuntimeFacade
             head.Status == HumanInputRequestLifecycleStatus.Answered,
             LatestConflict(entry));
     }
+
+    private static int BoundedEligibleRespondentCount(HumanInputEligibleRespondent[]? respondents)
+        => respondents is { Length: >= 1 and <= HumanInputLimits.MaxEligibleRespondents }
+            ? respondents.Length
+            : 0;
+
+    private static HumanInputContinuationPolicyKind BoundedContinuationPolicyKind(HumanInputContinuationBinding? continuation)
+        => continuation?.Kind == HumanInputContinuationPolicyKind.BoundNodeAndCheckpointOnly
+            ? continuation.Kind
+            : HumanInputContinuationPolicyKind.Unknown;
 
     private static HumanInputRequestConflict? LatestConflict(HumanInputRequestCatalogEntry entry)
     {

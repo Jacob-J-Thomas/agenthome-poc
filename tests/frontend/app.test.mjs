@@ -31,6 +31,7 @@ test("the shared shell owns primary navigation while Builder and Runs stay local
   assert.match(indexSource, /class="app-rail"/);
   assert.match(indexSource, /data-app-view="chat"/);
   assert.match(indexSource, /data-app-view="loops"/);
+  assert.match(indexSource, /data-app-view="human-input"/);
   assert.match(
     indexSource,
     /data-app-view="configuration"\s+data-config-tab="permissions"/,
@@ -59,6 +60,15 @@ test("shared-shell navigation switches views and keeps the refresh route aligned
   assert.equal(app.elements.humanReviewView.hidden, false);
   assert.equal(app.elements.surfaceTitle.textContent, "Reviews");
   assert.match(app.context.window.location.href, /\?view=reviews$/);
+
+  const humanInputTab = app.appTabs.find(
+    (tab) => tab.dataset.appView === "human-input",
+  );
+  await humanInputTab.click();
+  assert.equal(app.elements.humanReviewView.hidden, true);
+  assert.equal(app.elements.humanInputView.hidden, false);
+  assert.equal(app.elements.surfaceTitle.textContent, "Human Input");
+  assert.match(app.context.window.location.href, /\?view=human-input$/);
 
   await chatTab.click();
   assert.equal(app.elements.chatView.hidden, false);

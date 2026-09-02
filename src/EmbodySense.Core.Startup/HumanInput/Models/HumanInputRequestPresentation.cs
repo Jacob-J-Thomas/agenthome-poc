@@ -12,6 +12,8 @@ namespace EmbodySense.Core.Startup.HumanInput.Models;
 /// <param name="Timing">The finite response window.</param>
 /// <param name="ResponsePolicyKind">The policy family without respondent or selector role identities.</param>
 /// <param name="RequiredResponseCount">The policy's bounded numeric threshold when applicable.</param>
+/// <param name="EligibleRespondentCount">The bounded number of eligible respondents, without exposing their identities or routes.</param>
+/// <param name="ContinuationPolicyKind">The existing bounded continuation visibility policy, without exposing its node or checkpoint binding.</param>
 public sealed record HumanInputRequestPresentation(
     string RequestVersionId,
     string RequestHash,
@@ -21,4 +23,6 @@ public sealed record HumanInputRequestPresentation(
     HumanInputPrivacyClass PrivacyClass,
     HumanInputTiming Timing,
     HumanInputResponsePolicyKind ResponsePolicyKind,
-    int? RequiredResponseCount);
+    int? RequiredResponseCount,
+    int EligibleRespondentCount = 0,
+    HumanInputContinuationPolicyKind ContinuationPolicyKind = HumanInputContinuationPolicyKind.Unknown);

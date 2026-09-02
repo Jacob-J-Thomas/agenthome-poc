@@ -11,6 +11,7 @@ using EmbodySense.Core.Common.Inference.Profiles.Models;
 using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Startup.Capabilities;
 using EmbodySense.Core.Startup.HumanReview;
+using EmbodySense.Core.Startup.HumanInput;
 using EmbodySense.Core.Startup.Inference.Profiles;
 using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Core.Startup.Loops.Execution.Effects;
@@ -82,6 +83,8 @@ namespace EmbodySense.E2EBrowserHost
                 var approval = provider.GetRequiredService<WebApprovalCoordinator>();
                 var publication = provider.GetRequiredService<IAgentRuntimeConversationPublicationObserver>();
                 var decisionAuthorizationProvider = provider.GetRequiredService<IHumanReviewDecisionAuthorizationProvider>();
+                var humanInputAuthorityProvider = provider.GetRequiredService<IAgentRuntimeHumanInputAuthorityProvider>();
+                var humanInputCandidateRegistry = provider.GetRequiredService<IHumanInputSupersedeCandidateRegistry>();
                 return new WebAgentRuntimeHost(
                     options,
                     approval,
@@ -94,7 +97,9 @@ namespace EmbodySense.E2EBrowserHost
                         publication,
                         additionalModelProfileProviders: providers,
                         commandActionRuntimeProvider: commandActionProvider)
-                        .WithHumanReviewDecisionAuthorizationProvider(decisionAuthorizationProvider));
+                        .WithHumanReviewDecisionAuthorizationProvider(decisionAuthorizationProvider)
+                        .WithHumanInputAuthorityProvider(humanInputAuthorityProvider)
+                        .WithHumanInputSupersedeCandidateRegistry(humanInputCandidateRegistry));
             });
             await using var application = builder.Build();
             EmbodySense.Web.Program.ConfigurePipeline(application);
