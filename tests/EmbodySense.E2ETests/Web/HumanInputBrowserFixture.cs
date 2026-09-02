@@ -325,7 +325,7 @@ internal static class HumanInputBrowserFixture
         var trust = new FileCapabilityCatalogTrustProvider(capabilityTrustRoot);
         var lifecycleStore = new GovernedLoopRevisionLifecycleStore(paths, trust, authorityTransaction: transaction);
         var graphStore = new GovernedLoopGraphRevisionStore(paths, lifecycleStore, trust, authorityTransaction: transaction);
-        var artifact = CreateArtifact(role, _stableDependencyTimestamp);
+        var artifact = CreateArtifact(role, now);
         var publication = GovernedLoopRevisionPublicationPinFactory.Create(1, artifact.RevisionArtifact.Revision, "browser-human-input-publish", Hash("publication"));
         await EnsurePublishedGraphAsync(graphStore, artifact, publication, now).ConfigureAwait(false);
 
