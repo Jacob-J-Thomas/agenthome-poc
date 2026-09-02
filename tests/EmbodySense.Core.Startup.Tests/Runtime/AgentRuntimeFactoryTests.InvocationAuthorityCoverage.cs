@@ -164,7 +164,8 @@ public sealed partial class AgentRuntimeFactoryTests
 
               const poll = () => {
                 if (fs.existsSync(releasePath)) {
-                  fs.rmSync(releasePath);
+                  // This is a one-shot release barrier; retaining the marker avoids a
+                  // Windows sharing race after the test process has observed it.
                   callback();
                   return;
                 }
