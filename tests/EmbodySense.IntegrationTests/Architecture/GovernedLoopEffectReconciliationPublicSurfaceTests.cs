@@ -217,11 +217,11 @@ public sealed class GovernedLoopEffectReconciliationPublicSurfaceTests
         var sourceRoot = Path.Combine(root, "src");
         var allowedDirectories = new[]
         {
-            Path.Combine(sourceRoot, CommonProject, ReconciliationPath),
-            Path.Combine(sourceRoot, ApplicationProject, ReconciliationPath),
+            NormalizePath(Path.Combine(sourceRoot, CommonProject, ReconciliationPath)),
+            NormalizePath(Path.Combine(sourceRoot, ApplicationProject, ReconciliationPath)),
         };
         var duplicateDeclarations = Directory.EnumerateFiles(sourceRoot, "*.cs", SearchOption.AllDirectories)
-            .Where(path => !allowedDirectories.Any(directory => path.StartsWith(directory + Path.DirectorySeparatorChar, StringComparison.Ordinal)))
+            .Where(path => !allowedDirectories.Any(directory => NormalizePath(path).StartsWith(directory + '/', StringComparison.Ordinal)))
             .SelectMany(path => PublicTopLevelTypes(CSharpSyntaxTree.ParseText(File.ReadAllText(path)).GetRoot())
                 .Where(type => contractTypeNames.Contains(type.Identifier.ValueText))
                 .Select(type => $"{Path.GetRelativePath(root, path)} redeclares reconciliation contract {type.Identifier.ValueText}"))
@@ -298,6 +298,8 @@ public sealed class GovernedLoopEffectReconciliationPublicSurfaceTests
             .Select(path => new ContractSource(Path.GetRelativePath(root, path), CSharpSyntaxTree.ParseText(File.ReadAllText(path)).GetRoot()))
             .ToArray();
     }
+
+    private static string NormalizePath(string path) => path.Replace('\\', '/');
 
     private static IEnumerable<BaseTypeDeclarationSyntax> PublicTopLevelTypes(SyntaxNode root)
     {
