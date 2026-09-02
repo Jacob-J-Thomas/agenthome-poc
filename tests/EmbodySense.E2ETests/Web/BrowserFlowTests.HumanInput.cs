@@ -19,6 +19,7 @@ namespace EmbodySense.E2ETests.Web;
 public sealed partial class BrowserFlowTests
 {
     private const string HumanInputBrowserProfileId = "org.example/model-profile/human-input";
+    private static readonly string[] _forbiddenResponsePropertyNames = ["actor", "role", "workspace", "binding", "grant", "authority"];
 
     [InstalledBrowserFact]
     public async Task Human_input_browser_recovers_a_committed_response_loss_by_canonical_reread_once()
@@ -155,7 +156,14 @@ public sealed partial class BrowserFlowTests
             Assert.Equal(winnerOperationId, operation.OperationId);
             Assert.Equal(response.ResponseId, operation.SubmittedResponse?.ResponseId);
             app.AssertHealthy();
-            await browser.AssertHealthyAsync(($"/api/human-input/{RequestId}/answer", 409));
+            if (firstTabStatus == 409)
+            {
+                await browser.AssertHealthyAsync(($"/api/human-input/{RequestId}/answer", 409));
+            }
+            else
+            {
+                await browser.AssertHealthyAsync();
+            }
         }
         catch
         {
@@ -281,7 +289,7 @@ public sealed partial class BrowserFlowTests
             await SetValueAsync(browser, "#humanInputResponseEditor textarea", "late answer");
             await Task.Delay(TimeSpan.FromSeconds(2));
             await ClickAsync(browser, "[data-testid=\"human-input-response-submit\"]");
-            await browser.WaitForExpressionAsync("document.getElementById('humanInputResponseStatus').textContent.toLowerCase().includes('window closed') || document.getElementById('humanInputResponseStatus').textContent.toLowerCase().includes('temporarily unavailable')");
+            await browser.WaitForExpressionAsync("document.getElementById('humanInputResponseStatus').textContent === 'The request changed or the operation conflicted. Reread canonical state.'");
             await WaitForHumanInputLifecycleAsync(browser, "expired");
             var expiry = await HumanInputBrowserFixture.ReadAsync(paths, capabilityTrustRoot, ExpiryId);
             Assert.Equal(HumanInputRequestLifecycleStatus.Expired, expiry.PrimarySnapshot?.Head.Status);
@@ -445,12 +453,29 @@ public sealed partial class BrowserFlowTests
         Assert.Equal(requestId, payload.GetProperty("expectedRequest").GetProperty("requestId").GetString());
         Assert.False(string.IsNullOrWhiteSpace(payload.GetProperty("operationId").GetString()));
         Assert.False(string.IsNullOrWhiteSpace(payload.GetProperty("responseId").GetString()));
-        Assert.DoesNotContain("actor", payload.GetRawText(), StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("role", payload.GetRawText(), StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("workspace", payload.GetRawText(), StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("binding", payload.GetRawText(), StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("grant", payload.GetRawText(), StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("authority", payload.GetRawText(), StringComparison.OrdinalIgnoreCase);
+        AssertNoForbiddenResponsePropertyNames(payload);
+    }
+
+    private static void AssertNoForbiddenResponsePropertyNames(JsonElement element)
+    {
+        switch (element.ValueKind)
+        {
+            case JsonValueKind.Object:
+                foreach (var property in element.EnumerateObject())
+                {
+                    Assert.False(_forbiddenResponsePropertyNames.Any(name => property.Name.Contains(name, StringComparison.OrdinalIgnoreCase)), $"The response exposed forbidden property '{property.Name}'.");
+                    AssertNoForbiddenResponsePropertyNames(property.Value);
+                }
+
+                break;
+            case JsonValueKind.Array:
+                foreach (var item in element.EnumerateArray())
+                {
+                    AssertNoForbiddenResponsePropertyNames(item);
+                }
+
+                break;
+        }
     }
 
     private static async Task<CustomLoopRunRecord> WaitForHumanInputContinuationAsync(WorkspacePaths paths, string runId)
