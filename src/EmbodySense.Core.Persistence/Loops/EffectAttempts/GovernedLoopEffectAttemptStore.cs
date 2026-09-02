@@ -36,6 +36,7 @@ public sealed class GovernedLoopEffectAttemptStore : IGovernedLoopEffectAttemptS
     private readonly int _maximumRecordBytes;
     private readonly long _maximumStoreBytes;
     private readonly int _maximumVersionsPerAttempt;
+    private readonly GovernedLoopEffectReconciliationProofReader _reconciliationProofReader;
     private readonly string _root;
     private readonly string _workspaceId;
 
@@ -88,6 +89,7 @@ public sealed class GovernedLoopEffectAttemptStore : IGovernedLoopEffectAttemptS
             throw new InvalidOperationException("The physical workspace did not produce a canonical workspace scope.");
         }
         _guard = new CustomLoopArtifactPathGuard(paths.RootPath);
+        _reconciliationProofReader = new GovernedLoopEffectReconciliationProofReader(_guard, _root);
     }
 
     /// <summary>Performs one bounded, non-evidence-mutating readiness probe over the canonical storage envelope.</summary>
@@ -104,23 +106,7 @@ public sealed class GovernedLoopEffectAttemptStore : IGovernedLoopEffectAttemptS
         try
         {
             using var readLock = await _guard.AcquireExclusiveReadLockAsync(_root, cancellationToken).ConfigureAwait(false);
-            ValidateDirectory(cancellationToken, out var retainedIdentities, out _);
-            foreach (var storageKey in retainedIdentities.Order(StringComparer.Ordinal))
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                var versions = VersionPaths(storageKey);
-                if (versions.Count == 0)
-                {
-                    throw new FormatException("Effect-attempt storage contains a head without immutable intent evidence.");
-                }
-                var identity = await ReadUnboundVersionAsync(versions[0], storageKey, cancellationToken).ConfigureAwait(false);
-                _ = await ReadCurrentStrictlyAsync(
-                    versions,
-                    storageKey,
-                    identity.Payload.OperationId,
-                    identity.Payload.EffectGeneration,
-                    cancellationToken).ConfigureAwait(false);
-            }
+            await ValidateCurrentEffectChainsForReconciliationAsync(cancellationToken).ConfigureAwait(false);
             return true;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -527,6 +513,39 @@ public sealed class GovernedLoopEffectAttemptStore : IGovernedLoopEffectAttemptS
         CancellationToken cancellationToken)
         => ReadCurrentStrictlyForReconciliationAsync(operationId, effectGeneration, cancellationToken);
 
+    /// <summary>Validates every retained effect chain while the canonical reconciliation lock is already held.</summary>
+    /// <remarks>
+    /// Reconciled successors are accepted only when their resolution points to one canonical, current reconciliation
+    /// case. Callers use this helper from the reconciliation readiness probe so effect-chain and case evidence cannot
+    /// be reported healthy independently.
+    /// </remarks>
+    internal async Task ValidateCurrentEffectChainsForReconciliationAsync(CancellationToken cancellationToken)
+    {
+        ValidateDirectory(cancellationToken, out var retainedIdentities, out _);
+        if (!_reconciliationProofReader.TryReadCurrentCases(out var reconciliationCases))
+        {
+            throw new FormatException("Reconciliation case evidence is not a valid canonical inventory.");
+        }
+
+        foreach (var storageKey in retainedIdentities.Order(StringComparer.Ordinal))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var versions = VersionPaths(storageKey);
+            if (versions.Count == 0)
+            {
+                throw new FormatException("Effect-attempt storage contains a head without immutable intent evidence.");
+            }
+            var identity = await ReadUnboundVersionAsync(versions[0], storageKey, cancellationToken).ConfigureAwait(false);
+            _ = await ReadCurrentStrictlyAsync(
+                versions,
+                storageKey,
+                identity.Payload.OperationId,
+                identity.Payload.EffectGeneration,
+                cancellationToken,
+                reconciliationCases).ConfigureAwait(false);
+        }
+    }
+
     /// <summary>Reads one exact immutable effect attempt by content hash while the canonical mutation lease is held.</summary>
     internal async Task<GovernedLoopEffectAttempt?> ReadExactForReconciliationAsync(
         string operationId,
@@ -547,6 +566,78 @@ public sealed class GovernedLoopEffectAttemptStore : IGovernedLoopEffectAttemptS
         }
 
         return await ReadVersionAsync(path, storageKey, operationId, effectGeneration, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Repairs only the journal-authorized orphan successor/head boundary while the mutation lease is held.</summary>
+    /// <remarks>
+    /// A reconciliation successor is first written as immutable evidence and its head is published second. Recovery
+    /// invokes this method before a strict chain read so a process loss between those two writes is repaired only when
+    /// the durable case proves the exact successor. An unrelated head, malformed version, or missing old head fails
+    /// closed; a missing successor is left for the normal journal commit path.
+    /// </remarks>
+    internal async Task<bool> RepairOrphanedReconciliationSuccessorHeadAsync(
+        GovernedLoopEffectAttempt current,
+        GovernedLoopEffectAttempt successor,
+        GovernedLoopEffectReconciliationCase reconciliationCase,
+        CancellationToken cancellationToken)
+    {
+        if (!GovernedLoopEffectReconciliationAttemptContract.IsDirectSuccessor(current, successor, reconciliationCase))
+        {
+            throw new FormatException("The reconciliation successor is not an exact proof-backed effect transition.");
+        }
+
+        var storageKey = StorageKey(current.Payload.OperationId, current.Payload.EffectGeneration);
+        var headPath = HeadPath(storageKey);
+        if (!File.Exists(headPath))
+        {
+            throw new FormatException("The reconciliation effect head is missing at the journal repair boundary.");
+        }
+
+        var headBytes = await _guard.ReadAllBytesAsync(
+            _root,
+            headPath,
+            GovernedLoopExecutionLimits.Sha256HexCharacters,
+            "Governed-loop effect-attempt head",
+            cancellationToken).ConfigureAwait(false);
+        var headHash = Encoding.ASCII.GetString(headBytes);
+        if (!IsHash(headHash))
+        {
+            throw new FormatException("The reconciliation effect head is malformed at the journal repair boundary.");
+        }
+        if (string.Equals(headHash, successor.ContentHash, StringComparison.Ordinal))
+        {
+            _ = await ReadVersionAsync(
+                VersionPath(storageKey, successor.ContentHash),
+                storageKey,
+                successor.Payload.OperationId,
+                successor.Payload.EffectGeneration,
+                cancellationToken).ConfigureAwait(false);
+            return true;
+        }
+        if (!string.Equals(headHash, current.ContentHash, StringComparison.Ordinal))
+        {
+            throw new FormatException("The reconciliation effect head conflicts with the journal's expected predecessor.");
+        }
+
+        var successorPath = VersionPath(storageKey, successor.ContentHash);
+        if (!File.Exists(successorPath))
+        {
+            return false;
+        }
+
+        var persisted = await ReadVersionAsync(
+            successorPath,
+            storageKey,
+            successor.Payload.OperationId,
+            successor.Payload.EffectGeneration,
+            cancellationToken).ConfigureAwait(false);
+        if (!string.Equals(persisted.ContentHash, successor.ContentHash, StringComparison.Ordinal))
+        {
+            throw new FormatException("The reconciliation effect successor conflicts with the journal payload.");
+        }
+
+        await WriteHeadAsync(successor, cancellationToken).ConfigureAwait(false);
+        return true;
     }
 
     private async Task<GovernedLoopEffectAttempt?> ReadCurrentStrictlyForReconciliationAsync(
@@ -570,7 +661,8 @@ public sealed class GovernedLoopEffectAttemptStore : IGovernedLoopEffectAttemptS
         GovernedLoopEffectAttempt current,
         GovernedLoopEffectAttempt successor,
         GovernedLoopEffectReconciliationCase reconciliationCase,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Action? afterVersionPublished = null)
     {
         if (GovernedLoopEffectReconciliationAttemptContract.IsDirectSuccessor(current, successor, reconciliationCase) is false)
         {
@@ -605,7 +697,12 @@ public sealed class GovernedLoopEffectAttemptStore : IGovernedLoopEffectAttemptS
             }
         }
 
+        var versionWasAbsent = !File.Exists(existing);
         await WriteImmutableVersionAsync(successor, encoded, cancellationToken).ConfigureAwait(false);
+        if (versionWasAbsent)
+        {
+            afterVersionPublished?.Invoke();
+        }
         await WriteHeadAsync(successor, cancellationToken).ConfigureAwait(false);
         return (GovernedLoopEffectAttemptStoreStatus.Created, successor);
     }
@@ -895,6 +992,13 @@ public sealed class GovernedLoopEffectAttemptStore : IGovernedLoopEffectAttemptS
             }
         }
 
+        IReadOnlyDictionary<string, GovernedLoopEffectReconciliationCase>? reconciliationCases = null;
+        if (versions.Values.Any(version => version.Payload.Phase == GovernedLoopEffectPhase.Reconciled)
+            && !_reconciliationProofReader.TryReadCurrentCases(out reconciliationCases))
+        {
+            throw new FormatException("Reconciled effect-attempt evidence is not attached to a valid canonical reconciliation case.");
+        }
+
         var roots = versions.Values.Where(version => version.PreviousContentHash is null).ToArray();
         if (roots.Length != 1)
         {
@@ -904,7 +1008,7 @@ public sealed class GovernedLoopEffectAttemptStore : IGovernedLoopEffectAttemptS
         foreach (var version in versions.Values.Where(version => version.PreviousContentHash is not null))
         {
             if (!versions.TryGetValue(version.PreviousContentHash!, out var prior)
-                || !IsPersistedSuccessor(prior, version)
+                || !IsPersistedSuccessor(prior, version, reconciliationCases)
                 || !children.TryAdd(prior.ContentHash, version))
             {
                 throw new FormatException("Governed-loop effect-attempt evidence contains a missing predecessor, broken successor, or fork.");
@@ -951,7 +1055,8 @@ public sealed class GovernedLoopEffectAttemptStore : IGovernedLoopEffectAttemptS
         string storageKey,
         string operationId,
         long effectGeneration,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IReadOnlyDictionary<string, GovernedLoopEffectReconciliationCase>? reconciliationCases = null)
     {
         if (versionPaths.Count > _maximumVersionsPerAttempt)
         {
@@ -968,6 +1073,13 @@ public sealed class GovernedLoopEffectAttemptStore : IGovernedLoopEffectAttemptS
             }
         }
 
+        if (reconciliationCases is null
+            && versions.Values.Any(version => version.Payload.Phase == GovernedLoopEffectPhase.Reconciled)
+            && !_reconciliationProofReader.TryReadCurrentCases(out reconciliationCases))
+        {
+            throw new FormatException("Reconciled effect-attempt evidence is not attached to a valid canonical reconciliation case.");
+        }
+
         var roots = versions.Values.Where(version => version.PreviousContentHash is null).ToArray();
         if (roots.Length != 1)
         {
@@ -978,7 +1090,7 @@ public sealed class GovernedLoopEffectAttemptStore : IGovernedLoopEffectAttemptS
         foreach (var version in versions.Values.Where(version => version.PreviousContentHash is not null))
         {
             if (!versions.TryGetValue(version.PreviousContentHash!, out var prior)
-                || !IsPersistedSuccessor(prior, version)
+                || !IsPersistedSuccessor(prior, version, reconciliationCases)
                 || !children.TryAdd(prior.ContentHash, version))
             {
                 throw new FormatException("Governed-loop effect-attempt evidence contains a missing predecessor, broken successor, or fork.");
@@ -1156,44 +1268,18 @@ public sealed class GovernedLoopEffectAttemptStore : IGovernedLoopEffectAttemptS
         }
     }
 
-    private static bool IsPersistedSuccessor(GovernedLoopEffectAttempt current, GovernedLoopEffectAttempt next)
+    private bool IsPersistedSuccessor(
+        GovernedLoopEffectAttempt current,
+        GovernedLoopEffectAttempt next,
+        IReadOnlyDictionary<string, GovernedLoopEffectReconciliationCase>? reconciliationCases)
     {
-        if (GovernedLoopEffectAttemptContract.IsDirectSuccessor(current, next))
+        if (next.Payload.Phase != GovernedLoopEffectPhase.Reconciled
+            && GovernedLoopEffectAttemptContract.IsDirectSuccessor(current, next))
         {
             return true;
         }
-        if (GovernedLoopEffectAttemptContract.Validate(current) is not null
-            || GovernedLoopEffectAttemptContract.Validate(next) is not null
-            || current.Payload.Phase != GovernedLoopEffectPhase.ReconciliationRequired
-            || next.Payload.Phase != GovernedLoopEffectPhase.Reconciled
-            || !GovernedLoopEffectAttemptContract.HasSameIntent(current, next)
-            || !string.Equals(current.ContentHash, next.PreviousContentHash, StringComparison.Ordinal)
-            || !Equals(current.Binding, next.Binding)
-            || !string.Equals(current.NodeId, next.NodeId, StringComparison.Ordinal)
-            || current.NodeAttempt != next.NodeAttempt
-            || !Equals(current.Capability, next.Capability)
-            || !Equals(current.Implementation, next.Implementation)
-            || !string.Equals(current.ActuatorOperationId, next.ActuatorOperationId, StringComparison.Ordinal)
-            || !string.Equals(current.OperationDescriptorHash, next.OperationDescriptorHash, StringComparison.Ordinal)
-            || !string.Equals(current.InputFingerprint, next.InputFingerprint, StringComparison.Ordinal)
-            || !string.Equals(current.TargetFingerprint, next.TargetFingerprint, StringComparison.Ordinal)
-            || !string.Equals(current.PreconditionEvidenceHash, next.PreconditionEvidenceHash, StringComparison.Ordinal)
-            || !string.Equals(current.AdmissionAuthorityEvidenceHash, next.AdmissionAuthorityEvidenceHash, StringComparison.Ordinal)
-            || !string.Equals(current.DispatchAuthorityEvidenceHash, next.DispatchAuthorityEvidenceHash, StringComparison.Ordinal)
-            || !string.Equals(current.Payload.EffectId, next.Payload.EffectId, StringComparison.Ordinal)
-            || !string.Equals(current.Payload.OperationId, next.Payload.OperationId, StringComparison.Ordinal)
-            || current.Payload.EffectGeneration != next.Payload.EffectGeneration
-            || current.Payload.Origin != next.Payload.Origin
-            || !string.Equals(current.Payload.OriginNodeId, next.Payload.OriginNodeId, StringComparison.Ordinal)
-            || !string.Equals(current.Payload.IntentHash, next.Payload.IntentHash, StringComparison.Ordinal)
-            || !GovernedLoopExecutionValidator.ValidateTransition(
-                GovernedLoopEffectPosture.Create(current.Binding, current.Payload),
-                GovernedLoopEffectPosture.Create(next.Binding, next.Payload)).IsValid)
-        {
-            return false;
-        }
-
-        return true;
+        return reconciliationCases is not null
+            && _reconciliationProofReader.IsCanonicalSuccessor(current, next, reconciliationCases);
     }
 
     private static bool DoesNotRequireOwner(GovernedLoopEffectPhase phase)

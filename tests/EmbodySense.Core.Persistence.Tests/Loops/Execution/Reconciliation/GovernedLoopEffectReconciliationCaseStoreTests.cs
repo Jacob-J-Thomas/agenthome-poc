@@ -255,6 +255,57 @@ public sealed class GovernedLoopEffectReconciliationCaseStoreTests
     }
 
     [Fact]
+    public async Task Forged_reconciled_head_without_the_exact_canonical_resolution_fails_closed()
+    {
+        using var workspace = new TestWorkspace();
+        var scenario = await CreateScenarioAsync(workspace);
+        var store = new GovernedLoopEffectReconciliationCaseStore(scenario.EffectStore);
+        Assert.Equal(GovernedLoopEffectReconciliationCaseMutationStatus.Applied, (await store.CompareExchangeAsync(Mutation(scenario.Open, null, null, "open", "operation-open"))).Status);
+        var assessed = ProvedAssessed(scenario.Open);
+        Assert.Equal(GovernedLoopEffectReconciliationCaseMutationStatus.Applied, (await store.CompareExchangeAsync(Mutation(assessed, 1, scenario.Open.ContentHash, "assess", "operation-assess"))).Status);
+        var disposed = Disposed(assessed, 'e');
+        Assert.Equal(GovernedLoopEffectReconciliationCaseMutationStatus.Applied, (await store.CompareExchangeAsync(Mutation(disposed, 2, assessed.ContentHash, "dispose", "operation-dispose"))).Status);
+        var resolved = Resolved(disposed, scenario.Attempt, 'f');
+        Assert.Equal(GovernedLoopEffectReconciliationCaseMutationStatus.Applied, (await store.CompareExchangeAsync(Mutation(resolved.Case, 3, disposed.ContentHash, "resolve", "operation-resolve"))).Status);
+
+        var forged = ForgedSuccessor(scenario.Attempt, resolved.Case);
+        var headPath = EffectHeadPath(scenario.Paths);
+        var storageKey = Path.GetFileName(headPath)[..^5];
+        await File.WriteAllBytesAsync(Path.Combine(scenario.Paths.GovernedLoopEffectAttemptsPath, $"{storageKey}.{forged.ContentHash}.json"), GovernedLoopEffectAttemptRecordCodec.Encode(forged));
+        await File.WriteAllTextAsync(headPath, forged.ContentHash);
+
+        var read = await scenario.EffectStore.ReadAsync(scenario.WorkspaceId, scenario.Attempt.Payload.OperationId, scenario.Attempt.Payload.EffectGeneration);
+
+        Assert.Equal(GovernedLoopEffectAttemptReadStatus.Corrupt, read.Status);
+        Assert.False(await scenario.EffectStore.ProbeStorageAvailabilityAsync());
+        Assert.False(await store.ProbeStorageAvailabilityAsync());
+    }
+
+    [Fact]
+    public async Task Reconciled_head_without_a_current_case_head_fails_closed()
+    {
+        using var workspace = new TestWorkspace();
+        var scenario = await CreateScenarioAsync(workspace);
+        var store = new GovernedLoopEffectReconciliationCaseStore(scenario.EffectStore);
+        Assert.Equal(GovernedLoopEffectReconciliationCaseMutationStatus.Applied, (await store.CompareExchangeAsync(Mutation(scenario.Open, null, null, "open", "operation-open"))).Status);
+        var assessed = ProvedAssessed(scenario.Open);
+        Assert.Equal(GovernedLoopEffectReconciliationCaseMutationStatus.Applied, (await store.CompareExchangeAsync(Mutation(assessed, 1, scenario.Open.ContentHash, "assess", "operation-assess"))).Status);
+        var disposed = Disposed(assessed, 'e');
+        Assert.Equal(GovernedLoopEffectReconciliationCaseMutationStatus.Applied, (await store.CompareExchangeAsync(Mutation(disposed, 2, assessed.ContentHash, "dispose", "operation-dispose"))).Status);
+        var resolved = Resolved(disposed, scenario.Attempt, 'f');
+        var request = Mutation(resolved.Case, 3, disposed.ContentHash, "resolve", "operation-resolve", resolved.Successor);
+        Assert.Equal(GovernedLoopEffectReconciliationCaseMutationStatus.Applied, (await store.CompareExchangeAsync(request)).Status);
+        var caseHead = Directory.EnumerateFiles(scenario.Paths.GovernedLoopEffectAttemptsPath, "reconciliation-case.*.head").Single();
+        File.Delete(caseHead);
+
+        var read = await scenario.EffectStore.ReadAsync(scenario.WorkspaceId, scenario.Attempt.Payload.OperationId, scenario.Attempt.Payload.EffectGeneration);
+
+        Assert.Equal(GovernedLoopEffectAttemptReadStatus.Corrupt, read.Status);
+        Assert.False(await scenario.EffectStore.ProbeStorageAvailabilityAsync());
+        Assert.False(await store.ProbeStorageAvailabilityAsync());
+    }
+
+    [Fact]
     public async Task Missing_expected_case_cannot_return_payload_bearing_conflict()
     {
         using var workspace = new TestWorkspace();
@@ -294,8 +345,11 @@ public sealed class GovernedLoopEffectReconciliationCaseStoreTests
         Assert.Equal(scenario.Attempt.ContentHash, replay.EffectHead!.ContentHash);
     }
 
-    [Fact]
-    public async Task External_process_loss_after_effect_successor_publication_recovers_without_duplicate_transition()
+    [Theory]
+    [InlineData(GovernedLoopEffectReconciliationPersistenceBoundary.EffectPublished)]
+    [InlineData(GovernedLoopEffectReconciliationPersistenceBoundary.EffectVersionPublished)]
+    public async Task External_process_loss_at_effect_successor_boundaries_recovers_without_duplicate_transition(
+        GovernedLoopEffectReconciliationPersistenceBoundary boundary)
     {
         using var workspace = new TestWorkspace();
         var scenario = await CreateScenarioAsync(workspace);
@@ -307,9 +361,17 @@ public sealed class GovernedLoopEffectReconciliationCaseStoreTests
         Assert.Equal(GovernedLoopEffectReconciliationCaseMutationStatus.Applied, (await store.CompareExchangeAsync(Mutation(disposed, 2, assessed.ContentHash, "dispose", "operation-dispose"))).Status);
         var resolved = Resolved(disposed, scenario.Attempt, 'f');
         var request = Mutation(resolved.Case, 3, disposed.ContentHash, "resolve", "operation-crash-successor", resolved.Successor);
-        var result = await RunExternalCrashAsync(workspace.RootPath, GovernedLoopEffectReconciliationPersistenceBoundary.EffectPublished, request);
+        var result = await RunExternalCrashAsync(workspace.RootPath, boundary, request);
 
         Assert.NotEqual(0, result.ExitCode);
+        if (boundary == GovernedLoopEffectReconciliationPersistenceBoundary.EffectVersionPublished)
+        {
+            var headPath = EffectHeadPath(scenario.Paths);
+            Assert.Equal(scenario.Attempt.ContentHash, await File.ReadAllTextAsync(headPath));
+            var effectVersion = Directory.EnumerateFiles(scenario.Paths.GovernedLoopEffectAttemptsPath, "*.json")
+                .Single(path => Path.GetFileName(path).Contains(resolved.Successor.ContentHash, StringComparison.Ordinal));
+            Assert.True(File.Exists(effectVersion));
+        }
         Assert.True(await store.RecoverAsync());
         var replay = await store.CompareExchangeAsync(request);
         Assert.Equal(GovernedLoopEffectReconciliationCaseMutationStatus.Replayed, replay.Status);
@@ -449,6 +511,39 @@ public sealed class GovernedLoopEffectReconciliationCaseStoreTests
 
     private static GovernedLoopEffectReconciliationCaseMutationRequest Mutation(GovernedLoopEffectReconciliationCase replacement, long? expectedVersion, string? expectedHash, string purpose, string operationId, GovernedLoopEffectAttempt? successor = null)
         => new(operationId, Hash(operationId), purpose, expectedVersion, expectedHash, replacement.Binding, replacement, successor);
+
+    private static GovernedLoopEffectAttempt ForgedSuccessor(
+        GovernedLoopEffectAttempt current,
+        GovernedLoopEffectReconciliationCase resolved)
+    {
+        var resolution = resolved.Resolution!;
+        var payload = GovernedLoopEffectPayload.Create(
+            current.Payload.SchemaVersion,
+            current.Payload.EffectId,
+            current.Payload.OperationId,
+            current.Payload.EffectGeneration,
+            current.Payload.Origin,
+            current.Payload.OriginNodeId,
+            current.Payload.IntentHash,
+            GovernedLoopEffectPhase.Reconciled,
+            resolution.Outcome,
+            GovernedLoopEffectEvidenceStatus.Complete,
+            resolution.OutcomeEvidenceId,
+            "forged-resolution",
+            resolution.ResolvedAtUtc);
+        var forged = current with
+        {
+            AfterEvidenceId = current.AfterEvidenceId ?? resolution.OutcomeEvidenceId,
+            Payload = payload,
+            PreviousContentHash = current.ContentHash,
+            ContentHash = string.Empty,
+        };
+        return forged with { ContentHash = GovernedLoopEffectAttemptContract.Compute(forged) };
+    }
+
+    private static string EffectHeadPath(WorkspacePaths paths)
+        => Directory.EnumerateFiles(paths.GovernedLoopEffectAttemptsPath, "*.head")
+            .Single(path => !Path.GetFileName(path).StartsWith("reconciliation-", StringComparison.Ordinal));
 
     private static GovernedLoopEffectReconciliationCaseReference Reference(GovernedLoopEffectReconciliationCase value)
         => new(value.CaseId, value.CaseVersion, value.ContentHash, value.Binding.ContentHash);

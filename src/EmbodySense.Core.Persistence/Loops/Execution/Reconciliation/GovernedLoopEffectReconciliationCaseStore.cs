@@ -78,7 +78,7 @@ public sealed class GovernedLoopEffectReconciliationCaseStore : IGovernedLoopEff
         try
         {
             using var readLock = await AcquireExistingReadLockAsync(cancellationToken).ConfigureAwait(false);
-            _effectAttempts.ValidateArtifactInventoryForReconciliation(cancellationToken);
+            await _effectAttempts.ValidateCurrentEffectChainsForReconciliationAsync(cancellationToken).ConfigureAwait(false);
             if (HasPendingJournal())
             {
                 await ValidatePendingJournalsAsync(cancellationToken).ConfigureAwait(false);
@@ -425,7 +425,12 @@ public sealed class GovernedLoopEffectReconciliationCaseStore : IGovernedLoopEff
             var effectHead = currentEffect;
             if (request.ReconciledEffectSuccessor is not null)
             {
-                var effectCommit = await _effectAttempts.CommitReconciliationSuccessorAsync(currentEffect, request.ReconciledEffectSuccessor, request.Replacement, cancellationToken).ConfigureAwait(false);
+                var effectCommit = await _effectAttempts.CommitReconciliationSuccessorAsync(
+                    currentEffect,
+                    request.ReconciledEffectSuccessor,
+                    request.Replacement,
+                    cancellationToken,
+                    () => Observe(GovernedLoopEffectReconciliationPersistenceBoundary.EffectVersionPublished)).ConfigureAwait(false);
                 if (effectCommit.Status is not (GovernedLoopEffectAttemptStoreStatus.Created or GovernedLoopEffectAttemptStoreStatus.Replayed)
                     || effectCommit.Attempt is null)
                 {
@@ -533,8 +538,6 @@ public sealed class GovernedLoopEffectReconciliationCaseStore : IGovernedLoopEff
                 throw new GovernedLoopEffectReconciliationRepairRequiredException("The interrupted reconciliation case has a conflicting immutable head.");
             }
 
-            var effect = await _effectAttempts.ReadCurrentForReconciliationAsync(replacement.Binding.OperationId, replacement.Binding.EffectGeneration, cancellationToken).ConfigureAwait(false)
-                ?? throw new GovernedLoopEffectReconciliationRepairRequiredException("The interrupted reconciliation case lost its canonical effect-attempt head.");
             var expectedEffect = await _effectAttempts.ReadExactForReconciliationAsync(replacement.Binding.OperationId, replacement.Binding.EffectGeneration, journal.ExpectedEffectHash!, cancellationToken).ConfigureAwait(false)
                 ?? throw new GovernedLoopEffectReconciliationRepairRequiredException("The interrupted reconciliation case lost its expected immutable effect-attempt evidence.");
             if (!GovernedLoopEffectReconciliationContractValidator.Validate(replacement, expectedEffect).IsValid)
@@ -552,6 +555,18 @@ public sealed class GovernedLoopEffectReconciliationCaseStore : IGovernedLoopEff
                 throw new GovernedLoopEffectReconciliationRepairRequiredException("The interrupted reconciliation case create is not a version-one root.");
             }
             await PublishCaseAsync(replacement, caseKey, cancellationToken).ConfigureAwait(false);
+            if (successor is not null)
+            {
+                if (!GovernedLoopEffectReconciliationAttemptContract.IsDirectSuccessor(expectedEffect, successor, replacement))
+                {
+                    throw new GovernedLoopEffectReconciliationRepairRequiredException("The interrupted reconciliation successor is not an exact proof-backed effect transition.");
+                }
+
+                _ = await _effectAttempts.RepairOrphanedReconciliationSuccessorHeadAsync(expectedEffect, successor, replacement, cancellationToken).ConfigureAwait(false);
+            }
+
+            var effect = await _effectAttempts.ReadCurrentForReconciliationAsync(replacement.Binding.OperationId, replacement.Binding.EffectGeneration, cancellationToken).ConfigureAwait(false)
+                ?? throw new GovernedLoopEffectReconciliationRepairRequiredException("The interrupted reconciliation case lost its canonical effect-attempt head.");
             if (successor is null)
             {
                 if (!string.Equals(effect.ContentHash, expectedEffect.ContentHash, StringComparison.Ordinal))
@@ -561,10 +576,6 @@ public sealed class GovernedLoopEffectReconciliationCaseStore : IGovernedLoopEff
             }
             else
             {
-                if (!GovernedLoopEffectReconciliationAttemptContract.IsDirectSuccessor(expectedEffect, successor, replacement))
-                {
-                    throw new GovernedLoopEffectReconciliationRepairRequiredException("The interrupted reconciliation successor is not an exact proof-backed effect transition.");
-                }
                 if (!string.Equals(effect.ContentHash, successor.ContentHash, StringComparison.Ordinal))
                 {
                     if (!string.Equals(effect.ContentHash, expectedEffect.ContentHash, StringComparison.Ordinal))

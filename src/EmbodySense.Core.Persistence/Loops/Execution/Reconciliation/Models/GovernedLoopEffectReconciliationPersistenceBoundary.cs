@@ -19,4 +19,7 @@ public enum GovernedLoopEffectReconciliationPersistenceBoundary
 
     /// <summary>The immutable operation receipt has been durably published.</summary>
     ReceiptPublished = 4,
+
+    /// <summary>The immutable effect successor has been durably published before its head pointer.</summary>
+    EffectVersionPublished = 5,
 }
