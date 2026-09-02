@@ -39,10 +39,13 @@
     <Compile Include="..\EmbodySense.Core.Application.Tests\CommandActions\CommandActionApplicationTestData.cs" Link="Support\CommandActionApplicationTestData.cs" />
     <Compile Include="..\EmbodySense.Core.Application.Tests\GovernedModelProfileApplicationTestFixture.cs" Link="Support\GovernedModelProfileApplicationTestFixture.cs" />
     <Compile Include="..\EmbodySense.Core.Application.Tests\Governance\Authority\Grants\AuthorityGrantApplicationTestFixture.cs" Link="Support\AuthorityGrantApplicationTestFixture.cs" />
+    <Compile Include="..\EmbodySense.Core.Application.Tests\Loops\Execution\Effects\GovernedLoopEffectAttemptTestFixture.cs" Link="Support\GovernedLoopEffectAttemptTestFixture.cs" />
+    <Compile Include="..\EmbodySense.Core.Application.Tests\Loops\Execution\Reconciliation\GovernedLoopEffectReconciliationApplicationTestFixture.cs" Link="Support\GovernedLoopEffectReconciliationApplicationTestFixture.cs" />
     <Compile Include="..\EmbodySense.HumanInputContinuationHost\HumanInputResponseContinuationGraphFixture.cs" Link="Support\HumanInputResponseContinuationGraphFixture.cs" />
     <Compile Include="..\EmbodySense.Core.Common.Tests\TriggerDeliveryTestData.cs" Link="Support\TriggerDeliveryTestData.cs" />
     <Compile Include="..\EmbodySense.Core.Common.Tests\Triggers\Schedules\ScheduleContractTestData.cs" Link="Support\ScheduleContractTestData.cs" />
     <Compile Include="..\Shared\ScheduleStoreCrossProcessHost.cs" Link="Support\ScheduleStoreCrossProcessHost.cs" />
+    <Compile Include="..\Shared\GovernedLoopEffectReconciliationCrossProcessHost.cs" Link="Support\GovernedLoopEffectReconciliationCrossProcessHost.cs" />
   </ItemGroup>
 
   <PropertyGroup>

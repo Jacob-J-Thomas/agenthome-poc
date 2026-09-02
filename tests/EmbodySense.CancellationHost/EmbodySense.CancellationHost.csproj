@@ -13,6 +13,7 @@
     <Compile Include="..\Shared\TestCapabilityAdmissionFactory.cs" Link="Support\TestCapabilityAdmissionFactory.cs" />
     <Compile Include="..\Shared\TestCapabilityAdmissionService.cs" Link="Support\TestCapabilityAdmissionService.cs" />
     <Compile Include="..\Shared\ScheduleStoreCrossProcessHost.cs" Link="Persistence\ScheduleStoreCrossProcessHost.cs" />
+    <Compile Include="..\Shared\GovernedLoopEffectReconciliationCrossProcessHost.cs" Link="Persistence\GovernedLoopEffectReconciliationCrossProcessHost.cs" />
     <Compile Include="..\Shared\HumanReviewOrderedReleaseGraphFixture.cs" Link="Support\HumanReviewOrderedReleaseGraphFixture.cs" />
     <Compile Include="..\EmbodySense.Core.Persistence.Tests\HumanInput\Requests\HumanInputRequestStoreTestData.cs" Link="Persistence\HumanInputRequestStoreTestData.cs" />
     <Compile Include="..\EmbodySense.Core.Persistence.Tests\Loops\Revisions\GovernedLoopRevisionLifecycleStoreTestData.cs" Link="Persistence\GovernedLoopRevisionLifecycleStoreTestData.cs" />

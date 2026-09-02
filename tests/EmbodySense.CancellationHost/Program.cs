@@ -52,6 +52,11 @@ if (args is ["governed-loop-admission-writer", var writerWorkspace, var writerTr
     return await GovernedLoopAdmissionCrossProcessWriterHost.RunAsync(writerWorkspace, writerTrustRoot, writerGate, writerReady, writerOutput, writerOperation);
 }
 
+if (args is ["governed-loop-effect-reconciliation", var reconciliationWorkspace, var reconciliationGate, var reconciliationReady, var reconciliationOutput, var reconciliationOperationId, var reconciliationRequestHash, var reconciliationPurpose, var reconciliationExpectedVersion, var reconciliationExpectedHash, var reconciliationReplacement, var reconciliationSuccessor, var reconciliationCrashBoundary])
+{
+    return await GovernedLoopEffectReconciliationCrossProcessHost.RunAsync(reconciliationWorkspace, reconciliationGate, reconciliationReady, reconciliationOutput, reconciliationOperationId, reconciliationRequestHash, reconciliationPurpose, reconciliationExpectedVersion, reconciliationExpectedHash, reconciliationReplacement, reconciliationSuccessor, reconciliationCrashBoundary);
+}
+
 if (args is ["human-review-decision-process-loss", var humanReviewDecisionWorkspaceRoot, var humanReviewDecisionRunId, var humanReviewDecisionPublicationBoundary])
 {
     return await HumanReviewDecisionProcessLossHost.RunAsync(humanReviewDecisionWorkspaceRoot, humanReviewDecisionRunId, humanReviewDecisionPublicationBoundary);
