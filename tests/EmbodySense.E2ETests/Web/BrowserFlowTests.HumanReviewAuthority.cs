@@ -34,7 +34,7 @@ public sealed partial class BrowserFlowTests
         await SeedHumanReviewReadinessAuthorityAsync(paths, capabilityTrustRoot);
         var runId = "browser-human-review-expiry-boundary";
         var exactExpiryUtc = DateTimeOffset.UtcNow.AddMinutes(1);
-        await HumanReviewBrowserFixture.SeedPendingAsync(paths, runId, "exact expiry boundary", capabilityTrustRoot: capabilityTrustRoot, requestExpiresAtUtc: exactExpiryUtc);
+        await HumanReviewBrowserFixture.SeedPendingAsync(paths, runId, "late after expiry", capabilityTrustRoot: capabilityTrustRoot, requestExpiresAtUtc: exactExpiryUtc);
         await using var app = await ExternalWebApplicationProcess.StartBrowserProfileHostAsync(workspace.RootPath, GetFreePort(), codexExecutable, "gpt-test", capabilityTrustRoot, [profile]);
         await using var browser = await HeadlessBrowserSession.StartAsync(app.BaseUrl);
 
