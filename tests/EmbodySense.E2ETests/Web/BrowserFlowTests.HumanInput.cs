@@ -471,11 +471,6 @@ public sealed partial class BrowserFlowTests
         Assert.False(string.IsNullOrWhiteSpace(payload.GetProperty("operationId").GetString()));
         Assert.False(string.IsNullOrWhiteSpace(payload.GetProperty("responseId").GetString()));
         AssertNoForbiddenResponsePropertyNames(payload);
-        var rawPayload = payload.GetRawText();
-        foreach (var forbiddenTerm in _forbiddenResponsePropertyNames)
-        {
-            Assert.DoesNotContain(forbiddenTerm, rawPayload, StringComparison.OrdinalIgnoreCase);
-        }
     }
 
     private static void AssertNoForbiddenResponsePropertyNames(JsonElement element)

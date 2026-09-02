@@ -45,6 +45,7 @@ using EmbodySense.Core.Common.Loops.HumanInput.Policies;
 using EmbodySense.Core.Common.Loops.HumanInput.Policies.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
+using EmbodySense.Core.Common.Loops.PureNodes;
 using EmbodySense.Core.Common.Loops.Revisions;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
 using EmbodySense.Core.Common.Loops.Sequential;
@@ -158,67 +159,73 @@ internal static class HumanInputBrowserFixture
         }
 
         var adapter = GovernedLoopSequentialContractHash.Apply(new GovernedLoopSequentialAdapterBinding(1, workspaceId, execution, admissionRequest.OperationId, receipt, receipt.ContentHash, admissionRequest.RequestHash, invocation.ContentHash, dependencies.Artifact.ArtifactHash, dependencies.Artifact.LayoutHash, [], string.Empty));
-        var projected = GovernedLoopSequentialLegacyDefinitionProjector.Project(adapter, invocation, plan, dependencies.Artifact);
-        var definition = projected.Definition ?? throw new InvalidOperationException($"The browser Human Input continuation graph definition was not projected: {projected.Status}.");
-        var admittedEvent = CreateAdmittedEvent(adapter, now);
-        var initialized = GovernedLoopSequentialFrontierMachine.Initialize(adapter, plan, admittedEvent.EventId, admittedEvent.EventId, admittedEvent.SequentialNodeEvidence!.OutcomeArtifactHash, admittedEvent.TimestampUtc).Frontier as GovernedLoopFrontierPosture
-            ?? throw new InvalidOperationException("The browser Human Input continuation frontier was not initialized.");
-        var admissionAuditEvent = new CustomLoopRunEvent(2, "browser-human-input-admission-audit-" + runId, now, CustomLoopRunEventKind.AdmissionAuditCompleted, null, null, null, "Admission audit completed.", [], null, null, null, null, null, null, null, null, null, null);
-        var seed = CustomLoopAdmissionRequestHash.Apply(new CustomLoopRunRecord(1, runId, definition.Id, 1, CustomLoopRunStatus.Admitted, now, now, null, "web", invocation.ModelSnapshot, admissionOperationId, ActorId, string.Empty, definition, prompt, null, context, CustomLoopExecutionClock.NotStarted(), CustomLoopRunCheckpoint.Start(), [admittedEvent, admissionAuditEvent], null, null, null)
-        {
-            CapabilityAdmission = receipt.Evidence.CapabilityAdmission,
-            SequentialInvocationSnapshot = invocation,
-            SequentialAdapterBinding = adapter,
-            Frontier = initialized,
-        });
-        if (!CustomLoopRunValidator.HasCompleteAdmissionAudit(seed))
-        {
-            throw new InvalidOperationException("The browser Human Input fixture admission audit was not complete before run creation.");
-        }
+        var materialization = new GovernedLoopSequentialMaterializationRequest(
+            GovernedLoopSequentialMaterializationRequest.CurrentSchemaVersion,
+            admissionRequest,
+            receipt,
+            dependencies.Artifact,
+            plan,
+            invocation,
+            adapter);
         using var runs = new CustomLoopRunStore(paths);
-        var created = await runs.CreateAsync(seed).ConfigureAwait(false);
-        if (created.Status is not (CustomLoopRunStoreStatus.Created or CustomLoopRunStoreStatus.AlreadyCreated))
-        {
-            throw new InvalidOperationException($"The browser Human Input continuation run was not created: {created.Status}.");
-        }
+        var materialized = await new GovernedLoopSequentialRunMaterializer(
+            runs,
+            new BrowserAuditRecorder(),
+            new GovernedLoopSequentialEventIdentityGenerator(),
+            new BrowserTimeProvider(now)).MaterializeAsync(materialization).ConfigureAwait(false);
+        var seed = materialized.Status == GovernedLoopSequentialMaterializationStatus.Ready && materialized.Run is not null
+            ? materialized.Run
+            : throw new InvalidOperationException($"The browser Human Input fixture run was not materialized: {materialized.Status} {materialized.Detail}");
+        _ = seed.Frontier ?? throw new InvalidOperationException("The browser Human Input continuation frontier was not initialized.");
 
-        var selected = GovernedLoopSequentialFrontierMachine.Select(initialized, adapter, plan);
-        var node = plan.Nodes.Single(item => item.Descriptor.Kind == GovernedLoopNodeKind.HumanInput);
-        var activation = selected.Activation ?? throw new InvalidOperationException("The browser Human Input continuation node was not ready.");
-        var started = GovernedLoopSequentialFrontierMachine.Start(initialized, adapter, plan, node, activation, 1, "browser-human-input-claim-" + requestId, now.AddMinutes(1)).Frontier as GovernedLoopFrontierPosture
-            ?? throw new InvalidOperationException("The browser Human Input continuation node did not start.");
         var runningEvent = new CustomLoopRunEvent(seed.Events[^1].Sequence + 1, "browser-human-input-running-" + runId, now.AddMinutes(1), CustomLoopRunEventKind.LifecycleChanged, null, null, null, "Run entered its canonical running lifecycle.", [], null, null, null, null, null, null, null, null, null, null, ControlExpectedLifecycleVersion: seed.LifecycleVersion);
         var running = seed with
         {
-            LifecycleVersion = 2,
+            LifecycleVersion = seed.LifecycleVersion + 1,
             Status = CustomLoopRunStatus.Running,
             UpdatedAtUtc = now.AddMinutes(1),
             ExecutionClock = new CustomLoopExecutionClock(0, now.AddMinutes(1)),
-            Frontier = started,
             Events = [.. seed.Events, runningEvent],
         };
         var updated = await runs.UpdateAsync(running, seed.LifecycleVersion).ConfigureAwait(false);
         if (updated.Status != CustomLoopRunStoreStatus.Updated)
         {
-            throw new InvalidOperationException($"The browser Human Input continuation run did not start: {updated.Status}.");
+            throw new InvalidOperationException($"The browser Human Input continuation run did not enter Running: {updated.Status}.");
         }
 
-        var runningActivation = started.Payload.Nodes[activation.ActivationOrdinal];
-        var waitingFrontier = GovernedLoopSequentialFrontierMachine.ParkRunningHumanInput(started, adapter, plan, node, runningActivation, 1, runningActivation.AttemptOperationId!, now.AddMinutes(2)).Frontier as GovernedLoopFrontierPosture
+        var selected = GovernedLoopSequentialFrontierMachine.Select(running.Frontier, adapter, plan);
+        var node = plan.Nodes.Single(item => item.Descriptor.Kind == GovernedLoopNodeKind.HumanInput);
+        var activation = selected.Activation ?? throw new InvalidOperationException("The browser Human Input continuation node was not ready.");
+        var startedFrontier = GovernedLoopSequentialFrontierMachine.Start(running.Frontier, adapter, plan, node, activation, 1, "browser-human-input-claim-" + requestId, now.AddMinutes(2)).Frontier as GovernedLoopFrontierPosture
+            ?? throw new InvalidOperationException("The browser Human Input continuation node did not start.");
+        var startedRun = running with
+        {
+            LifecycleVersion = running.LifecycleVersion + 1,
+            UpdatedAtUtc = now.AddMinutes(2),
+            Frontier = startedFrontier,
+        };
+        updated = await runs.UpdateAsync(startedRun, running.LifecycleVersion).ConfigureAwait(false);
+        if (updated.Status != CustomLoopRunStoreStatus.Updated)
+        {
+            throw new InvalidOperationException($"The browser Human Input continuation node start was not persisted: {updated.Status}.");
+        }
+
+        var runningActivation = startedFrontier.Payload.Nodes[activation.ActivationOrdinal];
+        var waitingFrontier = GovernedLoopSequentialFrontierMachine.ParkRunningHumanInput(startedFrontier, adapter, plan, node, runningActivation, 1, runningActivation.AttemptOperationId!, now.AddMinutes(3)).Frontier as GovernedLoopFrontierPosture
             ?? throw new InvalidOperationException("The browser Human Input continuation frontier did not park.");
         var configuration = dependencies.Artifact.Graph.Nodes.Single(item => string.Equals(item.Id, node.NodeId, StringComparison.Ordinal)).HumanInputConfiguration
             ?? throw new InvalidOperationException("The browser Human Input continuation configuration was missing.");
-        var checkpoint = CreateCheckpoint(adapter, running, node, waitingFrontier.Payload.Nodes[runningActivation.ActivationOrdinal], waitingFrontier, configuration, requestId, now.AddMinutes(2));
-        var lifecycleEvent = new CustomLoopRunEvent(running.Events[^1].Sequence + 1, "browser-human-input-waiting-" + requestId, now.AddMinutes(2), CustomLoopRunEventKind.LifecycleChanged, null, null, null, "Ordered execution is parked on the exact durable Human Input checkpoint.", [], null, null, null, null, null, null, null, null, null, null);
-        var waiting = running with
+        var checkpoint = CreateCheckpoint(adapter, startedRun, node, waitingFrontier.Payload.Nodes[runningActivation.ActivationOrdinal], waitingFrontier, configuration, requestId, now.AddMinutes(3));
+        var lifecycleEvent = new CustomLoopRunEvent(startedRun.Events[^1].Sequence + 1, "browser-human-input-waiting-" + requestId, now.AddMinutes(3), CustomLoopRunEventKind.LifecycleChanged, null, null, null, "Ordered execution is parked on the exact durable Human Input checkpoint.", [], null, null, null, null, null, null, null, null, null, null);
+        var waiting = startedRun with
         {
-            LifecycleVersion = 3,
+            LifecycleVersion = startedRun.LifecycleVersion + 1,
             Status = CustomLoopRunStatus.Waiting,
-            UpdatedAtUtc = now.AddMinutes(2),
+            UpdatedAtUtc = now.AddMinutes(3),
             ExecutionClock = new CustomLoopExecutionClock(120_000, null),
             Frontier = waitingFrontier,
             HumanInputWaitingCheckpoints = [checkpoint],
-            Events = [.. running.Events, lifecycleEvent],
+            Events = [.. startedRun.Events, lifecycleEvent],
         };
         var validation = CustomLoopRunValidator.Validate(waiting);
         if (!validation.IsValid)
@@ -226,14 +233,14 @@ internal static class HumanInputBrowserFixture
             throw new InvalidOperationException("The browser Human Input continuation run was invalid: " + string.Join("; ", validation.Errors.Select(error => error.Code)));
         }
 
-        updated = await runs.UpdateAsync(waiting, running.LifecycleVersion).ConfigureAwait(false);
+        updated = await runs.UpdateAsync(waiting, startedRun.LifecycleVersion).ConfigureAwait(false);
         if (updated.Status != CustomLoopRunStoreStatus.Updated)
         {
             throw new InvalidOperationException($"The browser Human Input continuation checkpoint was not persisted: {updated.Status}.");
         }
 
         var publication = CreatePublicationCommand(runId, checkpoint.Request, dependencies.GrantReference);
-        await SeedRequestLifecycleAsync(paths, capabilityTrustRoot, checkpoint.Request, dependencies.GrantReference, now.AddMinutes(2), publication.OperationId, publication.RequestHash, "human-input-checkpoint-publication").ConfigureAwait(false);
+        await SeedRequestLifecycleAsync(paths, capabilityTrustRoot, checkpoint.Request, dependencies.GrantReference, now.AddMinutes(3), publication.OperationId, publication.RequestHash, "human-input-checkpoint-publication").ConfigureAwait(false);
     }
 
     private static async Task SeedRequestLifecycleAsync(WorkspacePaths paths, string capabilityTrustRoot, HumanInputRequest request, AuthorityGrantReference grantReference, DateTimeOffset now, string? operationIdOverride = null, string? requestHashOverride = null, string purposeText = "Create one exact browser Human Input request.")
@@ -526,14 +533,24 @@ internal static class HumanInputBrowserFixture
         {
             Trigger("trigger"),
             new GovernedLoopNodeDefinition(NodeId, new GovernedLoopNodeDescriptor(GovernedLoopNodeKind.HumanInput, GovernedLoopHumanInputVocabulary.TypeId, GovernedLoopHumanInputVocabulary.DescriptorVersion), [new GovernedLoopPortDefinition(GovernedLoopHumanInputVocabulary.ResponsePortId, GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "text", true)], GovernedLoopAuthorityCeiling.Create([]), new Dictionary<string, string>(), null, null, null, configuration),
+            new GovernedLoopNodeDefinition(
+                "success-fallback",
+                GovernedLoopSequentialNodeDescriptors.IdentityTransform,
+                [
+                    new GovernedLoopPortDefinition(GovernedLoopPureNodeVocabulary.InputPort, GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data, "text", true),
+                    new GovernedLoopPortDefinition(GovernedLoopPureNodeVocabulary.OutputPort, GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "text", true),
+                ],
+                GovernedLoopAuthorityCeiling.Create([]),
+                new Dictionary<string, string>()),
             Exit("exit"),
         };
         var edges = new GovernedLoopControlEdgeDefinition[]
         {
             new("trigger-to-human-input", "trigger", NodeId, GovernedLoopControlCondition.Always),
-            new("human-input-to-exit", NodeId, "exit", GovernedLoopControlCondition.Success),
+            new("human-input-to-success-fallback", NodeId, "success-fallback", GovernedLoopControlCondition.Success),
+            new("success-fallback-to-exit", "success-fallback", "exit", GovernedLoopControlCondition.Success),
         };
-        var graph = GovernedLoopGraphDefinition.Create(1, GraphId, RevisionId, "Park one exact durable browser Human Input request.", new ContextualRoleRevisionPin(role.Identity, role.ContentHash), "trigger", ["exit"], GovernedLoopAuthorityCeiling.Create([ConversationTurnCapabilityId]), [new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false)], nodes, edges, [new GovernedLoopBindingDefinition("request-to-exit", GovernedLoopBindingKind.Data, "trigger", "request", "exit", "result")], new GovernedLoopOutputContract("Return the exact bounded result.", [new GovernedLoopOutputDefinition("result", "text", "exit", "published-result", true)]), new GovernedLoopDisplayMetadata("Browser Human Input graph", "The fixture uses only the canonical input gate.", nodes.Select((node, index) => new GovernedLoopNodeDisplayMetadata(node.Id, node.Id, "Node.", index * 100, 0)).ToArray()), DefaultRoutingPolicy());
+        var graph = GovernedLoopGraphDefinition.Create(1, GraphId, RevisionId, "Park one exact durable browser Human Input request.", new ContextualRoleRevisionPin(role.Identity, role.ContentHash), "trigger", ["exit"], GovernedLoopAuthorityCeiling.Create([ConversationTurnCapabilityId]), [new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false)], nodes, edges, [new GovernedLoopBindingDefinition("request-to-success-fallback", GovernedLoopBindingKind.Data, "trigger", "request", "success-fallback", GovernedLoopPureNodeVocabulary.InputPort), new GovernedLoopBindingDefinition("success-fallback-to-exit", GovernedLoopBindingKind.Data, "success-fallback", GovernedLoopPureNodeVocabulary.OutputPort, "exit", "result")], new GovernedLoopOutputContract("Return the exact bounded result.", [new GovernedLoopOutputDefinition("result", "text", "exit", "published-result", true)]), new GovernedLoopDisplayMetadata("Browser Human Input graph", "The fixture uses only the canonical input gate.", nodes.Select((node, index) => new GovernedLoopNodeDisplayMetadata(node.Id, node.Id, "Node.", index * 100, 0)).ToArray()), DefaultRoutingPolicy());
         var revision = GovernedLoopRevisionArtifactFactory.Create(1, graph.RevisionReference, null, null, "browser-human-input-create", ActorId, now);
         return GovernedLoopGraphRevisionArtifactFactory.Create(1, revision, graph);
     }
@@ -559,13 +576,6 @@ internal static class HumanInputBrowserFixture
 
     private static ContextualRoleRevision CreateRole(string workspaceId, DateTimeOffset now)
         => ContextualRoleRevisionContentHash.Apply(new ContextualRoleRevision(1, new ContextualRoleRevisionIdentity(RoleId, 1), string.Empty, "Browser Human Input role", "Test-only role for exact server-owned browser Human Input authority.", ContextualRoleStatus.Published, new ContextualRoleProvenance("browser-e2e", now, now), new ContextualRoleWorkspaceApplicability(ImmutableArray.Create(workspaceId)), new ContextualRoleInstructionSourceReference(ContextualRoleInstructionSourceKind.WorkspaceRoleMarkdown, "role", ContextualRoleInstructionClassification.RoleInstruction), new ContextualRolePolicyMaxima(ImmutableArray.Create(ConversationTurnCapabilityId))));
-
-    private static CustomLoopRunEvent CreateAdmittedEvent(GovernedLoopSequentialAdapterBinding binding, DateTimeOffset now)
-    {
-        var runEvent = new CustomLoopRunEvent(1, "browser-human-input-admitted", now, CustomLoopRunEventKind.Admitted, null, null, null, "Run admitted.", [], null, null, null, null, null, null, null, null, null, null);
-        var evidence = CustomLoopSequentialNodeEvidenceHash.Apply(new CustomLoopSequentialNodeEvidence(1, CustomLoopSequentialNodeEvidenceKind.CompletedOutcome, binding.WorkspaceId, binding.ExecutionBinding.RunId, binding.ExecutionBinding.Revision, binding.ExecutionBinding.ExecutionGeneration, 0, 1, "trigger", 1, null, null, GovernedLoopControlCondition.Always, ["trigger-to-human-input"], [], null, null, CustomLoopSequentialNodeDisposition.Completed, CustomLoopSequentialOutcomeArtifactHash.Compute(runEvent), string.Empty));
-        return runEvent with { SequentialNodeEvidence = evidence };
-    }
 
     private static GovernedLoopHumanInputWaitingCheckpoint CreateCheckpoint(GovernedLoopSequentialAdapterBinding binding, CustomLoopRunRecord run, GovernedLoopSequentialPlanNode node, GovernedLoopNodeExecutionEvidence activation, GovernedLoopFrontierPosture frontier, GovernedLoopHumanInputNodeConfiguration configuration, string requestId, DateTimeOffset resolvedAtUtc)
     {
