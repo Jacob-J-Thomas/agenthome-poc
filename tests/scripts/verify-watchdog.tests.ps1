@@ -618,10 +618,17 @@ Assert-Equal -Actual ($linkedModelProfileFixturePlan.TestProjects -join "|") -Ex
 Assert-True -Condition (@($linkedModelProfileFixturePlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 -or @($_.Classes).Count -ne 0 }).Count -eq 0) -Message "The linked model-profile fixture must run every consuming suite without focused filtering."
 
 $linkedEffectFixturePlan = Get-QualificationPlan -ChangedPaths @("tests/EmbodySense.Core.Application.Tests/Loops/Execution/Effects/GovernedLoopEffectAttemptTestFixture.cs")
-Assert-Equal -Actual $linkedEffectFixturePlan.TestProjects.Count -Expected 2 -Message "A linked effect-attempt fixture must select both the Application and Startup consumers."
+Assert-Equal -Actual $linkedEffectFixturePlan.TestProjects.Count -Expected 3 -Message "A linked effect-attempt fixture must select the Application owner plus Persistence and Startup consumers."
 Assert-True -Condition ($linkedEffectFixturePlan.TestProjects -ccontains "tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj") -Message "A linked effect-attempt fixture must retain its source project."
+Assert-True -Condition ($linkedEffectFixturePlan.TestProjects -ccontains "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj") -Message "A linked effect-attempt fixture must execute its Persistence consumer."
 Assert-True -Condition ($linkedEffectFixturePlan.TestProjects -ccontains "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj") -Message "A linked effect-attempt fixture must execute its Startup consumer."
 Assert-True -Condition (@($linkedEffectFixturePlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 -or @($_.Classes).Count -ne 0 }).Count -eq 0) -Message "Linked effect-attempt inputs must run every consuming suite without focused filtering."
+
+$linkedReconciliationFixturePlan = Get-QualificationPlan -ChangedPaths @("tests/EmbodySense.Core.Application.Tests/Loops/Execution/Reconciliation/GovernedLoopEffectReconciliationApplicationTestFixture.cs")
+Assert-Equal -Actual $linkedReconciliationFixturePlan.TestProjects.Count -Expected 2 -Message "A linked reconciliation fixture must select its Application owner and Persistence consumer."
+Assert-True -Condition ($linkedReconciliationFixturePlan.TestProjects -ccontains "tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj") -Message "A linked reconciliation fixture must retain its source project."
+Assert-True -Condition ($linkedReconciliationFixturePlan.TestProjects -ccontains "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj") -Message "A linked reconciliation fixture must execute its Persistence consumer."
+Assert-True -Condition (@($linkedReconciliationFixturePlan.TestSelections | Where-Object { @($_.Namespaces).Count -ne 0 -or @($_.Classes).Count -ne 0 }).Count -eq 0) -Message "Linked reconciliation inputs must run every consuming suite without focused filtering."
 
 $linkedCommandActionFixturePlan = Get-QualificationPlan -ChangedPaths @("tests/EmbodySense.Core.Application.Tests/CommandActions/CommandActionApplicationTestData.cs")
 Assert-Equal -Actual ($linkedCommandActionFixturePlan.TestProjects -join "|") -Expected "tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj|tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj|tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj|tests/EmbodySense.Web.Tests/EmbodySense.Web.Tests.csproj" -Message "The linked command-Action fixture must select its Application owner plus Persistence, Startup, and Web consumers."
