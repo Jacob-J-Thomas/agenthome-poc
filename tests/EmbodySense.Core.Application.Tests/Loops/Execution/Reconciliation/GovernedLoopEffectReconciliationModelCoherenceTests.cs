@@ -86,14 +86,28 @@ public sealed class GovernedLoopEffectReconciliationModelCoherenceTests
         var reference = Reference(open);
         var otherBinding = GovernedLoopEffectReconciliationContract.CreateBinding(open.Binding.WorkspaceId, open.Binding.ActivationOrdinal + 1, open.Binding.VisitOrdinal, attempt);
         var corruptInput = new GovernedActuatorInputEvidence(input.CanonicalJson, Hash('7'), input.Utf8ByteCount, input.ElementCount);
+        var source = GovernedLoopEffectReconciliationContractHash.Apply(new GovernedLoopEffectReconciliationEvidenceSource(
+            GovernedLoopEffectReconciliationContractLimits.CurrentSchemaVersion,
+            open.CaseId,
+            open.Binding.ContentHash,
+            "source-1",
+            GovernedLoopEffectReconciliationEvidenceSourceKind.Authoritative,
+            GovernedLoopEffectReconciliationReliabilityPosture.Authoritative,
+            open.ContractMetadata.ContractId,
+            open.ContractMetadata.ContractVersion,
+            open.ContractMetadata.ContentHash,
+            Hash('8'),
+            open.OpenedAtUtc,
+            null,
+            string.Empty));
 
         Assert.Throws<ArgumentNullException>(() => new GovernedLoopEffectReconciliationCaseReadRequest(null!));
         Assert.Throws<ArgumentNullException>(() => new GovernedLoopEffectReconciliationProbeRegistryReadRequest(null!));
         Assert.Throws<ArgumentException>(() => new GovernedLoopEffectReconciliationAuthorizationRequest("assess", reference, otherBinding));
         Assert.Throws<ArgumentException>(() => new GovernedLoopEffectReconciliationInputReadRequest(reference, otherBinding));
         Assert.Throws<ArgumentException>(() => new GovernedLoopEffectReconciliationResolutionReadRequest(reference, otherBinding));
-        Assert.Throws<ArgumentException>(() => new GovernedLoopEffectReconciliationProbeInvocationRequest(reference, otherBinding, open.ContractMetadata, input));
-        Assert.Throws<ArgumentException>(() => new GovernedLoopEffectReconciliationProbeInvocationRequest(reference, open.Binding, open.ContractMetadata, corruptInput));
+        Assert.Throws<ArgumentException>(() => new GovernedLoopEffectReconciliationProbeInvocationRequest(reference, otherBinding, open.ContractMetadata, input, attempt, source));
+        Assert.Throws<ArgumentException>(() => new GovernedLoopEffectReconciliationProbeInvocationRequest(reference, open.Binding, open.ContractMetadata, corruptInput, attempt, source));
     }
 
     [Fact]

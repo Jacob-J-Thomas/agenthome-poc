@@ -10,11 +10,15 @@ namespace EmbodySense.Core.Application.Loops.Execution.Reconciliation.Models;
 /// <param name="Binding">The exact reconciliation binding.</param>
 /// <param name="Contract">The exact registered actuator and probe pin.</param>
 /// <param name="Input">The exact reconstructed bounded graph and run input.</param>
+/// <param name="EffectHead">The exact retained reconciliation-required effect head.</param>
+/// <param name="Source">The exact retained source registration used for this invocation.</param>
 public sealed record GovernedLoopEffectReconciliationProbeInvocationRequest(
     GovernedLoopEffectReconciliationCaseReference Case,
     GovernedLoopEffectReconciliationBinding Binding,
     GovernedLoopEffectReconciliationContractMetadata Contract,
-    GovernedActuatorInputEvidence Input)
+    GovernedActuatorInputEvidence Input,
+    GovernedLoopEffectAttempt EffectHead,
+    GovernedLoopEffectReconciliationEvidenceSource Source)
 {
     /// <summary>Gets a detached exact case reference.</summary>
     public GovernedLoopEffectReconciliationCaseReference Case { get; } = GovernedLoopEffectReconciliationModelGuard.CopyRequiredReference(Case, nameof(Case));
@@ -27,4 +31,10 @@ public sealed record GovernedLoopEffectReconciliationProbeInvocationRequest(
 
     /// <summary>Gets a detached exact reconstructed input.</summary>
     public GovernedActuatorInputEvidence Input { get; } = GovernedLoopEffectReconciliationModelGuard.CopyRequiredInput(Input, nameof(Input));
+
+    /// <summary>Gets a detached exact retained reconciliation-required effect head.</summary>
+    public GovernedLoopEffectAttempt EffectHead { get; } = GovernedLoopEffectReconciliationModelGuard.CopyProbeEffect(EffectHead, Binding, nameof(EffectHead));
+
+    /// <summary>Gets a detached exact retained source registration.</summary>
+    public GovernedLoopEffectReconciliationEvidenceSource Source { get; } = GovernedLoopEffectReconciliationModelGuard.CopyProbeSource(Source, Case, Binding, Contract, nameof(Source));
 }

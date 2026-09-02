@@ -12,7 +12,7 @@ namespace EmbodySense.Core.Application.Loops.Execution.Reconciliation;
 
 /// <summary>Orchestrates exact immutable effect-reconciliation stages using server-owned ports only.</summary>
 /// <remarks>
-/// This service never invokes an actuator or a registered probe. It accepts only the exact effect and
+/// This service never invokes an actuator. It accepts only the exact effect and
 /// ReviewBlocked frontier reconstructed by <see cref="IGovernedLoopEffectReconciliationInputSource"/>,
 /// and every mutating stage is one compare-exchange through the canonical case store.
 /// </remarks>
@@ -23,10 +23,13 @@ public sealed class GovernedLoopEffectReconciliationService : IGovernedLoopEffec
     private const string AssessPurpose = "effect-reconciliation.assess";
     private const string DisposePurpose = "effect-reconciliation.dispose";
     private const string ResolvePurpose = "effect-reconciliation.resolve";
+    private const string ProbePurpose = "effect-reconciliation.probe";
 
     private readonly IGovernedLoopEffectReconciliationCaseStore _caseStore;
     private readonly IGovernedLoopEffectReconciliationAuthorizationSource _authorizationSource;
     private readonly IGovernedLoopEffectReconciliationInputSource _inputSource;
+    private readonly IGovernedLoopEffectReconciliationProbeRegistry? _probeRegistry;
+    private readonly IGovernedLoopEffectReconciliationProbeReservationStore? _probeReservations;
     private readonly TimeProvider _timeProvider;
 
     /// <summary>Initializes the reconciliation orchestrator.</summary>
@@ -45,6 +48,26 @@ public sealed class GovernedLoopEffectReconciliationService : IGovernedLoopEffec
         _authorizationSource = authorizationSource ?? throw new ArgumentNullException(nameof(authorizationSource));
         _inputSource = inputSource ?? throw new ArgumentNullException(nameof(inputSource));
         _timeProvider = timeProvider ?? TimeProvider.System;
+    }
+
+    /// <summary>Initializes reconciliation with the exact registered-probe and durable reservation ports.</summary>
+    /// <param name="caseStore">The sole canonical immutable reconciliation case store.</param>
+    /// <param name="authorizationSource">The server-owned exact-purpose authorization source.</param>
+    /// <param name="inputSource">The source of exact current effect and ReviewBlocked frontier input.</param>
+    /// <param name="probeRegistry">The server-owned exact registered probe registry.</param>
+    /// <param name="probeReservations">The durable reservation and observation store sharing the effect root and lease.</param>
+    /// <param name="timeProvider">The trusted server clock used for fresh evidence boundaries.</param>
+    public GovernedLoopEffectReconciliationService(
+        IGovernedLoopEffectReconciliationCaseStore caseStore,
+        IGovernedLoopEffectReconciliationAuthorizationSource authorizationSource,
+        IGovernedLoopEffectReconciliationInputSource inputSource,
+        IGovernedLoopEffectReconciliationProbeRegistry probeRegistry,
+        IGovernedLoopEffectReconciliationProbeReservationStore probeReservations,
+        TimeProvider? timeProvider = null)
+        : this(caseStore, authorizationSource, inputSource, timeProvider)
+    {
+        _probeRegistry = probeRegistry ?? throw new ArgumentNullException(nameof(probeRegistry));
+        _probeReservations = probeReservations ?? throw new ArgumentNullException(nameof(probeReservations));
     }
 
     /// <inheritdoc />
@@ -427,8 +450,326 @@ public sealed class GovernedLoopEffectReconciliationService : IGovernedLoopEffec
         return MapMutation(mutation);
     }
 
+    /// <inheritdoc />
+    public async Task<GovernedLoopEffectReconciliationOperationResult> ProbeAsync(GovernedLoopEffectReconciliationProbeRequest request, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (request is null || !IsIdentifier(request.OperationId))
+        {
+            return Result(GovernedLoopEffectReconciliationOperationStatus.Invalid);
+        }
+        if (_probeRegistry is null || _probeReservations is null)
+        {
+            return Result(GovernedLoopEffectReconciliationOperationStatus.Unavailable);
+        }
+
+        var current = await ReadCaseAsync(request.Case, cancellationToken).ConfigureAwait(false);
+        if (current.Status != GovernedLoopEffectReconciliationOperationStatus.Found || current.Case is null)
+        {
+            return current;
+        }
+
+        var value = current.Case;
+        if (string.Equals(request.OperationId, value.Binding.OperationId, StringComparison.Ordinal))
+        {
+            return Result(GovernedLoopEffectReconciliationOperationStatus.Invalid);
+        }
+        if (value.Disposition is not null || value.Resolution is not null)
+        {
+            return Result(GovernedLoopEffectReconciliationOperationStatus.Conflict, value, await ReadEffectForConflictAsync(request.Case, value.Binding, cancellationToken).ConfigureAwait(false));
+        }
+
+        var input = await ReadInputAsync(request.Case, value.Binding, cancellationToken).ConfigureAwait(false);
+        if (input.Status != GovernedLoopEffectReconciliationInputReadStatus.Found)
+        {
+            return Result(MapInputStatus(input.Status));
+        }
+
+        if (!MatchesInput(input, request.Case, value.Binding, value)
+            || input.EffectHead is null
+            || input.Input is null)
+        {
+            return Result(GovernedLoopEffectReconciliationOperationStatus.Corrupt);
+        }
+
+        var sourceNow = TrustedNow(value.OpenedAtUtc);
+        if (sourceNow is null)
+        {
+            return Result(GovernedLoopEffectReconciliationOperationStatus.Unavailable);
+        }
+
+        var matchingSources = value.EvidenceSources.Where(candidate =>
+            candidate.Kind != GovernedLoopEffectReconciliationEvidenceSourceKind.Unknown
+            && string.Equals(candidate.CaseId, value.CaseId, StringComparison.Ordinal)
+            && string.Equals(candidate.BindingHash, value.Binding.ContentHash, StringComparison.Ordinal)
+            && string.Equals(candidate.ReconciliationContractId, value.ContractMetadata.ContractId, StringComparison.Ordinal)
+            && candidate.ReconciliationContractVersion == value.ContractMetadata.ContractVersion
+            && string.Equals(candidate.ReconciliationContractHash, value.ContractMetadata.ContentHash, StringComparison.Ordinal)
+            && candidate.RegisteredAtUtc <= sourceNow.Value
+            && (candidate.RetiredAtUtc is null || candidate.RetiredAtUtc > sourceNow.Value)).Take(2).ToArray();
+        if (matchingSources.Length != 1)
+        {
+            return Result(matchingSources.Length == 0
+                ? GovernedLoopEffectReconciliationOperationStatus.NotFound
+                : GovernedLoopEffectReconciliationOperationStatus.Conflict);
+        }
+        var source = matchingSources[0];
+
+        var authorization = await AuthorizeAsync(ProbePurpose, request.Case, value.Binding, cancellationToken).ConfigureAwait(false);
+        var authorizationStatus = AuthorizationStatus(authorization, ProbePurpose, request.Case, value.Binding);
+        if (authorizationStatus != GovernedLoopEffectReconciliationOperationStatus.Applied)
+        {
+            return Result(authorizationStatus);
+        }
+
+        GovernedLoopEffectReconciliationProbeRegistryReadResult? registryRead;
+        try
+        {
+            registryRead = await _probeRegistry.ReadAsync(new GovernedLoopEffectReconciliationProbeRegistryReadRequest(value.ContractMetadata), cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return Result(GovernedLoopEffectReconciliationOperationStatus.Unavailable);
+        }
+
+        if (registryRead is null)
+        {
+            return Result(GovernedLoopEffectReconciliationOperationStatus.Unavailable);
+        }
+
+        if (registryRead.Status != GovernedLoopEffectReconciliationProbeRegistryReadStatus.Found
+            || registryRead.Contract is null
+            || registryRead.Probe is null
+            || !Equals(registryRead.Contract, value.ContractMetadata))
+        {
+            return registryRead.Status switch
+            {
+                GovernedLoopEffectReconciliationProbeRegistryReadStatus.NotFound => Result(GovernedLoopEffectReconciliationOperationStatus.NotFound),
+                GovernedLoopEffectReconciliationProbeRegistryReadStatus.Invalid => Result(GovernedLoopEffectReconciliationOperationStatus.Invalid),
+                GovernedLoopEffectReconciliationProbeRegistryReadStatus.Corrupt => Result(GovernedLoopEffectReconciliationOperationStatus.Corrupt),
+                _ => Result(GovernedLoopEffectReconciliationOperationStatus.Unavailable)
+            };
+        }
+
+        GovernedLoopEffectReconciliationProbeInvocationRequest invocation;
+        try
+        {
+            invocation = new GovernedLoopEffectReconciliationProbeInvocationRequest(request.Case, value.Binding, value.ContractMetadata, input.Input, input.EffectHead, source);
+        }
+        catch (ArgumentException)
+        {
+            return Result(GovernedLoopEffectReconciliationOperationStatus.Corrupt);
+        }
+
+        string requestHash;
+        try
+        {
+            requestHash = ProbeRequestHash(request.OperationId, invocation, source, registryRead.Contract);
+        }
+        catch (ArgumentException)
+        {
+            return Result(GovernedLoopEffectReconciliationOperationStatus.Invalid);
+        }
+
+        GovernedLoopEffectReconciliationProbeReservationResult? reservationResult;
+        try
+        {
+            reservationResult = await _probeReservations.ReserveAsync(new GovernedLoopEffectReconciliationProbeReservationRequest(request.OperationId, requestHash, invocation), cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return Result(GovernedLoopEffectReconciliationOperationStatus.Unavailable);
+        }
+
+        if (reservationResult is null)
+        {
+            return Result(GovernedLoopEffectReconciliationOperationStatus.Unavailable);
+        }
+
+        if (reservationResult.Status == GovernedLoopEffectReconciliationProbeReservationStatus.Replayed)
+        {
+            return reservationResult.Case is not null && reservationResult.EffectHead is not null
+                ? Result(GovernedLoopEffectReconciliationOperationStatus.Replayed, reservationResult.Case, reservationResult.EffectHead)
+                : Result(GovernedLoopEffectReconciliationOperationStatus.Unavailable);
+        }
+
+        if (reservationResult.Status != GovernedLoopEffectReconciliationProbeReservationStatus.Reserved || reservationResult.Reservation is null)
+        {
+            return reservationResult.Status switch
+            {
+                GovernedLoopEffectReconciliationProbeReservationStatus.Conflict => Result(GovernedLoopEffectReconciliationOperationStatus.Conflict, value, input.EffectHead),
+                GovernedLoopEffectReconciliationProbeReservationStatus.Invalid => Result(GovernedLoopEffectReconciliationOperationStatus.Invalid),
+                GovernedLoopEffectReconciliationProbeReservationStatus.Corrupt => Result(GovernedLoopEffectReconciliationOperationStatus.Corrupt),
+                GovernedLoopEffectReconciliationProbeReservationStatus.CapacityExceeded => Result(GovernedLoopEffectReconciliationOperationStatus.CapacityExceeded),
+                GovernedLoopEffectReconciliationProbeReservationStatus.RepairRequired => Result(GovernedLoopEffectReconciliationOperationStatus.RepairRequired),
+                _ => Result(GovernedLoopEffectReconciliationOperationStatus.Unavailable)
+            };
+        }
+
+        // Re-read all mutable authority and effect evidence after the reservation and immediately before callback.
+        var latest = await ReadInputAsync(request.Case, value.Binding, cancellationToken).ConfigureAwait(false);
+        var latestNow = TrustedNow(value.OpenedAtUtc);
+        if (latest.Status != GovernedLoopEffectReconciliationInputReadStatus.Found
+            || latest.EffectHead is null
+            || latest.Input is null
+            || latestNow is null
+            || !MatchesInput(latest, request.Case, value.Binding, value)
+            || !string.Equals(latest.EffectHead.ContentHash, reservationResult.Reservation.EffectHead.ContentHash, StringComparison.Ordinal)
+            || !string.Equals(latest.Input.Fingerprint, input.Input!.Fingerprint, StringComparison.Ordinal)
+            || reservationResult.Reservation.Source.RegisteredAtUtc > latestNow.Value
+            || reservationResult.Reservation.Source.RetiredAtUtc is not null && reservationResult.Reservation.Source.RetiredAtUtc <= latestNow.Value)
+        {
+            return Result(GovernedLoopEffectReconciliationOperationStatus.Unavailable);
+        }
+
+        var latestAuthorization = await AuthorizeAsync(ProbePurpose, request.Case, value.Binding, cancellationToken).ConfigureAwait(false);
+        var latestAuthorizationStatus = AuthorizationStatus(latestAuthorization, ProbePurpose, request.Case, value.Binding);
+        if (latestAuthorizationStatus != GovernedLoopEffectReconciliationOperationStatus.Applied)
+        {
+            return Result(latestAuthorizationStatus);
+        }
+
+        GovernedLoopEffectReconciliationProbeRegistryReadResult? latestRegistry;
+        try
+        {
+            latestRegistry = await _probeRegistry.ReadAsync(new GovernedLoopEffectReconciliationProbeRegistryReadRequest(value.ContractMetadata), cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return Result(GovernedLoopEffectReconciliationOperationStatus.Unavailable);
+        }
+        if (latestRegistry is null
+            || latestRegistry.Status != GovernedLoopEffectReconciliationProbeRegistryReadStatus.Found
+            || latestRegistry.Contract is null
+            || latestRegistry.Probe is null
+            || !Equals(latestRegistry.Contract, value.ContractMetadata))
+        {
+            return Result(GovernedLoopEffectReconciliationOperationStatus.Unavailable);
+        }
+
+        GovernedLoopEffectReconciliationProbeInvocationResult probeResult;
+        try
+        {
+            probeResult = await latestRegistry.Probe.ProbeAsync(invocation, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (TimeoutException)
+        {
+            probeResult = UncertainProbeResult(GovernedLoopEffectReconciliationProbeInvocationStatus.NotFound, invocation, GovernedLoopEffectReconciliationObservationKind.TimedOut, "Probe timed out before an external state was established.");
+        }
+        catch
+        {
+            probeResult = UncertainProbeResult(GovernedLoopEffectReconciliationProbeInvocationStatus.Unavailable, invocation, GovernedLoopEffectReconciliationObservationKind.Missing, "Probe failed before an external state was established.");
+        }
+
+        GovernedLoopEffectReconciliationProbeObservationCommitResult? commit;
+        try
+        {
+            commit = await _probeReservations.CommitObservationAsync(new GovernedLoopEffectReconciliationProbeObservationCommitRequest(reservationResult.Reservation, probeResult), cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return Result(GovernedLoopEffectReconciliationOperationStatus.Unavailable);
+        }
+
+        if (commit is null)
+        {
+            return Result(GovernedLoopEffectReconciliationOperationStatus.Unavailable);
+        }
+
+        return commit.Status switch
+        {
+            GovernedLoopEffectReconciliationProbeReservationStatus.Reserved => Result(GovernedLoopEffectReconciliationOperationStatus.Applied, commit.Case, commit.EffectHead),
+            GovernedLoopEffectReconciliationProbeReservationStatus.Replayed => Result(GovernedLoopEffectReconciliationOperationStatus.Replayed, commit.Case, commit.EffectHead),
+            GovernedLoopEffectReconciliationProbeReservationStatus.Conflict => Result(GovernedLoopEffectReconciliationOperationStatus.Conflict, commit.Case, commit.EffectHead),
+            GovernedLoopEffectReconciliationProbeReservationStatus.Invalid => Result(GovernedLoopEffectReconciliationOperationStatus.Invalid),
+            GovernedLoopEffectReconciliationProbeReservationStatus.Corrupt => Result(GovernedLoopEffectReconciliationOperationStatus.Corrupt),
+            GovernedLoopEffectReconciliationProbeReservationStatus.CapacityExceeded => Result(GovernedLoopEffectReconciliationOperationStatus.CapacityExceeded),
+            GovernedLoopEffectReconciliationProbeReservationStatus.RepairRequired => Result(GovernedLoopEffectReconciliationOperationStatus.RepairRequired),
+            _ => Result(GovernedLoopEffectReconciliationOperationStatus.Unavailable)
+        };
+    }
+
     private async Task<GovernedLoopEffectReconciliationOperationResult> ReadCaseAsync(GovernedLoopEffectReconciliationCaseReference reference, CancellationToken cancellationToken)
         => await ReadAsync(new GovernedLoopEffectReconciliationCaseReadRequest(reference), cancellationToken);
+
+    private static string ProbeRequestHash(
+        string operationId,
+        GovernedLoopEffectReconciliationProbeInvocationRequest invocation,
+        GovernedLoopEffectReconciliationEvidenceSource source,
+        GovernedLoopEffectReconciliationContractMetadata contract)
+    {
+        var builder = new StringBuilder(2048);
+        Append(builder, "embodysense.governed-loop-effect-reconciliation-probe.v1");
+        Append(builder, operationId);
+        Append(builder, invocation.Case.CaseId);
+        Append(builder, invocation.Case.CaseVersion);
+        Append(builder, invocation.Case.ContentHash);
+        Append(builder, invocation.Binding.ContentHash);
+        Append(builder, invocation.EffectHead?.ContentHash);
+        Append(builder, invocation.EffectHead?.InputFingerprint);
+        Append(builder, invocation.EffectHead?.TargetFingerprint);
+        Append(builder, invocation.EffectHead?.PreconditionEvidenceHash);
+        Append(builder, invocation.EffectHead?.BeforeEvidenceId);
+        Append(builder, source.SourceId);
+        Append(builder, source.ContentHash);
+        Append(builder, source.RegistrationEvidenceHash);
+        Append(builder, contract.ContentHash);
+        Append(builder, contract.ProbeContractId);
+        Append(builder, contract.ProbeContractVersion);
+        Append(builder, contract.ProbeContractHash);
+        Append(builder, invocation.Input.CanonicalJson);
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(builder.ToString()))).ToLowerInvariant();
+    }
+
+    private static GovernedLoopEffectReconciliationProbeInvocationResult UncertainProbeResult(
+        GovernedLoopEffectReconciliationProbeInvocationStatus status,
+        GovernedLoopEffectReconciliationProbeInvocationRequest invocation,
+        GovernedLoopEffectReconciliationObservationKind kind,
+        string summary)
+    {
+        var now = invocation.EffectHead.Payload.UpdatedAtUtc;
+        if (invocation.Source.RegisteredAtUtc > now)
+        {
+            now = invocation.Source.RegisteredAtUtc;
+        }
+        var observation = GovernedLoopEffectReconciliationContractHash.Apply(new GovernedLoopEffectReconciliationObservation(
+            GovernedLoopEffectReconciliationContractLimits.CurrentSchemaVersion,
+            invocation.Case.CaseId,
+            invocation.Binding.ContentHash,
+            $"probe-{invocation.Case.CaseVersion}-{invocation.Source?.SourceId ?? "unknown"}",
+            invocation.Source?.SourceId ?? "unknown",
+            invocation.Source?.ContentHash ?? new string('0', GovernedLoopEffectReconciliationContractLimits.Sha256HexCharacters),
+            kind,
+            invocation.Source?.ReliabilityPosture ?? GovernedLoopEffectReconciliationReliabilityPosture.Untrusted,
+            GovernedLoopEffectReconciliationObservedOutcome.Unknown,
+            null,
+            null,
+            null,
+            now,
+            summary,
+            string.Empty));
+        return new GovernedLoopEffectReconciliationProbeInvocationResult(GovernedLoopEffectReconciliationProbeInvocationStatus.Ready, observation);
+    }
 
     private async Task<GovernedLoopEffectReconciliationInputReadResult> ReadInputAsync(GovernedLoopEffectReconciliationCaseReference reference, GovernedLoopEffectReconciliationBinding binding, CancellationToken cancellationToken)
     {

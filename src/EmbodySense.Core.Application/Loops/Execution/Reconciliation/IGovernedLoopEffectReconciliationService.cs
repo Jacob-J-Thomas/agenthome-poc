@@ -2,7 +2,7 @@ using EmbodySense.Core.Application.Loops.Execution.Reconciliation.Models;
 
 namespace EmbodySense.Core.Application.Loops.Execution.Reconciliation;
 
-/// <summary>Orchestrates exact effect-reconciliation cases without invoking the original actuator or a registered probe.</summary>
+/// <summary>Orchestrates exact effect-reconciliation cases without invoking the original actuator.</summary>
 /// <remarks>
 /// Implementations are stateless across calls and may be used concurrently. The canonical case store owns
 /// compare-exchange serialization; dependency failures become closed operation statuses, while caller cancellation
@@ -44,4 +44,11 @@ public interface IGovernedLoopEffectReconciliationService
     /// <returns>An applied or replayed resolution with its reconciled successor, or a closed unresolved/conflict status.</returns>
     /// <exception cref="OperationCanceledException">Thrown when <paramref name="cancellationToken"/> is canceled.</exception>
     Task<GovernedLoopEffectReconciliationOperationResult> ResolveAsync(GovernedLoopEffectReconciliationResolutionRequest request, CancellationToken cancellationToken = default);
+
+    /// <summary>Reserves and invokes one registered read-only probe at most once, then records its observation without an effect successor.</summary>
+    /// <param name="request">The independent probe operation and exact immutable case reference.</param>
+    /// <param name="cancellationToken">The caller token; cancellation is propagated and never retries a reserved callback.</param>
+    /// <returns>An applied or replayed observation result, or a closed status when exact source, authority, registration, or durable state cannot be established.</returns>
+    /// <exception cref="OperationCanceledException">Thrown when <paramref name="cancellationToken"/> is canceled.</exception>
+    Task<GovernedLoopEffectReconciliationOperationResult> ProbeAsync(GovernedLoopEffectReconciliationProbeRequest request, CancellationToken cancellationToken = default);
 }

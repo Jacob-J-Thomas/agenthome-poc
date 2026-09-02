@@ -1,14 +1,19 @@
 using EmbodySense.Core.Application.Loops.Execution.Reconciliation;
 using EmbodySense.Core.Application.Loops.Execution.Reconciliation.Models;
 using EmbodySense.Core.Common.Loops.Execution.Effects.Models;
+using EmbodySense.Core.Common.Loops.Execution.Reconciliation;
 using EmbodySense.Core.Common.Loops.Execution.Reconciliation.Models;
 
 namespace EmbodySense.Core.Application.Tests.Loops.Execution.Reconciliation;
 
-internal sealed class GovernedLoopEffectReconciliationServiceStore : IGovernedLoopEffectReconciliationCaseStore
+internal sealed class GovernedLoopEffectReconciliationServiceStore :
+    IGovernedLoopEffectReconciliationCaseStore,
+    IGovernedLoopEffectReconciliationProbeReservationStore
 {
     private readonly Dictionary<string, (string RequestHash, GovernedLoopEffectReconciliationCaseMutationResult Result)> _operations = new(StringComparer.Ordinal);
     private readonly Dictionary<string, GovernedLoopEffectReconciliationCase> _versions = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, (string RequestHash, GovernedLoopEffectReconciliationProbeReservation Reservation)> _probeReservations = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, GovernedLoopEffectReconciliationProbeObservationCommitResult> _probeCommits = new(StringComparer.Ordinal);
 
     internal GovernedLoopEffectReconciliationCase? CurrentCase { get; private set; }
 
@@ -29,6 +34,22 @@ internal sealed class GovernedLoopEffectReconciliationServiceStore : IGovernedLo
     internal int MutationCalls { get; private set; }
 
     internal int AppliedMutationCalls { get; private set; }
+
+    internal int ProbeReservationCalls { get; private set; }
+
+    internal int ProbeCommitCalls { get; private set; }
+
+    internal GovernedLoopEffectReconciliationProbeReservationStatus? ForcedProbeReservationStatus { get; set; }
+
+    internal GovernedLoopEffectReconciliationProbeReservationStatus? ForcedProbeCommitStatus { get; set; }
+
+    internal bool ThrowOnProbeReservation { get; set; }
+
+    internal bool ReturnNullOnProbeReservation { get; set; }
+
+    internal bool ThrowOnProbeCommit { get; set; }
+
+    internal bool ReturnNullOnProbeCommit { get; set; }
 
     internal void SeedEffect(GovernedLoopEffectAttempt effect) => CurrentEffect = effect;
 
@@ -122,6 +143,96 @@ internal sealed class GovernedLoopEffectReconciliationServiceStore : IGovernedLo
 
         var result = new GovernedLoopEffectReconciliationCaseMutationResult(GovernedLoopEffectReconciliationCaseMutationStatus.Applied, CurrentCase, CurrentEffect!);
         _operations[request.OperationId] = (request.RequestHash, result);
+        return Task.FromResult(result);
+    }
+
+    public Task<GovernedLoopEffectReconciliationProbeReservationResult> ReserveAsync(GovernedLoopEffectReconciliationProbeReservationRequest request, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ProbeReservationCalls++;
+        if (ThrowOnProbeReservation)
+        {
+            throw new IOException("The test reservation store is unavailable.");
+        }
+
+        if (ReturnNullOnProbeReservation)
+        {
+            return Task.FromResult<GovernedLoopEffectReconciliationProbeReservationResult>(null!);
+        }
+
+        if (ForcedProbeReservationStatus is { } forcedStatus)
+        {
+            return Task.FromResult(new GovernedLoopEffectReconciliationProbeReservationResult(forcedStatus, null));
+        }
+
+        if (_probeReservations.TryGetValue(request.OperationId, out var existing))
+        {
+            return Task.FromResult(string.Equals(existing.RequestHash, request.RequestHash, StringComparison.Ordinal)
+                ? new GovernedLoopEffectReconciliationProbeReservationResult(
+                    GovernedLoopEffectReconciliationProbeReservationStatus.Replayed,
+                    existing.Reservation,
+                    _probeCommits.TryGetValue(request.OperationId, out var commit) ? commit.Case : null,
+                    _probeCommits.TryGetValue(request.OperationId, out commit) ? commit.EffectHead : null)
+                : new GovernedLoopEffectReconciliationProbeReservationResult(GovernedLoopEffectReconciliationProbeReservationStatus.Conflict, null));
+        }
+
+        var reservation = new GovernedLoopEffectReconciliationProbeReservation(
+            request.OperationId,
+            request.RequestHash,
+            request.Invocation.Case,
+            request.Invocation.EffectHead,
+            request.Invocation.Source,
+            request.Invocation.Contract,
+            DateTimeOffset.UtcNow);
+        _probeReservations[request.OperationId] = (request.RequestHash, reservation);
+        return Task.FromResult(new GovernedLoopEffectReconciliationProbeReservationResult(GovernedLoopEffectReconciliationProbeReservationStatus.Reserved, reservation));
+    }
+
+    public Task<GovernedLoopEffectReconciliationProbeObservationCommitResult> CommitObservationAsync(GovernedLoopEffectReconciliationProbeObservationCommitRequest request, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ProbeCommitCalls++;
+        if (ThrowOnProbeCommit)
+        {
+            throw new IOException("The test observation store is unavailable.");
+        }
+
+        if (ReturnNullOnProbeCommit)
+        {
+            return Task.FromResult<GovernedLoopEffectReconciliationProbeObservationCommitResult>(null!);
+        }
+
+        if (ForcedProbeCommitStatus is { } forcedStatus)
+        {
+            return Task.FromResult(new GovernedLoopEffectReconciliationProbeObservationCommitResult(forcedStatus, forcedStatus is GovernedLoopEffectReconciliationProbeReservationStatus.Reserved or GovernedLoopEffectReconciliationProbeReservationStatus.Replayed ? CurrentCase : null, forcedStatus is GovernedLoopEffectReconciliationProbeReservationStatus.Reserved or GovernedLoopEffectReconciliationProbeReservationStatus.Replayed ? CurrentEffect : null));
+        }
+
+        if (_probeCommits.TryGetValue(request.Reservation.OperationId, out var committed))
+        {
+            return Task.FromResult(new GovernedLoopEffectReconciliationProbeObservationCommitResult(GovernedLoopEffectReconciliationProbeReservationStatus.Replayed, committed.Case, committed.EffectHead));
+        }
+
+        var observation = request.Result.Observation!;
+        var current = CurrentCase!;
+        var next = GovernedLoopEffectReconciliationContract.Create(
+            current.CaseId,
+            current.CaseVersion + 1,
+            current.Binding,
+            current.ContractMetadata,
+            current.EvidenceSources,
+            [.. current.ObservationHistory, observation],
+            current.AssessmentHistory,
+            current.CurrentAssessmentHash,
+            current.Disposition,
+            current.Resolution,
+            current.CaseReceiptHashes,
+            current.ContentHash,
+            current.OpenedAtUtc,
+            observation.RecordedAtUtc < current.UpdatedAtUtc ? current.UpdatedAtUtc : observation.RecordedAtUtc);
+        CurrentCase = next;
+        _versions[VersionKey(next)] = next;
+        var result = new GovernedLoopEffectReconciliationProbeObservationCommitResult(GovernedLoopEffectReconciliationProbeReservationStatus.Reserved, next, CurrentEffect);
+        _probeCommits[request.Reservation.OperationId] = result;
         return Task.FromResult(result);
     }
 

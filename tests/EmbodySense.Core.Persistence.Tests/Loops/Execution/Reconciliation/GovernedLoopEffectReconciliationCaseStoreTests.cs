@@ -73,6 +73,303 @@ public sealed class GovernedLoopEffectReconciliationCaseStoreTests
     }
 
     [Fact]
+    public async Task Probe_reservation_is_durable_before_callback_and_observation_keeps_original_effect_head()
+    {
+        using var workspace = new TestWorkspace();
+        var scenario = await CreateScenarioAsync(workspace);
+        var source = GovernedLoopEffectReconciliationContractHash.Apply(new GovernedLoopEffectReconciliationEvidenceSource(
+            1,
+            scenario.Open.CaseId,
+            scenario.Open.Binding.ContentHash,
+            "probe-source",
+            GovernedLoopEffectReconciliationEvidenceSourceKind.Authoritative,
+            GovernedLoopEffectReconciliationReliabilityPosture.Authoritative,
+            scenario.Open.ContractMetadata.ContractId,
+            scenario.Open.ContractMetadata.ContractVersion,
+            scenario.Open.ContractMetadata.ContentHash,
+            Hash('a'),
+            scenario.Open.OpenedAtUtc,
+            null,
+            string.Empty));
+        var probeCase = GovernedLoopEffectReconciliationContract.Create(
+            scenario.Open.CaseId,
+            scenario.Open.CaseVersion,
+            scenario.Open.Binding,
+            scenario.Open.ContractMetadata,
+            [source],
+            [],
+            [],
+            null,
+            null,
+            null,
+            [],
+            null,
+            scenario.Open.OpenedAtUtc,
+            scenario.Open.UpdatedAtUtc);
+        var store = new GovernedLoopEffectReconciliationCaseStore(scenario.EffectStore);
+        Assert.Equal(GovernedLoopEffectReconciliationCaseMutationStatus.Applied, (await store.CompareExchangeAsync(Mutation(probeCase, null, null, "open", "probe-case-open"))).Status);
+        var invocation = new GovernedLoopEffectReconciliationProbeInvocationRequest(
+            Reference(probeCase),
+            probeCase.Binding,
+            probeCase.ContractMetadata,
+            scenario.Input,
+            scenario.Attempt,
+            source);
+        Assert.Equal(invocation.Binding.ContentHash, invocation.Case.BindingHash);
+        Assert.Equal(invocation.Binding.CurrentAttemptHash, invocation.EffectHead!.ContentHash);
+        Assert.Equal(invocation.Input.Fingerprint, invocation.EffectHead.InputFingerprint);
+        var reservationRequest = new GovernedLoopEffectReconciliationProbeReservationRequest("probe-operation-1", Hash("probe-intent"), invocation);
+        var contender = new GovernedLoopEffectReconciliationCaseStore(new GovernedLoopEffectAttemptStore(scenario.Paths));
+        var reservations = await Task.WhenAll(store.ReserveAsync(reservationRequest), contender.ReserveAsync(reservationRequest));
+        Assert.Single(reservations, value => value.Status == GovernedLoopEffectReconciliationProbeReservationStatus.Reserved);
+        Assert.Single(reservations, value => value.Status == GovernedLoopEffectReconciliationProbeReservationStatus.Replayed);
+        var reservation = Assert.Single(reservations, value => value.Status == GovernedLoopEffectReconciliationProbeReservationStatus.Reserved);
+        Assert.NotNull(reservation.Reservation);
+        Assert.Contains(Directory.EnumerateFiles(scenario.Paths.GovernedLoopEffectAttemptsPath), path => Path.GetFileName(path)!.StartsWith("reconciliation-probe-reservation.", StringComparison.Ordinal));
+        var reservationJson = await File.ReadAllTextAsync(Directory.EnumerateFiles(scenario.Paths.GovernedLoopEffectAttemptsPath, "reconciliation-probe-reservation.*.json").Single());
+        Assert.Contains("\"inputJson\":\"\"", reservationJson, StringComparison.Ordinal);
+        Assert.DoesNotContain(scenario.Input.CanonicalJson, reservationJson, StringComparison.Ordinal);
+
+        var observation = GovernedLoopEffectReconciliationContractHash.Apply(new GovernedLoopEffectReconciliationObservation(
+            1,
+            probeCase.CaseId,
+            probeCase.Binding.ContentHash,
+            "probe-observation-1",
+            source.SourceId,
+            source.ContentHash,
+            GovernedLoopEffectReconciliationObservationKind.Evidence,
+            source.ReliabilityPosture,
+            GovernedLoopEffectReconciliationObservedOutcome.NotApplied,
+            "evidence-1",
+            Hash('b'),
+            probeCase.OpenedAtUtc.AddSeconds(1),
+            probeCase.OpenedAtUtc.AddSeconds(2),
+            "No external effect observed.",
+            string.Empty));
+        var committed = await store.CommitObservationAsync(new GovernedLoopEffectReconciliationProbeObservationCommitRequest(
+            reservation.Reservation!,
+            new GovernedLoopEffectReconciliationProbeInvocationResult(GovernedLoopEffectReconciliationProbeInvocationStatus.Ready, observation)));
+        Assert.Equal(GovernedLoopEffectReconciliationProbeReservationStatus.Reserved, committed.Status);
+        Assert.NotNull(committed.Case);
+        Assert.Equal(scenario.Attempt.ContentHash, committed.EffectHead!.ContentHash);
+        Assert.Single(committed.Case!.ObservationHistory);
+        var replay = await store.ReserveAsync(new GovernedLoopEffectReconciliationProbeReservationRequest("probe-operation-1", Hash("probe-intent"), invocation));
+        Assert.Equal(GovernedLoopEffectReconciliationProbeReservationStatus.Replayed, replay.Status);
+        Assert.Equal(committed.Case!.ContentHash, replay.Case!.ContentHash);
+        Assert.Equal(committed.EffectHead!.ContentHash, replay.EffectHead!.ContentHash);
+        Assert.DoesNotContain(Directory.EnumerateFiles(scenario.Paths.GovernedLoopEffectAttemptsPath), path => Path.GetFileName(path)!.Contains("reconciled", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task Probe_observation_process_loss_recovers_the_single_callback_result_and_replays()
+    {
+        using var workspace = new TestWorkspace();
+        var scenario = await CreateScenarioAsync(workspace);
+        var source = GovernedLoopEffectReconciliationContractHash.Apply(new GovernedLoopEffectReconciliationEvidenceSource(
+            1,
+            scenario.Open.CaseId,
+            scenario.Open.Binding.ContentHash,
+            "probe-crash-source",
+            GovernedLoopEffectReconciliationEvidenceSourceKind.Authoritative,
+            GovernedLoopEffectReconciliationReliabilityPosture.Authoritative,
+            scenario.Open.ContractMetadata.ContractId,
+            scenario.Open.ContractMetadata.ContractVersion,
+            scenario.Open.ContractMetadata.ContentHash,
+            Hash('a'),
+            scenario.Open.OpenedAtUtc,
+            null,
+            string.Empty));
+        var probeCase = GovernedLoopEffectReconciliationContract.Create(
+            scenario.Open.CaseId,
+            scenario.Open.CaseVersion,
+            scenario.Open.Binding,
+            scenario.Open.ContractMetadata,
+            [source],
+            [],
+            [],
+            null,
+            null,
+            null,
+            [],
+            null,
+            scenario.Open.OpenedAtUtc,
+            scenario.Open.UpdatedAtUtc);
+        var store = new GovernedLoopEffectReconciliationCaseStore(scenario.EffectStore);
+        Assert.Equal(GovernedLoopEffectReconciliationCaseMutationStatus.Applied, (await store.CompareExchangeAsync(Mutation(probeCase, null, null, "open", "probe-crash-open"))).Status);
+        var invocation = new GovernedLoopEffectReconciliationProbeInvocationRequest(
+            Reference(probeCase),
+            probeCase.Binding,
+            probeCase.ContractMetadata,
+            scenario.Input,
+            scenario.Attempt,
+            source);
+        var reservationRequest = new GovernedLoopEffectReconciliationProbeReservationRequest("probe-crash-operation", Hash("probe-crash-intent"), invocation);
+        var reservation = await store.ReserveAsync(reservationRequest);
+        Assert.Equal(GovernedLoopEffectReconciliationProbeReservationStatus.Reserved, reservation.Status);
+
+        var observation = GovernedLoopEffectReconciliationContractHash.Apply(new GovernedLoopEffectReconciliationObservation(
+            1,
+            probeCase.CaseId,
+            probeCase.Binding.ContentHash,
+            "probe-crash-observation",
+            source.SourceId,
+            source.ContentHash,
+            GovernedLoopEffectReconciliationObservationKind.Evidence,
+            source.ReliabilityPosture,
+            GovernedLoopEffectReconciliationObservedOutcome.NotApplied,
+            "crash-evidence",
+            Hash('b'),
+            probeCase.OpenedAtUtc.AddSeconds(1),
+            probeCase.OpenedAtUtc.AddSeconds(2),
+            "The callback result was durably captured before process loss.",
+            string.Empty));
+        var result = new GovernedLoopEffectReconciliationProbeInvocationResult(GovernedLoopEffectReconciliationProbeInvocationStatus.Ready, observation);
+        var crashingStore = new GovernedLoopEffectReconciliationCaseStore(
+            new GovernedLoopEffectAttemptStore(scenario.Paths),
+            options: new GovernedLoopEffectReconciliationCaseStoreOptions
+            {
+                DurableBoundaryObserver = boundary =>
+                {
+                    if (boundary == GovernedLoopEffectReconciliationPersistenceBoundary.ProbeObservationPublished)
+                    {
+                        throw new InvalidOperationException("simulated process loss");
+                    }
+                },
+            });
+
+        var interrupted = await crashingStore.CommitObservationAsync(new GovernedLoopEffectReconciliationProbeObservationCommitRequest(reservation.Reservation!, result));
+        Assert.Equal(GovernedLoopEffectReconciliationProbeReservationStatus.Unavailable, interrupted.Status);
+        Assert.Contains(Directory.EnumerateFiles(scenario.Paths.GovernedLoopEffectAttemptsPath), path => Path.GetFileName(path)!.StartsWith("reconciliation-probe-journal.", StringComparison.Ordinal));
+
+        var restarted = new GovernedLoopEffectReconciliationCaseStore(new GovernedLoopEffectAttemptStore(scenario.Paths));
+        Assert.True(await restarted.RecoverAsync());
+        Assert.DoesNotContain(Directory.EnumerateFiles(scenario.Paths.GovernedLoopEffectAttemptsPath), path => Path.GetFileName(path)!.StartsWith("reconciliation-probe-journal.", StringComparison.Ordinal));
+        var page = await restarted.ListAsync(new GovernedLoopEffectReconciliationCaseListRequest(10));
+        var summary = Assert.Single(page.Cases);
+        var recovered = await restarted.ReadAsync(new GovernedLoopEffectReconciliationCaseReadRequest(new GovernedLoopEffectReconciliationCaseReference(summary.CaseId, summary.CaseVersion, summary.ContentHash, summary.BindingHash)));
+        Assert.Equal(GovernedLoopEffectReconciliationCaseReadStatus.Found, recovered.Status);
+        Assert.Single(recovered.Case!.ObservationHistory);
+        Assert.Equal(scenario.Attempt.ContentHash, (await restarted.CommitObservationAsync(new GovernedLoopEffectReconciliationProbeObservationCommitRequest(reservation.Reservation!, result))).EffectHead!.ContentHash);
+    }
+
+    [Theory]
+    [InlineData(GovernedLoopEffectReconciliationProbeInvocationStatus.NotFound, GovernedLoopEffectReconciliationObservationKind.Missing)]
+    [InlineData(GovernedLoopEffectReconciliationProbeInvocationStatus.Invalid, GovernedLoopEffectReconciliationObservationKind.UnprovenHash)]
+    public async Task Probe_non_ready_invocation_is_normalized_and_committed_without_effect_successor(
+        GovernedLoopEffectReconciliationProbeInvocationStatus status,
+        GovernedLoopEffectReconciliationObservationKind expectedKind)
+    {
+        using var workspace = new TestWorkspace();
+        var setup = await CreateProbeSetupAsync(workspace, "non-ready-" + status.ToString().ToLowerInvariant());
+        var reservation = await setup.Store.ReserveAsync(new GovernedLoopEffectReconciliationProbeReservationRequest(
+            "probe-" + status.ToString().ToLowerInvariant(),
+            Hash(status.ToString()),
+            setup.Invocation));
+        Assert.Equal(GovernedLoopEffectReconciliationProbeReservationStatus.Reserved, reservation.Status);
+
+        var committed = await setup.Store.CommitObservationAsync(new GovernedLoopEffectReconciliationProbeObservationCommitRequest(
+            reservation.Reservation!,
+            new GovernedLoopEffectReconciliationProbeInvocationResult(status, null)));
+
+        Assert.Equal(GovernedLoopEffectReconciliationProbeReservationStatus.Reserved, committed.Status);
+        Assert.NotNull(committed.Case);
+        var observation = Assert.Single(committed.Case!.ObservationHistory);
+        Assert.Equal(expectedKind, observation.Kind);
+        Assert.Equal(GovernedLoopEffectReconciliationObservedOutcome.Unknown, observation.ObservedOutcome);
+        Assert.Equal(setup.Scenario.Attempt.ContentHash, committed.EffectHead!.ContentHash);
+        Assert.DoesNotContain(Directory.EnumerateFiles(setup.Scenario.Paths.GovernedLoopEffectAttemptsPath), path => Path.GetFileName(path)!.Contains("reconciled", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task Malformed_probe_reservation_observation_and_journal_fail_closed_in_readiness()
+    {
+        using var reservationWorkspace = new TestWorkspace();
+        var reservationSetup = await CreateProbeSetupAsync(reservationWorkspace, "malformed-reservation");
+        var reservation = await reservationSetup.Store.ReserveAsync(new GovernedLoopEffectReconciliationProbeReservationRequest(
+            "probe-malformed-reservation",
+            Hash("malformed-reservation"),
+            reservationSetup.Invocation));
+        Assert.Equal(GovernedLoopEffectReconciliationProbeReservationStatus.Reserved, reservation.Status);
+        var reservationPath = Directory.EnumerateFiles(reservationSetup.Scenario.Paths.GovernedLoopEffectAttemptsPath, "reconciliation-probe-reservation.*.json").Single();
+        await File.WriteAllTextAsync(reservationPath, "{}");
+        Assert.False(await reservationSetup.Store.ProbeStorageAvailabilityAsync());
+
+        using var observationWorkspace = new TestWorkspace();
+        var observationSetup = await CreateProbeSetupAsync(observationWorkspace, "malformed-observation");
+        var observationReservation = await observationSetup.Store.ReserveAsync(new GovernedLoopEffectReconciliationProbeReservationRequest(
+            "probe-malformed-observation",
+            Hash("malformed-observation"),
+            observationSetup.Invocation));
+        Assert.Equal(GovernedLoopEffectReconciliationProbeReservationStatus.Reserved, observationReservation.Status);
+        var observation = GovernedLoopEffectReconciliationContractHash.Apply(new GovernedLoopEffectReconciliationObservation(
+            1,
+            observationSetup.ProbeCase.CaseId,
+            observationSetup.ProbeCase.Binding.ContentHash,
+            "malformed-observation-result",
+            observationSetup.Source.SourceId,
+            observationSetup.Source.ContentHash,
+            GovernedLoopEffectReconciliationObservationKind.Evidence,
+            observationSetup.Source.ReliabilityPosture,
+            GovernedLoopEffectReconciliationObservedOutcome.NotApplied,
+            "malformed-evidence",
+            Hash('b'),
+            observationSetup.ProbeCase.OpenedAtUtc.AddSeconds(1),
+            observationSetup.ProbeCase.OpenedAtUtc.AddSeconds(2),
+            "No external effect observed.",
+            string.Empty));
+        var observationCommit = await observationSetup.Store.CommitObservationAsync(new GovernedLoopEffectReconciliationProbeObservationCommitRequest(
+            observationReservation.Reservation!,
+            new GovernedLoopEffectReconciliationProbeInvocationResult(GovernedLoopEffectReconciliationProbeInvocationStatus.Ready, observation)));
+        Assert.Equal(GovernedLoopEffectReconciliationProbeReservationStatus.Reserved, observationCommit.Status);
+        var observationPath = Directory.EnumerateFiles(observationSetup.Scenario.Paths.GovernedLoopEffectAttemptsPath, "reconciliation-probe-observation.*.json").Single();
+        await File.WriteAllTextAsync(observationPath, "{}");
+        Assert.False(await observationSetup.Store.ProbeStorageAvailabilityAsync());
+
+        using var journalWorkspace = new TestWorkspace();
+        var journalSetup = await CreateProbeSetupAsync(journalWorkspace, "malformed-journal");
+        var journalReservation = await journalSetup.Store.ReserveAsync(new GovernedLoopEffectReconciliationProbeReservationRequest(
+            "probe-malformed-journal",
+            Hash("malformed-journal"),
+            journalSetup.Invocation));
+        Assert.Equal(GovernedLoopEffectReconciliationProbeReservationStatus.Reserved, journalReservation.Status);
+        var journalObservation = GovernedLoopEffectReconciliationContractHash.Apply(new GovernedLoopEffectReconciliationObservation(
+            1,
+            journalSetup.ProbeCase.CaseId,
+            journalSetup.ProbeCase.Binding.ContentHash,
+            "malformed-journal-result",
+            journalSetup.Source.SourceId,
+            journalSetup.Source.ContentHash,
+            GovernedLoopEffectReconciliationObservationKind.Evidence,
+            journalSetup.Source.ReliabilityPosture,
+            GovernedLoopEffectReconciliationObservedOutcome.NotApplied,
+            "malformed-journal-evidence",
+            Hash('c'),
+            journalSetup.ProbeCase.OpenedAtUtc.AddSeconds(1),
+            journalSetup.ProbeCase.OpenedAtUtc.AddSeconds(2),
+            "No external effect observed.",
+            string.Empty));
+        var crashingStore = new GovernedLoopEffectReconciliationCaseStore(
+            new GovernedLoopEffectAttemptStore(journalSetup.Scenario.Paths),
+            options: new GovernedLoopEffectReconciliationCaseStoreOptions
+            {
+                DurableBoundaryObserver = boundary =>
+                {
+                    if (boundary == GovernedLoopEffectReconciliationPersistenceBoundary.ProbeObservationPublished)
+                    {
+                        throw new InvalidOperationException("simulated process loss");
+                    }
+                },
+            });
+        var interrupted = await crashingStore.CommitObservationAsync(new GovernedLoopEffectReconciliationProbeObservationCommitRequest(
+            journalReservation.Reservation!,
+            new GovernedLoopEffectReconciliationProbeInvocationResult(GovernedLoopEffectReconciliationProbeInvocationStatus.Ready, journalObservation)));
+        Assert.Equal(GovernedLoopEffectReconciliationProbeReservationStatus.Unavailable, interrupted.Status);
+        var journalPath = Directory.EnumerateFiles(journalSetup.Scenario.Paths.GovernedLoopEffectAttemptsPath, "reconciliation-probe-journal.*.json").Single();
+        await File.WriteAllTextAsync(journalPath, "{}");
+        Assert.False(await journalSetup.Store.ProbeStorageAvailabilityAsync());
+    }
+
+    [Fact]
     public async Task Divergent_same_operation_conflicts_and_stale_case_update_preserves_the_winner()
     {
         using var workspace = new TestWorkspace();
@@ -504,7 +801,52 @@ public sealed class GovernedLoopEffectReconciliationCaseStoreTests
         var metadata = GovernedLoopEffectReconciliationContractHash.Apply(new GovernedLoopEffectReconciliationContractMetadata(1, "contract-1", 1, attempt.Capability, attempt.Implementation, attempt.ActuatorOperationId, attempt.OperationDescriptorHash, "probe-1", 1, Hash('7'), string.Empty));
         var open = GovernedLoopEffectReconciliationContract.Open("case-" + suffix, binding, metadata, [], [], _now.AddSeconds(4));
         Assert.True(GovernedLoopEffectReconciliationContract.Validate(open, attempt).IsValid);
-        return new Scenario(paths, effectStore, workspaceId, attempt, open);
+        Assert.True(GovernedActuatorInputContract.TryCanonicalize("{}", out var input, out _));
+        return new Scenario(paths, effectStore, workspaceId, attempt, open, input!);
+    }
+
+    private static async Task<(Scenario Scenario, GovernedLoopEffectReconciliationCaseStore Store, GovernedLoopEffectReconciliationCase ProbeCase, GovernedLoopEffectReconciliationEvidenceSource Source, GovernedLoopEffectReconciliationProbeInvocationRequest Invocation)> CreateProbeSetupAsync(TestWorkspace workspace, string suffix)
+    {
+        var scenario = await CreateScenarioAsync(workspace, suffix);
+        var source = GovernedLoopEffectReconciliationContractHash.Apply(new GovernedLoopEffectReconciliationEvidenceSource(
+            1,
+            scenario.Open.CaseId,
+            scenario.Open.Binding.ContentHash,
+            "probe-source-" + suffix,
+            GovernedLoopEffectReconciliationEvidenceSourceKind.Authoritative,
+            GovernedLoopEffectReconciliationReliabilityPosture.Authoritative,
+            scenario.Open.ContractMetadata.ContractId,
+            scenario.Open.ContractMetadata.ContractVersion,
+            scenario.Open.ContractMetadata.ContentHash,
+            Hash('a'),
+            scenario.Open.OpenedAtUtc,
+            null,
+            string.Empty));
+        var probeCase = GovernedLoopEffectReconciliationContract.Create(
+            scenario.Open.CaseId,
+            scenario.Open.CaseVersion,
+            scenario.Open.Binding,
+            scenario.Open.ContractMetadata,
+            [source],
+            [],
+            [],
+            null,
+            null,
+            null,
+            [],
+            null,
+            scenario.Open.OpenedAtUtc,
+            scenario.Open.UpdatedAtUtc);
+        var store = new GovernedLoopEffectReconciliationCaseStore(scenario.EffectStore);
+        Assert.Equal(GovernedLoopEffectReconciliationCaseMutationStatus.Applied, (await store.CompareExchangeAsync(Mutation(probeCase, null, null, "open", "probe-case-open-" + suffix))).Status);
+        var invocation = new GovernedLoopEffectReconciliationProbeInvocationRequest(
+            Reference(probeCase),
+            probeCase.Binding,
+            probeCase.ContractMetadata,
+            scenario.Input,
+            scenario.Attempt,
+            source);
+        return (scenario, store, probeCase, source, invocation);
     }
 
     private static GovernedLoopEffectAttempt Prepare(string suffix = "1")
@@ -515,7 +857,8 @@ public sealed class GovernedLoopEffectReconciliationCaseStoreTests
         Assert.True(CapabilityProviderId.TryParse("org.example", out var provider, out var providerError), providerError?.Message);
         var revision = GovernedLoopRevisionReference.Create(1, "graph-1", "revision-1", Hash('2'));
         var execution = GovernedLoopExecutionBinding.Create(1, "run-1", revision, 1);
-        return GovernedLoopEffectAttemptContract.Prepare(execution, "action-" + suffix, 1, new CapabilityDescriptorIdentity(capabilityId!, version!, descriptorHash!), new CapabilityImplementationIdentity(provider!, "effects/probe"), "probe/observe", Hash('3'), "effect-" + suffix, "effect-operation-" + suffix, 1, Hash('4'), Hash('5'), Hash('8'), Hash('9'), "before-alpha", _now);
+        Assert.True(GovernedActuatorInputContract.TryCanonicalize("{}", out var input, out _));
+        return GovernedLoopEffectAttemptContract.Prepare(execution, "action-" + suffix, 1, new CapabilityDescriptorIdentity(capabilityId!, version!, descriptorHash!), new CapabilityImplementationIdentity(provider!, "effects/probe"), "probe/observe", Hash('3'), "effect-" + suffix, "effect-operation-" + suffix, 1, input!.Fingerprint, Hash('5'), Hash('8'), Hash('9'), "before-alpha", _now);
     }
 
     private static GovernedLoopEffectReconciliationCase Assessed(GovernedLoopEffectReconciliationCase open, string assessmentId, char authorityHash)
@@ -593,5 +936,5 @@ public sealed class GovernedLoopEffectReconciliationCaseStoreTests
 
     private sealed record ExternalCrashResult(int ExitCode, string OutputPath);
 
-    private sealed record Scenario(WorkspacePaths Paths, GovernedLoopEffectAttemptStore EffectStore, string WorkspaceId, GovernedLoopEffectAttempt Attempt, GovernedLoopEffectReconciliationCase Open);
+    private sealed record Scenario(WorkspacePaths Paths, GovernedLoopEffectAttemptStore EffectStore, string WorkspaceId, GovernedLoopEffectAttempt Attempt, GovernedLoopEffectReconciliationCase Open, GovernedActuatorInputEvidence Input);
 }

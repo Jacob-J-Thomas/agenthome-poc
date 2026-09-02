@@ -130,6 +130,219 @@ internal static class GovernedLoopEffectReconciliationModelGuard
         return GovernedLoopEffectReconciliationApplicationCopy.Copy(value)!;
     }
 
+    internal static GovernedLoopEffectAttempt CopyProbeEffect(
+        GovernedLoopEffectAttempt? value,
+        GovernedLoopEffectReconciliationBinding binding,
+        string parameterName)
+    {
+        ArgumentNullException.ThrowIfNull(value, parameterName);
+
+        var exact = CopyOptionalAttempt(value, parameterName)!;
+        if (exact.Payload.Phase != GovernedLoopEffectPhase.ReconciliationRequired
+            || !string.Equals(exact.ContentHash, binding.CurrentAttemptHash, StringComparison.Ordinal)
+            || !Equals(exact.Binding, binding.Execution)
+            || !string.Equals(exact.NodeId, binding.NodeId, StringComparison.Ordinal)
+            || exact.NodeAttempt != binding.NodeAttempt
+            || !string.Equals(exact.Payload.EffectId, binding.EffectId, StringComparison.Ordinal)
+            || !string.Equals(exact.Payload.OperationId, binding.OperationId, StringComparison.Ordinal)
+            || exact.Payload.EffectGeneration != binding.EffectGeneration
+            || !string.Equals(exact.Payload.IntentHash, binding.IntentHash, StringComparison.Ordinal))
+        {
+            throw new ArgumentException("A probe effect head must be the exact retained reconciliation-required effect bound by the request.", parameterName);
+        }
+
+        return exact;
+    }
+
+    internal static GovernedLoopEffectAttempt CopyRequiredProbeEffect(
+        GovernedLoopEffectAttempt? value,
+        GovernedLoopEffectReconciliationCaseReference caseReference,
+        string parameterName)
+    {
+        ArgumentNullException.ThrowIfNull(value, parameterName);
+        var exact = CopyOptionalAttempt(value, parameterName)!;
+        if (exact.Payload.Phase != GovernedLoopEffectPhase.ReconciliationRequired)
+        {
+            throw new ArgumentException("A probe reservation must retain a reconciliation-required effect head.", parameterName);
+        }
+
+        return exact;
+    }
+
+    internal static GovernedLoopEffectReconciliationEvidenceSource CopyProbeSource(
+        GovernedLoopEffectReconciliationEvidenceSource? value,
+        GovernedLoopEffectReconciliationCaseReference caseReference,
+        GovernedLoopEffectReconciliationBinding binding,
+        GovernedLoopEffectReconciliationContractMetadata contract,
+        string parameterName)
+    {
+        ArgumentNullException.ThrowIfNull(value, parameterName);
+
+        if (!GovernedLoopEffectReconciliationContractValidator.Validate(value).IsValid
+            || !string.Equals(value.CaseId, caseReference.CaseId, StringComparison.Ordinal)
+            || !string.Equals(value.BindingHash, binding.ContentHash, StringComparison.Ordinal)
+            || !string.Equals(value.ReconciliationContractId, contract.ContractId, StringComparison.Ordinal)
+            || value.ReconciliationContractVersion != contract.ContractVersion
+            || !string.Equals(value.ReconciliationContractHash, contract.ContentHash, StringComparison.Ordinal))
+        {
+            throw new ArgumentException("A probe source must be the exact retained source registration and probe contract bound by the request.", parameterName);
+        }
+
+        return GovernedLoopEffectReconciliationContractCopy.Copy(value)!;
+    }
+
+    internal static GovernedLoopEffectReconciliationEvidenceSource CopyRequiredProbeSource(
+        GovernedLoopEffectReconciliationEvidenceSource? value,
+        GovernedLoopEffectReconciliationCaseReference caseReference,
+        GovernedLoopEffectReconciliationContractMetadata contract,
+        string parameterName)
+    {
+        ArgumentNullException.ThrowIfNull(value, parameterName);
+        var exact = GovernedLoopEffectReconciliationContractValidator.Validate(value).IsValid
+            ? GovernedLoopEffectReconciliationContractCopy.Copy(value)
+            : throw new ArgumentException("A probe reservation must retain a canonical source registration.", parameterName);
+        if (!string.Equals(exact.CaseId, caseReference.CaseId, StringComparison.Ordinal)
+            || !string.Equals(exact.BindingHash, caseReference.BindingHash, StringComparison.Ordinal)
+            || !string.Equals(exact.ReconciliationContractId, contract.ContractId, StringComparison.Ordinal)
+            || exact.ReconciliationContractVersion != contract.ContractVersion
+            || !string.Equals(exact.ReconciliationContractHash, contract.ContentHash, StringComparison.Ordinal))
+        {
+            throw new ArgumentException("A probe reservation source is not bound to its exact case and contract.", parameterName);
+        }
+
+        return exact;
+    }
+
+    internal static GovernedLoopEffectReconciliationProbeInvocationRequest CopyRequiredProbeInvocation(
+        GovernedLoopEffectReconciliationProbeInvocationRequest? value,
+        string parameterName)
+    {
+        ArgumentNullException.ThrowIfNull(value, parameterName);
+        if (value.EffectHead is null || value.Source is null)
+        {
+            throw new ArgumentException("A durable probe reservation requires the exact retained effect head and source registration.", parameterName);
+        }
+
+        return new GovernedLoopEffectReconciliationProbeInvocationRequest(
+            value.Case,
+            value.Binding,
+            value.Contract,
+            value.Input,
+            value.EffectHead,
+            value.Source);
+    }
+
+    internal static GovernedLoopEffectReconciliationProbeInvocationResult CopyRequiredProbeResult(
+        GovernedLoopEffectReconciliationProbeInvocationResult? value,
+        string parameterName)
+    {
+        ArgumentNullException.ThrowIfNull(value, parameterName);
+        return new GovernedLoopEffectReconciliationProbeInvocationResult(value.Status, value.Observation);
+    }
+
+    internal static GovernedLoopEffectReconciliationProbeReservation CopyRequiredReservation(
+        GovernedLoopEffectReconciliationProbeReservation? value,
+        string parameterName)
+    {
+        ArgumentNullException.ThrowIfNull(value, parameterName);
+        return new GovernedLoopEffectReconciliationProbeReservation(value.OperationId, value.RequestHash, value.Case, value.EffectHead, value.Source, value.Contract, value.ReservedAtUtc);
+    }
+
+    internal static GovernedLoopEffectReconciliationProbeReservation? CopyReservationPayload(
+        GovernedLoopEffectReconciliationProbeReservationStatus status,
+        GovernedLoopEffectReconciliationProbeReservation? value,
+        string parameterName)
+    {
+        var required = status is GovernedLoopEffectReconciliationProbeReservationStatus.Reserved or GovernedLoopEffectReconciliationProbeReservationStatus.Replayed;
+        return required ? CopyRequiredReservation(value, parameterName) : value is null ? null : throw new ArgumentException("Only a reserved or replayed probe result may carry a reservation.", parameterName);
+    }
+
+    internal static GovernedLoopEffectReconciliationCase? CopyProbeCommitCase(
+        GovernedLoopEffectReconciliationProbeReservationStatus status,
+        GovernedLoopEffectReconciliationCase? value,
+        GovernedLoopEffectAttempt? effect,
+        string parameterName)
+    {
+        var hasPayload = status is GovernedLoopEffectReconciliationProbeReservationStatus.Reserved or GovernedLoopEffectReconciliationProbeReservationStatus.Replayed;
+        if (!hasPayload && (value is not null || effect is not null))
+        {
+            throw new ArgumentException("A non-successful probe commit must omit case and effect payloads.", parameterName);
+        }
+
+        if (hasPayload && (value is null || effect is null))
+        {
+            throw new ArgumentException("A successful probe commit requires its exact case and unchanged effect head.", parameterName);
+        }
+
+        if (value is null)
+        {
+            return null;
+        }
+
+        var exactCase = CopyRequiredCase(value, parameterName);
+        var exactEffect = CopyOptionalAttempt(effect, nameof(effect));
+        if (exactEffect is null || !IsCurrentAttempt(exactCase.Binding, exactEffect))
+        {
+            throw new ArgumentException("A successful probe commit must return the unchanged reconciliation-required effect head.", parameterName);
+        }
+
+        return exactCase;
+    }
+
+    internal static GovernedLoopEffectReconciliationCase? CopyProbeReplayCase(
+        GovernedLoopEffectReconciliationProbeReservationStatus status,
+        GovernedLoopEffectReconciliationCase? value,
+        GovernedLoopEffectAttempt? effect,
+        string parameterName)
+    {
+        if (status != GovernedLoopEffectReconciliationProbeReservationStatus.Replayed && (value is not null || effect is not null))
+        {
+            throw new ArgumentException("Only a replayed probe reservation may carry a completed case payload.", parameterName);
+        }
+
+        if ((value is null) != (effect is null))
+        {
+            throw new ArgumentException("A replayed probe reservation must carry both its case and unchanged effect head or neither.", parameterName);
+        }
+
+        if (value is null)
+        {
+            return null;
+        }
+
+        var exactCase = CopyRequiredCase(value, parameterName);
+        var exactEffect = CopyOptionalAttempt(effect, nameof(effect));
+        if (exactEffect is null || !IsCurrentAttempt(exactCase.Binding, exactEffect))
+        {
+            throw new ArgumentException("A replayed probe reservation must return the unchanged reconciliation-required effect head.", parameterName);
+        }
+
+        return exactCase;
+    }
+
+    internal static GovernedLoopEffectAttempt? CopyProbeReplayEffect(
+        GovernedLoopEffectReconciliationProbeReservationStatus status,
+        GovernedLoopEffectReconciliationCase? value,
+        GovernedLoopEffectAttempt? effect,
+        string parameterName)
+    {
+        _ = CopyProbeReplayCase(status, value, effect, nameof(value));
+        return effect is null ? null : CopyOptionalAttempt(effect, parameterName);
+    }
+
+    internal static GovernedLoopEffectAttempt? CopyProbeCommitEffect(
+        GovernedLoopEffectReconciliationProbeReservationStatus status,
+        GovernedLoopEffectReconciliationCase? value,
+        GovernedLoopEffectAttempt? effect,
+        string parameterName)
+    {
+        _ = CopyProbeCommitCase(status, value, effect, nameof(value));
+        return effect is null ? null : CopyOptionalAttempt(effect, parameterName);
+    }
+
+    internal static DateTimeOffset RequireUtc(DateTimeOffset value, string parameterName)
+        => value != default && value.Offset == TimeSpan.Zero ? value : throw new ArgumentException("A durable probe timestamp must be UTC.", parameterName);
+
     internal static GovernedLoopEffectReconciliationBinding CopyMutationBinding(
         GovernedLoopEffectReconciliationBinding? binding,
         GovernedLoopEffectReconciliationCase? replacement,

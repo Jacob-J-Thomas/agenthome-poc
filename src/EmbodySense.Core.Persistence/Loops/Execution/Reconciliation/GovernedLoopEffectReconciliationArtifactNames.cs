@@ -17,6 +17,15 @@ internal static class GovernedLoopEffectReconciliationArtifactNames
     internal static string JournalFileName(string operationKey)
         => $"{GovernedLoopEffectReconciliationPersistenceLimits.JournalFilePrefix}{operationKey}.json";
 
+    internal static string ProbeReservationFileName(string operationKey)
+        => $"{GovernedLoopEffectReconciliationPersistenceLimits.ProbeReservationFilePrefix}{operationKey}.json";
+
+    internal static string ProbeObservationFileName(string operationKey)
+        => $"{GovernedLoopEffectReconciliationPersistenceLimits.ProbeObservationFilePrefix}{operationKey}.json";
+
+    internal static string ProbeJournalFileName(string operationKey)
+        => $"{GovernedLoopEffectReconciliationPersistenceLimits.ProbeJournalFilePrefix}{operationKey}.json";
+
     internal static bool TryParseCaseVersionFile(string fileName, out string storageKey, out long version, out string contentHash)
     {
         storageKey = string.Empty;
@@ -71,11 +80,23 @@ internal static class GovernedLoopEffectReconciliationArtifactNames
     internal static bool TryParseJournalFile(string fileName, out string operationKey)
         => TryParseSingleHashFile(fileName, GovernedLoopEffectReconciliationPersistenceLimits.JournalFilePrefix, out operationKey);
 
+    internal static bool TryParseProbeReservationFile(string fileName, out string operationKey)
+        => TryParseSingleHashFile(fileName, GovernedLoopEffectReconciliationPersistenceLimits.ProbeReservationFilePrefix, out operationKey);
+
+    internal static bool TryParseProbeObservationFile(string fileName, out string operationKey)
+        => TryParseSingleHashFile(fileName, GovernedLoopEffectReconciliationPersistenceLimits.ProbeObservationFilePrefix, out operationKey);
+
+    internal static bool TryParseProbeJournalFile(string fileName, out string operationKey)
+        => TryParseSingleHashFile(fileName, GovernedLoopEffectReconciliationPersistenceLimits.ProbeJournalFilePrefix, out operationKey);
+
     internal static bool IsReconciliationArtifact(string fileName)
         => TryParseCaseVersionFile(fileName, out _, out _, out _)
             || TryParseCaseHeadFile(fileName, out _)
             || TryParseReceiptFile(fileName, out _)
-            || TryParseJournalFile(fileName, out _);
+            || TryParseJournalFile(fileName, out _)
+            || TryParseProbeReservationFile(fileName, out _)
+            || TryParseProbeObservationFile(fileName, out _)
+            || TryParseProbeJournalFile(fileName, out _);
 
     internal static bool IsInterruptedAtomicWrite(string fileName)
     {
@@ -96,7 +117,10 @@ internal static class GovernedLoopEffectReconciliationArtifactNames
         return (TryParseCaseVersionFile(destination, out _, out _, out _)
                 || TryParseCaseHeadFile(destination, out _)
                 || TryParseReceiptFile(destination, out _)
-                || TryParseJournalFile(destination, out _))
+                || TryParseJournalFile(destination, out _)
+                || TryParseProbeReservationFile(destination, out _)
+                || TryParseProbeObservationFile(destination, out _)
+                || TryParseProbeJournalFile(destination, out _))
             && nonce.Length == 32
             && nonce.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
     }

@@ -1,5 +1,6 @@
 using EmbodySense.Core.Application.Loops.Execution.Reconciliation;
 using EmbodySense.Core.Application.Loops.Execution.Reconciliation.Models;
+using EmbodySense.Core.Common.Loops.Execution.Reconciliation.Models;
 
 namespace EmbodySense.Core.Application.Tests.Loops.Execution.Reconciliation;
 
@@ -12,6 +13,22 @@ internal sealed class RecordingGovernedLoopEffectReconciliationPorts :
     IGovernedLoopEffectReconciliationResolutionReader
 {
     internal List<CancellationToken> CancellationTokens { get; } = [];
+
+    internal GovernedLoopEffectReconciliationContractMetadata? RegisteredContract { get; set; }
+
+    internal GovernedLoopEffectReconciliationProbeRegistryReadStatus? ForcedRegistryStatus { get; set; }
+
+    internal bool ThrowOnRegistryRead { get; set; }
+
+    internal bool ReturnNullOnRegistryRead { get; set; }
+
+    internal Func<GovernedLoopEffectReconciliationProbeInvocationRequest, GovernedLoopEffectReconciliationProbeInvocationResult>? ProbeResultFactory { get; set; }
+
+    internal Exception? ProbeException { get; set; }
+
+    internal int ProbeCalls { get; private set; }
+
+    internal GovernedLoopEffectReconciliationProbeInvocationRequest? LastInvocation { get; private set; }
 
     public Task<GovernedLoopEffectReconciliationCaseListPage> ListAsync(GovernedLoopEffectReconciliationCaseListRequest request, CancellationToken cancellationToken = default)
     {
@@ -46,13 +63,38 @@ internal sealed class RecordingGovernedLoopEffectReconciliationPorts :
     public Task<GovernedLoopEffectReconciliationProbeRegistryReadResult> ReadAsync(GovernedLoopEffectReconciliationProbeRegistryReadRequest request, CancellationToken cancellationToken = default)
     {
         CancellationTokens.Add(cancellationToken);
-        return Task.FromResult(new GovernedLoopEffectReconciliationProbeRegistryReadResult(GovernedLoopEffectReconciliationProbeRegistryReadStatus.Unavailable, null, null));
+        if (ThrowOnRegistryRead)
+        {
+            throw new IOException("The test registry is unavailable.");
+        }
+
+        if (ReturnNullOnRegistryRead)
+        {
+            return Task.FromResult<GovernedLoopEffectReconciliationProbeRegistryReadResult>(null!);
+        }
+
+        if (ForcedRegistryStatus is { } forcedStatus)
+        {
+            return Task.FromResult(new GovernedLoopEffectReconciliationProbeRegistryReadResult(forcedStatus, forcedStatus == GovernedLoopEffectReconciliationProbeRegistryReadStatus.Conflict ? RegisteredContract : null, null));
+        }
+
+        return Task.FromResult(RegisteredContract is null
+            ? new GovernedLoopEffectReconciliationProbeRegistryReadResult(GovernedLoopEffectReconciliationProbeRegistryReadStatus.Unavailable, null, null)
+            : new GovernedLoopEffectReconciliationProbeRegistryReadResult(GovernedLoopEffectReconciliationProbeRegistryReadStatus.Found, RegisteredContract, this));
     }
 
     public Task<GovernedLoopEffectReconciliationProbeInvocationResult> ProbeAsync(GovernedLoopEffectReconciliationProbeInvocationRequest request, CancellationToken cancellationToken = default)
     {
         CancellationTokens.Add(cancellationToken);
-        return Task.FromResult(new GovernedLoopEffectReconciliationProbeInvocationResult(GovernedLoopEffectReconciliationProbeInvocationStatus.Unavailable, null));
+        ProbeCalls++;
+        LastInvocation = request;
+        if (ProbeException is not null)
+        {
+            throw ProbeException;
+        }
+
+        return Task.FromResult(ProbeResultFactory?.Invoke(request)
+            ?? new GovernedLoopEffectReconciliationProbeInvocationResult(GovernedLoopEffectReconciliationProbeInvocationStatus.Unavailable, null));
     }
 
     public Task<GovernedLoopEffectReconciliationInputReadResult> ReadAsync(GovernedLoopEffectReconciliationInputReadRequest request, CancellationToken cancellationToken = default)
