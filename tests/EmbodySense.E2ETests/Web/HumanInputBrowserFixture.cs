@@ -163,13 +163,18 @@ internal static class HumanInputBrowserFixture
         var admittedEvent = CreateAdmittedEvent(adapter, now);
         var initialized = GovernedLoopSequentialFrontierMachine.Initialize(adapter, plan, admittedEvent.EventId, admittedEvent.EventId, admittedEvent.SequentialNodeEvidence!.OutcomeArtifactHash, admittedEvent.TimestampUtc).Frontier as GovernedLoopFrontierPosture
             ?? throw new InvalidOperationException("The browser Human Input continuation frontier was not initialized.");
-        var seed = CustomLoopAdmissionRequestHash.Apply(new CustomLoopRunRecord(1, runId, definition.Id, 1, CustomLoopRunStatus.Admitted, now, now, null, "web", invocation.ModelSnapshot, admissionOperationId, ActorId, string.Empty, definition, prompt, null, context, CustomLoopExecutionClock.NotStarted(), CustomLoopRunCheckpoint.Start(), [admittedEvent], null, null, null)
+        var admissionAuditEvent = new CustomLoopRunEvent(2, "browser-human-input-admission-audit-" + runId, now, CustomLoopRunEventKind.AdmissionAuditCompleted, null, null, null, "Admission audit completed.", [], null, null, null, null, null, null, null, null, null, null);
+        var seed = CustomLoopAdmissionRequestHash.Apply(new CustomLoopRunRecord(1, runId, definition.Id, 1, CustomLoopRunStatus.Admitted, now, now, null, "web", invocation.ModelSnapshot, admissionOperationId, ActorId, string.Empty, definition, prompt, null, context, CustomLoopExecutionClock.NotStarted(), CustomLoopRunCheckpoint.Start(), [admittedEvent, admissionAuditEvent], null, null, null)
         {
             CapabilityAdmission = receipt.Evidence.CapabilityAdmission,
             SequentialInvocationSnapshot = invocation,
             SequentialAdapterBinding = adapter,
             Frontier = initialized,
         });
+        if (!CustomLoopRunValidator.HasCompleteAdmissionAudit(seed))
+        {
+            throw new InvalidOperationException("The browser Human Input fixture admission audit was not complete before run creation.");
+        }
         using var runs = new CustomLoopRunStore(paths);
         var created = await runs.CreateAsync(seed).ConfigureAwait(false);
         if (created.Status is not (CustomLoopRunStoreStatus.Created or CustomLoopRunStoreStatus.AlreadyCreated))
