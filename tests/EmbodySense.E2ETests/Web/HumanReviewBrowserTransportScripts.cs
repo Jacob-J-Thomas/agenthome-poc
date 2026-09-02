@@ -128,10 +128,20 @@ internal static class HumanReviewBrowserTransportScripts
                     attempts: 0,
                     statuses: [],
                     payloads: [],
+                    conflictFeedbackObserved: false,
                     snapshotsReady: true,
                     mode: "stale-reads",
                 };
                 window.__humanReviewTransport = state;
+                const actionStatus = document.getElementById("humanReviewActionStatus");
+                const conflictFeedbackObserver = new MutationObserver(() => {
+                    const text = actionStatus?.textContent?.toLowerCase() ?? "";
+                    if (text.includes("changed") || text.includes("conflicted")) {
+                        state.conflictFeedbackObserved = true;
+                        conflictFeedbackObserver.disconnect();
+                    }
+                });
+                actionStatus && conflictFeedbackObserver.observe(actionStatus, { childList: true, characterData: true, subtree: true });
                 window.fetch = async (input, init = {}) => {
                     const rawUrl = typeof input === "string" ? input : input?.url ?? "";
                     const resolvedUrl = new URL(rawUrl, location.href);

@@ -105,7 +105,7 @@ public sealed partial class BrowserFlowTests
             Assert.True(await staleTab.EvaluateBooleanAsync("document.activeElement?.getAttribute('data-testid') === 'human-review-approve'"));
             await staleTab.EvaluateWithUserGestureAsync("document.querySelector('[data-testid=\"human-review-approve\"]').click()");
             await staleTab.WaitForExpressionAsync("window.__humanReviewTransport.mode === 'off' && window.__humanReviewTransport.statuses.length === 1 && window.__humanReviewTransport.statuses[0] === 409");
-            await staleTab.WaitForExpressionAsync("document.getElementById('humanReviewActionStatus').textContent.toLowerCase().includes('changed') || document.getElementById('humanReviewActionStatus').textContent.toLowerCase().includes('conflicted')");
+            await staleTab.WaitForExpressionAsync("window.__humanReviewTransport.conflictFeedbackObserved === true");
             await staleTab.WaitForExpressionAsync("document.getElementById('humanReviewLifecycleStatus').textContent.toLowerCase().includes('rejected')");
             await AssertNoReviewDispatchAsync(browser, runId);
             var review = await ReadHumanReviewAsync(browser, runId);
