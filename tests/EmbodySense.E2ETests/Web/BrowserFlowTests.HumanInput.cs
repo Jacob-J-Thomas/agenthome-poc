@@ -286,14 +286,31 @@ public sealed partial class BrowserFlowTests
             Assert.Empty(Assert.IsType<HumanInputResponseLifecycleStoreSnapshot>((await HumanInputBrowserFixture.ReadResponsesAsync(paths, capabilityTrustRoot, RejectId)).Snapshot).Responses);
 
             await SelectHumanInputAsync(browser, ExpiryId);
+            var expiryBefore = await HumanInputBrowserFixture.ReadAsync(paths, capabilityTrustRoot, ExpiryId);
+            var previousHead = expiryBefore.PrimarySnapshot?.Head
+                ?? throw new InvalidOperationException("The browser Human Input expiry request had no canonical lifecycle head before the late response.");
+            Assert.Equal(HumanInputRequestLifecycleStatus.Pending, previousHead.Status);
             await SetValueAsync(browser, "#humanInputResponseEditor textarea", "late answer");
             await Task.Delay(TimeSpan.FromSeconds(2));
             await ClickAsync(browser, "[data-testid=\"human-input-response-submit\"]");
             await browser.WaitForExpressionAsync("document.getElementById('humanInputResponseStatus').textContent === 'The request changed or the operation conflicted. Reread canonical state.'");
-            await WaitForHumanInputLifecycleAsync(browser, "expired");
+            await WaitForHumanInputLifecycleAsync(browser, "pending");
             var expiry = await HumanInputBrowserFixture.ReadAsync(paths, capabilityTrustRoot, ExpiryId);
-            Assert.Equal(HumanInputRequestLifecycleStatus.Expired, expiry.PrimarySnapshot?.Head.Status);
-            Assert.Empty(Assert.IsType<HumanInputResponseLifecycleStoreSnapshot>((await HumanInputBrowserFixture.ReadResponsesAsync(paths, capabilityTrustRoot, ExpiryId)).Snapshot).Responses);
+            Assert.Equal(HumanInputRequestLifecycleStatus.Pending, expiry.PrimarySnapshot?.Head.Status);
+            var expiryResponses = await HumanInputBrowserFixture.ReadResponsesAsync(paths, capabilityTrustRoot, ExpiryId);
+            var expiryResponseSnapshot = Assert.IsType<HumanInputResponseLifecycleStoreSnapshot>(expiryResponses.Snapshot);
+            var expirySubmitOperations = expiryResponseSnapshot.Operations
+                .Where(item => item.Kind == HumanInputResponseOperationKind.Submit)
+                .ToArray();
+            var expirySubmit = Assert.Single(expirySubmitOperations);
+            Assert.Equal(HumanInputResponseOperationOutcome.Rejected, expirySubmit.Outcome);
+            Assert.Equal(HumanInputResponseOperationFailureCode.LateResponse, expirySubmit.FailureCode);
+            Assert.Equal(previousHead, expirySubmit.PreviousHead);
+            Assert.Equal(previousHead, expirySubmit.ResultHead);
+            Assert.Null(expirySubmit.SubmittedResponse);
+            Assert.Null(expirySubmit.Selection);
+            Assert.Null(expiryResponseSnapshot.Selection);
+            Assert.Empty(expiryResponseSnapshot.Responses);
 
             await SelectHumanInputAsync(browser, SupersedeId);
             await SetValueAsync(browser, "#humanInputSupersedePurpose", "Prepared successor purpose");
@@ -331,7 +348,7 @@ public sealed partial class BrowserFlowTests
         var profile = HumanInputBrowserProfile();
         await InstallBrowserModelProfilesAsync(workspace.RootPath, capabilityTrustRoot, [BrowserProfileWebHost.CreateDescriptor(profile)]);
         await SeedHumanReviewReadinessAuthorityAsync(paths, capabilityTrustRoot);
-        const string RequestId = "browser-human-input-foreign-actor";
+        const string RequestId = "browser-human-input-ineligible";
         const string SecretCanary = "human-input-private-route-canary-7f9c2e";
         await HumanInputBrowserFixture.SeedPendingAsync(paths, RequestId, "<script>window.__xss = true</script> bounded sensitive prompt", capabilityTrustRoot, privacyClass: HumanInputPrivacyClass.Sensitive, eligibleRespondentId: SecretCanary);
         await using var app = await ExternalWebApplicationProcess.StartBrowserProfileHostAsync(workspace.RootPath, GetFreePort(), codexExecutable, "gpt-test", capabilityTrustRoot, [profile]);
@@ -454,6 +471,11 @@ public sealed partial class BrowserFlowTests
         Assert.False(string.IsNullOrWhiteSpace(payload.GetProperty("operationId").GetString()));
         Assert.False(string.IsNullOrWhiteSpace(payload.GetProperty("responseId").GetString()));
         AssertNoForbiddenResponsePropertyNames(payload);
+        var rawPayload = payload.GetRawText();
+        foreach (var forbiddenTerm in _forbiddenResponsePropertyNames)
+        {
+            Assert.DoesNotContain(forbiddenTerm, rawPayload, StringComparison.OrdinalIgnoreCase);
+        }
     }
 
     private static void AssertNoForbiddenResponsePropertyNames(JsonElement element)
