@@ -1,5 +1,7 @@
 using System.Text.Json;
 using EmbodySense.Core.Application.Capabilities;
+using EmbodySense.Core.Application.Capabilities.Models;
+using EmbodySense.Core.Application.Governance.Authority.Grants.Models;
 using EmbodySense.Core.Application.HumanReview;
 using EmbodySense.Core.Application.HumanReview.Models;
 using EmbodySense.Core.Application.Loops.EffectAttempts;
@@ -22,6 +24,7 @@ namespace EmbodySense.E2ETests.Web;
 public sealed partial class BrowserFlowTests
 {
     private const string HumanReviewResponseLossBrowserProfileId = "org.example/model-profile/human-review-response-loss";
+    private static readonly TimeSpan _failureCleanupTimeout = TimeSpan.FromSeconds(5);
 
     [Fact]
     public async Task Human_review_background_releases_one_approved_pre_dispatch_effect_without_browser_ownership()
@@ -103,6 +106,8 @@ public sealed partial class BrowserFlowTests
         ExternalWebApplicationProcess? app = await ExternalWebApplicationProcess.StartBrowserProfileHostAsync(workspace.RootPath, port, codexExecutable, "gpt-test", capabilityTrustRoot, [profile], suppressGovernedBackgroundHost: true);
         HeadlessBrowserSession? browser = await HeadlessBrowserSession.StartAsync(app.BaseUrl);
         string? retiredServerOutput = null;
+        var failureObserved = false;
+        var replacementHostStartUnconfirmed = false;
         try
         {
             await InitializeWorkspaceAsyncIfNeededAsync(browser);
@@ -162,15 +167,18 @@ public sealed partial class BrowserFlowTests
             using var reviewDocument = JsonDocument.Parse(await ReadHumanReviewResponseLossAsync(browser, runId));
             Assert.Equal(1, reviewDocument.RootElement.GetProperty("detail").GetProperty("decisions").GetArrayLength());
             Assert.Equal(firstOperationId, reviewDocument.RootElement.GetProperty("detail").GetProperty("decisions")[0].GetProperty("operationId").GetString());
-            await AssertHumanReviewStillBlockedBeforeRecoveryAsync(paths, runId);
             await browser.BeginExpectedServerRestartAsync();
             await browser.NavigateAsync("about:blank");
             await browser.WaitForExpressionAsync("location.href === 'about:blank'");
+            await AssertHumanReviewEffectMarkerAbsentAsync(paths);
+            await AssertHumanReviewStillBlockedBeforeRecoveryAsync(paths, capabilityTrustRoot, runId);
             retiredServerOutput = app.FormatOutput();
             await app.DisposeAsync();
             app = null;
             browser.MarkExpectedReplacementServerStarting();
+            replacementHostStartUnconfirmed = true;
             app = await ExternalWebApplicationProcess.StartBrowserProfileHostAsync(workspace.RootPath, port, codexExecutable, "gpt-test", capabilityTrustRoot, [profile]);
+            replacementHostStartUnconfirmed = false;
             await WaitForHumanReviewBackgroundReadyAsync(app);
             await WaitForHumanReviewEffectMarkerAsync(paths);
             await browser.NavigateAsync(app.BaseUrl);
@@ -183,23 +191,165 @@ public sealed partial class BrowserFlowTests
             app.AssertHealthy();
             await AssertHumanReviewResponseLossBrowserHealthyAsync(browser, runId);
         }
-        catch
+        catch (Exception exception)
         {
-            await WriteFailureDiagnosticsAsync(nameof(Human_review_browser_retries_a_committed_response_loss_with_the_original_operation_and_lifecycle), browser, app, retiredServerOutput);
+            failureObserved = true;
+            string? failureServerOutput = null;
+            try
+            {
+                failureServerOutput = app?.FormatOutput();
+            }
+            catch (Exception outputException)
+            {
+                exception.Data["replacement-server-output"] = outputException.GetType().Name;
+            }
+
+            exception.Data["browser-diagnostics"] = await CaptureFailureBrowserDiagnosticsAsync(browser, retiredServerOutput).ConfigureAwait(false);
+
+            var failedApp = app;
+            app = null;
+            var hostTerminationConfirmed = failedApp is null && !replacementHostStartUnconfirmed;
+            if (failedApp is not null)
+            {
+                var appCleanup = await DisposeFailureResourceAsync(failedApp).ConfigureAwait(false);
+                hostTerminationConfirmed = appCleanup.Confirmed;
+                exception.Data["replacement-host-termination"] = appCleanup.Status;
+            }
+            else
+            {
+                exception.Data["replacement-host-termination"] = replacementHostStartUnconfirmed ? "unconfirmed-start" : "not-running";
+            }
+
+            var failedBrowser = browser;
+            browser = null;
+            var browserCleanup = await DisposeFailureResourceAsync(failedBrowser).ConfigureAwait(false);
+            exception.Data["browser-termination"] = browserCleanup.Status;
+
+            if (!hostTerminationConfirmed || !browserCleanup.Confirmed)
+            {
+                exception.Data["offline-probe"] = "skipped:cleanup-termination-unconfirmed";
+            }
+            else
+            {
+                try
+                {
+                    var diagnostic = await HumanReviewResponseLossOfflineProbe.CaptureAsync(paths, capabilityTrustRoot, runId);
+                    exception.Data["offline-probe"] = diagnostic.Describe();
+                }
+                catch (Exception probeException)
+                {
+                    exception.Data["offline-probe-error"] = probeException.GetType().Name;
+                }
+            }
+
+            try
+            {
+                if (!string.IsNullOrWhiteSpace(failureServerOutput))
+                {
+                    var configuredRoot = Environment.GetEnvironmentVariable("EMBODYSENSE_BROWSER_E2E_ARTIFACTS");
+                    var root = string.IsNullOrWhiteSpace(configuredRoot)
+                        ? Path.GetFullPath(Path.Combine("tests", "EmbodySense.E2ETests", "TestResults", "BrowserE2E"))
+                        : Path.GetFullPath(configuredRoot);
+                    var directory = Path.Combine(root, nameof(Human_review_browser_retries_a_committed_response_loss_with_the_original_operation_and_lifecycle));
+                    Directory.CreateDirectory(directory);
+                    await File.WriteAllTextAsync(Path.Combine(directory, "replacement-server-output.txt"), failureServerOutput);
+                }
+            }
+            catch (Exception diagnosticsException)
+            {
+                exception.Data["diagnostics-write"] = diagnosticsException.GetType().Name;
+            }
             throw;
         }
         finally
         {
             if (browser is not null)
             {
-                await browser.DisposeAsync();
+                if (failureObserved)
+                {
+                    _ = await DisposeFailureResourceAsync(browser).ConfigureAwait(false);
+                }
+                else
+                {
+                    await browser.DisposeAsync();
+                }
             }
 
             if (app is not null)
             {
-                await app.DisposeAsync();
+                if (failureObserved)
+                {
+                    _ = await DisposeFailureResourceAsync(app).ConfigureAwait(false);
+                }
+                else
+                {
+                    await app.DisposeAsync();
+                }
             }
         }
+    }
+
+    private static async Task<(bool Confirmed, string Status)> DisposeFailureResourceAsync(IAsyncDisposable? resource)
+    {
+        if (resource is null)
+        {
+            return (true, "not-running");
+        }
+
+        Task disposalTask;
+        try
+        {
+            disposalTask = resource.DisposeAsync().AsTask();
+        }
+        catch (Exception exception)
+        {
+            return (false, "unconfirmed=" + exception.GetType().Name);
+        }
+
+        try
+        {
+            await disposalTask.WaitAsync(_failureCleanupTimeout).ConfigureAwait(false);
+            return (true, "terminated");
+        }
+        catch (Exception exception)
+        {
+            ObserveTaskFault(disposalTask);
+            return (false, "unconfirmed=" + exception.GetType().Name);
+        }
+    }
+
+    private static async Task<string> CaptureFailureBrowserDiagnosticsAsync(HeadlessBrowserSession? browser, string? retiredServerOutput)
+    {
+        if (browser is null)
+        {
+            return "not-running";
+        }
+
+        Task diagnosticsTask;
+        try
+        {
+            diagnosticsTask = WriteFailureDiagnosticsAsync(nameof(Human_review_browser_retries_a_committed_response_loss_with_the_original_operation_and_lifecycle), browser, null, retiredServerOutput);
+        }
+        catch (Exception exception)
+        {
+            return "failed=" + exception.GetType().Name;
+        }
+
+        try
+        {
+            await diagnosticsTask.WaitAsync(_failureCleanupTimeout).ConfigureAwait(false);
+            return "captured";
+        }
+        catch (Exception exception)
+        {
+            ObserveTaskFault(diagnosticsTask);
+            return "unconfirmed=" + exception.GetType().Name;
+        }
+    }
+
+    private static void ObserveTaskFault(Task task)
+    {
+        _ = task.ContinueWith(static completed => _ = completed.Exception, CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
     }
 
     private static async Task OpenHumanReviewResponseLossAsync(HeadlessBrowserSession browser)
@@ -435,22 +585,31 @@ public sealed partial class BrowserFlowTests
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         var markerPath = Path.Combine(paths.RootPath, "shared", "process-observable-marker.txt");
+        var lastObservation = "missing";
         while (!timeout.IsCancellationRequested)
         {
             try
             {
-                if (File.Exists(markerPath)
-                    && string.Equals(await File.ReadAllTextAsync(markerPath, timeout.Token).ConfigureAwait(false), "reviewed marker", StringComparison.Ordinal))
+                if (!File.Exists(markerPath))
+                {
+                    lastObservation = "missing";
+                }
+                else if (string.Equals(await File.ReadAllTextAsync(markerPath, timeout.Token).ConfigureAwait(false), "reviewed marker", StringComparison.Ordinal))
                 {
                     return;
+                }
+                else
+                {
+                    lastObservation = "invalid-content";
                 }
             }
             catch (OperationCanceledException) when (timeout.IsCancellationRequested)
             {
                 break;
             }
-            catch (IOException)
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
             {
+                lastObservation = $"read-error={exception.GetType().Name}";
             }
 
             try
@@ -463,7 +622,7 @@ public sealed partial class BrowserFlowTests
             }
         }
 
-        throw new TimeoutException("The approved Human Review effect did not publish its exact process-observable marker.");
+        throw new TimeoutException($"The approved Human Review effect did not publish its exact process-observable marker; last-observation={lastObservation}.");
     }
 
     private static async Task<CustomLoopRunRecord> ReadCompletedHumanReviewResponseLossAsync(WorkspacePaths paths, string runId)
@@ -524,22 +683,36 @@ public sealed partial class BrowserFlowTests
         throw new TimeoutException($"The replacement Web host did not reach ready background posture; last posture `{lastPosture}`.{Environment.NewLine}{app.FormatOutput()}");
     }
 
-    private static async Task AssertHumanReviewStillBlockedBeforeRecoveryAsync(WorkspacePaths paths, string runId)
+    private static async Task AssertHumanReviewStillBlockedBeforeRecoveryAsync(WorkspacePaths paths, string capabilityTrustRoot, string runId)
     {
-        using var store = new CustomLoopRunStore(paths);
-        var durable = await store.GetAsync(runId).ConfigureAwait(false) ?? throw new InvalidOperationException("The response-loss Human Review run disappeared before recovery.");
+        var probe = await HumanReviewResponseLossOfflineProbe.CaptureAsync(paths, capabilityTrustRoot, runId);
+        Assert.Null(probe.RunError);
+        Assert.Null(probe.AuthorityError);
+        Assert.Null(probe.EvidenceError);
+        Assert.Null(probe.CertaintyError);
+        Assert.Null(probe.AttemptError);
+        Assert.Equal("found", probe.RunReadStatus);
+        var durable = Assert.IsType<CustomLoopRunRecord>(probe.Run);
         Assert.Equal(CustomLoopRunStatus.Paused, durable.Status);
         Assert.Equal(GovernedLoopFrontierStatus.ReviewBlocked, durable.Frontier?.Payload.Status);
         var review = Assert.IsType<HumanReviewRunState>(durable.HumanReview);
         Assert.NotNull(review.ContinuationReservation);
         Assert.Null(review.Continuation);
-        var effect = Assert.IsType<HumanReviewEffectAttemptBinding>(review.Request.Binding.EffectAttempt);
-        var workspaceId = CapabilityWorkspaceScopeId.Create(paths.RootPath);
-        var read = await new GovernedLoopEffectAttemptStore(paths).ReadAsync(workspaceId, effect.OperationId, effect.EffectGeneration).ConfigureAwait(false);
-        Assert.Equal(GovernedLoopEffectAttemptReadStatus.Current, read.Status);
-        var attempt = Assert.IsType<GovernedLoopEffectAttempt>(read.Attempt);
-        Assert.Contains(attempt.Payload.Phase, new[] { GovernedLoopEffectPhase.IntentPrepared, GovernedLoopEffectPhase.DispatchNotStarted });
+        Assert.Equal(HumanReviewContinuationAuthorityReadStatus.Current, probe.AuthorityStatus);
+        Assert.Equal(AuthorityGrantResolutionStatus.Active, probe.GrantStatus);
+        Assert.Equal(CapabilityRevalidationStatus.Active, probe.CapabilityStatus);
+        Assert.Equal(HumanReviewCurrentEffectAttemptEvidenceReadStatus.Current, probe.EvidenceStatus);
+        Assert.Equal(GovernedLoopEffectCertaintySnapshotStatus.Current, probe.CertaintyStatus);
+        Assert.Equal(GovernedLoopEffectAttemptReadStatus.Current, probe.AttemptStatus);
+        Assert.True(probe.EffectPhase is GovernedLoopEffectPhase.IntentPrepared or GovernedLoopEffectPhase.DispatchNotStarted);
         Assert.DoesNotContain(durable.Events, item => item.Kind == CustomLoopRunEventKind.NodeAttemptCompleted);
+    }
+
+    private static Task AssertHumanReviewEffectMarkerAbsentAsync(WorkspacePaths paths)
+    {
+        var markerPath = Path.Combine(paths.RootPath, "shared", "process-observable-marker.txt");
+        Assert.False(File.Exists(markerPath), $"The response-loss marker already existed before replacement: {markerPath}");
+        return Task.CompletedTask;
     }
 
     private static async Task AssertSingleApprovedPreDispatchEffectAsync(WorkspacePaths paths, CustomLoopRunRecord durable)
