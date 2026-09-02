@@ -11,6 +11,8 @@ const maximumReferenceCharacters = 512;
 const maximumPurposeCharacters = 240;
 const maximumPromptCharacters = 4000;
 const maximumRequestBodyBytes = 16_384;
+const minimumRequestLifetimeMilliseconds = 60 * 1000;
+const maximumRequestLifetimeMilliseconds = 30 * 24 * 60 * 60 * 1000;
 const sha256Pattern = /^[0-9a-f]{64}$/;
 const identifierPattern = /^[a-z0-9][a-z0-9._-]{0,119}$/;
 const cursorPattern = /^[A-Za-z0-9_-]+$/;
@@ -114,7 +116,7 @@ export function projectHumanInputPosture(value) {
     value.schemaVersion !== 1 ||
     !isIdentifier(requestId) ||
     !Number.isSafeInteger(lifecycleVersion) ||
-    lifecycleVersion < 0 ||
+    lifecycleVersion < 1 ||
     !lifecycleStatuses.has(status) ||
     !currentRequest ||
     currentRequest.requestId !== requestId ||
@@ -1154,14 +1156,11 @@ export function createHumanInputSurface({
           item.control,
           item.schema.maxTextCharacters ?? maximumResponseCharacters,
         );
-        const field = {
-          fieldId: item.schema.fieldId,
-          text: null,
-          choiceId: null,
-        };
-        if (item.schema.kind === "text") field.text = value || null;
-        else field.choiceId = value || null;
         if (item.schema.required && !value) return null;
+        if (!value) continue;
+        const field = { fieldId: item.schema.fieldId };
+        if (item.schema.kind === "text") field.text = value;
+        else field.choiceId = value;
         fields.push(field);
       }
       return { kind: "structured", structuredFields: fields };
@@ -1347,10 +1346,15 @@ function projectTiming(value) {
   if (!value || typeof value !== "object") return null;
   const requestedAtUtc = validTimestamp(value.requestedAtUtc);
   const expiresAtUtc = validTimestamp(value.expiresAtUtc);
+  const requestedAtMilliseconds = Date.parse(requestedAtUtc ?? "");
+  const expiresAtMilliseconds = Date.parse(expiresAtUtc ?? "");
+  const lifetimeMilliseconds = expiresAtMilliseconds - requestedAtMilliseconds;
   if (
     !requestedAtUtc ||
     !expiresAtUtc ||
-    Date.parse(expiresAtUtc) < Date.parse(requestedAtUtc)
+    !Number.isFinite(lifetimeMilliseconds) ||
+    lifetimeMilliseconds < minimumRequestLifetimeMilliseconds ||
+    lifetimeMilliseconds > maximumRequestLifetimeMilliseconds
   )
     return null;
   return Object.freeze({ requestedAtUtc, expiresAtUtc });

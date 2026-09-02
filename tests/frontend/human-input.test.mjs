@@ -203,6 +203,10 @@ test("Human Input projection keeps only the bounded recipient aggregate and cont
     2,
   );
   assert.equal(
+    projectHumanInputPosture(posture({ lifecycleVersion: 0 })),
+    null,
+  );
+  assert.equal(
     projectHumanInputPosture(
       posture({
         presentation: {
@@ -215,6 +219,23 @@ test("Human Input projection keeps only the bounded recipient aggregate and cont
     null,
   );
   assert.equal(boundedHumanInputText("x".repeat(2000), 1024).length, 1024);
+});
+
+test("Human Input accepts only the inclusive one-minute through thirty-day request lifetime", () => {
+  const withExpiry = (expiresAtUtc) =>
+    projectHumanInputPosture(
+      posture({
+        presentation: {
+          ...posture().presentation,
+          timing: { requestedAtUtc: "2026-09-01T12:00:00Z", expiresAtUtc },
+        },
+      }),
+    );
+
+  assert.equal(withExpiry("2026-09-01T12:00:59Z"), null);
+  assert.ok(withExpiry("2026-09-01T12:01:00Z"));
+  assert.ok(withExpiry("2026-10-01T12:00:00Z"));
+  assert.equal(withExpiry("2026-10-01T12:00:01Z"), null);
 });
 
 test("Human Input answer is typed, exact-version-bound, retryable, and free of authority fields", async () => {
@@ -384,7 +405,7 @@ test("Human Input measures exact UTF-8 request bytes at the server boundary", as
     "é".repeat(2500),
     "é".repeat(2500),
     "é".repeat(2500),
-    `${"é".repeat(390)}xxx`,
+    `${"é".repeat(422)}xxx`,
   ]);
   await clickAndFlush(fixture.elements.humanInputResponseSubmitButton);
   assert.equal(postCalls().length, 1);
@@ -392,11 +413,11 @@ test("Human Input measures exact UTF-8 request bytes at the server boundary", as
   assert.equal(new TextEncoder().encode(exactBoundaryBody).byteLength, 16_384);
   assert.equal(
     JSON.parse(exactBoundaryBody).value.structuredFields[3].text,
-    `${"é".repeat(390)}xxx`,
+    `${"é".repeat(422)}xxx`,
   );
   const oneByteLargerBody = exactBoundaryBody.replace(
-    `${"é".repeat(390)}xxx`,
-    `${"é".repeat(390)}xxxx`,
+    `${"é".repeat(422)}xxx`,
+    `${"é".repeat(422)}xxxx`,
   );
   assert.equal(new TextEncoder().encode(oneByteLargerBody).byteLength, 16_385);
 
@@ -404,7 +425,7 @@ test("Human Input measures exact UTF-8 request bytes at the server boundary", as
     "é".repeat(2500),
     "é".repeat(2500),
     "é".repeat(2500),
-    `${"é".repeat(390)}xxxx`,
+    `${"é".repeat(450)}xxxx`,
   ]);
   await clickAndFlush(fixture.elements.humanInputResponseSubmitButton);
   assert.equal(postCalls().length, 1);
@@ -415,6 +436,88 @@ test("Human Input measures exact UTF-8 request bytes at the server boundary", as
   assert.match(
     fixture.elements.humanInputResponseStatus.textContent,
     /16,384 UTF-8 bytes|shorten|no request was sent/i,
+  );
+});
+
+test("Human Input structured responses omit blank optional fields and remain canonically valid", async () => {
+  const fixture = createFixture();
+  const current = posture({
+    presentation: {
+      ...posture().presentation,
+      responseSchema: {
+        kind: "structured",
+        structuredFields: [
+          {
+            fieldId: "required-text",
+            kind: "text",
+            required: true,
+            maxTextCharacters: 100,
+          },
+          {
+            fieldId: "optional-text",
+            kind: "text",
+            required: false,
+            maxTextCharacters: 100,
+          },
+          {
+            fieldId: "required-choice",
+            kind: "choice",
+            required: true,
+            choices: [{ choiceId: "choice-a", displayText: "Choice A" }],
+          },
+          {
+            fieldId: "optional-choice",
+            kind: "choice",
+            required: false,
+            choices: [{ choiceId: "choice-b", displayText: "Choice B" }],
+          },
+        ],
+      },
+    },
+  });
+  const calls = [];
+  const requestJson = async (url, options = {}) => {
+    calls.push({ url, options });
+    if (url === "/api/human-input?maximumCount=50")
+      return { status: "ready", requests: [current], nextCursor: null };
+    if (url === "/api/human-input/request-input-1") return current;
+    if (options.method === "POST") return { status: "committed" };
+    throw new Error("unexpected request");
+  };
+  const surface = createHumanInputSurface({
+    document: fixture.document,
+    window: { crypto: { randomUUID: () => "structured-canonical-operation" } },
+    requestJson,
+  });
+
+  await surface.activate();
+  const controls = () =>
+    fixture.elements.humanInputResponseEditor.children.map(
+      (field) => field.children[1],
+    );
+  controls()[0].value = "required value";
+  controls()[2].value = "choice-a";
+  await clickAndFlush(fixture.elements.humanInputResponseSubmitButton);
+
+  const post = calls.find((call) => call.options.method === "POST");
+  assert.ok(post);
+  assert.deepEqual(JSON.parse(post.options.body).value.structuredFields, [
+    { fieldId: "required-text", text: "required value" },
+    { fieldId: "required-choice", choiceId: "choice-a" },
+  ]);
+  assert.equal(
+    Object.hasOwn(
+      JSON.parse(post.options.body).value.structuredFields[0],
+      "choiceId",
+    ),
+    false,
+  );
+  assert.equal(
+    Object.hasOwn(
+      JSON.parse(post.options.body).value.structuredFields[1],
+      "text",
+    ),
+    false,
   );
 });
 
@@ -458,7 +561,7 @@ test("Human Input releases distinct oversized answer entries and preserves an am
       "é".repeat(2500),
       "é".repeat(2500),
       "é".repeat(2500),
-      `${"é".repeat(390)}xxxx-${index}`,
+      `${"é".repeat(450)}xxxx-${index}`,
     ]);
     fixture.elements.humanInputExplanation.value = `private explanation ${index}`;
     await clickAndFlush(fixture.elements.humanInputResponseSubmitButton);
