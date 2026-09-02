@@ -14,6 +14,8 @@ internal sealed class GovernedLoopEffectReconciliationServiceInput : IGovernedLo
 
     internal GovernedLoopEffectReconciliationBinding? LastBinding { get; private set; }
 
+    internal int ReadCalls { get; private set; }
+
     internal GovernedLoopEffectAttempt? Effect { get; set; }
 
     internal GovernedLoopFrontierPosture? Frontier { get; set; }
@@ -28,6 +30,7 @@ internal sealed class GovernedLoopEffectReconciliationServiceInput : IGovernedLo
 
     public Task<GovernedLoopEffectReconciliationInputReadResult> ReadAsync(GovernedLoopEffectReconciliationInputReadRequest request, CancellationToken cancellationToken = default)
     {
+        ReadCalls++;
         if (ThrowOnRead)
         {
             throw new IOException("The test input source is unavailable.");

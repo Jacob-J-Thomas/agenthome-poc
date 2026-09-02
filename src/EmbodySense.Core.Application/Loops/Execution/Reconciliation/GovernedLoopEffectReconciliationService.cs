@@ -95,7 +95,7 @@ public sealed class GovernedLoopEffectReconciliationService : IGovernedLoopEffec
             return Result(GovernedLoopEffectReconciliationOperationStatus.Corrupt);
         }
 
-        if (!TryCreateMutationRequest(request!.OperationId!, OpenPurpose, reference, binding!, candidate, null, null, StableOpenFingerprint(metadata!, sources!, receipts!), cancellationToken, out var openMutation))
+        if (!TryCreateMutationRequest(request!.OperationId!, OpenPurpose, reference, binding!, candidate, null, null, StableOpenFingerprint(metadata!, sources!, receipts!), cancellationToken, out var openMutation, stableOperationHash: true))
         {
             return Result(GovernedLoopEffectReconciliationOperationStatus.Invalid);
         }
@@ -160,6 +160,19 @@ public sealed class GovernedLoopEffectReconciliationService : IGovernedLoopEffec
             return current;
         }
 
+        var now = TrustedNow(current.Case.UpdatedAtUtc);
+        if (now is null)
+        {
+            return Result(GovernedLoopEffectReconciliationOperationStatus.Unavailable);
+        }
+
+        var authorization = await AuthorizeAsync(AuthorizationPurpose, reference!, current.Case.Binding, cancellationToken);
+        var authorizationStatus = AuthorizationStatus(authorization, AuthorizationPurpose, reference!, current.Case.Binding);
+        if (authorizationStatus != GovernedLoopEffectReconciliationOperationStatus.Applied)
+        {
+            return Result(authorizationStatus);
+        }
+
         if (current.Case.Disposition is not null || current.Case.Resolution is not null)
         {
             return Result(GovernedLoopEffectReconciliationOperationStatus.Conflict, current.Case, await ReadEffectForConflictAsync(reference!, current.Case.Binding, cancellationToken));
@@ -174,19 +187,6 @@ public sealed class GovernedLoopEffectReconciliationService : IGovernedLoopEffec
         if (!MatchesInput(input, reference!, current.Case.Binding, current.Case))
         {
             return Result(GovernedLoopEffectReconciliationOperationStatus.Corrupt);
-        }
-
-        var now = TrustedNow(current.Case.UpdatedAtUtc);
-        if (now is null)
-        {
-            return Result(GovernedLoopEffectReconciliationOperationStatus.Unavailable);
-        }
-
-        var authorization = await AuthorizeAsync(AuthorizationPurpose, reference!, current.Case.Binding, cancellationToken);
-        var authorizationStatus = AuthorizationStatus(authorization, AuthorizationPurpose, reference!, current.Case.Binding);
-        if (authorizationStatus != GovernedLoopEffectReconciliationOperationStatus.Applied)
-        {
-            return Result(authorizationStatus);
         }
 
         var assessment = CreateAssessment(current.Case, authorization!.AuthorityEvidenceHash!, now.Value, request!.SafeDetail);
@@ -248,28 +248,6 @@ public sealed class GovernedLoopEffectReconciliationService : IGovernedLoopEffec
             return current;
         }
 
-        var currentAssessment = CurrentAssessment(current.Case);
-        if (currentAssessment is null || current.Case.Disposition is not null || current.Case.Resolution is not null)
-        {
-            return Result(GovernedLoopEffectReconciliationOperationStatus.Conflict, current.Case, await ReadEffectForConflictAsync(reference!, current.Case.Binding, cancellationToken));
-        }
-
-        var input = await ReadInputAsync(reference!, current.Case.Binding, cancellationToken);
-        if (input.Status != GovernedLoopEffectReconciliationInputReadStatus.Found)
-        {
-            return Result(MapInputStatus(input.Status));
-        }
-
-        if (!MatchesInput(input, reference!, current.Case.Binding, current.Case))
-        {
-            return Result(GovernedLoopEffectReconciliationOperationStatus.Corrupt);
-        }
-
-        if (!GovernedLoopEffectReconciliationStateMatrix.IsDispositionAllowed(currentAssessment.Kind, request.Kind))
-        {
-            return Result(GovernedLoopEffectReconciliationOperationStatus.Invalid);
-        }
-
         var now = TrustedNow(current.Case.UpdatedAtUtc);
         if (now is null)
         {
@@ -281,6 +259,28 @@ public sealed class GovernedLoopEffectReconciliationService : IGovernedLoopEffec
         if (authorizationStatus != GovernedLoopEffectReconciliationOperationStatus.Applied)
         {
             return Result(authorizationStatus);
+        }
+
+        var currentAssessment = CurrentAssessment(current.Case);
+        if (currentAssessment is null || current.Case.Disposition is not null || current.Case.Resolution is not null)
+        {
+            return Result(GovernedLoopEffectReconciliationOperationStatus.Conflict, current.Case, await ReadEffectForConflictAsync(reference!, current.Case.Binding, cancellationToken));
+        }
+
+        if (!GovernedLoopEffectReconciliationStateMatrix.IsDispositionAllowed(currentAssessment.Kind, request.Kind))
+        {
+            return Result(GovernedLoopEffectReconciliationOperationStatus.Invalid);
+        }
+
+        var input = await ReadInputAsync(reference!, current.Case.Binding, cancellationToken);
+        if (input.Status != GovernedLoopEffectReconciliationInputReadStatus.Found)
+        {
+            return Result(MapInputStatus(input.Status));
+        }
+
+        if (!MatchesInput(input, reference!, current.Case.Binding, current.Case))
+        {
+            return Result(GovernedLoopEffectReconciliationOperationStatus.Corrupt);
         }
 
         var disposition = CreateDisposition(current.Case, currentAssessment, request.Kind, authorization!.AuthorityEvidenceHash!, now.Value, request.SafeDetail);
@@ -341,6 +341,19 @@ public sealed class GovernedLoopEffectReconciliationService : IGovernedLoopEffec
             return current;
         }
 
+        var now = TrustedNow(current.Case.UpdatedAtUtc);
+        if (now is null)
+        {
+            return Result(GovernedLoopEffectReconciliationOperationStatus.Unavailable);
+        }
+
+        var authorization = await AuthorizeAsync(AuthorizationPurpose, reference!, current.Case.Binding, cancellationToken);
+        var authorizationStatus = AuthorizationStatus(authorization, AuthorizationPurpose, reference!, current.Case.Binding);
+        if (authorizationStatus != GovernedLoopEffectReconciliationOperationStatus.Applied)
+        {
+            return Result(authorizationStatus);
+        }
+
         var currentAssessment = CurrentAssessment(current.Case);
         if (currentAssessment is null || current.Case.Disposition is null || current.Case.Resolution is not null)
         {
@@ -362,19 +375,6 @@ public sealed class GovernedLoopEffectReconciliationService : IGovernedLoopEffec
         if (!MatchesInput(input, reference!, current.Case.Binding, current.Case))
         {
             return Result(GovernedLoopEffectReconciliationOperationStatus.Corrupt);
-        }
-
-        var now = TrustedNow(current.Case.UpdatedAtUtc);
-        if (now is null)
-        {
-            return Result(GovernedLoopEffectReconciliationOperationStatus.Unavailable);
-        }
-
-        var authorization = await AuthorizeAsync(AuthorizationPurpose, reference!, current.Case.Binding, cancellationToken);
-        var authorizationStatus = AuthorizationStatus(authorization, AuthorizationPurpose, reference!, current.Case.Binding);
-        if (authorizationStatus != GovernedLoopEffectReconciliationOperationStatus.Applied)
-        {
-            return Result(authorizationStatus);
         }
 
         if (!TryOutcomeEvidence(current.Case, currentAssessment, outcome.Value, out var evidenceId, out var evidenceHash))
@@ -726,7 +726,8 @@ public sealed class GovernedLoopEffectReconciliationService : IGovernedLoopEffec
         GovernedLoopEffectReconciliationCase? predecessor,
         string semanticFingerprint,
         CancellationToken cancellationToken,
-        out GovernedLoopEffectReconciliationCaseMutationRequest? mutation)
+        out GovernedLoopEffectReconciliationCaseMutationRequest? mutation,
+        bool stableOperationHash = false)
     {
         try
         {
@@ -735,7 +736,7 @@ public sealed class GovernedLoopEffectReconciliationService : IGovernedLoopEffec
             var expectedHash = predecessor?.ContentHash;
             mutation = new GovernedLoopEffectReconciliationCaseMutationRequest(
                 operationId,
-                RequestHash(operationId, purpose, reference, binding, semanticFingerprint),
+                RequestHash(operationId, purpose, reference, binding, semanticFingerprint, includeReferenceContentHash: !stableOperationHash),
                 purpose,
                 expectedVersion,
                 expectedHash,
@@ -756,7 +757,7 @@ public sealed class GovernedLoopEffectReconciliationService : IGovernedLoopEffec
         }
     }
 
-    private static string RequestHash(string operationId, string purpose, GovernedLoopEffectReconciliationCaseReference reference, GovernedLoopEffectReconciliationBinding binding, string semanticFingerprint)
+    private static string RequestHash(string operationId, string purpose, GovernedLoopEffectReconciliationCaseReference reference, GovernedLoopEffectReconciliationBinding binding, string semanticFingerprint, bool includeReferenceContentHash)
     {
         var builder = new StringBuilder(4096);
         Append(builder, "embodysense.governed-loop-effect-reconciliation-operation.v1");
@@ -764,7 +765,11 @@ public sealed class GovernedLoopEffectReconciliationService : IGovernedLoopEffec
         Append(builder, purpose);
         Append(builder, reference.CaseId);
         Append(builder, reference.CaseVersion);
-        Append(builder, reference.ContentHash);
+        if (includeReferenceContentHash)
+        {
+            Append(builder, reference.ContentHash);
+        }
+
         Append(builder, reference.BindingHash);
         Append(builder, binding.ContentHash);
         Append(builder, semanticFingerprint);
@@ -813,7 +818,7 @@ public sealed class GovernedLoopEffectReconciliationService : IGovernedLoopEffec
 
     private static void Append(StringBuilder builder, long value) => Append(builder, value.ToString(CultureInfo.InvariantCulture));
 
-    private static string Identifier(string prefix, long number) => $"{prefix}-{number.ToString(CultureInfo.InvariantCulture)}";
+    private static string Identifier(string prefix, long number) => $"{prefix}-{number.ToString("D2", CultureInfo.InvariantCulture)}";
 
     private static GovernedLoopEffectReconciliationOperationStatus AuthorizationStatus(GovernedLoopEffectReconciliationAuthorizationResult? authorization, string purpose, GovernedLoopEffectReconciliationCaseReference reference, GovernedLoopEffectReconciliationBinding binding)
     {

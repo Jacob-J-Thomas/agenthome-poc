@@ -115,6 +115,29 @@ public sealed class GovernedLoopEffectReconciliationServiceBoundaryTests
         Assert.Null(input.LastCase);
     }
 
+    [Fact]
+    public async Task Denied_assessment_never_reconstructs_effect_input()
+    {
+        var (value, attempt, inputValue) = GovernedLoopEffectReconciliationApplicationTestFixture.OpenCase();
+        var store = new GovernedLoopEffectReconciliationServiceStore();
+        store.SeedCase(value);
+        store.SeedEffect(attempt);
+        var input = ConfigureInput(inputValue, attempt, value);
+        input.ThrowOnRead = true;
+        var authority = new GovernedLoopEffectReconciliationServiceAuthority
+        {
+            Status = GovernedLoopEffectReconciliationAuthorizationStatus.Denied
+        };
+        var service = new GovernedLoopEffectReconciliationService(store, authority, input);
+
+        var result = await service.AssessAsync(new GovernedLoopEffectReconciliationAssessmentRequest("assess-1", Reference(value)));
+
+        Assert.Equal(GovernedLoopEffectReconciliationOperationStatus.Denied, result.Status);
+        Assert.Equal(1, authority.Calls);
+        Assert.Equal(0, input.ReadCalls);
+        Assert.Equal(0, store.MutationCalls);
+    }
+
     [Theory]
     [InlineData(GovernedLoopEffectReconciliationInputReadStatus.Unknown, GovernedLoopEffectReconciliationOperationStatus.Unknown)]
     [InlineData(GovernedLoopEffectReconciliationInputReadStatus.NotFound, GovernedLoopEffectReconciliationOperationStatus.NotFound)]

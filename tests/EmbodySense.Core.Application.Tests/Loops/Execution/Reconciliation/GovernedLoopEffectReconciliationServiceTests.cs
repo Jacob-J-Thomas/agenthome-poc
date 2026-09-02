@@ -41,7 +41,65 @@ public sealed class GovernedLoopEffectReconciliationServiceTests
         Assert.Equal(GovernedLoopEffectReconciliationOperationStatus.Invalid, resolution.Status);
         Assert.Null(resolution.Case);
         Assert.Equal(attempt.ContentHash, store.CurrentEffect!.ContentHash);
-        Assert.Equal(3, authority.Calls);
+        Assert.Equal(4, authority.Calls);
+    }
+
+    [Fact]
+    public async Task Open_replays_the_exact_operation_after_a_fresh_timestamp_without_reopening_the_case()
+    {
+        var (open, attempt, inputValue) = GovernedLoopEffectReconciliationApplicationTestFixture.OpenCase();
+        var store = new GovernedLoopEffectReconciliationServiceStore();
+        store.SeedEffect(attempt);
+        var input = ConfigureInput(inputValue, attempt, open);
+        var authority = new GovernedLoopEffectReconciliationServiceAuthority();
+        var service = new GovernedLoopEffectReconciliationService(
+            store,
+            authority,
+            input,
+            new GovernedLoopEffectReconciliationServiceTimeProvider(open.UpdatedAtUtc, open.UpdatedAtUtc.AddTicks(1)));
+        var request = new GovernedLoopEffectReconciliationOpenRequest("open-1", open.CaseId, open.Binding, open.ContractMetadata, open.EvidenceSources, open.CaseReceiptHashes);
+
+        var applied = await service.OpenAsync(request);
+        var replayed = await service.OpenAsync(request);
+
+        Assert.Equal(GovernedLoopEffectReconciliationOperationStatus.Applied, applied.Status);
+        Assert.Equal(GovernedLoopEffectReconciliationOperationStatus.Replayed, replayed.Status);
+        Assert.Equal(applied.Case!.ContentHash, replayed.Case!.ContentHash);
+        Assert.Equal(applied.Case.UpdatedAtUtc, open.UpdatedAtUtc);
+        Assert.Equal(2, authority.Calls);
+        Assert.Equal(2, input.ReadCalls);
+        Assert.Equal(2, store.MutationCalls);
+        Assert.Equal(1, store.AppliedMutationCalls);
+    }
+
+    [Fact]
+    public async Task Assessment_history_identifiers_remain_canonically_sorted_at_single_and_double_digit_boundaries()
+    {
+        var (open, attempt, inputValue) = GovernedLoopEffectReconciliationApplicationTestFixture.OpenCase();
+        var store = new GovernedLoopEffectReconciliationServiceStore();
+        store.SeedCase(open);
+        store.SeedEffect(attempt);
+        var input = ConfigureInput(inputValue, attempt, open);
+        var service = new GovernedLoopEffectReconciliationService(
+            store,
+            new GovernedLoopEffectReconciliationServiceAuthority(),
+            input,
+            new GovernedLoopEffectReconciliationServiceTimeProvider(open.UpdatedAtUtc));
+        var current = open;
+
+        for (var index = 1; index <= 32; index++)
+        {
+            var assessed = await service.AssessAsync(new GovernedLoopEffectReconciliationAssessmentRequest($"assess-{index}", Reference(current)));
+            Assert.Equal(GovernedLoopEffectReconciliationOperationStatus.Applied, assessed.Status);
+            current = assessed.Case!;
+        }
+
+        var identifiers = current.AssessmentHistory.Select(assessment => assessment.AssessmentId).ToArray();
+        Assert.Equal("assessment-09", identifiers[8]);
+        Assert.Equal("assessment-10", identifiers[9]);
+        Assert.Equal("assessment-31", identifiers[30]);
+        Assert.Equal("assessment-32", identifiers[31]);
+        Assert.Equal(identifiers.Order(StringComparer.Ordinal), identifiers);
     }
 
     [Fact]

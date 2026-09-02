@@ -28,6 +28,8 @@ internal sealed class GovernedLoopEffectReconciliationServiceStore : IGovernedLo
 
     internal int MutationCalls { get; private set; }
 
+    internal int AppliedMutationCalls { get; private set; }
+
     internal void SeedEffect(GovernedLoopEffectAttempt effect) => CurrentEffect = effect;
 
     internal void SeedCase(GovernedLoopEffectReconciliationCase value)
@@ -111,6 +113,7 @@ internal sealed class GovernedLoopEffectReconciliationServiceStore : IGovernedLo
         }
 
         CurrentCase = request.Replacement;
+        AppliedMutationCalls++;
         _versions[VersionKey(CurrentCase)] = CurrentCase;
         if (request.ReconciledEffectSuccessor is not null)
         {
