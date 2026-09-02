@@ -444,11 +444,17 @@ export function createHumanReviewSurface({
     state.evidenceReady = false;
     renderDetailLoading(summary);
     const encodedRunId = encodeURIComponent(summary.runId);
-    const [detail, evidence, posture] = await Promise.all([
-      readEndpoint(`/api/human-reviews/${encodedRunId}`),
-      readEndpoint(`/api/human-reviews/${encodedRunId}/evidence`),
-      readEndpoint(`/api/human-reviews/${encodedRunId}/posture`),
-    ]);
+    // These projections share canonical stores whose bounded readers intentionally
+    // exclude one another while validating a complete snapshot. Keep the surface
+    // reads ordered so one browser refresh cannot turn healthy evidence into a
+    // transient self-contention failure.
+    const detail = await readEndpoint(`/api/human-reviews/${encodedRunId}`);
+    const evidence = await readEndpoint(
+      `/api/human-reviews/${encodedRunId}/evidence`,
+    );
+    const posture = await readEndpoint(
+      `/api/human-reviews/${encodedRunId}/posture`,
+    );
     if (generation !== state.selectionGeneration) return;
     state.detail = detail;
     state.evidence = evidence;

@@ -196,7 +196,7 @@ internal static class HumanReviewDecisionTestData
             Hash('c'),
             Hash('d'),
             Hash('e'),
-            binding.AuthorityGrantHash,
+            adapter.AdmissionReceipt.ContentHash,
             "before-continuation-one",
             predecessor.UpdatedAtUtc.AddSeconds(1));
     }

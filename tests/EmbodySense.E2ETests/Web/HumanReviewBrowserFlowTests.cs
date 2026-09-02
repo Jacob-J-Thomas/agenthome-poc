@@ -307,7 +307,7 @@ public sealed partial class BrowserFlowTests
             new AuthorityProvenance(actor!, AuthorityProvenanceKind.UserDeclaration),
             DateTimeOffset.UtcNow.AddMinutes(-1),
             null,
-            new AuthorityCeiling([], [], 0, CapabilitySideEffectClass.None, false, false, false),
+            HumanReviewBrowserFixture.CreatePreDispatchEffectAuthorityCeiling(),
             []);
         var store = new AuthorityProfileStore(paths, new FileCapabilityCatalogTrustProvider(capabilityTrustRoot));
         var result = await store.MutateAsync(new AuthorityProfileMutation(

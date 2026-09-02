@@ -305,6 +305,55 @@ test("Human Review surface rereads canonical detail and submits all four visible
   );
 });
 
+test("Human Review surface serializes canonical detail, evidence, and posture reads", async () => {
+  const fixture = createFixture();
+  const readOrder = [];
+  let activeCanonicalReads = 0;
+  let maximumConcurrentCanonicalReads = 0;
+  const requestJson = async (url) => {
+    if (url === "/api/human-reviews?maximumCount=50")
+      return { status: "ready", items: [summary()], continuationCursor: null };
+
+    activeCanonicalReads++;
+    maximumConcurrentCanonicalReads = Math.max(
+      maximumConcurrentCanonicalReads,
+      activeCanonicalReads,
+    );
+    readOrder.push(url);
+    await Promise.resolve();
+    activeCanonicalReads--;
+    if (url.endsWith("/evidence"))
+      return { status: "ready", evidence: [], effectEvidence: null };
+    if (url.endsWith("/posture"))
+      return { status: "ready", posture: { lifecycleStatus: "pending" } };
+    return {
+      status: "ready",
+      detail: {
+        summary: summary(),
+        previews: [],
+        decisions: [],
+        evidence: [],
+        runtime: { lifecycleStatus: "pending" },
+        effectEvidence: null,
+      },
+    };
+  };
+  const surface = createHumanReviewSurface({
+    document: fixture.document,
+    requestJson,
+  });
+
+  await surface.activate();
+
+  assert.equal(maximumConcurrentCanonicalReads, 1);
+  assert.deepEqual(readOrder, [
+    "/api/human-reviews/run-review-1",
+    "/api/human-reviews/run-review-1/evidence",
+    "/api/human-reviews/run-review-1/posture",
+  ]);
+  assert.equal(fixture.elements.humanReviewApproveButton.disabled, false);
+});
+
 test("Human Review replays a committed response after the POST result is lost without using the reread lifecycle", async () => {
   const fixture = createFixture();
   const storage = new FakeStorage();

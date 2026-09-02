@@ -630,6 +630,8 @@ public sealed class HumanReviewContinuationConsumerTests
         Assert.Equal(new GovernedLoopEffectCertaintySnapshotQuery(evidence.Identity, evidence.Preparation), result.Action?.EffectQuery);
         Assert.Equal(binding.WorkspaceId, evidence.Identity.WorkspaceId);
         Assert.Equal(executionBinding.ExecutionGeneration, evidence.Identity.ExecutionGeneration);
+        Assert.NotEqual(binding.AuthorityGrantHash, fixture.Run.SequentialAdapterBinding?.AdmissionReceipt.ContentHash);
+        Assert.Equal(fixture.Run.SequentialAdapterBinding?.AdmissionReceipt.ContentHash, evidence.Preparation.AdmissionAuthorityEvidenceHash);
         Assert.Equal(fixture.Run.Id, result.Completion?.RunId);
         Assert.Equal(fixture.Run.LifecycleVersion, result.Completion?.ExpectedLifecycleVersion);
         Assert.Equal(fixture.Claim.ClaimHash, result.Completion?.Claim.ClaimHash);

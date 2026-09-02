@@ -3,6 +3,8 @@ using System.Security.Cryptography;
 using System.Text;
 using EmbodySense.Core.Application.HumanReview;
 using EmbodySense.Core.Application.HumanReview.Models;
+using EmbodySense.Core.Application.Loops.Admission;
+using EmbodySense.Core.Application.Loops.Admission.Models;
 using EmbodySense.Core.Application.Loops.Execution.Custom.Models;
 using EmbodySense.Core.Application.Loops.GraphValidation;
 using EmbodySense.Core.Application.Loops.Models;
@@ -24,6 +26,8 @@ using EmbodySense.Core.Common.Loops.Execution.Effects.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Revisions.Models;
+using EmbodySense.Core.Common.Loops.Sequential;
+using EmbodySense.Core.Common.Loops.Sequential.Models;
 
 namespace EmbodySense.Core.Application.Tests.Loops.Execution.Custom;
 
@@ -480,10 +484,14 @@ public sealed partial class CustomLoopOrderedRunnerTests
         Assert.Equal(CustomLoopOrderedRunStatus.Paused, parked.Status);
 
         var intent = await PrepareClaimedDecisionActionAsync(store, HumanReviewDecisionKind.Reject);
+        var persistedBinding = Assert.IsType<GovernedLoopSequentialAdapterBinding>(store.Current.SequentialAdapterBinding);
+        var reconstructedAnchor = ReconstructSequentialAnchor(context, persistedBinding);
+        Assert.Equal(persistedBinding.ContentHash, reconstructedAnchor.AdapterBinding.ContentHash);
+        Assert.NotEqual(persistedBinding, reconstructedAnchor.AdapterBinding);
         var authority = new RecordingAuthoritySource(HumanReviewContinuationAuthorityReadStatus.Current, HumanReviewContinuationAuthorityReadStatus.Current);
         var unresolved = new HumanReviewOrderedReleaseService(
             store,
-            new HumanReviewOrderedReleaseTestContextResolver(new GovernedLoopWaitOrderedContext(context.Anchor, context.Plan, context.Artifact)),
+            new HumanReviewOrderedReleaseTestContextResolver(new GovernedLoopWaitOrderedContext(reconstructedAnchor, context.Plan, context.Artifact)),
             new HumanReviewOrderedReleaseTestRuntime(),
             new FixedTimeProvider(store.Current.UpdatedAtUtc.AddTicks(1)),
             authority);
@@ -494,11 +502,12 @@ public sealed partial class CustomLoopOrderedRunnerTests
         Assert.Equal(CustomLoopRunStatus.Running, store.Current.Status);
         Assert.Equal(intent.ActionOperationId, store.Current.Events[^1].EventId);
         Assert.Single(store.Current.Events, item => item.Kind == CustomLoopRunEventKind.NodeAttemptFailed);
+        Assert.Equal(2, authority.ReadCount);
 
         var confirmedRuntime = new HumanReviewOrderedReleaseTestRuntime((request, cancellationToken) => ConfirmHumanReviewHandoffAsync(store, request, cancellationToken));
         var replaying = new HumanReviewOrderedReleaseService(
             store,
-            new HumanReviewOrderedReleaseTestContextResolver(new GovernedLoopWaitOrderedContext(context.Anchor, context.Plan, context.Artifact)),
+            new HumanReviewOrderedReleaseTestContextResolver(new GovernedLoopWaitOrderedContext(reconstructedAnchor, context.Plan, context.Artifact)),
             confirmedRuntime,
             new FixedTimeProvider(store.Current.UpdatedAtUtc.AddTicks(1)),
             authority);
@@ -510,6 +519,42 @@ public sealed partial class CustomLoopOrderedRunnerTests
         Assert.NotEqual(intent.ActionOperationId, store.Current.Events[^1].EventId);
         Assert.Single(store.Current.Events, item => item.Kind == CustomLoopRunEventKind.NodeAttemptFailed);
         Assert.True(CustomLoopRunValidator.Validate(store.Current).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(store.Current).Errors));
+    }
+
+    private static GovernedLoopSequentialRunAnchor ReconstructSequentialAnchor(SequentialTestContext context, GovernedLoopSequentialAdapterBinding persistedBinding)
+    {
+        var reconstructedBinding = GovernedLoopSequentialContractHash.Apply(new GovernedLoopSequentialAdapterBinding(
+            persistedBinding.SchemaVersion,
+            persistedBinding.WorkspaceId,
+            persistedBinding.ExecutionBinding,
+            persistedBinding.AdmissionOperationId,
+            persistedBinding.AdmissionReceipt,
+            persistedBinding.AdmissionReceiptHash,
+            persistedBinding.AdmissionRequestHash,
+            persistedBinding.InvocationPayloadHash,
+            persistedBinding.GraphArtifactHash,
+            persistedBinding.GraphLayoutHash,
+            persistedBinding.CommandActionCapabilityIds.ToArray(),
+            string.Empty));
+        var intent = reconstructedBinding.AdmissionReceipt.Intent;
+        var request = GovernedLoopAdmissionRequestHash.Apply(new GovernedLoopAdmissionRequest(
+            GovernedLoopAdmissionRequest.CurrentSchemaVersion,
+            intent.OperationId,
+            reconstructedBinding.InvocationPayloadHash,
+            string.Empty,
+            intent.Publication,
+            intent.AuthorityGrant,
+            intent.ActorId,
+            intent.Surface));
+        Assert.Equal(intent.RequestHash, request.RequestHash);
+        var result = GovernedLoopSequentialRunAnchorGuard.Create(
+            reconstructedBinding,
+            request,
+            reconstructedBinding.AdmissionReceipt,
+            context.Anchor.InvocationSnapshot,
+            context.Artifact);
+        Assert.Equal(GovernedLoopSequentialRunAnchorStatus.Ready, result.Status);
+        return Assert.IsType<GovernedLoopSequentialRunAnchor>(result.Anchor);
     }
 
     [Fact]

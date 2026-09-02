@@ -225,7 +225,7 @@ public sealed class HumanReviewContinuationConsumer : IHumanReviewContinuationCo
         {
             return new EffectQueryRead(read.Status, null);
         }
-        if (!MatchesReviewedEffect(context.Request.Binding, context.AdapterBinding.ExecutionBinding, reviewed, evidence)
+        if (!MatchesReviewedEffect(context.Request.Binding, context.AdapterBinding, reviewed, evidence)
             || !HumanReviewEffectReleaseContract.TryCaptureExpectation(evidence.Identity, evidence.Preparation, out var identity, out var preparation, out _)
             || identity is null
             || preparation is null)
@@ -437,7 +437,7 @@ public sealed class HumanReviewContinuationConsumer : IHumanReviewContinuationCo
             && string.Equals(binding.ExecutionBinding.Revision.RevisionId, artifact.RevisionArtifact.Revision.RevisionId, StringComparison.Ordinal)
             && string.Equals(binding.ExecutionBinding.Revision.ExecutableHash, artifact.RevisionArtifact.Revision.ExecutableHash, StringComparison.Ordinal);
 
-    private static bool MatchesReviewedEffect(HumanReviewBinding binding, GovernedLoopExecutionBinding executionBinding, HumanReviewEffectAttemptBinding reviewed, HumanReviewCurrentEffectAttemptEvidence evidence)
+    private static bool MatchesReviewedEffect(HumanReviewBinding binding, GovernedLoopSequentialAdapterBinding adapterBinding, HumanReviewEffectAttemptBinding reviewed, HumanReviewCurrentEffectAttemptEvidence evidence)
     {
         try
         {
@@ -446,7 +446,7 @@ public sealed class HumanReviewContinuationConsumer : IHumanReviewContinuationCo
                 && string.Equals(evidence.Identity.GraphId, binding.GraphId, StringComparison.Ordinal)
                 && string.Equals(evidence.Identity.RevisionId, binding.RevisionId, StringComparison.Ordinal)
                 && string.Equals(evidence.Identity.RevisionHash, binding.RevisionHash, StringComparison.Ordinal)
-                && evidence.Identity.ExecutionGeneration == executionBinding.ExecutionGeneration
+                && evidence.Identity.ExecutionGeneration == adapterBinding.ExecutionBinding.ExecutionGeneration
                 && string.Equals(evidence.Identity.FrontierId, binding.FrontierId, StringComparison.Ordinal)
                 && evidence.Identity.FrontierVersion == binding.FrontierVersion
                 && string.Equals(evidence.Identity.FrontierHash, binding.FrontierHash, StringComparison.Ordinal)
@@ -463,7 +463,7 @@ public sealed class HumanReviewContinuationConsumer : IHumanReviewContinuationCo
                 && string.Equals(evidence.Preparation.ReviewTargetHash, binding.TargetHash, StringComparison.Ordinal)
                 && string.Equals(evidence.Preparation.ReviewPreconditionHash, binding.PreconditionHash, StringComparison.Ordinal)
                 && string.Equals(evidence.Preparation.ReviewPayloadHash, binding.PayloadHash, StringComparison.Ordinal)
-                && string.Equals(evidence.Preparation.AdmissionAuthorityEvidenceHash, binding.AuthorityGrantHash, StringComparison.Ordinal);
+                && string.Equals(evidence.Preparation.AdmissionAuthorityEvidenceHash, adapterBinding.AdmissionReceipt.ContentHash, StringComparison.Ordinal);
         }
         catch
         {
