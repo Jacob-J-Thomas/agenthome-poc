@@ -54,6 +54,7 @@ using EmbodySense.Core.Persistence.Authority;
 using EmbodySense.Core.Persistence.Capabilities;
 using EmbodySense.Core.Persistence.ContextualRoles;
 using EmbodySense.Core.Persistence.HumanInput.Requests;
+using EmbodySense.Core.Persistence.Loops.Admission;
 using EmbodySense.Core.Persistence.Loops.GraphAuthoring;
 using EmbodySense.Core.Persistence.Loops.Revisions;
 using EmbodySense.Core.Persistence.Loops;
@@ -123,6 +124,39 @@ internal static class HumanInputBrowserFixture
         var admissionRequest = GovernedLoopAdmissionRequestHash.Apply(new GovernedLoopAdmissionRequest(1, admissionOperationId, invocation.ContentHash, string.Empty, dependencies.Publication, dependencies.GrantReference, ParseActor(ActorId), "web"));
         var intent = new GovernedLoopAdmissionIntent(1, workspaceId, admissionRequest.OperationId, admissionRequest.RequestHash, dependencies.Publication, dependencies.GrantReference, dependencies.Artifact.Graph.OwningRole, ParseActor(ActorId), "web", dependencies.Artifact.ArtifactHash, dependencies.Artifact.LayoutHash);
         var receipt = CreateAdmissionReceipt(dependencies.Artifact, execution, intent, workspaceId, now, dependencies.GrantProfile, dependencies.GrantBoundary, dependencies.DependencyEvidenceHash, dependencies.EffectiveAuthority);
+        var admissionOutcome = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionTerminalOutcome(
+            GovernedLoopAdmissionTerminalOutcome.CurrentSchemaVersion,
+            intent,
+            GovernedLoopAdmissionDisposition.Admitted,
+            receipt,
+            null,
+            now,
+            string.Empty));
+        var admissionValidation = GovernedLoopAdmissionValidator.Validate(admissionOutcome);
+        if (!admissionValidation.IsValid)
+        {
+            throw new InvalidOperationException("The browser Human Input fixture admission outcome is invalid: " + string.Join(',', admissionValidation.Errors));
+        }
+
+        var canonicalAdmissionStore = new GovernedLoopAdmissionStore(paths, new FileCapabilityCatalogTrustProvider(capabilityTrustRoot));
+        var admissionRead = await canonicalAdmissionStore.ReadByOperationAsync(workspaceId, admissionRequest.OperationId).ConfigureAwait(false);
+        if (admissionRead.Status != GovernedLoopAdmissionStoreReadStatus.NotFound || admissionRead.Outcome is not null)
+        {
+            throw new InvalidOperationException($"The browser Human Input fixture admission identity was not empty: {admissionRead.Status}.");
+        }
+
+        var admissionCommit = await canonicalAdmissionStore.CommitAsync(new GovernedLoopAdmissionStoreMutation(
+            workspaceId,
+            admissionRequest.OperationId,
+            admissionRequest.RequestHash,
+            GovernedLoopAdmissionContractHash.ComputeIntentHash(intent),
+            admissionRead.StoreGeneration,
+            admissionOutcome)).ConfigureAwait(false);
+        if (admissionCommit.Status != GovernedLoopAdmissionStoreCommitStatus.Committed)
+        {
+            throw new InvalidOperationException($"The browser Human Input fixture admission outcome was not committed: {admissionCommit.Status}.");
+        }
+
         var adapter = GovernedLoopSequentialContractHash.Apply(new GovernedLoopSequentialAdapterBinding(1, workspaceId, execution, admissionRequest.OperationId, receipt, receipt.ContentHash, admissionRequest.RequestHash, invocation.ContentHash, dependencies.Artifact.ArtifactHash, dependencies.Artifact.LayoutHash, [], string.Empty));
         var projected = GovernedLoopSequentialLegacyDefinitionProjector.Project(adapter, invocation, plan, dependencies.Artifact);
         var definition = projected.Definition ?? throw new InvalidOperationException($"The browser Human Input continuation graph definition was not projected: {projected.Status}.");
