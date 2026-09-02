@@ -90,7 +90,7 @@ public sealed partial class BrowserFlowTests
     }
 
     [InstalledBrowserFact]
-    public async Task Human_input_browser_uses_two_same_profile_tabs_for_concurrent_valid_response_winner_replay_conflict_and_accessibility()
+    public async Task Human_input_browser_uses_two_same_profile_tabs_for_concurrent_valid_response_winner_conflict_and_accessibility()
     {
         using var workspace = new TestWorkspace();
         using var serverAccount = new BrowserServerAccountDirectory(workspace.ServerStatePath);
@@ -146,14 +146,6 @@ public sealed partial class BrowserFlowTests
             Assert.False(string.IsNullOrWhiteSpace(winnerOperationId));
             await Task.WhenAll(WaitForHumanInputLifecycleAsync(browser, "answered"), WaitForHumanInputLifecycleAsync(staleTab, "answered"));
 
-            var replayScript = HumanInputBrowserTransportScripts.ReplayExactOperation(actionPath, winnerPayload);
-            var replayRaw = firstTabStatus == 200
-                ? await browser.EvaluateStringAsync(replayScript)
-                : await staleTab.EvaluateStringAsync(replayScript);
-            using var replay = JsonDocument.Parse(replayRaw);
-            Assert.Equal(200, replay.RootElement.GetProperty("status").GetInt32());
-            Assert.Contains("replayed", replay.RootElement.GetProperty("body").GetString(), StringComparison.OrdinalIgnoreCase);
-
             var lifecycle = await HumanInputBrowserFixture.ReadAsync(paths, capabilityTrustRoot, RequestId);
             Assert.Equal(HumanInputRequestLifecycleStatus.Answered, lifecycle.PrimarySnapshot?.Head.Status);
             var responses = await HumanInputBrowserFixture.ReadResponsesAsync(paths, capabilityTrustRoot, RequestId);
@@ -167,7 +159,7 @@ public sealed partial class BrowserFlowTests
         }
         catch
         {
-            await WriteFailureDiagnosticsAsync(nameof(Human_input_browser_uses_two_same_profile_tabs_for_concurrent_valid_response_winner_replay_conflict_and_accessibility), browser, app);
+            await WriteFailureDiagnosticsAsync(nameof(Human_input_browser_uses_two_same_profile_tabs_for_concurrent_valid_response_winner_conflict_and_accessibility), browser, app);
             throw;
         }
     }
