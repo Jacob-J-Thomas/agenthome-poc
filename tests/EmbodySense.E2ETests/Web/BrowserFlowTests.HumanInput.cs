@@ -122,7 +122,7 @@ public sealed partial class BrowserFlowTests
             await browser.EvaluateWithUserGestureAsync("document.querySelector('[data-testid=\"human-input-refresh\"]')?.focus()");
             Assert.True(await browser.EvaluateBooleanAsync("document.activeElement?.getAttribute('data-testid') === 'human-input-refresh'"));
             await browser.PressKeyAsync("Enter");
-            await browser.WaitForExpressionAsync("document.getElementById('humanInputListStatus')?.textContent?.length > 0");
+            await browser.WaitForExpressionAsync("document.getElementById('humanInputRefreshButton')?.disabled === false && document.getElementById('humanInputListStatus')?.textContent?.includes('durable data request') && document.getElementById('humanInputLifecycleStatus')?.textContent?.toLowerCase().includes('pending') && document.querySelector('[data-testid=\"human-input-response-submit\"]')?.disabled === false");
 
             await SetValueAsync(browser, "#humanInputResponseEditor textarea", "answer from the first tab");
             await SetValueForTabAsync(staleTab, "#humanInputResponseEditor textarea", "answer from the second tab");

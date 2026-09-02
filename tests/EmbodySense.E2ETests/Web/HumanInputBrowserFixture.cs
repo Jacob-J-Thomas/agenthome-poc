@@ -57,6 +57,7 @@ using EmbodySense.Core.Persistence.HumanInput.Requests;
 using EmbodySense.Core.Persistence.Loops.GraphAuthoring;
 using EmbodySense.Core.Persistence.Loops.Revisions;
 using EmbodySense.Core.Persistence.Loops;
+using EmbodySense.Core.Startup.Capabilities;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Tests.Support;
 
@@ -118,7 +119,7 @@ internal static class HumanInputBrowserFixture
         var admissionOperationId = "browser-human-input-admit-" + requestId;
         var admissionRequest = GovernedLoopAdmissionRequestHash.Apply(new GovernedLoopAdmissionRequest(1, admissionOperationId, invocation.ContentHash, string.Empty, dependencies.Publication, dependencies.GrantReference, ParseActor(ActorId), "web"));
         var intent = new GovernedLoopAdmissionIntent(1, workspaceId, admissionRequest.OperationId, admissionRequest.RequestHash, dependencies.Publication, dependencies.GrantReference, dependencies.Artifact.Graph.OwningRole, ParseActor(ActorId), "web", dependencies.Artifact.ArtifactHash, dependencies.Artifact.LayoutHash);
-        var receipt = CreateAdmissionReceipt(dependencies.Artifact, execution, intent, workspaceId, now, dependencies.GrantProfile, dependencies.DependencyEvidenceHash);
+        var receipt = CreateAdmissionReceipt(dependencies.Artifact, execution, intent, workspaceId, now, dependencies.GrantProfile, dependencies.GrantBoundary, dependencies.DependencyEvidenceHash, dependencies.EffectiveAuthority);
         var adapter = GovernedLoopSequentialContractHash.Apply(new GovernedLoopSequentialAdapterBinding(1, workspaceId, execution, admissionRequest.OperationId, receipt, receipt.ContentHash, admissionRequest.RequestHash, invocation.ContentHash, dependencies.Artifact.ArtifactHash, dependencies.Artifact.LayoutHash, [], string.Empty));
         var projected = GovernedLoopSequentialLegacyDefinitionProjector.Project(adapter, invocation, plan, dependencies.Artifact);
         var definition = projected.Definition ?? throw new InvalidOperationException($"The browser Human Input continuation graph definition was not projected: {projected.Status}.");
@@ -302,7 +303,7 @@ internal static class HumanInputBrowserFixture
         return reference;
     }
 
-    private static async Task<(AuthorityGrantReference GrantReference, GovernedLoopRevisionPublicationPin Publication, GovernedLoopGraphRevisionArtifact Artifact, AuthorityGrant Grant, AuthorityGrantProfilePin GrantProfile, string DependencyEvidenceHash)> EnsureAuthorityDependenciesAsync(WorkspacePaths paths, string capabilityTrustRoot, string workspaceId, DateTimeOffset now)
+    private static async Task<(AuthorityGrantReference GrantReference, GovernedLoopRevisionPublicationPin Publication, GovernedLoopGraphRevisionArtifact Artifact, AuthorityGrant Grant, AuthorityGrantProfilePin GrantProfile, AuthorityGrantBoundary GrantBoundary, AuthorityCeiling EffectiveAuthority, string DependencyEvidenceHash)> EnsureAuthorityDependenciesAsync(WorkspacePaths paths, string capabilityTrustRoot, string workspaceId, DateTimeOffset now)
     {
         var transaction = new CapabilityAuthorityTransaction(paths);
         var role = CreateRole(workspaceId, _stableDependencyTimestamp);
@@ -325,9 +326,9 @@ internal static class HumanInputBrowserFixture
         var trust = new FileCapabilityCatalogTrustProvider(capabilityTrustRoot);
         var lifecycleStore = new GovernedLoopRevisionLifecycleStore(paths, trust, authorityTransaction: transaction);
         var graphStore = new GovernedLoopGraphRevisionStore(paths, lifecycleStore, trust, authorityTransaction: transaction);
-        var artifact = CreateArtifact(role, now);
+        var artifact = CreateArtifact(role, _stableDependencyTimestamp);
         var publication = GovernedLoopRevisionPublicationPinFactory.Create(1, artifact.RevisionArtifact.Revision, "browser-human-input-publish", Hash("publication"));
-        await EnsurePublishedGraphAsync(graphStore, artifact, publication, now).ConfigureAwait(false);
+        await EnsurePublishedGraphAsync(graphStore, artifact, publication, _stableDependencyTimestamp).ConfigureAwait(false);
 
         var authorityStore = new AuthorityProfileStore(paths, trust, authorityTransaction: transaction);
         var profileRead = await authorityStore.ReadAsync(AuthorityProfileId).ConfigureAwait(false);
@@ -346,13 +347,13 @@ internal static class HumanInputBrowserFixture
             throw new InvalidOperationException("The browser Human Input fixture grant identity is invalid.");
         }
 
-        var grant = AuthorityGrantHash.Apply(new AuthorityGrant(1, grantId!, grantRevision!, null, null, AuthorityGrantLifecycleStatus.Active, binding, AuthorityCeilingIntersection.EmptyCeiling(), new AuthorityGrantBoundary(_stableGrantStartsAtUtc, _stableGrantExpiresAtUtc, AuthorityGrantCompletionConstraintKind.None), actor!, purpose!, now, string.Empty));
+        var grant = AuthorityGrantHash.Apply(new AuthorityGrant(1, grantId!, grantRevision!, null, null, AuthorityGrantLifecycleStatus.Active, binding, CreateConversationTurnAuthorityCeiling(), new AuthorityGrantBoundary(_stableGrantStartsAtUtc, _stableGrantExpiresAtUtc, AuthorityGrantCompletionConstraintKind.None), actor!, purpose!, _stableDependencyTimestamp, string.Empty));
         var grantOperationId = "create-browser-human-input-grant-" + RequestIdFragment(workspaceId);
         var grantRequestHash = Hash("grant-request-" + workspaceId);
         var observed = await authorityStore.ReadForMutationAsync(grant.GrantId, grantOperationId, grantRequestHash).ConfigureAwait(false);
         if (observed.Status == AuthorityGrantStoreReadStatus.NotFound)
         {
-            var grantEvidence = new AuthorityGrantOperationEvidence(1, grantOperationId, grantRequestHash, AuthorityGrantOperationKind.Create, AuthorityGrantOperationOutcome.Committed, AuthorityGrantOperationFailureCode.None, grant.GrantId, 0, new AuthorityGrantReference(grant.GrantId, grant.Revision, grant.ContentHash), actor!, purpose!, Hash("grant-authority-" + workspaceId), Hash("grant-dependency-" + workspaceId), now);
+            var grantEvidence = new AuthorityGrantOperationEvidence(1, grantOperationId, grantRequestHash, AuthorityGrantOperationKind.Create, AuthorityGrantOperationOutcome.Committed, AuthorityGrantOperationFailureCode.None, grant.GrantId, 0, new AuthorityGrantReference(grant.GrantId, grant.Revision, grant.ContentHash), actor!, purpose!, Hash("grant-authority-" + workspaceId), Hash("grant-dependency-" + workspaceId), _stableDependencyTimestamp);
             var commit = await authorityStore.CommitAsync(new AuthorityGrantStoreMutation(observed.StoreGeneration, grant, grantEvidence)).ConfigureAwait(false);
             if (commit.Status is not (AuthorityGrantStoreCommitStatus.Committed or AuthorityGrantStoreCommitStatus.Replayed))
             {
@@ -374,7 +375,7 @@ internal static class HumanInputBrowserFixture
             throw new InvalidOperationException($"The browser Human Input fixture grant dependencies were not active: {resolved.Status}.");
         }
 
-        return (new AuthorityGrantReference(grant.GrantId, grant.Revision, grant.ContentHash), publication, artifact, grant, binding.Profile, resolved.DependencyEvidenceHash);
+        return (new AuthorityGrantReference(grant.GrantId, grant.Revision, grant.ContentHash), publication, artifact, grant, binding.Profile, grant.Boundary, resolved.EffectiveCeiling, resolved.DependencyEvidenceHash);
     }
 
     private static async Task EnsurePublishedGraphAsync(GovernedLoopGraphRevisionStore graphStore, GovernedLoopGraphRevisionArtifact artifact, GovernedLoopRevisionPublicationPin publication, DateTimeOffset now)
@@ -415,7 +416,7 @@ internal static class HumanInputBrowserFixture
         }
     }
 
-    private static GovernedLoopAdmissionReceipt CreateAdmissionReceipt(GovernedLoopGraphRevisionArtifact artifact, GovernedLoopExecutionBinding execution, GovernedLoopAdmissionIntent intent, string workspaceId, DateTimeOffset evaluatedAtUtc, AuthorityGrantProfilePin grantProfile, string dependencyEvidenceHash)
+    private static GovernedLoopAdmissionReceipt CreateAdmissionReceipt(GovernedLoopGraphRevisionArtifact artifact, GovernedLoopExecutionBinding execution, GovernedLoopAdmissionIntent intent, string workspaceId, DateTimeOffset evaluatedAtUtc, AuthorityGrantProfilePin grantProfile, AuthorityGrantBoundary grantBoundary, string dependencyEvidenceHash, AuthorityCeiling effectiveAuthority)
     {
         if (!CapabilityId.TryParse("org.embodysense/loop-" + artifact.ArtifactHash[..32], out var subject, out _)
             || !CapabilityVersionRange.TryParse("*", out var versions, out _)
@@ -435,33 +436,35 @@ internal static class HumanInputBrowserFixture
         }).ToArray();
         var manifest = new CapabilityDependencyManifest(1, CapabilityDependencyManifestKind.LoopPackage, subject!, dependencies, [], new CapabilityDependencyArtifactMetadata(checksum, null));
         var capabilities = CreateCapabilityAdmission(manifest, workspaceId, evaluatedAtUtc);
-        var grantBoundary = new AuthorityGrantBoundary(evaluatedAtUtc.AddHours(-1), evaluatedAtUtc.AddHours(1), AuthorityGrantCompletionConstraintKind.None);
-        var effectiveAuthority = AuthorityCeilingIntersection.EmptyCeiling();
         var modelRouting = GovernedLoopAdmissionContractHash.CreateEmptyModelRoutingAdmission(intent, execution, grantProfile, grantBoundary, dependencyEvidenceHash, effectiveAuthority, capabilities, evaluatedAtUtc);
         var admissionEvidence = GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionEvidence(1, GovernedLoopAdmissionContractHash.ComputeIntentHash(intent), execution, grantProfile, grantBoundary, dependencyEvidenceHash, effectiveAuthority, capabilities, modelRouting, GovernedLoopAdmissionContractHash.CreateEvidenceReferences(intent, effectiveAuthority, capabilities, modelRouting), evaluatedAtUtc, string.Empty));
         return GovernedLoopAdmissionContractHash.Apply(new GovernedLoopAdmissionReceipt(1, intent, admissionEvidence, evaluatedAtUtc, string.Empty));
     }
 
+    private static AuthorityCeiling CreateConversationTurnAuthorityCeiling()
+    {
+        var descriptor = BuiltInCapabilityCatalog.Descriptors.SingleOrDefault(item => string.Equals(item.Id.Value, ConversationTurnCapabilityId, StringComparison.Ordinal));
+        if (descriptor is null || !CapabilityDescriptorIdentity.TryCreate(descriptor, out var identity, out _))
+        {
+            throw new InvalidOperationException("The browser Human Input fixture conversation-turn capability descriptor is unavailable.");
+        }
+
+        return new AuthorityCeiling([identity!], descriptor.Requirements.DataClasses, 1, descriptor.SideEffectClass, false, false, false);
+    }
+
     private static CapabilityAdmissionSnapshot CreateCapabilityAdmission(CapabilityDependencyManifest requirements, string workspaceId, DateTimeOffset admittedAtUtc)
     {
         _ = CapabilityDependencyManifestHash.TryCompute(requirements, out var requirementsHash, out _);
-        if (!CapabilityProviderId.TryParse("org.embodysense", out var provider, out _)
-            || !CapabilityVersion.TryParse("1.0.0", out var version, out _))
-        {
-            throw new InvalidOperationException("The browser Human Input fixture capability provider is invalid.");
-        }
-
         var pins = requirements.Required.Select(dependency =>
         {
-            var digest = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(dependency.CapabilityId.Value))).ToLowerInvariant();
-            if (!CapabilityDescriptorHash.TryParse("sha256:" + digest, out var descriptorHash, out _))
+            var descriptor = BuiltInCapabilityCatalog.Descriptors.SingleOrDefault(item => item.Id.Equals(dependency.CapabilityId));
+            if (descriptor is null
+                || !CapabilityDescriptorIdentity.TryCreate(descriptor, out var identity, out _))
             {
-                throw new InvalidOperationException("The browser Human Input fixture capability descriptor hash is invalid.");
+                throw new InvalidOperationException("The browser Human Input fixture capability descriptor is unavailable.");
             }
 
-            var implementationId = dependency.CapabilityId.Value[(dependency.CapabilityId.Value.IndexOf('/') + 1)..];
-            var kind = implementationId.StartsWith("model-profile/", StringComparison.Ordinal) ? CapabilityKind.ModelProfile : CapabilityKind.GraphNode;
-            return new CapabilityAdmissionPin(new CapabilityDescriptorIdentity(dependency.CapabilityId, version!, descriptorHash!), kind, new CapabilityImplementationIdentity(provider!, implementationId), new CapabilityProvenance(CapabilityProvenanceKind.BuiltIn, "https://embodysense.dev/builtins/" + implementationId, "1", null), new CapabilityDependencyArtifactMetadata(null, null), "Test-safe description for " + implementationId + ".");
+            return new CapabilityAdmissionPin(identity!, descriptor.Kind, descriptor.Implementation, descriptor.Provenance, new CapabilityDependencyArtifactMetadata(null, null), descriptor.Purpose);
         }).ToArray();
         var evidence = requirements.Required.Select(dependency =>
         {
@@ -485,7 +488,7 @@ internal static class HumanInputBrowserFixture
             new("trigger-to-human-input", "trigger", NodeId, GovernedLoopControlCondition.Always),
             new("human-input-to-exit", NodeId, "exit", GovernedLoopControlCondition.Success),
         };
-        var graph = GovernedLoopGraphDefinition.Create(1, GraphId, RevisionId, "Park one exact durable browser Human Input request.", new ContextualRoleRevisionPin(role.Identity, role.ContentHash), "trigger", ["exit"], GovernedLoopAuthorityCeiling.Create([]), [new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false)], nodes, edges, [new GovernedLoopBindingDefinition("request-to-exit", GovernedLoopBindingKind.Data, "trigger", "request", "exit", "result")], new GovernedLoopOutputContract("Return the exact bounded result.", [new GovernedLoopOutputDefinition("result", "text", "exit", "published-result", true)]), new GovernedLoopDisplayMetadata("Browser Human Input graph", "The fixture uses only the canonical input gate.", nodes.Select((node, index) => new GovernedLoopNodeDisplayMetadata(node.Id, node.Id, "Node.", index * 100, 0)).ToArray()), DefaultRoutingPolicy());
+        var graph = GovernedLoopGraphDefinition.Create(1, GraphId, RevisionId, "Park one exact durable browser Human Input request.", new ContextualRoleRevisionPin(role.Identity, role.ContentHash), "trigger", ["exit"], GovernedLoopAuthorityCeiling.Create([ConversationTurnCapabilityId]), [new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false)], nodes, edges, [new GovernedLoopBindingDefinition("request-to-exit", GovernedLoopBindingKind.Data, "trigger", "request", "exit", "result")], new GovernedLoopOutputContract("Return the exact bounded result.", [new GovernedLoopOutputDefinition("result", "text", "exit", "published-result", true)]), new GovernedLoopDisplayMetadata("Browser Human Input graph", "The fixture uses only the canonical input gate.", nodes.Select((node, index) => new GovernedLoopNodeDisplayMetadata(node.Id, node.Id, "Node.", index * 100, 0)).ToArray()), DefaultRoutingPolicy());
         var revision = GovernedLoopRevisionArtifactFactory.Create(1, graph.RevisionReference, null, null, "browser-human-input-create", ActorId, now);
         return GovernedLoopGraphRevisionArtifactFactory.Create(1, revision, graph);
     }
@@ -494,7 +497,7 @@ internal static class HumanInputBrowserFixture
         => new(id, GovernedLoopSequentialNodeDescriptors.ManualTrigger, [new GovernedLoopPortDefinition("request", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "text", true), new GovernedLoopPortDefinition("invocation-context", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Context, "text", true)], GovernedLoopAuthorityCeiling.Create([]), new Dictionary<string, string>());
 
     private static GovernedLoopNodeDefinition Exit(string id)
-        => new(id, GovernedLoopSequentialNodeDescriptors.SuccessExit, [new GovernedLoopPortDefinition("result", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data, "text", true), new GovernedLoopPortDefinition("published-result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "text", true)], GovernedLoopAuthorityCeiling.Create([]), new Dictionary<string, string>());
+        => new(id, GovernedLoopSequentialNodeDescriptors.SuccessExit, [new GovernedLoopPortDefinition("result", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data, "text", true), new GovernedLoopPortDefinition("published-result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data, "text", true)], GovernedLoopAuthorityCeiling.Create([ConversationTurnCapabilityId]), new Dictionary<string, string>());
 
     private static GovernedModelRoutingPolicy DefaultRoutingPolicy()
     {
