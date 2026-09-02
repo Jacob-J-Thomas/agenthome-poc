@@ -346,7 +346,7 @@ internal static class HumanInputBrowserFixture
             throw new InvalidOperationException("The browser Human Input fixture grant identity is invalid.");
         }
 
-        var grant = AuthorityGrantHash.Apply(new AuthorityGrant(1, grantId!, grantRevision!, null, null, AuthorityGrantLifecycleStatus.Active, binding, AuthorityCeilingIntersection.EmptyCeiling(), new AuthorityGrantBoundary(_stableGrantStartsAtUtc, _stableGrantExpiresAtUtc, AuthorityGrantCompletionConstraintKind.None), actor!, purpose!, _stableDependencyTimestamp, string.Empty));
+        var grant = AuthorityGrantHash.Apply(new AuthorityGrant(1, grantId!, grantRevision!, null, null, AuthorityGrantLifecycleStatus.Active, binding, AuthorityCeilingIntersection.EmptyCeiling(), new AuthorityGrantBoundary(_stableGrantStartsAtUtc, _stableGrantExpiresAtUtc, AuthorityGrantCompletionConstraintKind.None), actor!, purpose!, now, string.Empty));
         var grantOperationId = "create-browser-human-input-grant-" + RequestIdFragment(workspaceId);
         var grantRequestHash = Hash("grant-request-" + workspaceId);
         var observed = await authorityStore.ReadForMutationAsync(grant.GrantId, grantOperationId, grantRequestHash).ConfigureAwait(false);
