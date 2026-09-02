@@ -18,6 +18,7 @@ public sealed class GovernedLoopEffectReconciliationPublicSurfaceTests
         ["IGovernedLoopEffectReconciliationProbe"] = ["ProbeAsync"],
         ["IGovernedLoopEffectReconciliationProbeRegistry"] = ["ListAsync", "ReadAsync"],
         ["IGovernedLoopEffectReconciliationResolutionReader"] = ["ReadAsync"],
+        ["IGovernedLoopEffectReconciliationService"] = ["AssessAsync", "DisposeAsync", "OpenAsync", "ReadAsync", "ResolveAsync"],
     };
     private static readonly string[] _forbiddenApplicationDependencies =
     [
