@@ -85,7 +85,8 @@ public sealed class GovernedLoopExecutionStateMatrixTests
             (GovernedLoopEffectPhase.Reconciled, GovernedLoopEffectOutcome.OutcomeUnknown, GovernedLoopEffectEvidenceStatus.Complete, false, true),
             (GovernedLoopEffectPhase.Reconciled, GovernedLoopEffectOutcome.Succeeded, GovernedLoopEffectEvidenceStatus.Complete, true, true),
             (GovernedLoopEffectPhase.Reconciled, GovernedLoopEffectOutcome.Failed, GovernedLoopEffectEvidenceStatus.Complete, true, true),
-            (GovernedLoopEffectPhase.Reconciled, GovernedLoopEffectOutcome.Conflicted, GovernedLoopEffectEvidenceStatus.Complete, true, true)
+            (GovernedLoopEffectPhase.Reconciled, GovernedLoopEffectOutcome.Conflicted, GovernedLoopEffectEvidenceStatus.Complete, true, true),
+            (GovernedLoopEffectPhase.Reconciled, GovernedLoopEffectOutcome.NotApplied, GovernedLoopEffectEvidenceStatus.Complete, false, true)
         ];
         AssertSetEqual(expectedEffects, actualEffects);
 

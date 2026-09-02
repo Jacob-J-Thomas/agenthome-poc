@@ -12,5 +12,7 @@ public enum GovernedLoopEffectOutcome
     /// <summary>Conclusive failure was observed.</summary>
     Failed,
     /// <summary>Available observations conflict.</summary>
-    Conflicted
+    Conflicted,
+    /// <summary>Authoritative reconciliation proved that the external effect was not applied.</summary>
+    NotApplied
 }

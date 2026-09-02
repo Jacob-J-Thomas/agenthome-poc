@@ -760,10 +760,18 @@ public static class GovernedLoopExecutionValidator
 
         if (current.Phase == GovernedLoopEffectPhase.ReconciliationRequired && next.Phase == GovernedLoopEffectPhase.Reconciled)
         {
-            return next.ReconciliationEvidenceId is not null
-                && current.Outcome == next.Outcome
+            var provedNotApplied = current.Outcome == GovernedLoopEffectOutcome.OutcomeUnknown
+                && current.EvidenceStatus is GovernedLoopEffectEvidenceStatus.Incomplete or GovernedLoopEffectEvidenceStatus.Conflicting
+                && current.OutcomeEvidenceId is null
+                && current.ReconciliationEvidenceId is null
+                && next.Outcome == GovernedLoopEffectOutcome.NotApplied
+                && next.EvidenceStatus == GovernedLoopEffectEvidenceStatus.Complete
+                && next.OutcomeEvidenceId is null;
+            var preservedOutcome = current.Outcome == next.Outcome
                 && string.Equals(current.OutcomeEvidenceId, next.OutcomeEvidenceId, StringComparison.Ordinal)
                 && current.Outcome != GovernedLoopEffectOutcome.None;
+            return next.ReconciliationEvidenceId is not null
+                && (provedNotApplied || preservedOutcome);
         }
 
         return current.ReconciliationEvidenceId is null && next.ReconciliationEvidenceId is null;

@@ -506,6 +506,13 @@ public static class GovernedLoopExecutionStateMatrix
         bool hasOutcomeEvidence,
         bool hasReconciliationEvidence)
     {
+        if (outcome == GovernedLoopEffectOutcome.NotApplied)
+        {
+            return evidenceStatus == GovernedLoopEffectEvidenceStatus.Complete
+                && !hasOutcomeEvidence
+                && hasReconciliationEvidence;
+        }
+
         return outcome != GovernedLoopEffectOutcome.None
             && evidenceStatus == GovernedLoopEffectEvidenceStatus.Complete
             && hasReconciliationEvidence
