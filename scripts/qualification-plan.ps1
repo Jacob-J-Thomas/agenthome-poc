@@ -286,7 +286,15 @@ $script:QualificationLinkedTestMappings = @(
         Path = "tests/EmbodySense.Core.Application.Tests/Loops/Execution/Effects/GovernedLoopEffectAttemptTestFixture.cs"
         TestProjects = @(
             "tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj",
+            "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj",
             "tests/EmbodySense.Core.Startup.Tests/EmbodySense.Core.Startup.Tests.csproj"
+        )
+    },
+    [pscustomobject]@{
+        Path = "tests/EmbodySense.Core.Application.Tests/Loops/Execution/Reconciliation/GovernedLoopEffectReconciliationApplicationTestFixture.cs"
+        TestProjects = @(
+            "tests/EmbodySense.Core.Application.Tests/EmbodySense.Core.Application.Tests.csproj",
+            "tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj"
         )
     },
     [pscustomobject]@{

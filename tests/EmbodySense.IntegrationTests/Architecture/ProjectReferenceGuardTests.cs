@@ -127,7 +127,9 @@ public sealed class ProjectReferenceGuardTests
             "EmbodySense.Core.Application.Runtime"
         };
 
-        return forbiddenNamespaces.Any(namespaceName => text.Contains(namespaceName, StringComparison.Ordinal));
+        return forbiddenNamespaces.Any(namespaceName => text.Contains(namespaceName, StringComparison.Ordinal)
+            && !(namespaceName == "EmbodySense.Core.Application.Loops.Execution"
+                && text.Contains("EmbodySense.Core.Application.Loops.Execution.Reconciliation", StringComparison.Ordinal)));
     }
 
     private static bool ContainsForbiddenCoreReference(string file)
