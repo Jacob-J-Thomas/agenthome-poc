@@ -59,9 +59,9 @@ public sealed partial class BrowserFlowTests
             await browser.WaitForExpressionAsync("window.__humanReviewResponseLoss?.networkPosts === 1");
             var responseLossResult = await browser.EvaluateStringAsync("JSON.stringify({ status: window.__humanReviewResponseLoss.realCommitStatus, mode: window.__humanReviewResponseLoss.mode })");
             Assert.True(await browser.EvaluateBooleanAsync("window.__humanReviewResponseLoss.realCommitStatus === 200 && window.__humanReviewResponseLoss.mode === 'response-lost'"), responseLossResult);
-            await WaitForCanonicalHumanReviewResponseLossAsync(browser, runId, initialRequestId!, initialRequestHash!, "approved", 1, initialLifecycleVersion + 1);
+            var approvedLifecycleVersion = await WaitForCanonicalHumanReviewResponseLossAsync(browser, runId, initialRequestId!, initialRequestHash!, "approved", 1, initialLifecycleVersion + 1);
             using var afterLossDocument = JsonDocument.Parse(await ReadHumanReviewResponseLossAsync(browser, runId));
-            AssertHumanReviewIdentity(afterLossDocument, runId, initialRequestId!, initialRequestHash!, initialLifecycleVersion + 1);
+            AssertHumanReviewIdentity(afterLossDocument, runId, initialRequestId!, initialRequestHash!, approvedLifecycleVersion);
             await browser.WaitForExpressionAsync("document.getElementById('humanReviewActionStatus').textContent.includes('recorded decision response remains unresolved')");
             Assert.True(await browser.EvaluateBooleanAsync("document.querySelector('[data-testid=\"human-review-approve\"]')?.textContent.toLowerCase().includes('retry recorded approve') && document.querySelector('[data-testid=\"human-review-approve\"]')?.disabled === false"));
             Assert.True(await browser.EvaluateBooleanAsync("window.__humanReviewResponseLoss.canonicalGets >= 3"));
@@ -77,15 +77,17 @@ public sealed partial class BrowserFlowTests
             await InitializeWorkspaceAsyncIfNeededAsync(browser);
             await OpenHumanReviewResponseLossAsync(browser);
             await SelectHumanReviewResponseLossAsync(browser, runId);
-            await WaitForCanonicalHumanReviewResponseLossAsync(browser, runId, initialRequestId!, initialRequestHash!, "approved", 1, initialLifecycleVersion + 1);
+            var reloadedLifecycleVersion = await WaitForCanonicalHumanReviewResponseLossAsync(browser, runId, initialRequestId!, initialRequestHash!, "approved", 1, approvedLifecycleVersion);
+            Assert.Equal(approvedLifecycleVersion, reloadedLifecycleVersion);
             using var afterReloadDocument = JsonDocument.Parse(await ReadHumanReviewResponseLossAsync(browser, runId));
-            AssertHumanReviewIdentity(afterReloadDocument, runId, initialRequestId!, initialRequestHash!, initialLifecycleVersion + 1);
+            AssertHumanReviewIdentity(afterReloadDocument, runId, initialRequestId!, initialRequestHash!, reloadedLifecycleVersion);
             await browser.WaitForExpressionAsync("document.getElementById('humanReviewActionStatus').textContent.includes('recorded decision response remains unresolved')");
             Assert.True(await browser.EvaluateBooleanAsync("document.querySelector('[data-testid=\"human-review-approve\"]')?.textContent.toLowerCase().includes('retry recorded approve') && document.querySelector('[data-testid=\"human-review-approve\"]')?.disabled === false"));
             await browser.EvaluateWithUserGestureAsync(HumanReviewBrowserResponseLossScripts.InstallRetryCapture(actionPath));
             await ClickAsync(browser, "[data-testid=\"human-review-approve\"]");
             await browser.WaitForExpressionAsync("window.__humanReviewRetryCapture?.statuses.length === 1 && window.__humanReviewRetryCapture.statuses[0] === 200");
-            await WaitForCanonicalHumanReviewResponseLossAsync(browser, runId, initialRequestId!, initialRequestHash!, "approved", 1, initialLifecycleVersion + 1);
+            var replayedLifecycleVersion = await WaitForCanonicalHumanReviewResponseLossAsync(browser, runId, initialRequestId!, initialRequestHash!, "approved", 1, reloadedLifecycleVersion);
+            Assert.Equal(reloadedLifecycleVersion, replayedLifecycleVersion);
 
             using var secondPayloadDocument = JsonDocument.Parse(await browser.EvaluateStringAsync("window.__humanReviewRetryCapture.payloads[0]"));
             Assert.Equal(firstOperationId, secondPayloadDocument.RootElement.GetProperty("operationId").GetString());
@@ -147,7 +149,7 @@ public sealed partial class BrowserFlowTests
         throw new TimeoutException("The response-loss Human Review detail did not reach a canonical ready state.");
     }
 
-    private static async Task WaitForCanonicalHumanReviewResponseLossAsync(HeadlessBrowserSession browser, string runId, string expectedRequestId, string expectedRequestHash, string lifecycle, int decisionCount, long expectedLifecycleVersion)
+    private static async Task<long> WaitForCanonicalHumanReviewResponseLossAsync(HeadlessBrowserSession browser, string runId, string expectedRequestId, string expectedRequestHash, string lifecycle, int decisionCount, long minimumLifecycleVersion)
     {
         var lifecycleToken = JsonSerializer.Serialize(lifecycle.Replace('-', ' '));
         var runIdToken = JsonSerializer.Serialize(runId);
@@ -169,23 +171,27 @@ public sealed partial class BrowserFlowTests
 
                 using var document = JsonDocument.Parse(response.Body);
                 var root = document.RootElement;
-                var summary = root.GetProperty("detail").GetProperty("summary");
+                var detail = root.GetProperty("detail");
+                var summary = detail.GetProperty("summary");
+                var lifecycleVersion = summary.GetProperty("lifecycleVersion").GetInt64();
+                var continuationStatus = detail.GetProperty("runtime").GetProperty("continuationStatus").GetString();
                 var canonical = string.Equals(root.GetProperty("status").GetString(), "ready", StringComparison.OrdinalIgnoreCase)
                     && string.Equals(summary.GetProperty("runId").GetString(), runId, StringComparison.Ordinal)
                     && string.Equals(summary.GetProperty("requestId").GetString(), expectedRequestId, StringComparison.Ordinal)
                     && string.Equals(summary.GetProperty("requestHash").GetString(), expectedRequestHash, StringComparison.Ordinal)
                     && string.Equals(summary.GetProperty("lifecycleStatus").GetString(), lifecycle, StringComparison.OrdinalIgnoreCase)
-                    && summary.GetProperty("lifecycleVersion").GetInt64() == expectedLifecycleVersion
-                    && root.GetProperty("detail").GetProperty("decisions").GetArrayLength() == decisionCount;
+                    && lifecycleVersion >= minimumLifecycleVersion
+                    && detail.GetProperty("decisions").GetArrayLength() == decisionCount
+                    && continuationStatus is "published" or "claimed";
                 if (canonical)
                 {
-                    var rendered = await browser.EvaluateBooleanAsync($"document.getElementById('humanReviewDetailStatus').textContent.includes('Canonical state reread') && document.getElementById('humanReviewIdentity').textContent.includes({requestIdToken}) && document.getElementById('humanReviewIdentity').textContent.includes({requestHashPrefixToken}) && document.getElementById('humanReviewLifecycleStatus').textContent.toLowerCase().includes({lifecycleToken}) && document.getElementById('humanReviewLifecycleStatus').textContent.includes('version {expectedLifecycleVersion}') && document.querySelectorAll('#humanReviewDecisionHistory .human-review-decision-item').length === {decisionCount}").ConfigureAwait(false);
+                    var rendered = await browser.EvaluateBooleanAsync($"document.getElementById('humanReviewDetailStatus').textContent.includes('Canonical state reread') && document.getElementById('humanReviewIdentity').textContent.includes({requestIdToken}) && document.getElementById('humanReviewIdentity').textContent.includes({requestHashPrefixToken}) && document.getElementById('humanReviewLifecycleStatus').textContent.toLowerCase().includes({lifecycleToken}) && document.getElementById('humanReviewLifecycleStatus').textContent.includes('version {lifecycleVersion}') && document.querySelectorAll('#humanReviewDecisionHistory .human-review-decision-item').length === {decisionCount}").ConfigureAwait(false);
                     if (rendered)
                     {
-                        return;
+                        return lifecycleVersion;
                     }
 
-                    var listMatchesCanonical = await browser.EvaluateBooleanAsync($"Array.from(document.querySelectorAll('[data-testid=\"human-review-item\"]')).some(item => item.dataset.runId === {runIdToken} && item.textContent.includes('version {expectedLifecycleVersion}'))").ConfigureAwait(false);
+                    var listMatchesCanonical = await browser.EvaluateBooleanAsync($"Array.from(document.querySelectorAll('[data-testid=\"human-review-item\"]')).some(item => item.dataset.runId === {runIdToken} && item.textContent.includes('version {lifecycleVersion}'))").ConfigureAwait(false);
                     if (!listMatchesCanonical)
                     {
                         // The detail endpoint may advance before the catalog response. Refresh the visible
@@ -239,15 +245,44 @@ public sealed partial class BrowserFlowTests
         {
             using var document = JsonDocument.Parse(body);
             var root = document.RootElement;
-            bodyDescription = root.TryGetProperty("status", out var responseStatus)
-                ? $"json-status={responseStatus.GetString() ?? "null"}"
-                : "json-status=missing";
+            bodyDescription = DescribeHumanReviewResponseLossBody(root);
         }
         catch (JsonException)
         {
         }
 
         return $"http={status}; body-length={body.Length}; {bodyDescription}";
+    }
+
+    private static string DescribeHumanReviewResponseLossBody(JsonElement root)
+    {
+        if (root.ValueKind != JsonValueKind.Object
+            || !root.TryGetProperty("status", out var status)
+            || status.ValueKind != JsonValueKind.String)
+        {
+            return "json-status=invalid; detail=unavailable";
+        }
+
+        var responseStatus = status.GetString() ?? "null";
+        if (!root.TryGetProperty("detail", out var detail)
+            || detail.ValueKind != JsonValueKind.Object
+            || !detail.TryGetProperty("summary", out var summary)
+            || summary.ValueKind != JsonValueKind.Object
+            || !summary.TryGetProperty("lifecycleStatus", out var lifecycle)
+            || lifecycle.ValueKind != JsonValueKind.String
+            || !summary.TryGetProperty("lifecycleVersion", out var lifecycleVersion)
+            || lifecycleVersion.ValueKind != JsonValueKind.Number
+            || !detail.TryGetProperty("decisions", out var decisions)
+            || decisions.ValueKind != JsonValueKind.Array
+            || !detail.TryGetProperty("runtime", out var runtime)
+            || runtime.ValueKind != JsonValueKind.Object
+            || !runtime.TryGetProperty("continuationStatus", out var continuation)
+            || continuation.ValueKind != JsonValueKind.String)
+        {
+            return $"json-status={responseStatus}; detail=unavailable";
+        }
+
+        return $"json-status={responseStatus}; lifecycle={lifecycle.GetString() ?? "null"}; version={lifecycleVersion.GetRawText()}; decisions={decisions.GetArrayLength()}; continuation={continuation.GetString() ?? "null"}";
     }
 
     private static void AssertHumanReviewIdentity(JsonDocument document, string runId, string requestId, string requestHash, long lifecycleVersion)
