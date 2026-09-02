@@ -1216,7 +1216,9 @@ public sealed partial class BrowserFlowTests
 
         try
         {
+            await HideCommittedWorkspaceInitializationUntilReloadAsync(browser);
             await InitializeWorkspaceAsync(browser);
+            Assert.Equal("reload", await browser.EvaluateStringAsync("performance.getEntriesByType('navigation')[0].type"));
             await ClickAsync(browser, "#loopsNav");
             await browser.WaitForExpressionAsync("!document.getElementById('loopsView').hidden && document.getElementById('loopList').textContent.includes('System loop')");
             Assert.Equal(0, await browser.EvaluateInt32Async("performance.getEntriesByType('resource').filter((entry) => entry.name.endsWith('/api/loops/receipt-retention')).length"));
@@ -1652,15 +1654,6 @@ public sealed partial class BrowserFlowTests
         Assert.Equal(CapabilityArtifactStoreStatus.Applied, (await artifacts.StageAsync(stage)).Status);
         Assert.Equal(CapabilityArtifactStoreStatus.Applied, (await artifacts.ActivateAsync(new CapabilityArtifactActivationRequest(manifest, 0, "activate-browser-lifecycle"))).Status);
         return descriptor.Id;
-    }
-
-    private static async Task InitializeWorkspaceAsync(HeadlessBrowserSession browser)
-    {
-        await browser.WaitForExpressionAsync("document.getElementById('workspaceStatus').textContent.includes('Needs initialization')");
-        await browser.WaitForExpressionAsync("!document.getElementById('initButton').disabled");
-        await ClickAsync(browser, "#initButton");
-        await browser.WaitForExpressionAsync("document.getElementById('workspaceStatus').textContent.includes('Initialized')");
-        await browser.WaitForExpressionAsync("document.getElementById('configContent').textContent.includes('compatible-test')");
     }
 
     private static Task<int> GetCustomDefinitionCountAsync(HeadlessBrowserSession browser)
@@ -2387,7 +2380,7 @@ public sealed partial class BrowserFlowTests
             return value.GetInt32();
         }
 
-        public async Task ReloadAsync(bool acceptBeforeUnload = false)
+        public async Task ReloadAsync(bool acceptBeforeUnload = false, CancellationToken cancellationToken = default)
         {
             if (acceptBeforeUnload)
             {
@@ -2396,7 +2389,7 @@ public sealed partial class BrowserFlowTests
 
             try
             {
-                _ = await SendCommandAsync("Page.reload", new { ignoreCache = true });
+                _ = await SendCommandAsync("Page.reload", new { ignoreCache = true }, cancellationToken);
             }
             catch
             {
