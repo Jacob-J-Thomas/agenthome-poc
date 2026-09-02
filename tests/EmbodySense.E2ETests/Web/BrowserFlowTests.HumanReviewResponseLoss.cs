@@ -37,8 +37,10 @@ public sealed partial class BrowserFlowTests
         var runId = "browser-human-review-response-loss";
         await HumanReviewBrowserFixture.SeedPendingAsync(paths, runId, "committed response loss", includePreDispatchEffect: true, capabilityTrustRoot: capabilityTrustRoot);
 
-        await using var app = await ExternalWebApplicationProcess.StartBrowserProfileHostAsync(workspace.RootPath, GetFreePort(), codexExecutable, "gpt-test", capabilityTrustRoot, [profile]);
-        await using var browser = await HeadlessBrowserSession.StartAsync(app.BaseUrl);
+        var port = GetFreePort();
+        ExternalWebApplicationProcess? app = await ExternalWebApplicationProcess.StartBrowserProfileHostAsync(workspace.RootPath, port, codexExecutable, "gpt-test", capabilityTrustRoot, [profile], suppressGovernedBackgroundHost: true);
+        HeadlessBrowserSession? browser = await HeadlessBrowserSession.StartAsync(app.BaseUrl);
+        string? retiredServerOutput = null;
         try
         {
             await InitializeWorkspaceAsyncIfNeededAsync(browser);
@@ -52,7 +54,6 @@ public sealed partial class BrowserFlowTests
             Assert.False(string.IsNullOrWhiteSpace(initialRequestId));
             Assert.Matches("^[0-9a-f]{64}$", initialRequestHash ?? string.Empty);
             Assert.True(initialLifecycleVersion > 0);
-            await using var authorityParking = await HumanReviewAuthorityParkingLease.ParkAsync(paths);
             var actionPath = $"/api/human-reviews/{Uri.EscapeDataString(runId)}/approve";
             await browser.EvaluateWithUserGestureAsync(HumanReviewBrowserResponseLossScripts.InstallPostCommitResponseLoss(actionPath));
             await ClickAsync(browser, "[data-testid=\"human-review-approve\"]");
@@ -99,8 +100,18 @@ public sealed partial class BrowserFlowTests
             using var reviewDocument = JsonDocument.Parse(await ReadHumanReviewResponseLossAsync(browser, runId));
             Assert.Equal(1, reviewDocument.RootElement.GetProperty("detail").GetProperty("decisions").GetArrayLength());
             Assert.Equal(firstOperationId, reviewDocument.RootElement.GetProperty("detail").GetProperty("decisions")[0].GetProperty("operationId").GetString());
-            await AssertHumanReviewStillBlockedBeforeAuthorityRestoreAsync(paths, runId);
-            await authorityParking.RestoreAsync();
+            await AssertHumanReviewStillBlockedBeforeRecoveryAsync(paths, runId);
+            await browser.BeginExpectedServerRestartAsync();
+            retiredServerOutput = app.FormatOutput();
+            await app.DisposeAsync();
+            app = null;
+            await browser.WaitForExpressionAsync("/reconnect|retry/i.test(document.getElementById('clientStatus').textContent)");
+            browser.MarkExpectedReplacementServerStarting();
+            app = await ExternalWebApplicationProcess.StartBrowserProfileHostAsync(workspace.RootPath, port, codexExecutable, "gpt-test", capabilityTrustRoot, [profile]);
+            await browser.WaitForExpressionAsync("document.getElementById('clientStatus').textContent === 'Web primary'");
+            await browser.ReloadAsync();
+            await InitializeWorkspaceAsyncIfNeededAsync(browser);
+            await browser.EndExpectedServerRestartAsync();
             var durable = await WaitForCompletedHumanReviewResponseLossAsync(paths, runId);
             await AssertSingleApprovedPreDispatchEffectAsync(paths, durable);
             app.AssertHealthy();
@@ -108,8 +119,20 @@ public sealed partial class BrowserFlowTests
         }
         catch
         {
-            await WriteFailureDiagnosticsAsync(nameof(Human_review_browser_retries_a_committed_response_loss_with_the_original_operation_and_lifecycle), browser, app);
+            await WriteFailureDiagnosticsAsync(nameof(Human_review_browser_retries_a_committed_response_loss_with_the_original_operation_and_lifecycle), browser, app, retiredServerOutput);
             throw;
+        }
+        finally
+        {
+            if (browser is not null)
+            {
+                await browser.DisposeAsync();
+            }
+
+            if (app is not null)
+            {
+                await app.DisposeAsync();
+            }
         }
     }
 
@@ -182,7 +205,7 @@ public sealed partial class BrowserFlowTests
                     && string.Equals(summary.GetProperty("lifecycleStatus").GetString(), lifecycle, StringComparison.OrdinalIgnoreCase)
                     && lifecycleVersion >= minimumLifecycleVersion
                     && detail.GetProperty("decisions").GetArrayLength() == decisionCount
-                    && continuationStatus is "published" or "claimed";
+                    && continuationStatus == "reserved";
                 if (canonical)
                 {
                     var rendered = await browser.EvaluateBooleanAsync($"document.getElementById('humanReviewDetailStatus').textContent.includes('Canonical state reread') && document.getElementById('humanReviewIdentity').textContent.includes({requestIdToken}) && document.getElementById('humanReviewIdentity').textContent.includes({requestHashPrefixToken}) && document.getElementById('humanReviewLifecycleStatus').textContent.toLowerCase().includes({lifecycleToken}) && document.getElementById('humanReviewLifecycleStatus').textContent.includes('version {lifecycleVersion}') && document.querySelectorAll('#humanReviewDecisionHistory .human-review-decision-item').length === {decisionCount}", timeout.Token).ConfigureAwait(false);
@@ -366,16 +389,15 @@ public sealed partial class BrowserFlowTests
         throw new TimeoutException($"Human Review run `{runId}` did not complete after the response-loss retry ({lastStatus}).");
     }
 
-    private static async Task AssertHumanReviewStillBlockedBeforeAuthorityRestoreAsync(WorkspacePaths paths, string runId)
+    private static async Task AssertHumanReviewStillBlockedBeforeRecoveryAsync(WorkspacePaths paths, string runId)
     {
         using var store = new CustomLoopRunStore(paths);
-        var durable = await store.GetAsync(runId).ConfigureAwait(false) ?? throw new InvalidOperationException("The response-loss Human Review run disappeared before authority restore.");
+        var durable = await store.GetAsync(runId).ConfigureAwait(false) ?? throw new InvalidOperationException("The response-loss Human Review run disappeared before recovery.");
         Assert.Equal(CustomLoopRunStatus.Paused, durable.Status);
         Assert.Equal(GovernedLoopFrontierStatus.ReviewBlocked, durable.Frontier?.Payload.Status);
         var review = Assert.IsType<HumanReviewRunState>(durable.HumanReview);
-        var continuation = Assert.IsType<HumanReviewContinuationState>(review.Continuation);
-        Assert.Null(continuation.Completion);
-        Assert.Null(continuation.Retirement);
+        Assert.NotNull(review.ContinuationReservation);
+        Assert.Null(review.Continuation);
         var effect = Assert.IsType<HumanReviewEffectAttemptBinding>(review.Request.Binding.EffectAttempt);
         var workspaceId = CapabilityWorkspaceScopeId.Create(paths.RootPath);
         var read = await new GovernedLoopEffectAttemptStore(paths).ReadAsync(workspaceId, effect.OperationId, effect.EffectGeneration).ConfigureAwait(false);

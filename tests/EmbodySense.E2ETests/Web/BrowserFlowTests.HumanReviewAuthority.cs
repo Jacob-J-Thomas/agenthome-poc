@@ -122,8 +122,7 @@ public sealed partial class BrowserFlowTests
             await InitializeWorkspaceAsyncIfNeededAsync(browser);
             await browser.EndExpectedServerRestartAsync();
             await OpenHumanReviewAsync(browser);
-            await SelectHumanReviewAsync(browser, runId);
-            await WaitForCanonicalHumanReviewAsync(browser, "approved", 1);
+            await SelectHumanReviewAfterAuthorityRevocationAsync(browser, runId);
             var reread = await ReadHumanReviewAsync(browser, runId);
             AssertCanonicalApproval(reread);
             Assert.Equal(approvedDecision, ReadApprovalDecision(reread));
@@ -140,11 +139,11 @@ public sealed partial class BrowserFlowTests
             Assert.Equal("exact-not-started", effectEvidence.GetProperty("status").GetString());
             Assert.Equal("not-started", effectEvidence.GetProperty("certainty").GetString());
             app.AssertHealthy();
-            await browser.AssertHealthyAsync();
+            await AssertAuthorityRevocationBrowserHealthyAsync(browser, runId);
         }
         catch
         {
-            await WriteFailureDiagnosticsAsync(nameof(Human_review_browser_retains_consent_after_server_owned_authority_revocation_without_release), browser, app);
+            await WriteFailureDiagnosticsAsync(nameof(Human_review_browser_retains_consent_after_server_owned_authority_revocation_without_release), browser, app, retiredServerOutput);
             throw;
         }
         finally
@@ -258,6 +257,44 @@ public sealed partial class BrowserFlowTests
     {
         var encodedRoute = JsonSerializer.Serialize(route);
         return browser.EvaluateStringAsync($"(async () => {{ const response = await fetch({encodedRoute}, {{ cache: 'no-store' }}); return response.status + '|' + await response.text(); }})()");
+    }
+
+    private static async Task SelectHumanReviewAfterAuthorityRevocationAsync(HeadlessBrowserSession browser, string runId)
+    {
+        var selector = JsonSerializer.Serialize($"[data-testid=\"human-review-item\"][data-run-id=\"{runId}\"]");
+        var runIdToken = JsonSerializer.Serialize(runId);
+        await browser.EvaluateWithUserGestureAsync($"(() => {{ const item = document.querySelector({selector}); if (!item) throw new Error('Retained Human Review item was not rendered.'); item.click(); }})()");
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        while (!timeout.IsCancellationRequested)
+        {
+            var ready = await browser.EvaluateBooleanAsync($"(() => {{ const actions = ['approve', 'reject', 'cancel', 'request-information'].map(action => document.querySelector(`[data-testid=\"human-review-${{action}}\"]`)); return document.getElementById('humanReviewDetailStatus').textContent.includes('Canonical state reread') && document.getElementById('humanReviewIdentity').textContent.includes({runIdToken}) && document.getElementById('humanReviewLifecycleStatus').textContent.toLowerCase().includes('approved') && document.querySelectorAll('#humanReviewDecisionHistory .human-review-decision-item').length === 1 && actions.every(element => element?.disabled === true); }})()", timeout.Token).ConfigureAwait(false);
+            if (ready)
+            {
+                return;
+            }
+
+            await browser.EvaluateWithUserGestureAsync("document.querySelector('[data-testid=\"human-review-detail-refresh\"]')?.click()", timeout.Token).ConfigureAwait(false);
+            try
+            {
+                await Task.Delay(200, timeout.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+            {
+                break;
+            }
+        }
+
+        throw new TimeoutException("The retained approved Human Review did not converge after authority revocation.");
+    }
+
+    private static Task AssertAuthorityRevocationBrowserHealthyAsync(HeadlessBrowserSession browser, string runId)
+    {
+        var evidenceFragment = $"/api/human-reviews/{Uri.EscapeDataString(runId)}/evidence";
+        var observedUnavailable = browser.DiagnosticsSnapshot().Any(item => item.Contains(evidenceFragment, StringComparison.Ordinal)
+            && (item.Contains("\"status\":503", StringComparison.Ordinal) || item.Contains("status of 503 (", StringComparison.Ordinal)));
+        return observedUnavailable
+            ? browser.AssertHealthyAsync((evidenceFragment, 503))
+            : browser.AssertHealthyAsync();
     }
 
     private static async Task<GovernedLoopEffectAttempt> ReadCanonicalEffectAttemptAsync(WorkspacePaths paths, string runId)

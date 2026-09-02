@@ -61,7 +61,8 @@ internal sealed class ExternalWebApplicationProcess : IAsyncDisposable
         string model,
         string capabilityTrustRoot,
         IReadOnlyList<BrowserModelProfileSpec> profiles,
-        IReadOnlyList<BrowserCommandActionSpec>? commandActions = null)
+        IReadOnlyList<BrowserCommandActionSpec>? commandActions = null,
+        bool suppressGovernedBackgroundHost = false)
     {
         var hostAssemblyPath = typeof(BrowserProfileWebHost).Assembly.Location;
         if (!File.Exists(hostAssemblyPath))
@@ -84,6 +85,11 @@ internal sealed class ExternalWebApplicationProcess : IAsyncDisposable
             additionalArguments.Add("--command-action-registration");
             additionalArguments.Add(BrowserProfileWebHost.Serialize(commandAction));
         }
+        if (suppressGovernedBackgroundHost)
+        {
+            additionalArguments.Add("--suppress-governed-background-host-for-test");
+        }
+
         var runtimeConfigPath = Path.Combine(AppContext.BaseDirectory, "EmbodySense.E2ETests.runtimeconfig.json");
         var depsFilePath = Path.Combine(AppContext.BaseDirectory, "EmbodySense.E2ETests.deps.json");
         return await StartCoreAsync(

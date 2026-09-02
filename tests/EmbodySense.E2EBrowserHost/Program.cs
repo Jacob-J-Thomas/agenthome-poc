@@ -63,6 +63,19 @@ namespace EmbodySense.E2EBrowserHost
                         BrowserCommandActionArtifactTrustVerifier.Instance),
                     BrowserCommandActionProcessIsolationBoundary.Instance);
             var builder = EmbodySense.Web.Program.CreateBuilder(args, options);
+            if (args.Contains("--suppress-governed-background-host-for-test", StringComparer.Ordinal))
+            {
+                var backgroundHostRegistrations = builder.Services
+                    .Where(service => service.ServiceType == typeof(Microsoft.Extensions.Hosting.IHostedService) && service.ImplementationFactory is not null)
+                    .ToArray();
+                if (backgroundHostRegistrations.Length != 1)
+                {
+                    throw new InvalidOperationException("The test host could not identify exactly one application-owned governed background registration.");
+                }
+
+                builder.Services.Remove(backgroundHostRegistrations[0]);
+            }
+
             builder.Services.RemoveAll<WebAgentRuntimeHost>();
             builder.Services.AddSingleton(provider =>
             {
