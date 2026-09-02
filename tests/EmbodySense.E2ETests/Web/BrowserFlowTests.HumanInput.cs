@@ -155,7 +155,7 @@ public sealed partial class BrowserFlowTests
             Assert.Equal(winnerOperationId, operation.OperationId);
             Assert.Equal(response.ResponseId, operation.SubmittedResponse?.ResponseId);
             app.AssertHealthy();
-            await browser.AssertHealthyAsync();
+            await browser.AssertHealthyAsync(($"/api/human-input/{RequestId}/answer", 409));
         }
         catch
         {
@@ -255,7 +255,7 @@ public sealed partial class BrowserFlowTests
         const string SupersedeId = "browser-human-input-supersede";
         await HumanInputBrowserFixture.SeedPendingAsync(paths, CancelId, "Cancel this exact request.", capabilityTrustRoot);
         await HumanInputBrowserFixture.SeedPendingAsync(paths, RejectId, "Reject this exact request.", capabilityTrustRoot);
-        await HumanInputBrowserFixture.SeedPendingAsync(paths, ExpiryId, "Answer only inside this short window.", capabilityTrustRoot, TimeSpan.FromSeconds(1));
+        await HumanInputBrowserFixture.SeedPendingAsync(paths, ExpiryId, "Answer only inside this short window.", capabilityTrustRoot, requestExpiresAtUtc: DateTimeOffset.UtcNow.AddSeconds(1));
         await HumanInputBrowserFixture.SeedPendingAsync(paths, SupersedeId, "Supersede this exact request.", capabilityTrustRoot);
         await using var app = await ExternalWebApplicationProcess.StartBrowserProfileHostAsync(workspace.RootPath, GetFreePort(), codexExecutable, "gpt-test", capabilityTrustRoot, [profile]);
         await using var browser = await HeadlessBrowserSession.StartAsync(app.BaseUrl);
@@ -417,8 +417,20 @@ public sealed partial class BrowserFlowTests
     private static async Task<JsonElement> ReadHumanInputPayloadAsync(HeadlessBrowserSession browser, string expression)
     {
         var serialized = await browser.EvaluateStringAsync($"JSON.stringify({expression})");
-        using var document = JsonDocument.Parse(serialized);
-        return document.RootElement.Clone();
+        using var envelope = JsonDocument.Parse(serialized);
+        if (envelope.RootElement.ValueKind != JsonValueKind.String)
+        {
+            return envelope.RootElement.Clone();
+        }
+
+        var body = envelope.RootElement.GetString();
+        if (string.IsNullOrWhiteSpace(body))
+        {
+            throw new JsonException("The captured Human Input response body was empty.");
+        }
+
+        using var bodyDocument = JsonDocument.Parse(body);
+        return bodyDocument.RootElement.Clone();
     }
 
     private static async Task SetValueForTabAsync(HeadlessBrowserTab tab, string selector, string value)

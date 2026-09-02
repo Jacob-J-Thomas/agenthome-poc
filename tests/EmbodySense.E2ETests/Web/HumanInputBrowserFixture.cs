@@ -84,19 +84,22 @@ internal static class HumanInputBrowserFixture
         string capabilityTrustRoot,
         TimeSpan? requestLifetime = null,
         HumanInputPrivacyClass privacyClass = HumanInputPrivacyClass.Private,
-        string? eligibleRespondentId = null)
+        string? eligibleRespondentId = null,
+        DateTimeOffset? requestExpiresAtUtc = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
         ArgumentException.ThrowIfNullOrWhiteSpace(requestId);
         ArgumentException.ThrowIfNullOrWhiteSpace(prompt);
         ArgumentException.ThrowIfNullOrWhiteSpace(capabilityTrustRoot);
 
-        var now = requestLifetime is { } lifetime && lifetime <= TimeSpan.FromMinutes(2)
-            ? DateTimeOffset.UtcNow
-            : DateTimeOffset.UtcNow.AddMinutes(-5);
+        var now = requestExpiresAtUtc is { } expiresAtUtc
+            ? expiresAtUtc.ToUniversalTime() - HumanInputLimits.MinResponseWindow
+            : requestLifetime is { } lifetime && lifetime <= TimeSpan.FromMinutes(2)
+                ? DateTimeOffset.UtcNow
+                : DateTimeOffset.UtcNow.AddMinutes(-5);
         var workspaceId = CapabilityWorkspaceScopeId.Create(paths.RootPath);
         var dependencies = await EnsureAuthorityDependenciesAsync(paths, capabilityTrustRoot, workspaceId, now).ConfigureAwait(false);
-        var request = CreateRequest(workspaceId, requestId, prompt, dependencies.Publication, now, requestLifetime, privacyClass, eligibleRespondentId);
+        var request = CreateRequest(workspaceId, requestId, prompt, dependencies.Publication, now, requestLifetime, requestExpiresAtUtc, privacyClass, eligibleRespondentId);
         await SeedRequestLifecycleAsync(paths, capabilityTrustRoot, request, dependencies.GrantReference, now).ConfigureAwait(false);
     }
 
@@ -145,6 +148,7 @@ internal static class HumanInputBrowserFixture
         var activation = selected.Activation ?? throw new InvalidOperationException("The browser Human Input continuation node was not ready.");
         var started = GovernedLoopSequentialFrontierMachine.Start(initialized, adapter, plan, node, activation, 1, "browser-human-input-claim-" + requestId, now.AddMinutes(1)).Frontier as GovernedLoopFrontierPosture
             ?? throw new InvalidOperationException("The browser Human Input continuation node did not start.");
+        var runningEvent = new CustomLoopRunEvent(seed.Events[^1].Sequence + 1, "browser-human-input-running-" + runId, now.AddMinutes(1), CustomLoopRunEventKind.LifecycleChanged, null, null, null, "Run entered its canonical running lifecycle.", [], null, null, null, null, null, null, null, null, null, null, ControlExpectedLifecycleVersion: seed.LifecycleVersion);
         var running = seed with
         {
             LifecycleVersion = 2,
@@ -152,6 +156,7 @@ internal static class HumanInputBrowserFixture
             UpdatedAtUtc = now.AddMinutes(1),
             ExecutionClock = new CustomLoopExecutionClock(0, now.AddMinutes(1)),
             Frontier = started,
+            Events = [.. seed.Events, runningEvent],
         };
         var updated = await runs.UpdateAsync(running, seed.LifecycleVersion).ConfigureAwait(false);
         if (updated.Status != CustomLoopRunStoreStatus.Updated)
@@ -283,10 +288,11 @@ internal static class HumanInputBrowserFixture
         return await ((IHumanInputResponseLifecycleStore)store).ReadAsync(lifecycle.PrimarySnapshot.Head.CurrentRequest).ConfigureAwait(false);
     }
 
-    private static HumanInputRequest CreateRequest(string workspaceId, string requestId, string prompt, GovernedLoopRevisionPublicationPin publication, DateTimeOffset requestedAtUtc, TimeSpan? requestLifetime, HumanInputPrivacyClass privacyClass, string? eligibleRespondentId)
+    private static HumanInputRequest CreateRequest(string workspaceId, string requestId, string prompt, GovernedLoopRevisionPublicationPin publication, DateTimeOffset requestedAtUtc, TimeSpan? requestLifetime, DateTimeOffset? requestExpiresAtUtc, HumanInputPrivacyClass privacyClass, string? eligibleRespondentId)
     {
         var binding = new HumanInputRequestBinding(workspaceId, publication.Revision.GraphId, publication.Revision.RevisionId, NodeId, requestId, CheckpointId);
-        var request = new HumanInputRequest(1, requestId, requestId + "-v1", binding, "Collect one bounded browser response.", prompt, new HumanInputResponseSchema(HumanInputResponseKind.Text, 128, null, null, null), privacyClass, [new HumanInputEligibleRespondent(eligibleRespondentId ?? WorkspaceActors.Web, "web-respondent", "web")], new HumanInputTiming(requestedAtUtc, requestedAtUtc.Add(requestLifetime ?? TimeSpan.FromHours(1))), new HumanInputResponsePolicy(HumanInputResponsePolicyKind.FirstValid, null, null), new HumanInputContinuationBinding(HumanInputContinuationPolicyKind.BoundNodeAndCheckpointOnly, NodeId, CheckpointId), string.Empty);
+        var expiresAtUtc = requestExpiresAtUtc?.ToUniversalTime() ?? requestedAtUtc.Add(requestLifetime ?? TimeSpan.FromHours(1));
+        var request = new HumanInputRequest(1, requestId, requestId + "-v1", binding, "Collect one bounded browser response.", prompt, new HumanInputResponseSchema(HumanInputResponseKind.Text, 128, null, null, null), privacyClass, [new HumanInputEligibleRespondent(eligibleRespondentId ?? WorkspaceActors.Web, "web-respondent", "web")], new HumanInputTiming(requestedAtUtc, expiresAtUtc), new HumanInputResponsePolicy(HumanInputResponsePolicyKind.FirstValid, null, null), new HumanInputContinuationBinding(HumanInputContinuationPolicyKind.BoundNodeAndCheckpointOnly, NodeId, CheckpointId), string.Empty);
         return HumanInputRequestHash.Apply(request);
     }
 
