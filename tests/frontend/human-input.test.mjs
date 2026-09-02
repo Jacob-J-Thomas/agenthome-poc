@@ -67,6 +67,20 @@ test("Human Input projection keeps only the bounded recipient aggregate and cont
       posture({
         presentation: {
           ...posture().presentation,
+          responseSchema: {
+            kind: "choice",
+            choices: [{ choiceId: "only-choice", displayText: "Only choice" }],
+          },
+        },
+      }),
+    ),
+    null,
+  );
+  assert.equal(
+    projectHumanInputPosture(
+      posture({
+        presentation: {
+          ...posture().presentation,
           continuationPolicyKind: "Unknown",
         },
       }),
@@ -463,13 +477,19 @@ test("Human Input structured responses omit blank optional fields and remain can
             fieldId: "required-choice",
             kind: "choice",
             required: true,
-            choices: [{ choiceId: "choice-a", displayText: "Choice A" }],
+            choices: [
+              { choiceId: "choice-a", displayText: "Choice A" },
+              { choiceId: "choice-a-other", displayText: "Choice A other" },
+            ],
           },
           {
             fieldId: "optional-choice",
             kind: "choice",
             required: false,
-            choices: [{ choiceId: "choice-b", displayText: "Choice B" }],
+            choices: [
+              { choiceId: "choice-b", displayText: "Choice B" },
+              { choiceId: "choice-b-other", displayText: "Choice B other" },
+            ],
           },
         ],
       },

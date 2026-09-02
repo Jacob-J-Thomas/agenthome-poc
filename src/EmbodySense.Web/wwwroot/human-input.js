@@ -1289,7 +1289,7 @@ function projectResponseSchema(value) {
 function projectChoices(value) {
   if (
     !Array.isArray(value) ||
-    value.length < 1 ||
+    value.length < 2 ||
     value.length > maximumChoices
   )
     return null;
