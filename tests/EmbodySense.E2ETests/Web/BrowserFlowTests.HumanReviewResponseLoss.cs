@@ -115,7 +115,7 @@ public sealed partial class BrowserFlowTests
             var durable = await WaitForCompletedHumanReviewResponseLossAsync(paths, runId);
             await AssertSingleApprovedPreDispatchEffectAsync(paths, durable);
             app.AssertHealthy();
-            await browser.AssertHealthyAsync();
+            await AssertHumanReviewResponseLossBrowserHealthyAsync(browser, runId);
         }
         catch
         {
@@ -208,7 +208,7 @@ public sealed partial class BrowserFlowTests
                     && continuationStatus == "reserved";
                 if (canonical)
                 {
-                    var rendered = await browser.EvaluateBooleanAsync($"document.getElementById('humanReviewDetailStatus').textContent.includes('Canonical state reread') && document.getElementById('humanReviewIdentity').textContent.includes({requestIdToken}) && document.getElementById('humanReviewIdentity').textContent.includes({requestHashPrefixToken}) && document.getElementById('humanReviewLifecycleStatus').textContent.toLowerCase().includes({lifecycleToken}) && document.getElementById('humanReviewLifecycleStatus').textContent.includes('version {lifecycleVersion}') && document.querySelectorAll('#humanReviewDecisionHistory .human-review-decision-item').length === {decisionCount}", timeout.Token).ConfigureAwait(false);
+                    var rendered = await browser.EvaluateBooleanAsync($"document.getElementById('humanReviewDetailStatus').textContent.includes('Canonical state reread') && document.getElementById('humanReviewIdentity').textContent.includes({requestIdToken}) && document.getElementById('humanReviewIdentity').textContent.includes({requestHashPrefixToken}) && document.getElementById('humanReviewLifecycleStatus').textContent.toLowerCase().includes({lifecycleToken}) && Array.from(document.querySelectorAll('#humanReviewSummary div')).some(item => item.querySelector('dt')?.textContent === 'Lifecycle version' && item.querySelector('dd')?.textContent === '{lifecycleVersion}') && document.querySelectorAll('#humanReviewDecisionHistory .human-review-decision-item').length === {decisionCount}", timeout.Token).ConfigureAwait(false);
                     if (rendered)
                     {
                         return lifecycleVersion;
@@ -353,6 +353,16 @@ public sealed partial class BrowserFlowTests
         var valueFreeEntry = storedEntry.GetRawText();
         foreach (var forbidden in new[] { "actor", "role", "grant", "authority", "effect", "credential", "private", "secret", "detail" })
             Assert.DoesNotContain(forbidden, valueFreeEntry, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static Task AssertHumanReviewResponseLossBrowserHealthyAsync(HeadlessBrowserSession browser, string runId)
+    {
+        var runFragment = $"/api/human-reviews/{Uri.EscapeDataString(runId)}";
+        var observedUnavailable = browser.DiagnosticsSnapshot().Any(item => item.Contains(runFragment, StringComparison.Ordinal)
+            && (item.Contains("\"status\":503", StringComparison.Ordinal) || item.Contains("status of 503 (", StringComparison.Ordinal)));
+        return observedUnavailable
+            ? browser.AssertHealthyAsync((runFragment, 503))
+            : browser.AssertHealthyAsync();
     }
 
     private static async Task<CustomLoopRunRecord> WaitForCompletedHumanReviewResponseLossAsync(WorkspacePaths paths, string runId)
