@@ -121,6 +121,7 @@ public sealed partial class BrowserFlowTests
             await browser.ReloadAsync();
             await InitializeWorkspaceAsyncIfNeededAsync(browser);
             await browser.EndExpectedServerRestartAsync();
+            await InstallHumanReviewCanonicalRereadObservationAsync(browser, runId);
             await OpenHumanReviewAsync(browser);
             await SelectHumanReviewAfterAuthorityRevocationAsync(browser, runId);
             var reread = await ReadHumanReviewAsync(browser, runId);
@@ -129,6 +130,7 @@ public sealed partial class BrowserFlowTests
             await AssertNoReviewDispatchAsync(browser, runId);
             Assert.Equal("Retired", await ReadRetiredBrowserAuthorityAsync(paths, capabilityTrustRoot));
             Assert.DoesNotContain("grantReference", reread, StringComparison.OrdinalIgnoreCase);
+            await WaitForHumanReviewCanonicalRereadIdleAsync(browser, runId);
             var effectAfter = await ReadCanonicalEffectAttemptAsync(paths, runId);
             Assert.Equal(effectBefore.ContentHash, effectAfter.ContentHash);
             AssertExactNotStartedEffect(effectAfter);
@@ -263,7 +265,7 @@ public sealed partial class BrowserFlowTests
     {
         var selector = JsonSerializer.Serialize($"[data-testid=\"human-review-item\"][data-run-id=\"{runId}\"]");
         var runIdToken = JsonSerializer.Serialize(runId);
-        await browser.EvaluateWithUserGestureAsync($"(() => {{ const item = document.querySelector({selector}); if (!item) throw new Error('Retained Human Review item was not rendered.'); item.click(); }})()");
+        await browser.EvaluateWithUserGestureAsync($"(() => {{ const item = document.querySelector({selector}); if (!item) throw new Error('Retained Human Review item was not rendered.'); if (item.getAttribute('aria-selected') !== 'true') item.click(); }})()");
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
         while (!timeout.IsCancellationRequested)
         {
