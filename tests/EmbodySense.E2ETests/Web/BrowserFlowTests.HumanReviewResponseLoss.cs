@@ -161,7 +161,7 @@ public sealed partial class BrowserFlowTests
         {
             try
             {
-                var response = await ReadHumanReviewResponseLossHttpAsync(browser, runId).ConfigureAwait(false);
+                var response = await ReadHumanReviewResponseLossHttpAsync(browser, runId, timeout.Token).ConfigureAwait(false);
                 lastObservation = DescribeHumanReviewResponseLoss(response.Status, response.Body);
                 if (response.Status != 200)
                 {
@@ -185,22 +185,22 @@ public sealed partial class BrowserFlowTests
                     && continuationStatus is "published" or "claimed";
                 if (canonical)
                 {
-                    var rendered = await browser.EvaluateBooleanAsync($"document.getElementById('humanReviewDetailStatus').textContent.includes('Canonical state reread') && document.getElementById('humanReviewIdentity').textContent.includes({requestIdToken}) && document.getElementById('humanReviewIdentity').textContent.includes({requestHashPrefixToken}) && document.getElementById('humanReviewLifecycleStatus').textContent.toLowerCase().includes({lifecycleToken}) && document.getElementById('humanReviewLifecycleStatus').textContent.includes('version {lifecycleVersion}') && document.querySelectorAll('#humanReviewDecisionHistory .human-review-decision-item').length === {decisionCount}").ConfigureAwait(false);
+                    var rendered = await browser.EvaluateBooleanAsync($"document.getElementById('humanReviewDetailStatus').textContent.includes('Canonical state reread') && document.getElementById('humanReviewIdentity').textContent.includes({requestIdToken}) && document.getElementById('humanReviewIdentity').textContent.includes({requestHashPrefixToken}) && document.getElementById('humanReviewLifecycleStatus').textContent.toLowerCase().includes({lifecycleToken}) && document.getElementById('humanReviewLifecycleStatus').textContent.includes('version {lifecycleVersion}') && document.querySelectorAll('#humanReviewDecisionHistory .human-review-decision-item').length === {decisionCount}", timeout.Token).ConfigureAwait(false);
                     if (rendered)
                     {
                         return lifecycleVersion;
                     }
 
-                    var listMatchesCanonical = await browser.EvaluateBooleanAsync($"Array.from(document.querySelectorAll('[data-testid=\"human-review-item\"]')).some(item => item.dataset.runId === {runIdToken} && item.textContent.includes('version {lifecycleVersion}'))").ConfigureAwait(false);
+                    var listMatchesCanonical = await browser.EvaluateBooleanAsync($"Array.from(document.querySelectorAll('[data-testid=\"human-review-item\"]')).some(item => item.dataset.runId === {runIdToken} && item.textContent.includes('version {lifecycleVersion}'))", timeout.Token).ConfigureAwait(false);
                     if (!listMatchesCanonical)
                     {
                         // The detail endpoint may advance before the catalog response. Refresh the visible
                         // catalog first so the selected summary and detail identity advance together.
-                        await ClickAsync(browser, "[data-testid=\"human-review-refresh\"]").ConfigureAwait(false);
+                        await ClickHumanReviewResponseLossAsync(browser, "[data-testid=\"human-review-refresh\"]", timeout.Token).ConfigureAwait(false);
                     }
                     else
                     {
-                        await ClickAsync(browser, "[data-testid=\"human-review-detail-refresh\"]").ConfigureAwait(false);
+                        await ClickHumanReviewResponseLossAsync(browser, "[data-testid=\"human-review-detail-refresh\"]", timeout.Token).ConfigureAwait(false);
                     }
                 }
             }
@@ -209,6 +209,10 @@ public sealed partial class BrowserFlowTests
             }
             catch (InvalidOperationException)
             {
+            }
+            catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+            {
+                break;
             }
             try
             {
@@ -229,13 +233,19 @@ public sealed partial class BrowserFlowTests
         return browser.EvaluateStringAsync($"(async () => {{ const response = await fetch({route}, {{ cache: 'no-store' }}); if (!response.ok) throw new Error('Human Review read failed: ' + response.status); return JSON.stringify(await response.json()); }})()");
     }
 
-    private static async Task<(int Status, string Body)> ReadHumanReviewResponseLossHttpAsync(HeadlessBrowserSession browser, string runId)
+    private static async Task<(int Status, string Body)> ReadHumanReviewResponseLossHttpAsync(HeadlessBrowserSession browser, string runId, CancellationToken cancellationToken)
     {
         var route = JsonSerializer.Serialize($"/api/human-reviews/{Uri.EscapeDataString(runId)}");
-        var result = await browser.EvaluateStringAsync($"(async () => {{ const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), 2000); try {{ const response = await fetch({route}, {{ cache: 'no-store', signal: controller.signal }}); return JSON.stringify({{ status: response.status, body: await response.text() }}); }} catch (error) {{ return JSON.stringify({{ status: 0, body: 'fetch-error:' + (error?.name ?? 'unknown') }}); }} finally {{ clearTimeout(timeout); }} }})()").ConfigureAwait(false);
+        var result = await browser.EvaluateStringAsync($"(async () => {{ const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), 2000); try {{ const response = await fetch({route}, {{ cache: 'no-store', signal: controller.signal }}); return JSON.stringify({{ status: response.status, body: await response.text() }}); }} catch (error) {{ return JSON.stringify({{ status: 0, body: 'fetch-error:' + (error?.name ?? 'unknown') }}); }} finally {{ clearTimeout(timeout); }} }})()", cancellationToken).ConfigureAwait(false);
         using var document = JsonDocument.Parse(result);
         var root = document.RootElement;
         return (root.GetProperty("status").GetInt32(), root.GetProperty("body").GetString() ?? string.Empty);
+    }
+
+    private static Task ClickHumanReviewResponseLossAsync(HeadlessBrowserSession browser, string selector, CancellationToken cancellationToken)
+    {
+        var jsonSelector = JsonSerializer.Serialize(selector);
+        return browser.EvaluateWithUserGestureAsync("(() => { const element = document.querySelector(" + jsonSelector + "); if (!element) throw new Error('Element was not rendered: ' + " + jsonSelector + "); element.click(); })()", cancellationToken);
     }
 
     private static string DescribeHumanReviewResponseLoss(int status, string body)
@@ -391,6 +401,14 @@ public sealed partial class BrowserFlowTests
         Assert.Equal(GovernedLoopEffectAttemptReadStatus.Current, read.Status);
         Assert.Equal(GovernedLoopEffectPhase.Committed, Assert.IsType<GovernedLoopEffectAttempt>(read.Attempt).Payload.Phase);
         Assert.Single(durable.Events, item => item.Kind == CustomLoopRunEventKind.NodeAttemptCompleted);
+    }
+
+    private sealed partial class HeadlessBrowserSession
+    {
+        public async Task EvaluateWithUserGestureAsync(string expression, CancellationToken cancellationToken)
+        {
+            _ = await EvaluateAsync(expression, cancellationToken, userGesture: true);
+        }
     }
 
 }

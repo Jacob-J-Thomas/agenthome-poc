@@ -20,7 +20,7 @@ namespace EmbodySense.E2ETests.Web;
 public sealed partial class BrowserFlowTests
 {
     [InstalledBrowserFact]
-    public async Task Human_review_browser_rejects_approval_at_the_exact_expiry_boundary_without_dispatch()
+    public async Task Human_review_browser_rejects_approval_after_expiry_through_server_owned_runtime_without_dispatch()
     {
         using var workspace = new TestWorkspace();
         using var serverAccount = new BrowserServerAccountDirectory(workspace.ServerStatePath);
@@ -35,7 +35,7 @@ public sealed partial class BrowserFlowTests
         var runId = "browser-human-review-expiry-boundary";
         var exactExpiryUtc = DateTimeOffset.UtcNow.AddMinutes(1);
         await HumanReviewBrowserFixture.SeedPendingAsync(paths, runId, "exact expiry boundary", capabilityTrustRoot: capabilityTrustRoot, requestExpiresAtUtc: exactExpiryUtc);
-        await using var app = await ExternalWebApplicationProcess.StartBrowserProfileHostAsync(workspace.RootPath, GetFreePort(), codexExecutable, "gpt-test", capabilityTrustRoot, [profile], humanReviewTestClockUtc: exactExpiryUtc);
+        await using var app = await ExternalWebApplicationProcess.StartBrowserProfileHostAsync(workspace.RootPath, GetFreePort(), codexExecutable, "gpt-test", capabilityTrustRoot, [profile]);
         await using var browser = await HeadlessBrowserSession.StartAsync(app.BaseUrl);
 
         try
@@ -44,6 +44,7 @@ public sealed partial class BrowserFlowTests
             await OpenHumanReviewAsync(browser);
             await SelectHumanReviewAsync(browser, runId);
             Assert.True(await browser.EvaluateBooleanAsync("document.querySelector('[data-testid=\"human-review-approve\"]')?.getAttribute('aria-disabled') === 'false'"));
+            await WaitUntilHumanReviewHasExpiredAsync(exactExpiryUtc);
             await ClickAsync(browser, "[data-testid=\"human-review-approve\"]");
             await WaitForHumanReviewLifecycleAsync(browser, "expired");
             Assert.Contains("terminal", (await browser.EvaluateStringAsync("document.getElementById('humanReviewActionStatus').textContent")).ToLowerInvariant(), StringComparison.Ordinal);
@@ -57,9 +58,20 @@ public sealed partial class BrowserFlowTests
         }
         catch
         {
-            await WriteFailureDiagnosticsAsync(nameof(Human_review_browser_rejects_approval_at_the_exact_expiry_boundary_without_dispatch), browser, app);
+            await WriteFailureDiagnosticsAsync(nameof(Human_review_browser_rejects_approval_after_expiry_through_server_owned_runtime_without_dispatch), browser, app);
             throw;
         }
+    }
+
+    private static async Task WaitUntilHumanReviewHasExpiredAsync(DateTimeOffset expiryUtc)
+    {
+        var remaining = expiryUtc - TimeProvider.System.GetUtcNow();
+        if (remaining > TimeSpan.Zero)
+        {
+            await Task.Delay(remaining).ConfigureAwait(false);
+        }
+
+        await Task.Delay(100).ConfigureAwait(false);
     }
 
     [InstalledBrowserFact]
@@ -76,7 +88,9 @@ public sealed partial class BrowserFlowTests
         await InstallBrowserModelProfilesAsync(workspace.RootPath, capabilityTrustRoot, [BrowserProfileWebHost.CreateDescriptor(profile)]);
         await SeedHumanReviewReadinessAuthorityAsync(paths, capabilityTrustRoot);
         var runId = "browser-human-review-authority-revocation";
-        await HumanReviewBrowserFixture.SeedPendingAsync(paths, runId, "authority revocation after consent", capabilityTrustRoot: capabilityTrustRoot);
+        await HumanReviewBrowserFixture.SeedPendingAsync(paths, runId, "authority revocation after consent", includePreDispatchEffect: true, capabilityTrustRoot: capabilityTrustRoot);
+        var effectBefore = await ReadCanonicalEffectAttemptAsync(paths, runId);
+        AssertExactNotStartedEffect(effectBefore);
         var port = GetFreePort();
         ExternalWebApplicationProcess? app = await ExternalWebApplicationProcess.StartBrowserProfileHostAsync(workspace.RootPath, port, codexExecutable, "gpt-test", capabilityTrustRoot, [profile]);
         HeadlessBrowserSession? browser = await HeadlessBrowserSession.StartAsync(app.BaseUrl);
@@ -87,6 +101,7 @@ public sealed partial class BrowserFlowTests
             await InitializeWorkspaceAsyncIfNeededAsync(browser);
             await OpenHumanReviewAsync(browser);
             await SelectHumanReviewAsync(browser, runId);
+            await using var authorityParking = await HumanReviewAuthorityParkingLease.ParkAsync(paths);
             await ClickAsync(browser, "[data-testid=\"human-review-approve\"]");
             await WaitForHumanReviewLifecycleAsync(browser, "approved");
             var approved = await ReadHumanReviewAsync(browser, runId);
@@ -98,6 +113,7 @@ public sealed partial class BrowserFlowTests
             await app.DisposeAsync();
             app = null;
             await browser.WaitForExpressionAsync("/reconnect|retry/i.test(document.getElementById('clientStatus').textContent)");
+            await authorityParking.RestoreAsync();
             await RetireBrowserAuthorityAsync(paths, capabilityTrustRoot);
             browser.MarkExpectedReplacementServerStarting();
             app = await ExternalWebApplicationProcess.StartBrowserProfileHostAsync(workspace.RootPath, port, codexExecutable, "gpt-test", capabilityTrustRoot, [profile]);
@@ -114,6 +130,15 @@ public sealed partial class BrowserFlowTests
             await AssertNoReviewDispatchAsync(browser, runId);
             Assert.Equal("Retired", await ReadRetiredBrowserAuthorityAsync(paths, capabilityTrustRoot));
             Assert.DoesNotContain("grantReference", reread, StringComparison.OrdinalIgnoreCase);
+            var effectAfter = await ReadCanonicalEffectAttemptAsync(paths, runId);
+            Assert.Equal(effectBefore.ContentHash, effectAfter.ContentHash);
+            AssertExactNotStartedEffect(effectAfter);
+            var evidence = await ReadHumanReviewEndpointAsync(browser, $"/api/human-reviews/{Uri.EscapeDataString(runId)}/evidence");
+            Assert.StartsWith("200|", evidence, StringComparison.Ordinal);
+            using var evidenceDocument = JsonDocument.Parse(evidence[4..]);
+            var effectEvidence = evidenceDocument.RootElement.GetProperty("effectEvidence");
+            Assert.Equal("exact-not-started", effectEvidence.GetProperty("status").GetString());
+            Assert.Equal("not-started", effectEvidence.GetProperty("certainty").GetString());
             app.AssertHealthy();
             await browser.AssertHealthyAsync();
         }
@@ -244,6 +269,15 @@ public sealed partial class BrowserFlowTests
         var read = await new GovernedLoopEffectAttemptStore(paths).ReadAsync(run!.HumanReview!.Request.Binding.WorkspaceId, effectBinding.OperationId, effectBinding.EffectGeneration);
         Assert.Equal(GovernedLoopEffectAttemptReadStatus.Current, read.Status);
         return Assert.IsType<GovernedLoopEffectAttempt>(read.Attempt);
+    }
+
+    private static void AssertExactNotStartedEffect(GovernedLoopEffectAttempt attempt)
+    {
+        Assert.Equal(GovernedLoopEffectPhase.IntentPrepared, attempt.Payload.Phase);
+        Assert.Equal(GovernedLoopEffectOutcome.None, attempt.Payload.Outcome);
+        Assert.Equal(GovernedLoopEffectEvidenceStatus.Pending, attempt.Payload.EvidenceStatus);
+        Assert.Null(attempt.DispatchAuthorityEvidenceHash);
+        Assert.Null(attempt.AfterEvidenceId);
     }
 
     private static int CountEffectAttemptArtifacts(WorkspacePaths paths)
