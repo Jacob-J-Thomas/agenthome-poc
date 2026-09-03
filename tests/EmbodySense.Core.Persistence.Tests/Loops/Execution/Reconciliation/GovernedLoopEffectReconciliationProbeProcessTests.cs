@@ -206,7 +206,9 @@ public sealed class GovernedLoopEffectReconciliationProbeProcessTests
         }
         else
         {
-            CoverageChildProcessAssembly.AddVstestArguments(startInfo, assemblyPath, testName);
+            // These children prove real process coordination while the outer Persistence lane and
+            // in-process service/store suites cover the same successful production paths.
+            CoverageChildProcessAssembly.AddCoordinationOnlyVstestArguments(startInfo, assemblyPath, testName);
         }
         startInfo.Environment["DOTNET_ROLL_FORWARD"] = "Major";
         startInfo.Environment[WorkerWorkspaceVariable] = workspaceRoot;

@@ -32,6 +32,7 @@ $cancellationHostProjectPath = Join-Path $repoRoot "tests\EmbodySense.Cancellati
 $cancellationHostProgramPath = Join-Path $repoRoot "tests\EmbodySense.CancellationHost\Program.cs"
 $scheduleStoreTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Triggers\Schedules\ScheduleStoreTests.cs"
 $scheduleStoreHostPath = Join-Path $repoRoot "tests\Shared\ScheduleStoreCrossProcessHost.cs"
+$reconciliationProbeProcessTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Loops\Execution\Reconciliation\GovernedLoopEffectReconciliationProbeProcessTests.cs"
 $admissionStoreTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Loops\Admission\GovernedLoopAdmissionStoreTests.cs"
 $admissionStoreFixturePath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Loops\Admission\GovernedLoopAdmissionStoreTestFixture.cs"
 $admissionStoreHostTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Loops\Admission\GovernedLoopAdmissionStoreCrossProcessHostTests.cs"
@@ -185,6 +186,7 @@ $cancellationHostProject = Get-Content -LiteralPath $cancellationHostProjectPath
 $cancellationHostProgram = Get-Content -LiteralPath $cancellationHostProgramPath -Raw
 $scheduleStoreTest = Get-Content -LiteralPath $scheduleStoreTestPath -Raw
 $scheduleStoreHost = Get-Content -LiteralPath $scheduleStoreHostPath -Raw
+$reconciliationProbeProcessTest = Get-Content -LiteralPath $reconciliationProbeProcessTestPath -Raw
 $admissionStoreTest = Get-Content -LiteralPath $admissionStoreTestPath -Raw
 $admissionStoreFixture = Get-Content -LiteralPath $admissionStoreFixturePath -Raw
 $admissionStoreHostTest = Get-Content -LiteralPath $admissionStoreHostTestPath -Raw
@@ -255,6 +257,9 @@ Assert-Contains -Actual $cancellationHostProgram -Expected '["schedule-store", v
 Assert-Contains -Actual $cancellationHostProject -Expected '..\Shared\ScheduleStoreCrossProcessHost.cs' -Message "The cancellation host must compile the shared schedule worker."
 Assert-Contains -Actual $persistenceTestProject -Expected '..\Shared\ScheduleStoreCrossProcessHost.cs' -Message "Persistence tests must compile the same shared schedule worker."
 Assert-Contains -Actual $cancellationHostProcess -Expected 'internal static CrossProcessProcess StartAppHostOwned' -Message "Direct schedule workers must be job-owned for bounded cleanup."
+Assert-Contains -Actual $reconciliationProbeProcessTest -Expected 'public async Task Cross_process_probe_worker()' -Message "The reconciliation probe worker Fact must remain discoverable in the Persistence inventory."
+Assert-Contains -Actual $reconciliationProbeProcessTest -Expected 'CoverageChildProcessAssembly.AddExpectedTerminationVstestArguments(startInfo, assemblyPath, testName);' -Message "Reconciliation probe crash workers must retain the exact expected-termination VSTest route."
+Assert-Contains -Actual $reconciliationProbeProcessTest -Expected 'CoverageChildProcessAssembly.AddCoordinationOnlyVstestArguments(startInfo, assemblyPath, testName);' -Message "Successful reconciliation probe workers must remain report-free coordination children whose production paths are covered by the parent lane."
 Assert-Contains -Actual $verifyScript -Expected 'Resolve-VerificationPhysicalTempRoot -RunnerTemp $env:RUNNER_TEMP -SystemTempPath ([IO.Path]::GetTempPath())' -Message "Hosted verification must select the runner-owned ephemeral volume with a local fallback."
 Assert-Contains -Actual $verifyScript -Expected 'Get-VerificationLaneFixturePath -PhysicalTempRoot $verificationPhysicalTempRoot' -Message "Lane fixture isolation must remain short, disjoint, and outside retained repository artifacts."
 Assert-Contains -Actual $verifyScript -Expected 'EMBODYSENSE_CAPABILITY_CATALOG_TRUST_ROOT = Join-Path $laneFixtureRoot "catalog-trust"' -Message "Every project lane must receive a disjoint process-scoped catalog trust root."
