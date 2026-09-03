@@ -1,0 +1,350 @@
+.effect-reconciliation-view {
+  overflow: hidden;
+  padding: 16px;
+  background: var(--canvas);
+}
+
+.effect-reconciliation-shell {
+  width: min(1320px, 100%);
+  height: 100%;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(245px, 310px) minmax(0, 1fr);
+  gap: 14px;
+  margin: 0 auto;
+}
+
+.effect-reconciliation-catalog,
+.effect-reconciliation-detail-panel,
+.effect-reconciliation-empty {
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+
+.effect-reconciliation-catalog {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.effect-reconciliation-catalog-header,
+.effect-reconciliation-detail-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.effect-reconciliation-catalog-header h1,
+.effect-reconciliation-detail-header h2 {
+  margin-top: 3px;
+  font-size: 20px;
+}
+
+.effect-reconciliation-status,
+.effect-reconciliation-action-status {
+  min-height: 32px;
+  margin: 0;
+  padding: 9px 13px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.effect-reconciliation-status.success,
+.effect-reconciliation-action-status.success {
+  color: var(--green-dark);
+  background: var(--green-soft);
+}
+
+.effect-reconciliation-status.error,
+.effect-reconciliation-action-status.error {
+  color: var(--red);
+  background: var(--red-soft);
+}
+
+.effect-reconciliation-status.warning,
+.effect-reconciliation-action-status.warning {
+  color: var(--amber);
+  background: var(--amber-soft);
+}
+
+.effect-reconciliation-list {
+  min-height: 0;
+  overflow: auto;
+  padding: 8px;
+}
+
+.effect-reconciliation-list-item {
+  width: 100%;
+  display: grid;
+  gap: 4px;
+  margin: 0 0 6px;
+  padding: 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink);
+  background: #fbfcfb;
+  text-align: left;
+}
+
+.effect-reconciliation-list-item:hover,
+.effect-reconciliation-list-item:focus-visible,
+.effect-reconciliation-list-item[aria-selected="true"] {
+  border-color: var(--green);
+  background: var(--green-soft);
+  outline: none;
+}
+
+.effect-reconciliation-list-posture,
+.effect-reconciliation-list-id,
+.effect-reconciliation-list-hash,
+.effect-reconciliation-probe-title,
+.effect-reconciliation-evidence-title {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.effect-reconciliation-list-posture {
+  color: var(--green-dark);
+  font-size: 10px;
+  font-weight: 750;
+  text-transform: capitalize;
+}
+
+.effect-reconciliation-list-id,
+.effect-reconciliation-list-hash,
+.effect-reconciliation-probe-detail,
+.effect-reconciliation-evidence-detail,
+.effect-reconciliation-identity {
+  color: var(--muted);
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 9px;
+}
+
+.effect-reconciliation-detail {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+.effect-reconciliation-empty {
+  height: 100%;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 8px;
+  padding: 28px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.effect-reconciliation-empty h2 {
+  color: var(--ink);
+  font-size: 17px;
+}
+
+.effect-reconciliation-empty p:last-child {
+  max-width: 430px;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.effect-reconciliation-detail-panel {
+  overflow: hidden;
+}
+
+.effect-reconciliation-detail-header {
+  align-items: center;
+}
+
+.effect-reconciliation-detail-header > div {
+  min-width: 0;
+}
+
+.effect-reconciliation-identity {
+  margin-top: 5px;
+  overflow-wrap: anywhere;
+}
+
+.effect-reconciliation-summary,
+.effect-reconciliation-subsummary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 20px;
+  margin: 0;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.effect-reconciliation-subsummary {
+  padding: 0;
+  border: 0;
+}
+
+.effect-reconciliation-summary div,
+.effect-reconciliation-subsummary div {
+  display: grid;
+  grid-template-columns: 118px minmax(0, 1fr);
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid #edf1ee;
+}
+
+.effect-reconciliation-summary dt,
+.effect-reconciliation-subsummary dt {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.effect-reconciliation-summary dd,
+.effect-reconciliation-subsummary dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 9px;
+}
+
+.effect-reconciliation-section {
+  margin: 12px 16px 0;
+  padding: 13px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: #fbfcfb;
+}
+
+.effect-reconciliation-section-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 9px;
+}
+
+.effect-reconciliation-section-heading h3 {
+  font-size: 12px;
+}
+
+.effect-reconciliation-section-heading p {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.effect-reconciliation-redaction-note,
+.effect-reconciliation-state-chip {
+  flex: 0 0 auto;
+  padding: 3px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  background: white;
+  font-size: 8px;
+  font-weight: 700;
+}
+
+.effect-reconciliation-state-chip {
+  color: var(--green-dark);
+  background: var(--green-soft);
+}
+
+.effect-reconciliation-evidence-list {
+  display: grid;
+  gap: 7px;
+  margin: 0 0 8px;
+  padding-left: 22px;
+}
+
+.effect-reconciliation-evidence-list:empty {
+  display: none;
+}
+
+.effect-reconciliation-evidence-list li,
+.effect-reconciliation-probe-item {
+  padding: 9px 10px;
+  border: 1px solid #edf1ee;
+  border-radius: 7px;
+  background: white;
+}
+
+.effect-reconciliation-evidence-title,
+.effect-reconciliation-probe-title {
+  margin-bottom: 4px;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.effect-reconciliation-evidence-detail,
+.effect-reconciliation-probe-detail {
+  line-height: 1.5;
+}
+
+.effect-reconciliation-probe-list {
+  display: grid;
+  gap: 7px;
+  margin-bottom: 9px;
+}
+
+.effect-reconciliation-empty-state {
+  margin: 8px 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.effect-reconciliation-empty-state.error {
+  color: var(--red);
+}
+
+.effect-reconciliation-actions-section {
+  margin-bottom: 16px;
+}
+
+.effect-reconciliation-action-status {
+  min-height: 0;
+  margin: 0 0 9px;
+  padding: 0;
+}
+
+.effect-reconciliation-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.effect-reconciliation-disposition-field {
+  display: grid;
+  min-width: 190px;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.effect-reconciliation-disposition-field textarea {
+  min-height: 35px;
+}
+
+.effect-reconciliation-resolution {
+  min-height: 28px;
+}
+
+@media (max-width: 1020px) {
+  .effect-reconciliation-shell {
+    grid-template-columns: minmax(220px, 270px) minmax(0, 1fr);
+  }
+
+  .effect-reconciliation-summary,
+  .effect-reconciliation-subsummary {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

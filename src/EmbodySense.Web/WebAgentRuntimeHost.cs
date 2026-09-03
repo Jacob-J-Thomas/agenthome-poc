@@ -3,6 +3,8 @@ using EmbodySense.Core.Startup.Configuration.Models;
 using EmbodySense.Core.Startup.Configuration;
 using EmbodySense.Core.Startup.Loops;
 using EmbodySense.Core.Startup.Loops.Execution;
+using EmbodySense.Core.Startup.Loops.Execution.Reconciliation;
+using EmbodySense.Core.Startup.Loops.Execution.Reconciliation.Models;
 using EmbodySense.Core.Startup.Loops.Posture;
 using EmbodySense.Core.Startup.Loops.GraphAuthoring.Models;
 using EmbodySense.Core.Startup.Loops.InvocationPreparation.Models;
@@ -33,7 +35,7 @@ namespace EmbodySense.Web;
 /// admission. Evidence reads recover interrupted runs before returning state. The application container owns this host
 /// and must dispose it asynchronously.
 /// </remarks>
-public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvoker, IWebHumanReviewRuntime
+public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvoker, IWebHumanReviewRuntime, IWebEffectReconciliationRuntime
 {
     private readonly WebRunOptions _options;
     private readonly string _configuredModel;
@@ -605,6 +607,61 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     /// <returns>The detached canonical Human Review decision result.</returns>
     public Task<HumanReviewDecisionResult> DecideHumanReviewAsync(HumanReviewDecisionOperationInput input, CancellationToken cancellationToken = default)
         => UseHumanReviewRuntimeAsync((humanReview, token) => humanReview.DecideAsync(input, token), cancellationToken);
+
+    /// <summary>Lists one bounded detached reconciliation page through the retained runtime.</summary>
+    /// <param name="request">The bounded page size and opaque continuation cursor.</param>
+    /// <param name="cancellationToken">Cancels host recovery, runtime acquisition, or the canonical read.</param>
+    /// <returns>The detached canonical reconciliation page.</returns>
+    public Task<GovernedLoopEffectReconciliationPage> ListAsync(GovernedLoopEffectReconciliationPageRequest request, CancellationToken cancellationToken = default)
+        => UseEffectReconciliationRuntimeAsync((reconciliation, token) => reconciliation.ListAsync(request, token), cancellationToken);
+
+    /// <summary>Reads one exact detached reconciliation case through the retained runtime.</summary>
+    /// <param name="reference">The exact immutable case reference.</param>
+    /// <param name="cancellationToken">Cancels host recovery, runtime acquisition, or the canonical read.</param>
+    /// <returns>The detached canonical case result.</returns>
+    public Task<GovernedLoopEffectReconciliationReadResult> ReadAsync(GovernedLoopEffectReconciliationCaseReference reference, CancellationToken cancellationToken = default)
+        => UseEffectReconciliationRuntimeAsync((reconciliation, token) => reconciliation.ReadAsync(reference, token), cancellationToken);
+
+    /// <summary>Lists one bounded page of registered read-only reconciliation probes.</summary>
+    /// <param name="request">The bounded page size and opaque continuation cursor.</param>
+    /// <param name="cancellationToken">Cancels host recovery, runtime acquisition, or the canonical read.</param>
+    /// <returns>The detached canonical probe catalog.</returns>
+    public Task<GovernedLoopEffectReconciliationProbeCatalogPage> ListProbeContractsAsync(GovernedLoopEffectReconciliationPageRequest request, CancellationToken cancellationToken = default)
+        => UseEffectReconciliationRuntimeAsync((reconciliation, token) => reconciliation.ListProbeContractsAsync(request, token), cancellationToken);
+
+    /// <summary>Invokes one registered read-only reconciliation probe.</summary>
+    /// <param name="operationId">The stable idempotency identity.</param>
+    /// <param name="reference">The exact immutable case reference.</param>
+    /// <param name="cancellationToken">Cancels host recovery, runtime acquisition, or the canonical operation.</param>
+    /// <returns>The detached canonical operation result.</returns>
+    public Task<GovernedLoopEffectReconciliationOperationResult> ProbeAsync(string operationId, GovernedLoopEffectReconciliationCaseReference reference, CancellationToken cancellationToken = default)
+        => UseEffectReconciliationRuntimeAsync((reconciliation, token) => reconciliation.ProbeAsync(operationId, reference, token), cancellationToken);
+
+    /// <summary>Derives one immutable reconciliation assessment.</summary>
+    /// <param name="operationId">The stable idempotency identity.</param>
+    /// <param name="reference">The exact immutable case reference.</param>
+    /// <param name="safeDetail">Optional bounded operator context that is never treated as evidence.</param>
+    /// <param name="cancellationToken">Cancels host recovery, runtime acquisition, or the canonical operation.</param>
+    /// <returns>The detached canonical operation result.</returns>
+    public Task<GovernedLoopEffectReconciliationOperationResult> AssessAsync(string operationId, GovernedLoopEffectReconciliationCaseReference reference, string? safeDetail = null, CancellationToken cancellationToken = default)
+        => UseEffectReconciliationRuntimeAsync((reconciliation, token) => reconciliation.AssessAsync(operationId, reference, safeDetail, token), cancellationToken);
+
+    /// <summary>Applies one legal reconciliation disposition.</summary>
+    /// <param name="operationId">The stable idempotency identity.</param>
+    /// <param name="reference">The exact immutable case reference.</param>
+    /// <param name="kind">The legal disposition selected by the authenticated route.</param>
+    /// <param name="safeDetail">Optional bounded operator context that is never treated as evidence.</param>
+    /// <param name="cancellationToken">Cancels host recovery, runtime acquisition, or the canonical operation.</param>
+    /// <returns>The detached canonical operation result.</returns>
+    public Task<GovernedLoopEffectReconciliationOperationResult> ApplyDispositionAsync(string operationId, GovernedLoopEffectReconciliationCaseReference reference, GovernedLoopEffectReconciliationDispositionKind kind, string? safeDetail = null, CancellationToken cancellationToken = default)
+        => UseEffectReconciliationRuntimeAsync((reconciliation, token) => reconciliation.DisposeAsync(operationId, reference, kind, safeDetail, token), cancellationToken);
+
+    /// <summary>Reads one exact immutable reconciliation resolution.</summary>
+    /// <param name="reference">The exact immutable case reference.</param>
+    /// <param name="cancellationToken">Cancels host recovery, runtime acquisition, or the canonical read.</param>
+    /// <returns>The detached canonical resolution result.</returns>
+    public Task<GovernedLoopEffectReconciliationResolutionReadResult> ReadResolutionAsync(GovernedLoopEffectReconciliationCaseReference reference, CancellationToken cancellationToken = default)
+        => UseEffectReconciliationRuntimeAsync((reconciliation, token) => reconciliation.ReadResolutionAsync(reference, token), cancellationToken);
 
     internal async Task<T> UseLoopAuthoringAsync<T>(Func<LoopAuthoringFacade, Task<T>> operation, CancellationToken cancellationToken = default)
     {
@@ -1800,6 +1857,23 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         try
         {
             return await operation(runtime.HumanReview, operationCancellation.Token).ConfigureAwait(false);
+        }
+        finally
+        {
+            await EndCustomRuntimeOperationAsync().ConfigureAwait(false);
+        }
+    }
+
+    private async Task<TResult> UseEffectReconciliationRuntimeAsync<TResult>(Func<GovernedLoopEffectReconciliationFacade, CancellationToken, Task<TResult>> operation, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+        using var operationCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _hostLifetimeCancellation.Token);
+        EnsureWorkspaceInitialized("using effect reconciliation");
+        await EnsureLoopRecoveryAsync(operationCancellation.Token).ConfigureAwait(false);
+        var runtime = await BeginCustomRuntimeOperationAsync(operationCancellation.Token).ConfigureAwait(false);
+        try
+        {
+            return await operation(runtime.EffectReconciliation, operationCancellation.Token).ConfigureAwait(false);
         }
         finally
         {

@@ -55,6 +55,7 @@ const elements = {
   configurationSubtitle: document.getElementById("configurationSubtitle"),
   configurationTitle: document.getElementById("configurationTitle"),
   configurationView: document.getElementById("configurationView"),
+  effectReconciliationView: document.getElementById("effectReconciliationView"),
   appTabs: Array.from(document.querySelectorAll("[data-app-view]")),
   chatView: document.getElementById("chatView"),
   humanInputView: document.getElementById("humanInputView"),
@@ -110,6 +111,7 @@ function selectAppView(view, sourceTab = null) {
     "loops",
     "reviews",
     "human-input",
+    "effect-reconciliation",
     "configuration",
   ].includes(view)
     ? view
@@ -117,9 +119,17 @@ function selectAppView(view, sourceTab = null) {
   if (previousAppView === "loops" && activeAppView !== "loops") {
     window.embodySenseLoopBuilder?.deactivate();
   }
+  if (
+    previousAppView === "effect-reconciliation" &&
+    activeAppView !== "effect-reconciliation"
+  ) {
+    window.embodySenseEffectReconciliation?.deactivate?.();
+  }
   elements.chatView.hidden = activeAppView !== "chat";
   elements.loopsView.hidden = activeAppView !== "loops";
   elements.humanInputView.hidden = activeAppView !== "human-input";
+  elements.effectReconciliationView.hidden =
+    activeAppView !== "effect-reconciliation";
   elements.humanReviewView.hidden = activeAppView !== "reviews";
   elements.configurationView.hidden = activeAppView !== "configuration";
   if (activeAppView === "loops") {
@@ -128,6 +138,8 @@ function selectAppView(view, sourceTab = null) {
     void window.embodySenseHumanReview?.activate();
   } else if (activeAppView === "human-input") {
     void window.embodySenseHumanInput?.activate();
+  } else if (activeAppView === "effect-reconciliation") {
+    void window.embodySenseEffectReconciliation?.activate();
   }
 
   let selectedTab = null;
@@ -164,7 +176,9 @@ function selectAppView(view, sourceTab = null) {
           ? "Reviews"
           : activeAppView === "human-input"
             ? "Human Input"
-            : "Chat";
+            : activeAppView === "effect-reconciliation"
+              ? "Effect Reconciliation"
+              : "Chat";
   }
 
   if (sourceTab && window.history?.replaceState) {
@@ -442,6 +456,7 @@ async function runSessionRecoveryAttempt(generation) {
     renderApprovals(pendingApprovals);
     void window.embodySenseHumanReview?.sessionRecovered?.();
     void window.embodySenseHumanInput?.sessionRecovered?.();
+    void window.embodySenseEffectReconciliation?.sessionRecovered?.();
     candidateEvents.promote();
     sessionRecoveryAttempts = 0;
     applyConnectedState();
@@ -2358,8 +2373,10 @@ selectAppView(
       ? "reviews"
       : requestedView === "human-input"
         ? "human-input"
-        : isConfigurationTabName(requestedView)
-          ? "configuration"
-          : "chat",
+        : requestedView === "effect-reconciliation"
+          ? "effect-reconciliation"
+          : isConfigurationTabName(requestedView)
+            ? "configuration"
+            : "chat",
 );
 boot().catch((error) => appendMessage("error", error.message));
