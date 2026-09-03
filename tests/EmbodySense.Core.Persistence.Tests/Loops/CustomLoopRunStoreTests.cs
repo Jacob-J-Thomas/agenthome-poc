@@ -1619,7 +1619,7 @@ public sealed class CustomLoopRunStoreTests
         var pendingPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.pending");
 
         // Permit discovery reads while withholding the sharing required to replace the derived index.
-        using (var restrictiveReader = WindowsFileLock.OpenRestrictiveReader(indexPath, workspace.RootPath))
+        using (var restrictiveReader = await WindowsRestrictiveReaderProcess.StartAsync(indexPath, workspace.RootPath))
         {
             var replacementWindow = Stopwatch.StartNew();
             // This lower bound rules out an immediate bypass in the retained contention scenario; it does not claim
@@ -1630,6 +1630,7 @@ public sealed class CustomLoopRunStoreTests
             Assert.Equal(CustomLoopRunStoreStatus.Created, result.Status);
             Assert.True(replacementWindow.Elapsed >= TimeSpan.FromMilliseconds(1500), "The derived-index replacement completed without consuming the bounded contention budget.");
             Assert.True(File.Exists(pendingPath));
+            await restrictiveReader.ReleaseAsync();
         }
 
         Assert.Equal(CustomLoopRunStatus.Admitted, (await store.GetAsync("run-derived-index"))!.Status);
@@ -1663,11 +1664,12 @@ public sealed class CustomLoopRunStoreTests
         Assert.Equal(CustomLoopTraceDeletionStoreStatus.Deleted, (await store.DeleteTerminalTraceAsync(mutation)).Status);
         var operationPath = Path.Combine(paths.CustomLoopTraceDeletionOperationsPath, mutation.Request.OperationId + ".json");
 
-        using (var restrictiveReader = WindowsFileLock.OpenRestrictiveReader(operationPath, workspace.RootPath))
+        using (var restrictiveReader = await WindowsRestrictiveReaderProcess.StartAsync(operationPath, workspace.RootPath))
         {
             var replacementWindow = Stopwatch.StartNew();
             await Assert.ThrowsAnyAsync<IOException>(() => store.MarkTraceDeletionOutcomeAsync(mutation.Request.OperationId, CustomLoopTraceDeletionIntegrity.OutcomeAuditStarted).WaitAsync(TimeSpan.FromSeconds(5)));
             Assert.True(replacementWindow.Elapsed >= TimeSpan.FromMilliseconds(1500), "The trace-deletion operation replacement did not consume its bounded auxiliary contention budget.");
+            await restrictiveReader.ReleaseAsync();
         }
 
         Assert.Equal(CustomLoopTraceDeletionAuditMarkStatus.Marked, await store.MarkTraceDeletionOutcomeAsync(mutation.Request.OperationId, CustomLoopTraceDeletionIntegrity.OutcomeAuditStarted));
@@ -1702,7 +1704,7 @@ public sealed class CustomLoopRunStoreTests
         var previous = SynchronizationContext.Current;
         Task<CustomLoopTraceDeletionAuditMarkStatus>? markTask = null;
 
-        using (var restrictiveReader = WindowsFileLock.OpenRestrictiveReader(operationPath, workspace.RootPath))
+        using (var restrictiveReader = await WindowsRestrictiveReaderProcess.StartAsync(operationPath, workspace.RootPath))
         {
             SynchronizationContext.SetSynchronizationContext(gated);
             try
@@ -1729,6 +1731,7 @@ public sealed class CustomLoopRunStoreTests
             await gated.DrainUntilCompletedAsync(markTask, TimeSpan.FromSeconds(5));
             var exception = await Assert.ThrowsAnyAsync<IOException>(() => markTask);
             Assert.Equal(CustomLoopRunPersistenceDiagnosticStage.Unknown, Assert.IsType<CustomLoopRunPersistenceDiagnostic>(CustomLoopRunPersistenceDiagnostic.Find(exception)).Stage);
+            await restrictiveReader.ReleaseAsync();
         }
 
         Assert.Equal(CustomLoopTraceDeletionAuditMarkStatus.Marked, await store.MarkTraceDeletionOutcomeAsync(mutation.Request.OperationId, CustomLoopTraceDeletionIntegrity.OutcomeAuditStarted));
