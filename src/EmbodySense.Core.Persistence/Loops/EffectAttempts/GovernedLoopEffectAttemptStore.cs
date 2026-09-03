@@ -781,6 +781,9 @@ public sealed class GovernedLoopEffectAttemptStore : IGovernedLoopEffectAttemptS
             + GovernedLoopEffectReconciliationPersistenceLimits.MaximumCases
             + GovernedLoopEffectReconciliationPersistenceLimits.MaximumOperationReceipts
             + GovernedLoopEffectReconciliationPersistenceLimits.MaximumJournals
+            + GovernedLoopEffectReconciliationPersistenceLimits.MaximumProbeReservations
+            + GovernedLoopEffectReconciliationPersistenceLimits.MaximumProbeObservations
+            + GovernedLoopEffectReconciliationPersistenceLimits.MaximumProbeJournals
             + 2);
         var entries = new List<string>(Math.Min(maximumArtifacts, 1024));
         foreach (var entry in Directory.EnumerateFileSystemEntries(_root))
@@ -837,7 +840,10 @@ public sealed class GovernedLoopEffectAttemptStore : IGovernedLoopEffectAttemptS
             if (GovernedLoopEffectReconciliationArtifactNames.TryParseCaseVersionFile(fileName, out _, out _, out _)
                 || GovernedLoopEffectReconciliationArtifactNames.TryParseCaseHeadFile(fileName, out _)
                 || GovernedLoopEffectReconciliationArtifactNames.TryParseReceiptFile(fileName, out _)
-                || GovernedLoopEffectReconciliationArtifactNames.TryParseJournalFile(fileName, out _))
+                || GovernedLoopEffectReconciliationArtifactNames.TryParseJournalFile(fileName, out _)
+                || GovernedLoopEffectReconciliationArtifactNames.TryParseProbeReservationFile(fileName, out _)
+                || GovernedLoopEffectReconciliationArtifactNames.TryParseProbeObservationFile(fileName, out _)
+                || GovernedLoopEffectReconciliationArtifactNames.TryParseProbeJournalFile(fileName, out _))
             {
                 retainedBytes = AddRetainedBytes(retainedBytes, entry);
                 continue;

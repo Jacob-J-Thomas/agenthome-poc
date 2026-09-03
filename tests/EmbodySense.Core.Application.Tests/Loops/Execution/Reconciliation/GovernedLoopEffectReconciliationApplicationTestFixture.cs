@@ -38,6 +38,42 @@ internal static class GovernedLoopEffectReconciliationApplicationTestFixture
         return (reconciliationCase, attempt, input!);
     }
 
+    internal static (GovernedLoopEffectReconciliationCase Case, GovernedLoopEffectAttempt Attempt, GovernedActuatorInputEvidence Input, GovernedLoopEffectReconciliationEvidenceSource Source) ProbeCase()
+    {
+        var (open, attempt, input) = OpenCase();
+        var source = GovernedLoopEffectReconciliationContractHash.Apply(new GovernedLoopEffectReconciliationEvidenceSource(
+            GovernedLoopEffectReconciliationContractLimits.CurrentSchemaVersion,
+            open.CaseId,
+            open.Binding.ContentHash,
+            "source-probe",
+            GovernedLoopEffectReconciliationEvidenceSourceKind.Authoritative,
+            GovernedLoopEffectReconciliationReliabilityPosture.Authoritative,
+            open.ContractMetadata.ContractId,
+            open.ContractMetadata.ContractVersion,
+            open.ContractMetadata.ContentHash,
+            GovernedLoopEffectAttemptTestFixture.Hash('a'),
+            open.OpenedAtUtc,
+            null,
+            string.Empty));
+        var value = GovernedLoopEffectReconciliationContract.Create(
+            open.CaseId,
+            open.CaseVersion,
+            open.Binding,
+            open.ContractMetadata,
+            [source],
+            [],
+            [],
+            null,
+            null,
+            null,
+            [],
+            null,
+            open.OpenedAtUtc,
+            open.UpdatedAtUtc);
+        Assert.True(GovernedLoopEffectReconciliationContract.Validate(value, attempt).IsValid);
+        return (value, attempt, input, source);
+    }
+
     internal static (GovernedLoopEffectReconciliationCase Open, GovernedLoopEffectReconciliationCase Assessed, GovernedLoopEffectAttempt Attempt) AssessedCase()
     {
         var (open, attempt, _) = OpenCase();

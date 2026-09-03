@@ -90,8 +90,22 @@ public sealed class GovernedLoopEffectReconciliationModelCopyTests
     [Fact]
     public void Probe_and_resolution_models_retain_detached_exact_case_binding_and_evidence()
     {
-        var (open, _, input) = GovernedLoopEffectReconciliationApplicationTestFixture.OpenCase();
+        var (open, attempt, input) = GovernedLoopEffectReconciliationApplicationTestFixture.OpenCase();
         var reference = Reference(open);
+        var source = GovernedLoopEffectReconciliationContractHash.Apply(new GovernedLoopEffectReconciliationEvidenceSource(
+            GovernedLoopEffectReconciliationContractLimits.CurrentSchemaVersion,
+            open.CaseId,
+            open.Binding.ContentHash,
+            "source-1",
+            GovernedLoopEffectReconciliationEvidenceSourceKind.Authoritative,
+            GovernedLoopEffectReconciliationReliabilityPosture.Authoritative,
+            open.ContractMetadata.ContractId,
+            open.ContractMetadata.ContractVersion,
+            open.ContractMetadata.ContentHash,
+            GovernedLoopEffectAttemptTestFixture.Hash('2'),
+            open.OpenedAtUtc,
+            null,
+            string.Empty));
         var observation = GovernedLoopEffectReconciliationContractHash.Apply(new GovernedLoopEffectReconciliationObservation(
             GovernedLoopEffectReconciliationContractLimits.CurrentSchemaVersion,
             open.CaseId,
@@ -123,17 +137,25 @@ public sealed class GovernedLoopEffectReconciliationModelCopyTests
             "Accepted exact absence proof.",
             string.Empty));
 
-        var invocation = new GovernedLoopEffectReconciliationProbeInvocationRequest(reference, open.Binding, open.ContractMetadata, input);
+        var target = new GovernedLoopEffectReconciliationProbeTarget(attempt.TargetFingerprint, attempt.PreconditionEvidenceHash, attempt.BeforeEvidenceId);
+        var invocation = new GovernedLoopEffectReconciliationProbeInvocationRequest(
+            "probe-invocation-1",
+            Reference(open),
+            "source-1",
+            GovernedLoopEffectAttemptTestFixture.Hash('3'),
+            GovernedLoopEffectReconciliationReliabilityPosture.Authoritative,
+            target);
         var probeResult = new GovernedLoopEffectReconciliationProbeInvocationResult(GovernedLoopEffectReconciliationProbeInvocationStatus.Ready, observation);
         var resolutionResult = new GovernedLoopEffectReconciliationResolutionReadResult(GovernedLoopEffectReconciliationResolutionReadStatus.Found, resolution);
 
-        Assert.NotSame(reference, invocation.Case);
-        Assert.NotSame(open.Binding, invocation.Binding);
-        Assert.NotSame(open.ContractMetadata, invocation.Contract);
-        Assert.NotSame(input, invocation.Input);
-        Assert.Equal(invocation.Case.CaseId, probeResult.Observation!.CaseId);
+        Assert.NotSame(target, invocation.Target);
+        Assert.Equal("probe-invocation-1", invocation.ProbeInvocationId);
+        Assert.Equal(open.CaseId, invocation.Case.CaseId);
+        Assert.Equal("source-1", invocation.SourceId);
+        Assert.Equal(attempt.TargetFingerprint, invocation.Target.TargetFingerprint);
+        Assert.Equal(open.CaseId, probeResult.Observation!.CaseId);
         Assert.Equal(GovernedLoopEffectReconciliationProbeInvocationStatus.Ready, probeResult.Status);
-        Assert.Equal(invocation.Binding.ContentHash, probeResult.Observation.BindingHash);
+        Assert.Equal(open.Binding.ContentHash, probeResult.Observation.BindingHash);
         Assert.NotSame(observation, probeResult.Observation);
         Assert.Equal(open.CaseId, resolutionResult.Resolution!.CaseId);
         Assert.Equal(GovernedLoopEffectReconciliationResolutionReadStatus.Found, resolutionResult.Status);

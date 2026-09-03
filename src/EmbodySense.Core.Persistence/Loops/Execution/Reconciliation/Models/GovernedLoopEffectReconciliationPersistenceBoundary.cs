@@ -22,4 +22,16 @@ public enum GovernedLoopEffectReconciliationPersistenceBoundary
 
     /// <summary>The immutable effect successor has been durably published before its head pointer.</summary>
     EffectVersionPublished = 5,
+
+    /// <summary>The immutable probe callback reservation has been durably published.</summary>
+    ProbeReservationPublished = 6,
+
+    /// <summary>The terminal probe observation has been durably published.</summary>
+    ProbeObservationPublished = 7,
+
+    /// <summary>The case successor containing the probe observation has been durably published.</summary>
+    ProbeCasePublished = 8,
+
+    /// <summary>The probe completion receipt has been durably published.</summary>
+    ProbeReceiptPublished = 9,
 }

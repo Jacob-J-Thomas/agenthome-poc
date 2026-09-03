@@ -26,11 +26,14 @@ internal sealed class GovernedLoopEffectReconciliationServiceInput : IGovernedLo
 
     internal bool ReturnNullOnRead { get; set; }
 
+    internal Action<int>? BeforeRead { get; set; }
+
     internal void SetStatus(GovernedLoopEffectReconciliationInputReadStatus status) => _status = status;
 
     public Task<GovernedLoopEffectReconciliationInputReadResult> ReadAsync(GovernedLoopEffectReconciliationInputReadRequest request, CancellationToken cancellationToken = default)
     {
         ReadCalls++;
+        BeforeRead?.Invoke(ReadCalls);
         if (ThrowOnRead)
         {
             throw new IOException("The test input source is unavailable.");

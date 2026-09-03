@@ -1,5 +1,8 @@
 using System.Globalization;
+using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using EmbodySense.Core.Application.Loops.EffectAttempts.Models;
 using EmbodySense.Core.Application.Loops.Execution.Reconciliation;
 using EmbodySense.Core.Application.Loops.Execution.Reconciliation.Models;
@@ -12,6 +15,7 @@ using EmbodySense.Core.Common.Loops.Execution.Reconciliation.Models;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Loops.EffectAttempts;
 using EmbodySense.Core.Persistence.Loops.EffectAttempts.Models;
+using EmbodySense.Core.Persistence.Loops.Admission;
 using EmbodySense.Core.Persistence.Loops.Execution.Reconciliation.Models;
 
 namespace EmbodySense.Core.Persistence.Loops.Execution.Reconciliation;
@@ -23,8 +27,16 @@ namespace EmbodySense.Core.Persistence.Loops.Execution.Reconciliation;
 /// mutation lease protects both the case and any proof-backed reconciled effect successor. No separate reconciliation
 /// directory, lock, or authority ledger is created.
 /// </remarks>
-public sealed class GovernedLoopEffectReconciliationCaseStore : IGovernedLoopEffectReconciliationCaseStore, IGovernedLoopEffectReconciliationResolutionReader
+public sealed class GovernedLoopEffectReconciliationCaseStore : IGovernedLoopEffectReconciliationCaseStore, IGovernedLoopEffectReconciliationResolutionReader, IGovernedLoopEffectReconciliationProbeReservationStore
 {
+    private static readonly JsonSerializerOptions _probeJson = new(JsonSerializerDefaults.Web)
+    {
+        PropertyNameCaseInsensitive = false,
+        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
+        WriteIndented = false,
+        MaxDepth = 32,
+        Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase, allowIntegerValues: false), new GovernedLoopExecutionBindingJsonConverter() }
+    };
     private readonly GovernedLoopEffectAttemptStore _effectAttempts;
     private readonly CustomLoopArtifactPathGuard _guard;
     private readonly string _root;
@@ -87,6 +99,7 @@ public sealed class GovernedLoopEffectReconciliationCaseStore : IGovernedLoopEff
 
             var cases = await ReadAllCurrentCasesAsync(cancellationToken).ConfigureAwait(false);
             await ValidateReceiptInventoryAsync(cases, cancellationToken).ConfigureAwait(false);
+            await ValidateProbeInventoryAsync(cases, cancellationToken).ConfigureAwait(false);
             return true;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -112,6 +125,7 @@ public sealed class GovernedLoopEffectReconciliationCaseStore : IGovernedLoopEff
                     await RecoverPendingJournalsUnderLockAsync(token).ConfigureAwait(false);
                     var cases = await ReadAllCurrentCasesAsync(token).ConfigureAwait(false);
                     await ValidateReceiptInventoryAsync(cases, token).ConfigureAwait(false);
+                    await ValidateProbeInventoryAsync(cases, token).ConfigureAwait(false);
                     return true;
                 },
                 cancellationToken).ConfigureAwait(false);
@@ -151,6 +165,7 @@ public sealed class GovernedLoopEffectReconciliationCaseStore : IGovernedLoopEff
 
             var persistedCases = await ReadAllCurrentCasesAsync(cancellationToken).ConfigureAwait(false);
             await ValidateReceiptInventoryAsync(persistedCases, cancellationToken).ConfigureAwait(false);
+            await ValidateProbeInventoryAsync(persistedCases, cancellationToken).ConfigureAwait(false);
             var cases = persistedCases
                 .OrderBy(value => value.CaseId, StringComparer.Ordinal)
                 .Select(ToSummary)
@@ -211,6 +226,7 @@ public sealed class GovernedLoopEffectReconciliationCaseStore : IGovernedLoopEff
 
             var allCases = await ReadAllCurrentCasesAsync(cancellationToken).ConfigureAwait(false);
             await ValidateReceiptInventoryAsync(allCases, cancellationToken).ConfigureAwait(false);
+            await ValidateProbeInventoryAsync(allCases, cancellationToken).ConfigureAwait(false);
             var key = GovernedLoopEffectReconciliationArtifactNames.StorageKey(request.Reference.CaseId);
             var chain = await ReadCaseChainAsync(key, allowMissingHead: false, cancellationToken).ConfigureAwait(false);
             var exact = chain.FirstOrDefault(value => value.CaseVersion == request.Reference.CaseVersion
@@ -269,6 +285,1010 @@ public sealed class GovernedLoopEffectReconciliationCaseStore : IGovernedLoopEff
     }
 
     /// <inheritdoc />
+    public async Task<GovernedLoopEffectReconciliationProbeReservationResult> ReserveAsync(
+        GovernedLoopEffectReconciliationProbeReservationRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        cancellationToken.ThrowIfCancellationRequested();
+        try
+        {
+            return await _effectAttempts.ExecuteReconciliationMutationAsync(
+                (_, token) => ReserveProbeUnderLockAsync(request, token),
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (GovernedLoopEffectReconciliationRepairRequiredException)
+        {
+            return ProbeReservationResult(GovernedLoopEffectReconciliationProbeReservationStatus.RepairRequired);
+        }
+        catch (Exception exception) when (IsCorrupt(exception))
+        {
+            return ProbeReservationResult(GovernedLoopEffectReconciliationProbeReservationStatus.Corrupt);
+        }
+        catch (Exception exception) when (IsUnavailable(exception))
+        {
+            return ProbeReservationResult(GovernedLoopEffectReconciliationProbeReservationStatus.Unavailable);
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task<GovernedLoopEffectReconciliationProbeReservationStatus> ValidateBeforeCallbackAsync(
+        GovernedLoopEffectReconciliationProbeReservation reservation,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(reservation);
+        cancellationToken.ThrowIfCancellationRequested();
+        try
+        {
+            return await _effectAttempts.ExecuteReconciliationMutationAsync(
+                (_, token) => ValidateProbeReservationHeadUnderLockAsync(reservation, token),
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (GovernedLoopEffectReconciliationRepairRequiredException)
+        {
+            return GovernedLoopEffectReconciliationProbeReservationStatus.RepairRequired;
+        }
+        catch (Exception exception) when (IsCorrupt(exception))
+        {
+            return GovernedLoopEffectReconciliationProbeReservationStatus.Corrupt;
+        }
+        catch (Exception exception) when (IsUnavailable(exception))
+        {
+            return GovernedLoopEffectReconciliationProbeReservationStatus.Unavailable;
+        }
+    }
+
+    private async Task<GovernedLoopEffectReconciliationProbeReservationStatus> ValidateProbeReservationHeadUnderLockAsync(
+        GovernedLoopEffectReconciliationProbeReservation reservation,
+        CancellationToken cancellationToken)
+    {
+        var operationKey = GovernedLoopEffectReconciliationArtifactNames.OperationKey(reservation.OperationId);
+        var stored = await ReadProbeReservationAsync(operationKey, cancellationToken).ConfigureAwait(false);
+        if (stored is null)
+        {
+            return GovernedLoopEffectReconciliationProbeReservationStatus.Unavailable;
+        }
+        if (!SameProbeReservation(stored, reservation))
+        {
+            return GovernedLoopEffectReconciliationProbeReservationStatus.Conflict;
+        }
+
+        var chain = await ReadCaseChainAsync(GovernedLoopEffectReconciliationArtifactNames.StorageKey(reservation.Context.Case.CaseId), allowMissingHead: false, cancellationToken).ConfigureAwait(false);
+        var current = chain.LastOrDefault();
+        var effect = await _effectAttempts.ReadCurrentForReconciliationAsync(reservation.Context.Binding.OperationId, reservation.Context.Binding.EffectGeneration, cancellationToken).ConfigureAwait(false);
+        return current is not null
+            && current.CaseVersion == reservation.Context.Case.CaseVersion
+            && string.Equals(current.ContentHash, reservation.Context.Case.ContentHash, StringComparison.Ordinal)
+            && string.Equals(current.Binding.ContentHash, reservation.Context.Binding.ContentHash, StringComparison.Ordinal)
+            && current.Disposition is null
+            && current.Resolution is null
+            && effect is not null
+            && string.Equals(effect.ContentHash, reservation.Context.EffectHead.ContentHash, StringComparison.Ordinal)
+            && GovernedLoopEffectReconciliationContractValidator.Validate(current, effect).IsValid
+            ? GovernedLoopEffectReconciliationProbeReservationStatus.Reserved
+            : GovernedLoopEffectReconciliationProbeReservationStatus.Conflict;
+    }
+
+    /// <inheritdoc />
+    public async Task<GovernedLoopEffectReconciliationProbeObservationCommitResult> CommitObservationAsync(
+        GovernedLoopEffectReconciliationProbeObservationCommitRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        cancellationToken.ThrowIfCancellationRequested();
+        try
+        {
+            return await _effectAttempts.ExecuteReconciliationMutationAsync(
+                (_, token) => CommitProbeObservationUnderLockAsync(request, token),
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (GovernedLoopEffectReconciliationRepairRequiredException)
+        {
+            return ProbeCommitResult(GovernedLoopEffectReconciliationProbeReservationStatus.RepairRequired);
+        }
+        catch (Exception exception) when (IsCorrupt(exception))
+        {
+            return ProbeCommitResult(GovernedLoopEffectReconciliationProbeReservationStatus.Corrupt);
+        }
+        catch (Exception exception) when (IsUnavailable(exception))
+        {
+            return ProbeCommitResult(GovernedLoopEffectReconciliationProbeReservationStatus.Unavailable);
+        }
+    }
+
+    private async Task<GovernedLoopEffectReconciliationProbeReservationResult> ReserveProbeUnderLockAsync(
+        GovernedLoopEffectReconciliationProbeReservationRequest request,
+        CancellationToken cancellationToken)
+    {
+        await RecoverPendingJournalsUnderLockAsync(cancellationToken).ConfigureAwait(false);
+        var allCases = await ReadAllCurrentCasesAsync(cancellationToken).ConfigureAwait(false);
+        await ValidateReceiptInventoryAsync(allCases, cancellationToken).ConfigureAwait(false);
+        await ValidateProbeInventoryAsync(allCases, cancellationToken).ConfigureAwait(false);
+        if (!string.Equals(request.Context.Case.BindingHash, request.Context.Binding.ContentHash, StringComparison.Ordinal)
+            || !string.Equals(request.Context.EffectHead.ContentHash, request.Context.Binding.CurrentAttemptHash, StringComparison.Ordinal)
+            || !string.Equals(request.Context.InputFingerprint, request.Context.EffectHead.InputFingerprint, StringComparison.Ordinal))
+        {
+            return ProbeReservationResult(GovernedLoopEffectReconciliationProbeReservationStatus.Invalid);
+        }
+
+        var operationKey = GovernedLoopEffectReconciliationArtifactNames.OperationKey(request.OperationId);
+        var observation = await ReadProbeObservationAsync(operationKey, cancellationToken).ConfigureAwait(false);
+        if (observation is not null)
+        {
+            if (!string.Equals(observation.RequestHash, request.RequestHash, StringComparison.Ordinal))
+            {
+                return ProbeReservationResult(GovernedLoopEffectReconciliationProbeReservationStatus.Conflict);
+            }
+
+            var storedReservation = await ReadProbeReservationAsync(operationKey, cancellationToken).ConfigureAwait(false)
+                ?? throw new GovernedLoopEffectReconciliationRepairRequiredException("A probe observation is missing its durable reservation.");
+            var completed = await ReadProbeCommitPayloadAsync(observation, storedReservation, cancellationToken).ConfigureAwait(false);
+            return new GovernedLoopEffectReconciliationProbeReservationResult(GovernedLoopEffectReconciliationProbeReservationStatus.Replayed, storedReservation, completed.Case, completed.EffectHead);
+        }
+
+        var existing = await ReadProbeReservationAsync(operationKey, cancellationToken).ConfigureAwait(false);
+        if (existing is not null)
+        {
+            return string.Equals(existing.RequestHash, request.RequestHash, StringComparison.Ordinal)
+                ? new GovernedLoopEffectReconciliationProbeReservationResult(GovernedLoopEffectReconciliationProbeReservationStatus.Replayed, existing)
+                : ProbeReservationResult(GovernedLoopEffectReconciliationProbeReservationStatus.Conflict);
+        }
+
+        if (await HasIncompleteProbeReservationForCaseAsync(request.Context.Case, cancellationToken).ConfigureAwait(false))
+        {
+            return ProbeReservationResult(GovernedLoopEffectReconciliationProbeReservationStatus.Conflict);
+        }
+
+        if (CountProbeReservationFiles() >= GovernedLoopEffectReconciliationPersistenceLimits.MaximumProbeReservations
+            || await CountProbeReservationsForCaseAsync(request.Context.Case.CaseId, cancellationToken).ConfigureAwait(false) >= GovernedLoopEffectReconciliationPersistenceLimits.MaximumProbeReservationsPerCase)
+        {
+            return ProbeReservationResult(GovernedLoopEffectReconciliationProbeReservationStatus.CapacityExceeded);
+        }
+
+        var key = GovernedLoopEffectReconciliationArtifactNames.StorageKey(request.Context.Case.CaseId);
+        var chain = await ReadCaseChainAsync(key, allowMissingHead: false, cancellationToken).ConfigureAwait(false);
+        var currentCase = chain.LastOrDefault();
+        var currentEffect = await _effectAttempts.ReadCurrentForReconciliationAsync(request.Context.Binding.OperationId, request.Context.Binding.EffectGeneration, cancellationToken).ConfigureAwait(false);
+        if (currentCase is null || currentEffect is null
+            || currentCase.CaseVersion != request.Context.Case.CaseVersion
+            || !string.Equals(currentCase.ContentHash, request.Context.Case.ContentHash, StringComparison.Ordinal)
+            || !string.Equals(currentCase.Binding.ContentHash, request.Context.Binding.ContentHash, StringComparison.Ordinal))
+        {
+            return ProbeReservationResult(GovernedLoopEffectReconciliationProbeReservationStatus.Conflict);
+        }
+        if (currentCase.Disposition is not null || currentCase.Resolution is not null
+            || !GovernedLoopEffectReconciliationContractValidator.Validate(currentCase, currentEffect).IsValid
+            || !string.Equals(currentEffect.ContentHash, request.Context.EffectHead.ContentHash, StringComparison.Ordinal))
+        {
+            return ProbeReservationResult(GovernedLoopEffectReconciliationProbeReservationStatus.Conflict);
+        }
+
+        var now = _timeProvider.GetUtcNow();
+        if (now.Offset != TimeSpan.Zero || now == default)
+        {
+            return ProbeReservationResult(GovernedLoopEffectReconciliationProbeReservationStatus.Unavailable);
+        }
+        var reservation = new GovernedLoopEffectReconciliationProbeReservation(
+            request.OperationId,
+            request.RequestHash,
+            CreateProbeInvocationId(),
+            request.Context,
+            now);
+        var artifact = CreateReservationArtifact(reservation);
+        if (!HasProbeRetainedCapacity(artifact, null, null, null, includeReservationBudget: true))
+        {
+            return ProbeReservationResult(GovernedLoopEffectReconciliationProbeReservationStatus.CapacityExceeded);
+        }
+        await WriteProbeReservationAsync(operationKey, artifact, cancellationToken).ConfigureAwait(false);
+        Observe(GovernedLoopEffectReconciliationPersistenceBoundary.ProbeReservationPublished);
+        return new GovernedLoopEffectReconciliationProbeReservationResult(GovernedLoopEffectReconciliationProbeReservationStatus.Reserved, reservation);
+    }
+
+    private async Task<GovernedLoopEffectReconciliationProbeObservationCommitResult> CommitProbeObservationUnderLockAsync(
+        GovernedLoopEffectReconciliationProbeObservationCommitRequest request,
+        CancellationToken cancellationToken)
+    {
+        await RecoverPendingJournalsUnderLockAsync(cancellationToken).ConfigureAwait(false);
+        var allCases = await ReadAllCurrentCasesAsync(cancellationToken).ConfigureAwait(false);
+        await ValidateReceiptInventoryAsync(allCases, cancellationToken).ConfigureAwait(false);
+        await ValidateProbeInventoryAsync(allCases, cancellationToken).ConfigureAwait(false);
+        var operationKey = GovernedLoopEffectReconciliationArtifactNames.OperationKey(request.Reservation.OperationId);
+        var storedReservation = await ReadProbeReservationAsync(operationKey, cancellationToken).ConfigureAwait(false);
+        if (storedReservation is null)
+        {
+            return ProbeCommitResult(GovernedLoopEffectReconciliationProbeReservationStatus.Unavailable);
+        }
+        if (!SameProbeReservation(storedReservation, request.Reservation))
+        {
+            return ProbeCommitResult(GovernedLoopEffectReconciliationProbeReservationStatus.Conflict);
+        }
+
+        var existing = await ReadProbeObservationAsync(operationKey, cancellationToken).ConfigureAwait(false);
+        if (existing is not null)
+        {
+            var completed = await ReadProbeCommitPayloadAsync(existing, storedReservation, cancellationToken).ConfigureAwait(false);
+            return new GovernedLoopEffectReconciliationProbeObservationCommitResult(GovernedLoopEffectReconciliationProbeReservationStatus.Replayed, completed.Case, completed.EffectHead);
+        }
+
+        var key = GovernedLoopEffectReconciliationArtifactNames.StorageKey(storedReservation.Context.Case.CaseId);
+        var chain = await ReadCaseChainAsync(key, allowMissingHead: false, cancellationToken).ConfigureAwait(false);
+        var currentCase = chain.LastOrDefault();
+        var currentEffect = await _effectAttempts.ReadCurrentForReconciliationAsync(storedReservation.Context.EffectHead.Payload.OperationId, storedReservation.Context.EffectHead.Payload.EffectGeneration, cancellationToken).ConfigureAwait(false);
+        if (currentCase is null || currentEffect is null || !string.Equals(currentCase.ContentHash, storedReservation.Context.Case.ContentHash, StringComparison.Ordinal)
+            || !string.Equals(currentEffect.ContentHash, storedReservation.Context.EffectHead.ContentHash, StringComparison.Ordinal))
+        {
+            return ProbeCommitResult(GovernedLoopEffectReconciliationProbeReservationStatus.Conflict);
+        }
+
+        var now = _timeProvider.GetUtcNow();
+        if (now == default || now.Offset != TimeSpan.Zero || now < currentCase.UpdatedAtUtc || now < storedReservation.ReservedAtUtc)
+        {
+            return ProbeCommitResult(GovernedLoopEffectReconciliationProbeReservationStatus.Unavailable);
+        }
+        var observation = NormalizeProbeObservation(request.Result, storedReservation, now);
+        if (currentCase.ObservationHistory.Any(item => string.Equals(item.ObservationId, observation.ObservationId, StringComparison.Ordinal)))
+        {
+            return ProbeCommitResult(GovernedLoopEffectReconciliationProbeReservationStatus.Conflict);
+        }
+        if (currentCase.ObservationHistory.Count >= GovernedLoopEffectReconciliationContractLimits.MaxObservations
+            || CountProbeObservationFiles() >= GovernedLoopEffectReconciliationPersistenceLimits.MaximumProbeObservations)
+        {
+            return ProbeCommitResult(GovernedLoopEffectReconciliationProbeReservationStatus.CapacityExceeded);
+        }
+        var next = CreateProbeResultCase(currentCase, observation, now);
+        if (!GovernedLoopEffectReconciliationContractValidator.ValidateTransition(currentCase, next).IsValid)
+        {
+            return ProbeCommitResult(GovernedLoopEffectReconciliationProbeReservationStatus.Invalid);
+        }
+
+        var result = new GovernedLoopEffectReconciliationProbeObservationArtifact(
+            GovernedLoopEffectReconciliationContractLimits.CurrentSchemaVersion,
+            storedReservation.OperationId,
+            storedReservation.RequestHash,
+            storedReservation.Context.Case.CaseId,
+            storedReservation.Context.Case.CaseVersion,
+            storedReservation.Context.Case.ContentHash,
+            storedReservation.Context.Case.BindingHash,
+            storedReservation.Context.EffectHead.ContentHash,
+            request.Result.Status,
+            JsonSerializer.Serialize(observation, _probeJson),
+            next.CaseVersion,
+            next.ContentHash,
+            now,
+            string.Empty);
+        var reservationArtifact = CreateReservationArtifact(storedReservation);
+        var journal = new GovernedLoopEffectReconciliationProbeJournal(
+            GovernedLoopEffectReconciliationContractLimits.CurrentSchemaVersion,
+            storedReservation.OperationId,
+            storedReservation.RequestHash,
+            Encoding.UTF8.GetString(GovernedLoopEffectReconciliationProbeArtifactCodec.EncodeReservation(reservationArtifact)),
+            Encoding.UTF8.GetString(GovernedLoopEffectReconciliationProbeArtifactCodec.EncodeObservation(result)),
+            GovernedLoopEffectReconciliationProbeJournalStage.Pending,
+            now,
+            string.Empty);
+        if (!HasProbeRetainedCapacity(null, result, journal, next, includeReservationBudget: false, excludeCurrentReservationBudget: true))
+        {
+            return ProbeCommitResult(GovernedLoopEffectReconciliationProbeReservationStatus.CapacityExceeded);
+        }
+        await WriteProbeJournalIfAbsentAsync(operationKey, journal, cancellationToken).ConfigureAwait(false);
+        await WriteProbeObservationAsync(operationKey, result, cancellationToken).ConfigureAwait(false);
+        Observe(GovernedLoopEffectReconciliationPersistenceBoundary.ProbeObservationPublished);
+        journal = journal with { Stage = GovernedLoopEffectReconciliationProbeJournalStage.ObservationPublished, ContentHash = string.Empty };
+        await WriteProbeJournalAsync(operationKey, journal, cancellationToken).ConfigureAwait(false);
+        await PublishCaseAsync(next, key, cancellationToken).ConfigureAwait(false);
+        Observe(GovernedLoopEffectReconciliationPersistenceBoundary.ProbeCasePublished);
+        DeleteProbeJournal(operationKey);
+        Observe(GovernedLoopEffectReconciliationPersistenceBoundary.ProbeReceiptPublished);
+        return new GovernedLoopEffectReconciliationProbeObservationCommitResult(GovernedLoopEffectReconciliationProbeReservationStatus.Reserved, next, currentEffect);
+    }
+
+    private GovernedLoopEffectReconciliationProbeReservationArtifact CreateReservationArtifact(
+        GovernedLoopEffectReconciliationProbeReservation reservation)
+    {
+        return new GovernedLoopEffectReconciliationProbeReservationArtifact(
+            GovernedLoopEffectReconciliationContractLimits.CurrentSchemaVersion,
+            reservation.OperationId,
+            reservation.RequestHash,
+            reservation.ProbeInvocationId,
+            reservation.Context.Case.CaseId,
+            reservation.Context.Case.CaseVersion,
+            reservation.Context.Case.ContentHash,
+            reservation.Context.Case.BindingHash,
+            JsonSerializer.Serialize(reservation.Context.Binding, _probeJson),
+            reservation.Context.EffectHead.ContentHash,
+            Convert.ToBase64String(EmbodySense.Core.Common.Loops.Execution.Effects.GovernedLoopEffectAttemptRecordCodec.Encode(reservation.Context.EffectHead)),
+            JsonSerializer.Serialize(reservation.Context.Source, _probeJson),
+            JsonSerializer.Serialize(reservation.Context.Contract, _probeJson),
+            JsonSerializer.Serialize(reservation.Context.Target, _probeJson),
+            reservation.Context.InputFingerprint,
+            reservation.ReservedAtUtc,
+            string.Empty);
+    }
+
+    private async Task<GovernedLoopEffectReconciliationProbeReservation?> ReadProbeReservationAsync(string operationKey, CancellationToken cancellationToken)
+    {
+        var path = _guard.GetFilePath(_root, GovernedLoopEffectReconciliationArtifactNames.ProbeReservationFileName(operationKey));
+        if (!File.Exists(path))
+        {
+            return null;
+        }
+
+        var bytes = await _guard.ReadAllBytesAsync(_root, path, GovernedLoopEffectReconciliationPersistenceLimits.MaximumProbeReservationUtf8Bytes, "Reconciliation probe reservation", cancellationToken).ConfigureAwait(false);
+        if (!GovernedLoopEffectReconciliationProbeArtifactCodec.TryDecodeReservation(bytes, out var artifact)
+            || artifact is null
+            || artifact.SchemaVersion != GovernedLoopEffectReconciliationContractLimits.CurrentSchemaVersion
+            || !string.Equals(GovernedLoopEffectReconciliationArtifactNames.OperationKey(artifact.OperationId), operationKey, StringComparison.Ordinal)
+            || !IsHash(artifact.RequestHash)
+            || !CustomLoopArtifactIdentifier.IsValid(artifact.ProbeInvocationId, GovernedLoopEffectReconciliationContractLimits.MaxIdentifierCharacters)
+            || !CustomLoopArtifactIdentifier.IsValid(artifact.CaseId, GovernedLoopEffectReconciliationContractLimits.MaxIdentifierCharacters)
+            || artifact.CaseVersion < 1
+            || !IsHash(artifact.CaseContentHash)
+            || !IsHash(artifact.BindingHash)
+            || !IsHash(artifact.EffectContentHash)
+            || string.IsNullOrWhiteSpace(artifact.BindingJson)
+            || string.IsNullOrWhiteSpace(artifact.TargetJson)
+            || !IsHash(artifact.InputFingerprint)
+            || artifact.ReservedAtUtc == default
+            || artifact.ReservedAtUtc.Offset != TimeSpan.Zero)
+        {
+            throw new FormatException("The reconciliation probe reservation is malformed or not bound to its operation identity.");
+        }
+
+        var effect = DecodeAttempt(artifact.EffectJson);
+        var persistedBinding = Deserialize<GovernedLoopEffectReconciliationBinding>(artifact.BindingJson, "probe binding");
+        var source = Deserialize<GovernedLoopEffectReconciliationEvidenceSource>(artifact.SourceJson, "probe source");
+        var contract = Deserialize<GovernedLoopEffectReconciliationContractMetadata>(artifact.ContractJson, "probe contract");
+        var target = Deserialize<GovernedLoopEffectReconciliationProbeTarget>(artifact.TargetJson, "probe target");
+        if (effect is null || persistedBinding is null || source is null || contract is null || target is null
+            || GovernedLoopEffectAttemptContract.Validate(effect) is not null
+            || !GovernedLoopEffectReconciliationContractValidator.Validate(source).IsValid
+            || !GovernedLoopEffectReconciliationContractValidator.Validate(contract).IsValid)
+        {
+            throw new FormatException("The reconciliation probe reservation contains invalid retained identity evidence.");
+        }
+
+        var reference = new GovernedLoopEffectReconciliationCaseReference(artifact.CaseId, artifact.CaseVersion, artifact.CaseContentHash, artifact.BindingHash);
+        var chain = await ReadCaseChainAsync(GovernedLoopEffectReconciliationArtifactNames.StorageKey(reference.CaseId), allowMissingHead: false, cancellationToken).ConfigureAwait(false);
+        var exactCase = chain.FirstOrDefault(value => value.CaseVersion == reference.CaseVersion && string.Equals(value.ContentHash, reference.ContentHash, StringComparison.Ordinal));
+        var binding = exactCase?.Binding;
+        if (effect.Payload.Phase != GovernedLoopEffectPhase.ReconciliationRequired
+            || binding is null
+            || !Equals(persistedBinding, binding)
+            || !string.Equals(binding.ContentHash, artifact.BindingHash, StringComparison.Ordinal)
+            || !string.Equals(effect.ContentHash, artifact.EffectContentHash, StringComparison.Ordinal)
+            || !string.Equals(binding.CurrentAttemptHash, effect.ContentHash, StringComparison.Ordinal)
+            || !string.Equals(effect.InputFingerprint, artifact.InputFingerprint, StringComparison.Ordinal)
+            || !string.Equals(target.TargetFingerprint, effect.TargetFingerprint, StringComparison.Ordinal)
+            || !string.Equals(target.PreconditionEvidenceHash, effect.PreconditionEvidenceHash, StringComparison.Ordinal)
+            || !string.Equals(target.BeforeEvidenceId, effect.BeforeEvidenceId, StringComparison.Ordinal)
+            || !string.Equals(source.CaseId, reference.CaseId, StringComparison.Ordinal)
+            || !string.Equals(source.BindingHash, reference.BindingHash, StringComparison.Ordinal)
+            || !string.Equals(source.ReconciliationContractId, contract.ContractId, StringComparison.Ordinal)
+            || source.ReconciliationContractVersion != contract.ContractVersion
+            || !string.Equals(source.ReconciliationContractHash, contract.ContentHash, StringComparison.Ordinal))
+        {
+            throw new FormatException("The reconciliation probe reservation contains disconnected identity evidence.");
+        }
+        if (string.Equals(artifact.ProbeInvocationId, artifact.OperationId, StringComparison.Ordinal)
+            || string.Equals(artifact.ProbeInvocationId, binding.OperationId, StringComparison.Ordinal)
+            || string.Equals(artifact.ProbeInvocationId, contract.ActuatorOperationId, StringComparison.Ordinal))
+        {
+            throw new FormatException("The reconciliation probe callback identity is not independent of retained operation identities.");
+        }
+        var context = new GovernedLoopEffectReconciliationProbeReservationContext(reference, binding, contract, effect, source, target, artifact.InputFingerprint);
+        if (!string.Equals(ComputeProbeRequestHash(artifact.OperationId, context), artifact.RequestHash, StringComparison.Ordinal))
+        {
+            throw new GovernedLoopEffectReconciliationRepairRequiredException("The reconciliation probe reservation request hash does not bind its retained context.");
+        }
+        var reservation = new GovernedLoopEffectReconciliationProbeReservation(artifact.OperationId, artifact.RequestHash, artifact.ProbeInvocationId, context, artifact.ReservedAtUtc);
+        var exactEffect = await _effectAttempts.ReadExactForReconciliationAsync(binding.OperationId, binding.EffectGeneration, effect.ContentHash, cancellationToken).ConfigureAwait(false);
+        if (exactCase is null
+            || !string.Equals(exactCase.Binding.ContentHash, binding.ContentHash, StringComparison.Ordinal)
+            || !string.Equals(exactCase.ContractMetadata.ContentHash, contract.ContentHash, StringComparison.Ordinal)
+            || !exactCase.EvidenceSources.Any(value => string.Equals(value.SourceId, source.SourceId, StringComparison.Ordinal) && string.Equals(value.ContentHash, source.ContentHash, StringComparison.Ordinal))
+            || exactEffect is null
+            || !string.Equals(exactEffect.ContentHash, effect.ContentHash, StringComparison.Ordinal))
+        {
+            throw new GovernedLoopEffectReconciliationRepairRequiredException("The reconciliation probe reservation is not bound to the exact retained case chain and effect head.");
+        }
+
+        return reservation;
+    }
+
+    private async Task<GovernedLoopEffectReconciliationProbeObservationArtifact?> ReadProbeObservationAsync(string operationKey, CancellationToken cancellationToken)
+    {
+        var path = _guard.GetFilePath(_root, GovernedLoopEffectReconciliationArtifactNames.ProbeObservationFileName(operationKey));
+        if (!File.Exists(path))
+        {
+            return null;
+        }
+
+        var bytes = await _guard.ReadAllBytesAsync(_root, path, GovernedLoopEffectReconciliationPersistenceLimits.MaximumProbeObservationUtf8Bytes, "Reconciliation probe observation", cancellationToken).ConfigureAwait(false);
+        if (!GovernedLoopEffectReconciliationProbeArtifactCodec.TryDecodeObservation(bytes, out var artifact)
+            || artifact is null
+            || artifact.SchemaVersion != GovernedLoopEffectReconciliationContractLimits.CurrentSchemaVersion
+            || !string.Equals(GovernedLoopEffectReconciliationArtifactNames.OperationKey(artifact.OperationId), operationKey, StringComparison.Ordinal)
+            || !IsHash(artifact.RequestHash)
+            || !CustomLoopArtifactIdentifier.IsValid(artifact.CaseId, GovernedLoopEffectReconciliationContractLimits.MaxIdentifierCharacters)
+            || artifact.CaseVersion < 1
+            || !IsHash(artifact.CaseContentHash)
+            || !IsHash(artifact.BindingHash)
+            || !IsHash(artifact.EffectContentHash)
+            || artifact.ResultCaseVersion < 1
+            || artifact.ResultCaseContentHash is null
+            || !IsHash(artifact.ResultCaseContentHash)
+            || string.IsNullOrWhiteSpace(artifact.ObservationJson)
+            || !Enum.IsDefined(artifact.Status)
+            || artifact.CommittedAtUtc == default
+            || artifact.CommittedAtUtc.Offset != TimeSpan.Zero)
+        {
+            throw new FormatException("The reconciliation probe observation is malformed or not bound to its operation identity.");
+        }
+
+        var payload = Deserialize<GovernedLoopEffectReconciliationObservation>(artifact.ObservationJson!, "probe observation");
+        if (payload is null
+            || !GovernedLoopEffectReconciliationContractValidator.Validate(payload).IsValid
+            || !string.Equals(payload.CaseId, artifact.CaseId, StringComparison.Ordinal)
+            || !string.Equals(payload.BindingHash, artifact.BindingHash, StringComparison.Ordinal)
+            || !IsObservationStatusCompatible(artifact.Status, payload.Kind)
+            || !string.Equals(payload.ObservationId, ProbeObservationId(artifact.OperationId), StringComparison.Ordinal)
+            || payload.RecordedAtUtc > artifact.CommittedAtUtc
+            || payload.ObservedAtUtc is { } observedAt && observedAt > artifact.CommittedAtUtc)
+        {
+            throw new FormatException("The reconciliation probe observation payload is not canonically bound to its receipt.");
+        }
+
+        return artifact;
+    }
+
+    private async Task<GovernedLoopEffectReconciliationProbeObservationCommitResult> ReadProbeCommitPayloadAsync(
+        GovernedLoopEffectReconciliationProbeObservationArtifact observation,
+        GovernedLoopEffectReconciliationProbeReservation reservation,
+        CancellationToken cancellationToken)
+    {
+        var key = GovernedLoopEffectReconciliationArtifactNames.StorageKey(reservation.Context.Case.CaseId);
+        var chain = await ReadCaseChainAsync(key, allowMissingHead: false, cancellationToken).ConfigureAwait(false);
+        var exact = chain.FirstOrDefault(value => value.CaseVersion == observation.ResultCaseVersion && string.Equals(value.ContentHash, observation.ResultCaseContentHash, StringComparison.Ordinal));
+        var effect = await _effectAttempts.ReadExactForReconciliationAsync(reservation.Context.EffectHead.Payload.OperationId, reservation.Context.EffectHead.Payload.EffectGeneration, reservation.Context.EffectHead.ContentHash, cancellationToken).ConfigureAwait(false);
+        var payload = Deserialize<GovernedLoopEffectReconciliationObservation>(observation.ObservationJson!, "probe observation");
+        var predecessor = chain.FirstOrDefault(value => value.CaseVersion == reservation.Context.Case.CaseVersion && string.Equals(value.ContentHash, reservation.Context.Case.ContentHash, StringComparison.Ordinal));
+        var expected = payload is not null && predecessor is not null
+            ? CreateProbeResultCase(predecessor, payload, observation.CommittedAtUtc)
+            : null;
+        if (payload is null
+            || !string.Equals(observation.OperationId, reservation.OperationId, StringComparison.Ordinal)
+            || !string.Equals(observation.RequestHash, reservation.RequestHash, StringComparison.Ordinal)
+            || !string.Equals(observation.CaseId, reservation.Context.Case.CaseId, StringComparison.Ordinal)
+            || observation.CaseVersion != reservation.Context.Case.CaseVersion
+            || !string.Equals(observation.CaseContentHash, reservation.Context.Case.ContentHash, StringComparison.Ordinal)
+            || !string.Equals(observation.BindingHash, reservation.Context.Binding.ContentHash, StringComparison.Ordinal)
+            || !string.Equals(observation.EffectContentHash, reservation.Context.EffectHead.ContentHash, StringComparison.Ordinal)
+            || observation.ResultCaseVersion != reservation.Context.Case.CaseVersion + 1
+            || observation.CommittedAtUtc < reservation.ReservedAtUtc
+            || exact is null
+            || predecessor is null
+            || expected is null
+            || !string.Equals(observation.ResultCaseContentHash, expected.ContentHash, StringComparison.Ordinal)
+            || !string.Equals(exact.ContentHash, expected.ContentHash, StringComparison.Ordinal)
+            || !string.Equals(payload.CaseId, reservation.Context.Case.CaseId, StringComparison.Ordinal)
+            || !string.Equals(payload.BindingHash, reservation.Context.Binding.ContentHash, StringComparison.Ordinal)
+            || !string.Equals(payload.SourceId, reservation.Context.Source.SourceId, StringComparison.Ordinal)
+            || !string.Equals(payload.SourceRegistrationHash, reservation.Context.Source.ContentHash, StringComparison.Ordinal)
+            || effect is null || !string.Equals(effect.ContentHash, reservation.Context.EffectHead.ContentHash, StringComparison.Ordinal))
+        {
+            throw new GovernedLoopEffectReconciliationRepairRequiredException("The probe observation receipt does not point to a complete immutable case result.");
+        }
+
+        return new GovernedLoopEffectReconciliationProbeObservationCommitResult(GovernedLoopEffectReconciliationProbeReservationStatus.Replayed, exact, effect);
+    }
+
+    private static GovernedLoopEffectReconciliationCase CreateProbeResultCase(
+        GovernedLoopEffectReconciliationCase predecessor,
+        GovernedLoopEffectReconciliationObservation observation,
+        DateTimeOffset committedAtUtc)
+        => GovernedLoopEffectReconciliationContract.Create(
+            predecessor.CaseId,
+            predecessor.CaseVersion + 1,
+            predecessor.Binding,
+            predecessor.ContractMetadata,
+            predecessor.EvidenceSources,
+            [.. predecessor.ObservationHistory, observation],
+            predecessor.AssessmentHistory,
+            predecessor.CurrentAssessmentHash,
+            predecessor.Disposition,
+            predecessor.Resolution,
+            predecessor.CaseReceiptHashes,
+            predecessor.ContentHash,
+            predecessor.OpenedAtUtc,
+            committedAtUtc);
+
+    private GovernedLoopEffectReconciliationObservation NormalizeProbeObservation(
+        GovernedLoopEffectReconciliationProbeInvocationResult result,
+        GovernedLoopEffectReconciliationProbeReservation reservation,
+        DateTimeOffset now)
+    {
+        if (result.Status == GovernedLoopEffectReconciliationProbeInvocationStatus.Ready && result.Observation is not null)
+        {
+            var value = result.Observation;
+            if (!string.Equals(value.CaseId, reservation.Context.Case.CaseId, StringComparison.Ordinal)
+                || !string.Equals(value.BindingHash, reservation.Context.Case.BindingHash, StringComparison.Ordinal)
+                || !string.Equals(value.SourceId, reservation.Context.Source.SourceId, StringComparison.Ordinal)
+                || !string.Equals(value.SourceRegistrationHash, reservation.Context.Source.ContentHash, StringComparison.Ordinal)
+                || value.RecordedAtUtc > now
+                || value.ObservedAtUtc is { } observedAt && observedAt > now
+                || !GovernedLoopEffectReconciliationContractValidator.Validate(value).IsValid)
+            {
+                throw new FormatException("The probe returned an observation outside its reserved case, binding, or source identity.");
+            }
+
+            return GovernedLoopEffectReconciliationContractHash.Apply(value with
+            {
+                ObservationId = ProbeObservationId(reservation.OperationId),
+                ContentHash = string.Empty
+            });
+        }
+
+        var kind = result.Status switch
+        {
+            GovernedLoopEffectReconciliationProbeInvocationStatus.NotFound => GovernedLoopEffectReconciliationObservationKind.Missing,
+            GovernedLoopEffectReconciliationProbeInvocationStatus.Invalid => GovernedLoopEffectReconciliationObservationKind.UnprovenHash,
+            _ => GovernedLoopEffectReconciliationObservationKind.Missing
+        };
+        var observation = new GovernedLoopEffectReconciliationObservation(
+            GovernedLoopEffectReconciliationContractLimits.CurrentSchemaVersion,
+            reservation.Context.Case.CaseId,
+            reservation.Context.Case.BindingHash,
+            ProbeObservationId(reservation.OperationId),
+            reservation.Context.Source.SourceId,
+            reservation.Context.Source.ContentHash,
+            kind,
+            reservation.Context.Source.ReliabilityPosture,
+            GovernedLoopEffectReconciliationObservedOutcome.Unknown,
+            null,
+            null,
+            null,
+            now,
+            "The read-only probe did not establish exact external evidence.",
+            string.Empty);
+        return GovernedLoopEffectReconciliationContractHash.Apply(observation);
+    }
+
+    private static string ProbeObservationId(string operationId)
+        => "probe-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(operationId))).ToLowerInvariant()[..32];
+
+    private static string CreateProbeInvocationId()
+        => "probe-" + Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
+
+    private static bool IsObservationStatusCompatible(
+        GovernedLoopEffectReconciliationProbeInvocationStatus status,
+        GovernedLoopEffectReconciliationObservationKind kind)
+        => status switch
+        {
+            GovernedLoopEffectReconciliationProbeInvocationStatus.Ready => kind is GovernedLoopEffectReconciliationObservationKind.Evidence
+                or GovernedLoopEffectReconciliationObservationKind.Missing
+                or GovernedLoopEffectReconciliationObservationKind.TimedOut
+                or GovernedLoopEffectReconciliationObservationKind.Cancelled
+                or GovernedLoopEffectReconciliationObservationKind.UnprovenHash,
+            GovernedLoopEffectReconciliationProbeInvocationStatus.NotFound => kind == GovernedLoopEffectReconciliationObservationKind.Missing,
+            GovernedLoopEffectReconciliationProbeInvocationStatus.Invalid => kind == GovernedLoopEffectReconciliationObservationKind.UnprovenHash,
+            GovernedLoopEffectReconciliationProbeInvocationStatus.Unavailable => kind == GovernedLoopEffectReconciliationObservationKind.Missing,
+            _ => false,
+        };
+
+    private static string ComputeProbeRequestHash(string operationId, GovernedLoopEffectReconciliationProbeReservationContext context)
+    {
+        var builder = new StringBuilder(2048);
+        Append(builder, "embodysense.governed-loop-effect-reconciliation-probe.v1");
+        Append(builder, operationId);
+        Append(builder, context.Case.CaseId);
+        Append(builder, context.Case.CaseVersion);
+        Append(builder, context.Case.ContentHash);
+        Append(builder, context.Binding.ContentHash);
+        Append(builder, context.EffectHead.ContentHash);
+        Append(builder, context.InputFingerprint);
+        Append(builder, context.Target.TargetFingerprint);
+        Append(builder, context.Target.PreconditionEvidenceHash);
+        Append(builder, context.Target.BeforeEvidenceId);
+        Append(builder, context.Source.SourceId);
+        Append(builder, context.Source.ContentHash);
+        Append(builder, context.Source.RegistrationEvidenceHash);
+        Append(builder, context.Contract.ContentHash);
+        Append(builder, context.Contract.ProbeContractId);
+        Append(builder, context.Contract.ProbeContractVersion);
+        Append(builder, context.Contract.ProbeContractHash);
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(builder.ToString()))).ToLowerInvariant();
+    }
+
+    private static void Append(StringBuilder builder, string? value)
+    {
+        if (value is null)
+        {
+            builder.Append("-1:");
+            return;
+        }
+
+        builder.Append(Encoding.UTF8.GetByteCount(value).ToString(CultureInfo.InvariantCulture));
+        builder.Append(':');
+        builder.Append(value);
+    }
+
+    private static void Append(StringBuilder builder, long value) => Append(builder, value.ToString(CultureInfo.InvariantCulture));
+
+    private static T? Deserialize<T>(string json, string description)
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<T>(json, _probeJson);
+        }
+        catch (Exception exception) when (exception is JsonException or ArgumentException or NotSupportedException)
+        {
+            throw new FormatException($"The {description} payload is malformed.", exception);
+        }
+    }
+
+    private async Task WriteProbeReservationAsync(string operationKey, GovernedLoopEffectReconciliationProbeReservationArtifact artifact, CancellationToken cancellationToken)
+    {
+        var path = _guard.GetFilePath(_root, GovernedLoopEffectReconciliationArtifactNames.ProbeReservationFileName(operationKey));
+        var bytes = GovernedLoopEffectReconciliationProbeArtifactCodec.EncodeReservation(artifact);
+        if (!await _guard.WriteTextAtomicallyIfAbsentAsync(_root, path, Encoding.UTF8.GetString(bytes), cancellationToken).ConfigureAwait(false))
+        {
+            var existing = await _guard.ReadAllBytesAsync(_root, path, GovernedLoopEffectReconciliationPersistenceLimits.MaximumProbeReservationUtf8Bytes, "Reconciliation probe reservation", cancellationToken).ConfigureAwait(false);
+            if (!existing.SequenceEqual(bytes))
+            {
+                throw new GovernedLoopEffectReconciliationRepairRequiredException("A probe reservation conflicted with immutable evidence.");
+            }
+        }
+    }
+
+    private async Task WriteProbeObservationAsync(string operationKey, GovernedLoopEffectReconciliationProbeObservationArtifact artifact, CancellationToken cancellationToken)
+    {
+        var path = _guard.GetFilePath(_root, GovernedLoopEffectReconciliationArtifactNames.ProbeObservationFileName(operationKey));
+        var bytes = GovernedLoopEffectReconciliationProbeArtifactCodec.EncodeObservation(artifact);
+        if (!await _guard.WriteTextAtomicallyIfAbsentAsync(_root, path, Encoding.UTF8.GetString(bytes), cancellationToken).ConfigureAwait(false))
+        {
+            var existing = await _guard.ReadAllBytesAsync(_root, path, GovernedLoopEffectReconciliationPersistenceLimits.MaximumProbeObservationUtf8Bytes, "Reconciliation probe observation", cancellationToken).ConfigureAwait(false);
+            if (!existing.SequenceEqual(bytes))
+            {
+                throw new GovernedLoopEffectReconciliationRepairRequiredException("A probe observation conflicted with immutable evidence.");
+            }
+        }
+    }
+
+    private async Task WriteProbeJournalIfAbsentAsync(string operationKey, GovernedLoopEffectReconciliationProbeJournal journal, CancellationToken cancellationToken)
+    {
+        var path = _guard.GetFilePath(_root, GovernedLoopEffectReconciliationArtifactNames.ProbeJournalFileName(operationKey));
+        var bytes = GovernedLoopEffectReconciliationProbeArtifactCodec.EncodeJournal(journal);
+        if (!await _guard.WriteTextAtomicallyIfAbsentAsync(_root, path, Encoding.UTF8.GetString(bytes), cancellationToken).ConfigureAwait(false))
+        {
+            var existing = await _guard.ReadAllBytesAsync(_root, path, GovernedLoopEffectReconciliationPersistenceLimits.MaximumProbeJournalUtf8Bytes, "Reconciliation probe journal", cancellationToken).ConfigureAwait(false);
+            if (!existing.SequenceEqual(bytes))
+            {
+                throw new GovernedLoopEffectReconciliationRepairRequiredException("A probe journal conflicted with immutable evidence.");
+            }
+        }
+    }
+
+    private async Task WriteProbeJournalAsync(string operationKey, GovernedLoopEffectReconciliationProbeJournal journal, CancellationToken cancellationToken)
+    {
+        var path = _guard.GetFilePath(_root, GovernedLoopEffectReconciliationArtifactNames.ProbeJournalFileName(operationKey));
+        var bytes = GovernedLoopEffectReconciliationProbeArtifactCodec.EncodeJournal(journal);
+        await _guard.WriteTextAtomicallyAsync(_root, path, Encoding.UTF8.GetString(bytes), cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<GovernedLoopEffectReconciliationProbeJournal?> ReadProbeJournalAsync(string operationKey, CancellationToken cancellationToken)
+    {
+        var path = _guard.GetFilePath(_root, GovernedLoopEffectReconciliationArtifactNames.ProbeJournalFileName(operationKey));
+        if (!File.Exists(path))
+        {
+            return null;
+        }
+
+        var bytes = await _guard.ReadAllBytesAsync(_root, path, GovernedLoopEffectReconciliationPersistenceLimits.MaximumProbeJournalUtf8Bytes, "Reconciliation probe journal", cancellationToken).ConfigureAwait(false);
+        if (!GovernedLoopEffectReconciliationProbeArtifactCodec.TryDecodeJournal(bytes, out var journal)
+            || journal is null
+            || journal.SchemaVersion != GovernedLoopEffectReconciliationContractLimits.CurrentSchemaVersion
+            || !string.Equals(GovernedLoopEffectReconciliationArtifactNames.OperationKey(journal.OperationId), operationKey, StringComparison.Ordinal)
+            || !IsHash(journal.RequestHash)
+            || !Enum.IsDefined(journal.Stage)
+            || journal.CreatedAtUtc == default
+            || journal.CreatedAtUtc.Offset != TimeSpan.Zero)
+        {
+            throw new FormatException("The reconciliation probe journal is malformed or not bound to its operation identity.");
+        }
+
+        if (!GovernedLoopEffectReconciliationProbeArtifactCodec.TryDecodeReservation(Encoding.UTF8.GetBytes(journal.ReservationJson), out var reservation)
+            || reservation is null
+            || !GovernedLoopEffectReconciliationProbeArtifactCodec.TryDecodeObservation(Encoding.UTF8.GetBytes(journal.ObservationJson), out var observation)
+            || observation is null
+            || !string.Equals(reservation.OperationId, journal.OperationId, StringComparison.Ordinal)
+            || !string.Equals(observation.OperationId, journal.OperationId, StringComparison.Ordinal)
+            || !string.Equals(reservation.RequestHash, journal.RequestHash, StringComparison.Ordinal)
+            || !string.Equals(observation.RequestHash, journal.RequestHash, StringComparison.Ordinal))
+        {
+            throw new GovernedLoopEffectReconciliationRepairRequiredException("The reconciliation probe journal does not contain matching canonical reservation and observation artifacts.");
+        }
+
+        return journal;
+    }
+
+    private void DeleteProbeJournal(string operationKey)
+        => _guard.DeleteFile(_root, _guard.GetFilePath(_root, GovernedLoopEffectReconciliationArtifactNames.ProbeJournalFileName(operationKey)));
+
+    private async Task RecoverPendingProbeJournalsUnderLockAsync(CancellationToken cancellationToken)
+    {
+        var paths = Directory.EnumerateFiles(_root, GovernedLoopEffectReconciliationPersistenceLimits.ProbeJournalFilePrefix + "*.json", SearchOption.TopDirectoryOnly)
+            .Where(path => GovernedLoopEffectReconciliationArtifactNames.TryParseProbeJournalFile(Path.GetFileName(path), out _))
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        if (paths.Length > GovernedLoopEffectReconciliationPersistenceLimits.MaximumProbeJournals)
+        {
+            throw new GovernedLoopEffectReconciliationRepairRequiredException("Too many interrupted reconciliation probe publications require explicit repair.");
+        }
+
+        foreach (var path in paths)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!GovernedLoopEffectReconciliationArtifactNames.TryParseProbeJournalFile(Path.GetFileName(path), out var operationKey))
+            {
+                throw new FormatException("The reconciliation probe journal name is malformed.");
+            }
+            var journal = await ReadProbeJournalAsync(operationKey, cancellationToken).ConfigureAwait(false)
+                ?? throw new FormatException("The reconciliation probe journal disappeared during recovery.");
+            var reservation = await ReadProbeReservationAsync(operationKey, cancellationToken).ConfigureAwait(false);
+            var observation = Deserialize<GovernedLoopEffectReconciliationProbeObservationArtifact>(journal.ObservationJson, "probe observation journal");
+            var embeddedReservation = Deserialize<GovernedLoopEffectReconciliationProbeReservationArtifact>(journal.ReservationJson, "probe reservation journal");
+            if (reservation is null || observation is null || embeddedReservation is null
+                || !string.Equals(reservation.RequestHash, journal.RequestHash, StringComparison.Ordinal)
+                || !string.Equals(Encoding.UTF8.GetString(GovernedLoopEffectReconciliationProbeArtifactCodec.EncodeReservation(embeddedReservation)), journal.ReservationJson, StringComparison.Ordinal)
+                || !string.Equals(Encoding.UTF8.GetString(GovernedLoopEffectReconciliationProbeArtifactCodec.EncodeReservation(CreateReservationArtifact(reservation))), journal.ReservationJson, StringComparison.Ordinal)
+                || !string.Equals(observation.OperationId, reservation.OperationId, StringComparison.Ordinal)
+                || !string.Equals(observation.RequestHash, reservation.RequestHash, StringComparison.Ordinal)
+                || !string.Equals(observation.CaseId, reservation.Context.Case.CaseId, StringComparison.Ordinal)
+                || observation.CaseVersion != reservation.Context.Case.CaseVersion
+                || !string.Equals(observation.CaseContentHash, reservation.Context.Case.ContentHash, StringComparison.Ordinal)
+                || !string.Equals(observation.BindingHash, reservation.Context.Binding.ContentHash, StringComparison.Ordinal)
+                || !string.Equals(observation.EffectContentHash, reservation.Context.EffectHead.ContentHash, StringComparison.Ordinal)
+                || observation.ResultCaseVersion != reservation.Context.Case.CaseVersion + 1
+                || observation.CommittedAtUtc == default
+                || observation.CommittedAtUtc.Offset != TimeSpan.Zero
+                || observation.CommittedAtUtc < reservation.ReservedAtUtc)
+            {
+                throw new GovernedLoopEffectReconciliationRepairRequiredException("The reconciliation probe journal is not bound to its immutable reservation.");
+            }
+            var storedObservation = Deserialize<GovernedLoopEffectReconciliationObservation>(observation.ObservationJson ?? string.Empty, "probe observation");
+            if (storedObservation is null
+                || !string.Equals(storedObservation.CaseId, reservation.Context.Case.CaseId, StringComparison.Ordinal)
+                || !string.Equals(storedObservation.BindingHash, reservation.Context.Case.BindingHash, StringComparison.Ordinal)
+                || !string.Equals(storedObservation.SourceId, reservation.Context.Source.SourceId, StringComparison.Ordinal)
+                || !string.Equals(storedObservation.SourceRegistrationHash, reservation.Context.Source.ContentHash, StringComparison.Ordinal)
+                || !string.Equals(storedObservation.ObservationId, ProbeObservationId(reservation.OperationId), StringComparison.Ordinal)
+                || storedObservation.RecordedAtUtc > observation.CommittedAtUtc
+                || storedObservation.ObservedAtUtc is { } observedAt && observedAt > observation.CommittedAtUtc
+                || !GovernedLoopEffectReconciliationContractValidator.Validate(storedObservation).IsValid
+                || !IsObservationStatusCompatible(observation.Status, storedObservation.Kind))
+            {
+                throw new GovernedLoopEffectReconciliationRepairRequiredException("The reconciliation probe journal has an invalid immutable observation payload.");
+            }
+            var key = GovernedLoopEffectReconciliationArtifactNames.StorageKey(reservation.Context.Case.CaseId);
+            var chain = await ReadCaseChainAsync(key, allowMissingHead: false, cancellationToken).ConfigureAwait(false);
+            var current = chain.LastOrDefault();
+            var predecessor = chain.FirstOrDefault(value => value.CaseVersion == reservation.Context.Case.CaseVersion && string.Equals(value.ContentHash, reservation.Context.Case.ContentHash, StringComparison.Ordinal));
+            if (predecessor is null)
+            {
+                throw new GovernedLoopEffectReconciliationRepairRequiredException("The interrupted reconciliation probe is missing its immutable predecessor.");
+            }
+            var expected = CreateProbeResultCase(predecessor, storedObservation, observation.CommittedAtUtc);
+            if (expected.CaseVersion != observation.ResultCaseVersion || !string.Equals(expected.ContentHash, observation.ResultCaseContentHash, StringComparison.Ordinal))
+            {
+                throw new GovernedLoopEffectReconciliationRepairRequiredException("The interrupted reconciliation probe result case does not match its immutable receipt.");
+            }
+            if (current is not null && string.Equals(current.ContentHash, reservation.Context.Case.ContentHash, StringComparison.Ordinal))
+            {
+                await WriteProbeObservationAsync(operationKey, observation, cancellationToken).ConfigureAwait(false);
+                await PublishCaseAsync(expected, key, cancellationToken).ConfigureAwait(false);
+            }
+            else if (current is null
+                || !string.Equals(current.ContentHash, expected.ContentHash, StringComparison.Ordinal))
+            {
+                throw new GovernedLoopEffectReconciliationRepairRequiredException("The interrupted reconciliation probe has a conflicting case head.");
+            }
+            DeleteProbeJournal(operationKey);
+        }
+    }
+
+    private async Task ValidateProbeInventoryAsync(IReadOnlyList<GovernedLoopEffectReconciliationCase> cases, CancellationToken cancellationToken)
+    {
+        if (!Directory.Exists(_root))
+        {
+            return;
+        }
+
+        var reservations = Directory.EnumerateFiles(_root, GovernedLoopEffectReconciliationPersistenceLimits.ProbeReservationFilePrefix + "*.json", SearchOption.TopDirectoryOnly)
+            .Count(path => GovernedLoopEffectReconciliationArtifactNames.TryParseProbeReservationFile(Path.GetFileName(path), out _));
+        var observations = Directory.EnumerateFiles(_root, GovernedLoopEffectReconciliationPersistenceLimits.ProbeObservationFilePrefix + "*.json", SearchOption.TopDirectoryOnly)
+            .Count(path => GovernedLoopEffectReconciliationArtifactNames.TryParseProbeObservationFile(Path.GetFileName(path), out _));
+        var journals = Directory.EnumerateFiles(_root, GovernedLoopEffectReconciliationPersistenceLimits.ProbeJournalFilePrefix + "*.json", SearchOption.TopDirectoryOnly)
+            .Count(path => GovernedLoopEffectReconciliationArtifactNames.TryParseProbeJournalFile(Path.GetFileName(path), out _));
+        if (reservations > GovernedLoopEffectReconciliationPersistenceLimits.MaximumProbeReservations
+            || observations > GovernedLoopEffectReconciliationPersistenceLimits.MaximumProbeObservations
+            || journals > GovernedLoopEffectReconciliationPersistenceLimits.MaximumProbeJournals)
+        {
+            throw new FormatException("The reconciliation probe artifact inventory exceeds its finite bounds.");
+        }
+
+        var reservationsByCase = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var path in Directory.EnumerateFiles(_root, GovernedLoopEffectReconciliationPersistenceLimits.ProbeReservationFilePrefix + "*.json", SearchOption.TopDirectoryOnly))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!GovernedLoopEffectReconciliationArtifactNames.TryParseProbeReservationFile(Path.GetFileName(path), out var operationKey))
+            {
+                throw new FormatException("The reconciliation probe reservation name is malformed.");
+            }
+            var reservation = await ReadProbeReservationAsync(operationKey, cancellationToken).ConfigureAwait(false)
+                ?? throw new FormatException("The reconciliation probe reservation disappeared during inventory validation.");
+            if (!cases.Any(value => string.Equals(value.CaseId, reservation.Context.Case.CaseId, StringComparison.Ordinal)))
+            {
+                throw new FormatException("The reconciliation probe reservation is not attached to a retained case.");
+            }
+            var caseReservations = reservationsByCase.GetValueOrDefault(reservation.Context.Case.CaseId) + 1;
+            if (caseReservations > GovernedLoopEffectReconciliationPersistenceLimits.MaximumProbeReservationsPerCase)
+            {
+                throw new FormatException("The reconciliation probe reservation inventory exceeds its per-case bound.");
+            }
+            reservationsByCase[reservation.Context.Case.CaseId] = caseReservations;
+        }
+
+        foreach (var path in Directory.EnumerateFiles(_root, GovernedLoopEffectReconciliationPersistenceLimits.ProbeObservationFilePrefix + "*.json", SearchOption.TopDirectoryOnly))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!GovernedLoopEffectReconciliationArtifactNames.TryParseProbeObservationFile(Path.GetFileName(path), out var operationKey))
+            {
+                throw new FormatException("The reconciliation probe observation name is malformed.");
+            }
+            var observation = await ReadProbeObservationAsync(operationKey, cancellationToken).ConfigureAwait(false)
+                ?? throw new FormatException("The reconciliation probe observation disappeared during inventory validation.");
+            var reservation = await ReadProbeReservationAsync(operationKey, cancellationToken).ConfigureAwait(false)
+                ?? throw new FormatException("The reconciliation probe observation is orphaned from its reservation.");
+            if (!string.Equals(observation.RequestHash, reservation.RequestHash, StringComparison.Ordinal)
+                || !string.Equals(observation.EffectContentHash, reservation.Context.EffectHead.ContentHash, StringComparison.Ordinal))
+            {
+                throw new FormatException("The reconciliation probe observation is not bound to its reservation.");
+            }
+            _ = await ReadProbeCommitPayloadAsync(observation, reservation, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private int CountProbeReservationFiles()
+        => Directory.Exists(_root)
+            ? Directory.EnumerateFiles(_root, GovernedLoopEffectReconciliationPersistenceLimits.ProbeReservationFilePrefix + "*.json", SearchOption.TopDirectoryOnly)
+                .Count(path => GovernedLoopEffectReconciliationArtifactNames.TryParseProbeReservationFile(Path.GetFileName(path), out _))
+            : 0;
+
+    private int CountProbeObservationFiles()
+        => Directory.Exists(_root)
+            ? Directory.EnumerateFiles(_root, GovernedLoopEffectReconciliationPersistenceLimits.ProbeObservationFilePrefix + "*.json", SearchOption.TopDirectoryOnly)
+                .Count(path => GovernedLoopEffectReconciliationArtifactNames.TryParseProbeObservationFile(Path.GetFileName(path), out _))
+            : 0;
+
+    private int CountIncompleteProbeReservationFiles()
+    {
+        if (!Directory.Exists(_root))
+        {
+            return 0;
+        }
+
+        var count = 0;
+        foreach (var path in Directory.EnumerateFiles(_root, GovernedLoopEffectReconciliationPersistenceLimits.ProbeReservationFilePrefix + "*.json", SearchOption.TopDirectoryOnly))
+        {
+            if (GovernedLoopEffectReconciliationArtifactNames.TryParseProbeReservationFile(Path.GetFileName(path), out var operationKey)
+                && !File.Exists(_guard.GetFilePath(_root, GovernedLoopEffectReconciliationArtifactNames.ProbeObservationFileName(operationKey))))
+            {
+                count++;
+            }
+        }
+
+        return count;
+    }
+
+    private async Task<bool> HasIncompleteProbeReservationForCaseAsync(
+        GovernedLoopEffectReconciliationCaseReference caseReference,
+        CancellationToken cancellationToken)
+    {
+        if (!Directory.Exists(_root))
+        {
+            return false;
+        }
+
+        foreach (var path in Directory.EnumerateFiles(_root, GovernedLoopEffectReconciliationPersistenceLimits.ProbeReservationFilePrefix + "*.json", SearchOption.TopDirectoryOnly))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!GovernedLoopEffectReconciliationArtifactNames.TryParseProbeReservationFile(Path.GetFileName(path), out var operationKey)
+                || File.Exists(_guard.GetFilePath(_root, GovernedLoopEffectReconciliationArtifactNames.ProbeObservationFileName(operationKey))))
+            {
+                continue;
+            }
+
+            var reservation = await ReadProbeReservationAsync(operationKey, cancellationToken).ConfigureAwait(false);
+            if (reservation is not null
+                && string.Equals(reservation.Context.Case.CaseId, caseReference.CaseId, StringComparison.Ordinal)
+                && reservation.Context.Case.CaseVersion == caseReference.CaseVersion
+                && string.Equals(reservation.Context.Case.ContentHash, caseReference.ContentHash, StringComparison.Ordinal)
+                && string.Equals(reservation.Context.Case.BindingHash, caseReference.BindingHash, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private async Task<int> CountProbeReservationsForCaseAsync(string caseId, CancellationToken cancellationToken)
+    {
+        if (!Directory.Exists(_root))
+        {
+            return 0;
+        }
+
+        var count = 0;
+        foreach (var path in Directory.EnumerateFiles(_root, GovernedLoopEffectReconciliationPersistenceLimits.ProbeReservationFilePrefix + "*.json", SearchOption.TopDirectoryOnly))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (GovernedLoopEffectReconciliationArtifactNames.TryParseProbeReservationFile(Path.GetFileName(path), out var key)
+                && await ReadProbeReservationAsync(key, cancellationToken).ConfigureAwait(false) is { Context.Case.CaseId: var id }
+                && string.Equals(id, caseId, StringComparison.Ordinal))
+            {
+                count++;
+            }
+        }
+
+        return count;
+    }
+
+    private bool HasProbeRetainedCapacity(
+        GovernedLoopEffectReconciliationProbeReservationArtifact? reservation,
+        GovernedLoopEffectReconciliationProbeObservationArtifact? observation,
+        GovernedLoopEffectReconciliationProbeJournal? journal,
+        GovernedLoopEffectReconciliationCase? nextCase,
+        bool includeReservationBudget,
+        bool excludeCurrentReservationBudget = false)
+    {
+        try
+        {
+            var publicationBytes = checked((long)GovernedLoopEffectReconciliationPersistenceLimits.MaximumProbeObservationUtf8Bytes
+                + GovernedLoopEffectReconciliationPersistenceLimits.MaximumProbeJournalUtf8Bytes
+                + GovernedLoopEffectReconciliationContractLimits.MaxRecordUtf8Bytes);
+            var heldReservationCount = CountIncompleteProbeReservationFiles() - (excludeCurrentReservationBudget ? 1 : 0);
+            var heldPublicationBytes = checked((long)Math.Max(0, heldReservationCount) * publicationBytes);
+            var additionalBytes = checked((reservation is null ? 0 : GovernedLoopEffectReconciliationProbeArtifactCodec.EncodeReservation(reservation).Length)
+                + (observation is null ? 0 : GovernedLoopEffectReconciliationProbeArtifactCodec.EncodeObservation(observation).Length)
+                + (journal is null ? 0 : Math.Max(
+                    GovernedLoopEffectReconciliationProbeArtifactCodec.EncodeJournal(journal).Length,
+                    GovernedLoopEffectReconciliationProbeArtifactCodec.EncodeJournal(journal with { Stage = GovernedLoopEffectReconciliationProbeJournalStage.ObservationPublished, ContentHash = string.Empty }).Length))
+                + (nextCase is null ? 0 : GovernedLoopEffectReconciliationRecordCodec.Encode(nextCase).Length)
+                + heldPublicationBytes
+                + (includeReservationBudget ? publicationBytes : 0));
+            return additionalBytes <= _effectAttempts.MaximumStoreBytes
+                && _effectAttempts.GetRetainedBytesUnderMutationLock() <= _effectAttempts.MaximumStoreBytes - additionalBytes;
+        }
+        catch (OverflowException)
+        {
+            return false;
+        }
+    }
+
+    /// <inheritdoc />
     public async Task<GovernedLoopEffectReconciliationResolutionReadResult> ReadAsync(
         GovernedLoopEffectReconciliationResolutionReadRequest request,
         CancellationToken cancellationToken = default)
@@ -292,6 +1312,7 @@ public sealed class GovernedLoopEffectReconciliationCaseStore : IGovernedLoopEff
 
             var allCases = await ReadAllCurrentCasesAsync(cancellationToken).ConfigureAwait(false);
             await ValidateReceiptInventoryAsync(allCases, cancellationToken).ConfigureAwait(false);
+            await ValidateProbeInventoryAsync(allCases, cancellationToken).ConfigureAwait(false);
             var key = GovernedLoopEffectReconciliationArtifactNames.StorageKey(request.Case.CaseId);
             var chain = await ReadCaseChainAsync(key, allowMissingHead: false, cancellationToken).ConfigureAwait(false);
             var exact = chain.FirstOrDefault(value => value.CaseVersion == request.Case.CaseVersion
@@ -328,6 +1349,7 @@ public sealed class GovernedLoopEffectReconciliationCaseStore : IGovernedLoopEff
         await RecoverPendingJournalsUnderLockAsync(cancellationToken).ConfigureAwait(false);
         var allCases = await ReadAllCurrentCasesAsync(cancellationToken).ConfigureAwait(false);
         await ValidateReceiptInventoryAsync(allCases, cancellationToken).ConfigureAwait(false);
+        await ValidateProbeInventoryAsync(allCases, cancellationToken).ConfigureAwait(false);
         if (!string.Equals(request.Binding.WorkspaceId, _workspaceId, StringComparison.Ordinal)
             || !string.Equals(request.Binding.ContentHash, request.Replacement.Binding.ContentHash, StringComparison.Ordinal))
         {
@@ -356,6 +1378,13 @@ public sealed class GovernedLoopEffectReconciliationCaseStore : IGovernedLoopEff
         if (currentEffect is null)
         {
             return MutationResult(GovernedLoopEffectReconciliationCaseMutationStatus.Unavailable);
+        }
+        if (currentCase is not null
+            && await HasIncompleteProbeReservationForCaseAsync(
+                new GovernedLoopEffectReconciliationCaseReference(currentCase.CaseId, currentCase.CaseVersion, currentCase.ContentHash, currentCase.Binding.ContentHash),
+                cancellationToken).ConfigureAwait(false))
+        {
+            return CurrentResult(GovernedLoopEffectReconciliationCaseMutationStatus.Conflict, currentCase, currentEffect);
         }
         if (currentCase is not null)
         {
@@ -598,6 +1627,8 @@ public sealed class GovernedLoopEffectReconciliationCaseStore : IGovernedLoopEff
             await WriteReceiptIfAbsentAsync(operationKey, receipt, cancellationToken).ConfigureAwait(false);
             DeleteJournal(operationKey);
         }
+
+        await RecoverPendingProbeJournalsUnderLockAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<GovernedLoopEffectReconciliationCaseMutationResult> ReplayReceiptAsync(
@@ -1010,7 +2041,10 @@ public sealed class GovernedLoopEffectReconciliationCaseStore : IGovernedLoopEff
     private bool HasPendingJournal()
         => Directory.Exists(_root)
             && Directory.EnumerateFiles(_root, GovernedLoopEffectReconciliationPersistenceLimits.JournalFilePrefix + "*.json", SearchOption.TopDirectoryOnly)
-                .Any(path => GovernedLoopEffectReconciliationArtifactNames.TryParseJournalFile(Path.GetFileName(path), out _));
+                .Any(path => GovernedLoopEffectReconciliationArtifactNames.TryParseJournalFile(Path.GetFileName(path), out _))
+            || Directory.Exists(_root)
+                && Directory.EnumerateFiles(_root, GovernedLoopEffectReconciliationPersistenceLimits.ProbeJournalFilePrefix + "*.json", SearchOption.TopDirectoryOnly)
+                    .Any(path => GovernedLoopEffectReconciliationArtifactNames.TryParseProbeJournalFile(Path.GetFileName(path), out _));
 
     private void Observe(GovernedLoopEffectReconciliationPersistenceBoundary boundary)
         => _options.DurableBoundaryObserver?.Invoke(boundary);
@@ -1030,6 +2064,16 @@ public sealed class GovernedLoopEffectReconciliationCaseStore : IGovernedLoopEff
                 var journal = await ReadJournalAsync(operationKey, cancellationToken).ConfigureAwait(false)
                     ?? throw new FormatException("The reconciliation transaction journal disappeared during validation.");
                 ValidatePendingJournalPayload(journal);
+            }
+        }
+
+        foreach (var path in Directory.EnumerateFiles(_root, GovernedLoopEffectReconciliationPersistenceLimits.ProbeJournalFilePrefix + "*.json", SearchOption.TopDirectoryOnly))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (GovernedLoopEffectReconciliationArtifactNames.TryParseProbeJournalFile(Path.GetFileName(path), out var operationKey))
+            {
+                _ = await ReadProbeJournalAsync(operationKey, cancellationToken).ConfigureAwait(false)
+                    ?? throw new FormatException("The reconciliation probe journal disappeared during validation.");
             }
         }
     }
@@ -1147,6 +2191,12 @@ public sealed class GovernedLoopEffectReconciliationCaseStore : IGovernedLoopEff
     private static GovernedLoopEffectReconciliationCaseMutationResult MutationResult(GovernedLoopEffectReconciliationCaseMutationStatus status)
         => new(status, null, null);
 
+    private static GovernedLoopEffectReconciliationProbeReservationResult ProbeReservationResult(GovernedLoopEffectReconciliationProbeReservationStatus status)
+        => new(status, null);
+
+    private static GovernedLoopEffectReconciliationProbeObservationCommitResult ProbeCommitResult(GovernedLoopEffectReconciliationProbeReservationStatus status)
+        => new(status, null, null);
+
     private static bool SameReceiptRequest(
         GovernedLoopEffectReconciliationOperationReceipt receipt,
         GovernedLoopEffectReconciliationCaseMutationRequest request)
@@ -1159,6 +2209,26 @@ public sealed class GovernedLoopEffectReconciliationCaseStore : IGovernedLoopEff
         GovernedLoopEffectReconciliationOperationReceipt left,
         GovernedLoopEffectReconciliationOperationReceipt right)
         => left == right;
+
+    private static bool SameProbeReservation(
+        GovernedLoopEffectReconciliationProbeReservation left,
+        GovernedLoopEffectReconciliationProbeReservation right)
+        => string.Equals(left.OperationId, right.OperationId, StringComparison.Ordinal)
+            && string.Equals(left.RequestHash, right.RequestHash, StringComparison.Ordinal)
+            && string.Equals(left.ProbeInvocationId, right.ProbeInvocationId, StringComparison.Ordinal)
+            && left.ReservedAtUtc == right.ReservedAtUtc
+            && Equals(left.Context.Case, right.Context.Case)
+            && string.Equals(left.Context.Binding.ContentHash, right.Context.Binding.ContentHash, StringComparison.Ordinal)
+            && string.Equals(left.Context.EffectHead.ContentHash, right.Context.EffectHead.ContentHash, StringComparison.Ordinal)
+            && string.Equals(left.Context.InputFingerprint, right.Context.InputFingerprint, StringComparison.Ordinal)
+            && string.Equals(left.Context.Target.TargetFingerprint, right.Context.Target.TargetFingerprint, StringComparison.Ordinal)
+            && string.Equals(left.Context.Target.PreconditionEvidenceHash, right.Context.Target.PreconditionEvidenceHash, StringComparison.Ordinal)
+            && string.Equals(left.Context.Target.BeforeEvidenceId, right.Context.Target.BeforeEvidenceId, StringComparison.Ordinal)
+            && string.Equals(left.Context.Source.SourceId, right.Context.Source.SourceId, StringComparison.Ordinal)
+            && string.Equals(left.Context.Source.ContentHash, right.Context.Source.ContentHash, StringComparison.Ordinal)
+            && string.Equals(left.Context.Contract.ContractId, right.Context.Contract.ContractId, StringComparison.Ordinal)
+            && left.Context.Contract.ContractVersion == right.Context.Contract.ContractVersion
+            && string.Equals(left.Context.Contract.ContentHash, right.Context.Contract.ContentHash, StringComparison.Ordinal);
 
     private static string CreateCursor(string caseId)
         => Convert.ToBase64String(Encoding.UTF8.GetBytes("v1\n" + caseId)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
