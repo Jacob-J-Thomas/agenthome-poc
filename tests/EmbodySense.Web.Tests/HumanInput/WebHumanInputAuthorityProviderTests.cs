@@ -45,6 +45,50 @@ public sealed class WebHumanInputAuthorityProviderTests
     }
 
     [Fact]
+    public async Task Authenticated_session_allows_remind_without_accepting_a_client_grant_or_candidate()
+    {
+        var context = new DefaultHttpContext { User = new ClaimsPrincipal(new ClaimsIdentity([], WebSessionAuthenticationDefaults.Scheme)) };
+        var provider = new WebHumanInputAuthorityProvider(new HttpContextAccessor { HttpContext = context }, new HumanInputSupersedeCandidateRegistry());
+        var expectedRequest = new HumanInputRequestReference(1, "request", "version", "hash");
+
+        var terms = await provider.ResolveLifecycleTermsAsync(new AgentRuntimeHumanInputLifecycleTermsRequest(
+            "operation-remind",
+            HumanInputRequestLifecycleOperationKind.Remind,
+            "request",
+            1,
+            HumanInputRequestLifecycleStatus.Pending,
+            expectedRequest,
+            null,
+            "reason"));
+
+        Assert.Equal(AgentRuntimeHumanInputAuthorityStatus.Ready, terms.Status);
+        Assert.Null(terms.CandidateRequest);
+        Assert.Null(terms.GrantReference);
+
+        var missingReference = await provider.ResolveLifecycleTermsAsync(new AgentRuntimeHumanInputLifecycleTermsRequest(
+            "operation-remind",
+            HumanInputRequestLifecycleOperationKind.Remind,
+            "request",
+            1,
+            HumanInputRequestLifecycleStatus.Pending,
+            null,
+            null,
+            "reason"));
+        var forgedCandidate = await provider.ResolveLifecycleTermsAsync(new AgentRuntimeHumanInputLifecycleTermsRequest(
+            "operation-remind",
+            HumanInputRequestLifecycleOperationKind.Remind,
+            "request",
+            1,
+            HumanInputRequestLifecycleStatus.Pending,
+            expectedRequest,
+            "forged-candidate",
+            "reason"));
+
+        Assert.Equal(AgentRuntimeHumanInputAuthorityStatus.Unavailable, missingReference.Status);
+        Assert.Equal(AgentRuntimeHumanInputAuthorityStatus.Unavailable, forgedCandidate.Status);
+    }
+
+    [Fact]
     public async Task Extra_identity_is_unavailable_at_both_authority_boundaries()
     {
         var context = new DefaultHttpContext
@@ -99,4 +143,30 @@ public sealed class WebHumanInputAuthorityProviderTests
         Assert.Equal(candidate.RequestId, terms.CandidateRequest!.RequestId);
         Assert.Equal(registration.GrantReference, terms.GrantReference);
     }
+
+    [Fact]
+    public async Task Prepared_candidate_is_bound_to_operation_kind_and_cannot_be_reused_for_reroute_or_amend()
+    {
+        const string WorkspaceRoot = "/tmp/agenthome-human-input-authority-kind";
+        var workspaceId = HumanInputWebAuthority.GetWorkspaceId(WorkspaceRoot);
+        var binding = new HumanInputRequestBinding(workspaceId, "governed-loop", "loop-revision-one", "node-one", "run-one", "checkpoint-one");
+        var current = HumanInputRequestStoreTestData.Request("request-one", "version-one", HumanInputRequestStoreTestData.Time, binding);
+        var candidate = HumanInputRequestStoreTestData.Request("request-two", "version-two", HumanInputRequestStoreTestData.Time, binding, HumanInputPrivacyClass.Sensitive);
+        var mutation = HumanInputRequestStoreTestData.CreateMutation();
+        var registration = new HumanInputSupersedeCandidateRegistration(workspaceId, WorkspaceActors.Web, "operation-kind", current.RequestId, 1, HumanInputRequestStoreTestData.Reference(current), candidate, mutation.Operation.GrantReference!, DateTimeOffset.UtcNow.AddMinutes(5), HumanInputRequestLifecycleOperationKind.Supersede);
+        var registry = new HumanInputSupersedeCandidateRegistry();
+        Assert.True(registry.TryRegister(registration, out var key));
+        var context = new DefaultHttpContext { User = new ClaimsPrincipal(new ClaimsIdentity([], WebSessionAuthenticationDefaults.Scheme)) };
+        var provider = new WebHumanInputAuthorityProvider(new HttpContextAccessor { HttpContext = context }, registry, WorkspaceRoot);
+        var reference = HumanInputStoreReference(current);
+
+        foreach (var kind in new[] { HumanInputRequestLifecycleOperationKind.Reroute, HumanInputRequestLifecycleOperationKind.Amend })
+        {
+            var terms = await provider.ResolveLifecycleTermsAsync(new AgentRuntimeHumanInputLifecycleTermsRequest("operation-kind", kind, current.RequestId, 1, HumanInputRequestLifecycleStatus.Pending, reference, key, "reason"));
+            Assert.Equal(AgentRuntimeHumanInputAuthorityStatus.Unavailable, terms.Status);
+        }
+    }
+
+    private static HumanInputRequestReference HumanInputStoreReference(HumanInputRequest request)
+        => new(HumanInputRequestReference.CurrentSchemaVersion, request.RequestId, request.RequestVersionId, request.RequestHash);
 }

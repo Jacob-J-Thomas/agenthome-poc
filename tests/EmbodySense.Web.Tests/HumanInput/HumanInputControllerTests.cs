@@ -120,6 +120,85 @@ public sealed class HumanInputControllerTests
     }
 
     [Fact]
+    public async Task Remind_reroute_and_amend_routes_preserve_exact_terms_and_candidate_requirements()
+    {
+        var runtime = new HumanInputControllerTestRuntime();
+        var controller = new HumanInputController(runtime);
+        var expectedRequest = Reference();
+        var lifecycle = new HumanInputWebLifecycleRequest("operation-1", 3, "Pending", expectedRequest, "operator-reason");
+
+        runtime.OperationResponse = new HumanInputOperationResult(HumanInputOperationStatus.Committed, "operation-1", null, null, []);
+        Assert.Equal(StatusCodes.Status200OK, (await controller.Remind("request-1", lifecycle)).ResultStatusCode());
+        Assert.Equal("Remind", runtime.LastLifecycleInput!.Kind);
+        Assert.Null(runtime.LastLifecycleInput.CandidateKey);
+        Assert.Equal(StatusCodes.Status400BadRequest, (await controller.Remind("request-1", lifecycle with { CandidateKey = "unexpected" })).ResultStatusCode());
+        Assert.Equal(StatusCodes.Status400BadRequest, (await controller.Reject("request-1", lifecycle with { CandidateKey = "unexpected" })).ResultStatusCode());
+        Assert.Equal(StatusCodes.Status400BadRequest, (await controller.Cancel("request-1", lifecycle with { CandidateKey = "unexpected" })).ResultStatusCode());
+
+        var candidateExpiry = DateTimeOffset.UtcNow.AddMinutes(5);
+        var reroutePreparation = new HumanInputWebReroutePreparationRequest("operation-2", 3, "Pending", expectedRequest, candidateExpiry);
+        runtime.ReroutePreparationResponse = new HumanInputReroutePreparationResult(
+            HumanInputSupersedePreparationStatus.Ready,
+            "request-1",
+            [new HumanInputRerouteCandidateOption("candidate-1", "Alternative respondent set", 2, DateTimeOffset.UtcNow.AddMinutes(5))],
+            candidateExpiry,
+            null);
+        Assert.Equal(StatusCodes.Status200OK, (await controller.PrepareReroute("request-1", reroutePreparation)).ResultStatusCode());
+        Assert.Equal("operation-2", runtime.LastReroutePreparationInput!.OperationId);
+        Assert.Equal("hash-1", runtime.LastReroutePreparationInput.ExpectedRequest!.RequestHash);
+
+        var reroute = lifecycle with { OperationId = "operation-3", CandidateKey = "candidate-1" };
+        Assert.Equal(StatusCodes.Status200OK, (await controller.Reroute("request-1", reroute)).ResultStatusCode());
+        Assert.Equal("Reroute", runtime.LastLifecycleInput.Kind);
+        Assert.Equal("candidate-1", runtime.LastLifecycleInput.CandidateKey);
+        Assert.Equal(StatusCodes.Status400BadRequest, (await controller.Reroute("request-1", lifecycle)).ResultStatusCode());
+
+        var amendmentExpiry = DateTimeOffset.UtcNow.AddMinutes(5);
+        var amendPreparation = new HumanInputWebAmendPreparationRequest("operation-4", 3, "Pending", expectedRequest, "new purpose", "new prompt", "Public", amendmentExpiry, candidateExpiry);
+        runtime.AmendPreparationResponse = new HumanInputAmendPreparationResult(HumanInputSupersedePreparationStatus.Ready, "request-1", "candidate-2", candidateExpiry, null);
+        Assert.Equal(StatusCodes.Status200OK, (await controller.PrepareAmend("request-1", amendPreparation)).ResultStatusCode());
+        Assert.Equal("new purpose", runtime.LastAmendPreparationInput!.Purpose);
+        Assert.Equal("new prompt", runtime.LastAmendPreparationInput.Prompt);
+        Assert.Equal("Public", runtime.LastAmendPreparationInput.PrivacyClass);
+        Assert.Equal(StatusCodes.Status400BadRequest, (await controller.Amend("request-1", lifecycle)).ResultStatusCode());
+        Assert.Equal(StatusCodes.Status200OK, (await controller.Amend("request-1", lifecycle with { OperationId = "operation-5", CandidateKey = "candidate-2" })).ResultStatusCode());
+        Assert.Equal("Amend", runtime.LastLifecycleInput.Kind);
+    }
+
+    [Fact]
+    public async Task Candidate_preparation_maps_statuses_and_rejects_route_mismatch()
+    {
+        var runtime = new HumanInputControllerTestRuntime();
+        var controller = new HumanInputController(runtime);
+        var expectedRequest = Reference();
+        var candidateExpiry = DateTimeOffset.UtcNow.AddMinutes(5);
+        var reroute = new HumanInputWebReroutePreparationRequest("operation-1", 3, "Pending", expectedRequest, candidateExpiry);
+        var amend = new HumanInputWebAmendPreparationRequest("operation-2", 3, "Pending", expectedRequest, "purpose", "prompt", "Public", DateTimeOffset.UtcNow.AddMinutes(5), candidateExpiry);
+
+        Assert.Equal(StatusCodes.Status409Conflict, (await controller.PrepareReroute("other-request", reroute)).ResultStatusCode());
+        Assert.Equal(StatusCodes.Status409Conflict, (await controller.PrepareAmend("other-request", amend)).ResultStatusCode());
+
+        foreach (var (status, expected) in new[]
+        {
+            (HumanInputSupersedePreparationStatus.Ready, StatusCodes.Status200OK),
+            (HumanInputSupersedePreparationStatus.Invalid, StatusCodes.Status400BadRequest),
+            (HumanInputSupersedePreparationStatus.NotFound, StatusCodes.Status404NotFound),
+            (HumanInputSupersedePreparationStatus.Conflict, StatusCodes.Status409Conflict),
+            (HumanInputSupersedePreparationStatus.Ambiguous, StatusCodes.Status409Conflict),
+            (HumanInputSupersedePreparationStatus.LimitExceeded, StatusCodes.Status409Conflict),
+            (HumanInputSupersedePreparationStatus.Denied, StatusCodes.Status403Forbidden),
+            (HumanInputSupersedePreparationStatus.Unavailable, StatusCodes.Status503ServiceUnavailable),
+            (HumanInputSupersedePreparationStatus.Unknown, StatusCodes.Status503ServiceUnavailable)
+        })
+        {
+            runtime.ReroutePreparationResponse = new HumanInputReroutePreparationResult(status, "request-1", [], null, null);
+            Assert.Equal(expected, (await controller.PrepareReroute("request-1", reroute)).ResultStatusCode());
+            runtime.AmendPreparationResponse = new HumanInputAmendPreparationResult(status, "request-1", null, null, null);
+            Assert.Equal(expected, (await controller.PrepareAmend("request-1", amend)).ResultStatusCode());
+        }
+    }
+
+    [Fact]
     public async Task Prepare_supersede_requires_exact_route_successor_and_maps_every_preparation_status()
     {
         var runtime = new HumanInputControllerTestRuntime();
@@ -143,6 +222,7 @@ public sealed class HumanInputControllerTests
             (HumanInputSupersedePreparationStatus.NotFound, StatusCodes.Status404NotFound),
             (HumanInputSupersedePreparationStatus.Conflict, StatusCodes.Status409Conflict),
             (HumanInputSupersedePreparationStatus.Ambiguous, StatusCodes.Status409Conflict),
+            (HumanInputSupersedePreparationStatus.LimitExceeded, StatusCodes.Status409Conflict),
             (HumanInputSupersedePreparationStatus.Denied, StatusCodes.Status403Forbidden),
             (HumanInputSupersedePreparationStatus.Unavailable, StatusCodes.Status503ServiceUnavailable),
             (HumanInputSupersedePreparationStatus.Unknown, StatusCodes.Status503ServiceUnavailable)
@@ -182,7 +262,7 @@ public sealed class HumanInputControllerTests
         };
         var controller = new HumanInputController(runtime);
         var reference = Reference();
-        var lifecycle = new HumanInputWebLifecycleRequest("operation", 1, "Pending", reference, "reason", "candidate");
+        var lifecycle = new HumanInputWebLifecycleRequest("operation", 1, "Pending", reference, "reason");
         var response = new HumanInputWebResponseRequest("operation", 1, "Pending", reference, "response", Json("true"), null);
         var preparation = new HumanInputWebSupersedePreparationRequest("operation", 1, "Pending", reference, new HumanInputWebSuccessorDraft("purpose", "prompt", Json("{}"), "Private", DateTimeOffset.UtcNow.AddMinutes(1), Json("{}")));
 
@@ -223,7 +303,7 @@ public sealed class HumanInputControllerTests
         (HumanInputOperationStatus.Conflict, StatusCodes.Status409Conflict),
         (HumanInputOperationStatus.Late, StatusCodes.Status409Conflict),
         (HumanInputOperationStatus.Ambiguous, StatusCodes.Status409Conflict),
-        (HumanInputOperationStatus.LimitExceeded, StatusCodes.Status503ServiceUnavailable),
+        (HumanInputOperationStatus.LimitExceeded, StatusCodes.Status409Conflict),
         (HumanInputOperationStatus.Unavailable, StatusCodes.Status503ServiceUnavailable),
         (HumanInputOperationStatus.Unknown, StatusCodes.Status503ServiceUnavailable)
     ];

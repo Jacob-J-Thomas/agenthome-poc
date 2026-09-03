@@ -221,6 +221,11 @@ async function fetchJsonWithoutRecovery(url, options = {}) {
     const text = await response.text();
     const error = new Error(text || `Request failed (${response.status}).`);
     error.status = response.status;
+    try {
+      error.payload = JSON.parse(text);
+    } catch {
+      error.payload = null;
+    }
     throw error;
   }
 
@@ -606,6 +611,12 @@ function bindHubEvents(connection, generation, closeCandidate) {
   connection.on("HumanReviewChanged", (notification) => {
     dispatch(
       (value) => window.embodySenseHumanReview?.notifyChanged?.(value),
+      notification,
+    );
+  });
+  connection.on("HumanInputChanged", (notification) => {
+    dispatch(
+      (value) => window.embodySenseHumanInput?.notifyChanged?.(value),
       notification,
     );
   });

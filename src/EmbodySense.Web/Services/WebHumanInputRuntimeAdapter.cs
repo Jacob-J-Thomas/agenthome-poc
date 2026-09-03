@@ -34,4 +34,12 @@ public sealed class WebHumanInputRuntimeAdapter : IWebHumanInputRuntime
     /// <inheritdoc />
     public Task<HumanInputSupersedePreparationResult> PrepareSupersedeAsync(HumanInputSupersedePreparationInput input, CancellationToken cancellationToken = default)
         => _host.PrepareHumanInputSupersedeAsync(input, cancellationToken);
+
+    /// <inheritdoc />
+    public Task<HumanInputReroutePreparationResult> PrepareRerouteAsync(HumanInputReroutePreparationInput input, CancellationToken cancellationToken = default)
+        => _host.PrepareHumanInputRerouteAsync(input, cancellationToken);
+
+    /// <inheritdoc />
+    public Task<HumanInputAmendPreparationResult> PrepareAmendAsync(HumanInputAmendPreparationInput input, CancellationToken cancellationToken = default)
+        => _host.PrepareHumanInputAmendAsync(input, cancellationToken);
 }

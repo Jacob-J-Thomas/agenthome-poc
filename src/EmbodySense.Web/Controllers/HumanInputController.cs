@@ -100,6 +100,85 @@ public sealed class HumanInputController : ControllerBase
     public Task<ActionResult<HumanInputOperationResult>> Cancel(string requestId, [FromBody] HumanInputWebLifecycleRequest? request, CancellationToken cancellationToken = default)
         => SubmitLifecycleAsync(requestId, request, "Cancel", cancellationToken);
 
+    /// <summary>Records one exact pending delivery reminder using the current server-owned grant.</summary>
+    [HttpPost("{requestId}/remind")]
+    public Task<ActionResult<HumanInputOperationResult>> Remind(string requestId, [FromBody] HumanInputWebLifecycleRequest? request, CancellationToken cancellationToken = default)
+        => SubmitLifecycleAsync(requestId, request, "Remind", cancellationToken);
+
+    /// <summary>Prepares bounded opaque server-generated alternatives for rerouting one exact pending request.</summary>
+    [HttpPost("{requestId}/reroute/prepare")]
+    public async Task<ActionResult<HumanInputReroutePreparationResult>> PrepareReroute(string requestId, [FromBody] HumanInputWebReroutePreparationRequest? request, CancellationToken cancellationToken = default)
+    {
+        if (request is null || !MatchesRoute(requestId, request.ExpectedRequest))
+        {
+            return Conflict(new { error = "request_state_conflict" });
+        }
+
+        var input = new HumanInputReroutePreparationInput(
+            request.OperationId,
+            requestId,
+            ToSurfaceReference(request.ExpectedRequest),
+            request.ExpectedLifecycleVersion,
+            request.ExpectedLifecycleStatus,
+            request.CandidateExpiresAtUtc);
+        try
+        {
+            return Project(await _runtime.PrepareRerouteAsync(input, cancellationToken).ConfigureAwait(false));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            return RuntimeUnavailable<HumanInputReroutePreparationResult>();
+        }
+    }
+
+    /// <summary>Commits one exact opaque reroute candidate through server-owned lifecycle authority.</summary>
+    [HttpPost("{requestId}/reroute")]
+    public Task<ActionResult<HumanInputOperationResult>> Reroute(string requestId, [FromBody] HumanInputWebLifecycleRequest? request, CancellationToken cancellationToken = default)
+        => SubmitLifecycleAsync(requestId, request, "Reroute", cancellationToken);
+
+    /// <summary>Prepares one bounded opaque amendment from server-validated replacement content.</summary>
+    [HttpPost("{requestId}/amend/prepare")]
+    public async Task<ActionResult<HumanInputAmendPreparationResult>> PrepareAmend(string requestId, [FromBody] HumanInputWebAmendPreparationRequest? request, CancellationToken cancellationToken = default)
+    {
+        if (request is null || !MatchesRoute(requestId, request.ExpectedRequest))
+        {
+            return Conflict(new { error = "request_state_conflict" });
+        }
+
+        var input = new HumanInputAmendPreparationInput(
+            request.OperationId,
+            requestId,
+            ToSurfaceReference(request.ExpectedRequest),
+            request.ExpectedLifecycleVersion,
+            request.ExpectedLifecycleStatus,
+            request.Purpose,
+            request.Prompt,
+            request.PrivacyClass,
+            request.RequestExpiresAtUtc,
+            request.CandidateExpiresAtUtc);
+        try
+        {
+            return Project(await _runtime.PrepareAmendAsync(input, cancellationToken).ConfigureAwait(false));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            return RuntimeUnavailable<HumanInputAmendPreparationResult>();
+        }
+    }
+
+    /// <summary>Commits one exact opaque amendment candidate through server-owned lifecycle authority.</summary>
+    [HttpPost("{requestId}/amend")]
+    public Task<ActionResult<HumanInputOperationResult>> Amend(string requestId, [FromBody] HumanInputWebLifecycleRequest? request, CancellationToken cancellationToken = default)
+        => SubmitLifecycleAsync(requestId, request, "Amend", cancellationToken);
+
     /// <summary>Prepares one opaque server-owned successor candidate for supersession.</summary>
     [HttpPost("{requestId}/supersede/prepare")]
     public async Task<ActionResult<HumanInputSupersedePreparationResult>> PrepareSupersede(string requestId, [FromBody] HumanInputWebSupersedePreparationRequest? request, CancellationToken cancellationToken = default)
@@ -152,9 +231,14 @@ public sealed class HumanInputController : ControllerBase
             return Conflict(new { error = "request_state_conflict" });
         }
 
-        if (string.Equals(kind, "Supersede", StringComparison.Ordinal) && string.IsNullOrWhiteSpace(request.CandidateKey))
+        if (kind is "Supersede" or "Reroute" or "Amend" && string.IsNullOrWhiteSpace(request.CandidateKey))
         {
             return BadRequest(new { error = "candidate_key_required" });
+        }
+
+        if (kind is "Reject" or "Cancel" or "Remind" && !string.IsNullOrWhiteSpace(request.CandidateKey))
+        {
+            return BadRequest(new { error = "candidate_key_not_allowed" });
         }
 
         try
@@ -211,7 +295,10 @@ public sealed class HumanInputController : ControllerBase
     }
 
     private static bool MatchesRoute(string requestId, HumanInputWebRequestReference? expectedRequest)
-        => expectedRequest is not null && string.Equals(requestId, expectedRequest.RequestId, StringComparison.Ordinal);
+        => !string.IsNullOrWhiteSpace(requestId)
+            && expectedRequest is not null
+            && !string.IsNullOrWhiteSpace(expectedRequest.RequestId)
+            && string.Equals(requestId, expectedRequest.RequestId, StringComparison.Ordinal);
 
     private static HumanInputSurfaceRequestReference? ToSurfaceReference(HumanInputWebRequestReference? reference)
         => reference is null ? null : new HumanInputSurfaceRequestReference(reference.RequestId, reference.RequestVersionId, reference.RequestHash);
@@ -231,7 +318,29 @@ public sealed class HumanInputController : ControllerBase
             HumanInputSupersedePreparationStatus.Ready => new OkObjectResult(response),
             HumanInputSupersedePreparationStatus.Invalid => new BadRequestObjectResult(response),
             HumanInputSupersedePreparationStatus.NotFound => new NotFoundObjectResult(response),
-            HumanInputSupersedePreparationStatus.Conflict or HumanInputSupersedePreparationStatus.Ambiguous => new ConflictObjectResult(response),
+            HumanInputSupersedePreparationStatus.Conflict or HumanInputSupersedePreparationStatus.Ambiguous or HumanInputSupersedePreparationStatus.LimitExceeded => new ConflictObjectResult(response),
+            HumanInputSupersedePreparationStatus.Denied => new ObjectResult(response) { StatusCode = StatusCodes.Status403Forbidden },
+            _ => new ObjectResult(response) { StatusCode = StatusCodes.Status503ServiceUnavailable }
+        };
+
+    private static ActionResult<HumanInputReroutePreparationResult> Project(HumanInputReroutePreparationResult response)
+        => response.Status switch
+        {
+            HumanInputSupersedePreparationStatus.Ready => new OkObjectResult(response),
+            HumanInputSupersedePreparationStatus.Invalid => new BadRequestObjectResult(response),
+            HumanInputSupersedePreparationStatus.NotFound => new NotFoundObjectResult(response),
+            HumanInputSupersedePreparationStatus.Conflict or HumanInputSupersedePreparationStatus.Ambiguous or HumanInputSupersedePreparationStatus.LimitExceeded => new ConflictObjectResult(response),
+            HumanInputSupersedePreparationStatus.Denied => new ObjectResult(response) { StatusCode = StatusCodes.Status403Forbidden },
+            _ => new ObjectResult(response) { StatusCode = StatusCodes.Status503ServiceUnavailable }
+        };
+
+    private static ActionResult<HumanInputAmendPreparationResult> Project(HumanInputAmendPreparationResult response)
+        => response.Status switch
+        {
+            HumanInputSupersedePreparationStatus.Ready => new OkObjectResult(response),
+            HumanInputSupersedePreparationStatus.Invalid => new BadRequestObjectResult(response),
+            HumanInputSupersedePreparationStatus.NotFound => new NotFoundObjectResult(response),
+            HumanInputSupersedePreparationStatus.Conflict or HumanInputSupersedePreparationStatus.Ambiguous or HumanInputSupersedePreparationStatus.LimitExceeded => new ConflictObjectResult(response),
             HumanInputSupersedePreparationStatus.Denied => new ObjectResult(response) { StatusCode = StatusCodes.Status403Forbidden },
             _ => new ObjectResult(response) { StatusCode = StatusCodes.Status503ServiceUnavailable }
         };
@@ -243,7 +352,7 @@ public sealed class HumanInputController : ControllerBase
             HumanInputOperationStatus.Invalid => new BadRequestObjectResult(response),
             HumanInputOperationStatus.NotFound => new NotFoundObjectResult(response),
             HumanInputOperationStatus.Denied => new ObjectResult(response) { StatusCode = StatusCodes.Status403Forbidden },
-            HumanInputOperationStatus.Conflict or HumanInputOperationStatus.Late or HumanInputOperationStatus.Ambiguous => new ConflictObjectResult(response),
+            HumanInputOperationStatus.Conflict or HumanInputOperationStatus.Late or HumanInputOperationStatus.Ambiguous or HumanInputOperationStatus.LimitExceeded => new ConflictObjectResult(response),
             _ => new ObjectResult(new { error = "human_input_unavailable" }) { StatusCode = StatusCodes.Status503ServiceUnavailable }
         };
 

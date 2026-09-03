@@ -10,7 +10,9 @@ import {
   humanInputOutcomeMessage,
   humanInputRequestBodyCapacityMessage,
   projectHumanInputPage,
+  projectHumanInputCandidatePreparation,
   projectHumanInputPosture,
+  projectHumanInputReroutePreparation,
 } from "../../src/EmbodySense.Web/wwwroot/human-input.js";
 
 const hash = "a".repeat(64);
@@ -28,6 +30,9 @@ test("Human Input is a distinct shell surface with bounded semantic controls", (
     "human-input-response-submit",
     "human-input-reject",
     "human-input-cancel",
+    "human-input-remind",
+    "human-input-reroute",
+    "human-input-amend",
     "human-input-supersede",
   ])
     assert.match(indexSource, new RegExp(`data-testid="${testId}"`));
@@ -250,6 +255,111 @@ test("Human Input accepts only the inclusive one-minute through thirty-day reque
   assert.ok(withExpiry("2026-09-01T12:01:00Z"));
   assert.ok(withExpiry("2026-10-01T12:00:00Z"));
   assert.equal(withExpiry("2026-10-01T12:00:01Z"), null);
+});
+
+test("Human Input lifecycle preparation projects bounded opaque candidates and typed limits", () => {
+  const expiresAtUtc = "2026-10-01T12:00:00Z";
+  const ready = projectHumanInputReroutePreparation({
+    status: "ready",
+    requestId: "request-input-1",
+    expiresAtUtc,
+    options: [
+      {
+        candidateKey: "route-a",
+        label: "Alternative route",
+        eligibleRespondentCount: 2,
+        expiresAtUtc,
+      },
+    ],
+  });
+  assert.equal(ready.status, "ready");
+  assert.deepEqual(ready.options[0], {
+    candidateKey: "route-a",
+    label: "Alternative route",
+    eligibleRespondentCount: 2,
+    expiresAtUtc,
+  });
+  assert.equal(
+    projectHumanInputReroutePreparation({
+      ...ready,
+      options: Array.from({ length: 16 }, (_, index) => ({
+        candidateKey: `route-${index}`,
+        label: "Alternative route",
+        eligibleRespondentCount: 1,
+        expiresAtUtc,
+      })),
+    }).options.length,
+    16,
+  );
+  assert.equal(
+    projectHumanInputReroutePreparation({
+      ...ready,
+      options: [
+        {
+          candidateKey: "route-a",
+          label: "Alternative route",
+          eligibleRespondentCount: 1,
+        },
+      ],
+    }).status,
+    "invalid",
+  );
+  assert.equal(
+    projectHumanInputReroutePreparation({
+      ...ready,
+      binding: { workspaceId: "must-not-cross-boundary" },
+    }).status,
+    "invalid",
+  );
+  assert.equal(
+    projectHumanInputReroutePreparation({
+      status: "ready",
+      options: Array.from({ length: 17 }, (_, index) => ({
+        candidateKey: `route-${index}`,
+        label: "Alternative route",
+        eligibleRespondentCount: 1,
+        expiresAtUtc,
+      })),
+    }).status,
+    "invalid",
+  );
+  assert.equal(
+    projectHumanInputCandidatePreparation({
+      status: "ready",
+      requestId: "request-input-1",
+      candidateKey: "amend-a",
+      candidateExpiresAtUtc: expiresAtUtc,
+      expiresAtUtc,
+    }).status,
+    "invalid",
+  );
+  assert.equal(
+    projectHumanInputCandidatePreparation({
+      status: "ready",
+      requestId: "request-input-1",
+      candidateKey: 123,
+      expiresAtUtc,
+    }).status,
+    "invalid",
+  );
+  assert.equal(
+    projectHumanInputReroutePreparation({
+      ...ready,
+      options: [
+        {
+          candidateKey: 123,
+          label: "Alternative route",
+          eligibleRespondentCount: 1,
+          expiresAtUtc,
+        },
+      ],
+    }).status,
+    "invalid",
+  );
+  assert.equal(
+    humanInputOutcomeMessage("limit-exceeded", 409),
+    "The bounded Human Input lifecycle limit was reached. Reread canonical state before trying again.",
+  );
 });
 
 test("Human Input answer is typed, exact-version-bound, retryable, and free of authority fields", async () => {
@@ -718,6 +828,295 @@ test("Human Input lifecycle controls and supersede keep operation identity separ
   assert.match(humanInputOutcomeMessage("replayed"), /already recorded/i);
 });
 
+test("Human Input exposes Remind, server-owned Reroute options, and bounded Amend", async () => {
+  const fixture = createFixture();
+  const current = posture();
+  const calls = [];
+  const candidateExpiresAtUtc = new Date(
+    Date.now() + 60 * 60 * 1000,
+  ).toISOString();
+  const requestExpiresAtUtc = new Date(
+    Date.now() + 2 * 60 * 60 * 1000,
+  ).toISOString();
+  const requestJson = async (url, options = {}) => {
+    calls.push({ url, options });
+    if (url === "/api/human-input?maximumCount=50")
+      return { status: "ready", requests: [current], nextCursor: null };
+    if (url === "/api/human-input/request-input-1") return current;
+    if (url.endsWith("/remind")) return { status: "committed" };
+    if (url.endsWith("/reroute/prepare"))
+      return {
+        status: "ready",
+        requestId: "request-input-1",
+        expiresAtUtc: candidateExpiresAtUtc,
+        options: [
+          {
+            candidateKey: "route-a",
+            label: "Alternative route",
+            eligibleRespondentCount: 1,
+            expiresAtUtc: candidateExpiresAtUtc,
+          },
+        ],
+      };
+    if (url.endsWith("/reroute")) return { status: "committed" };
+    if (url.endsWith("/amend/prepare"))
+      return {
+        status: "ready",
+        requestId: "request-input-1",
+        candidateKey: "amend-a",
+        expiresAtUtc: candidateExpiresAtUtc,
+      };
+    if (url.endsWith("/amend")) return { status: "committed" };
+    throw new Error("unexpected request");
+  };
+  const surface = createHumanInputSurface({
+    document: fixture.document,
+    window: { crypto: { randomUUID: () => "lifecycle-controls-operation" } },
+    requestJson,
+  });
+
+  await surface.activate();
+  await clickAndFlush(fixture.elements.humanInputRemindButton);
+  await clickAndFlush(fixture.elements.humanInputRerouteButton);
+  await clickAndFlush(fixture.elements.humanInputRerouteButton);
+  fixture.elements.humanInputAmendPurpose.value = "Updated purpose";
+  fixture.elements.humanInputAmendPrompt.value = "Updated prompt";
+  fixture.elements.humanInputAmendPrivacyClass.value = "sensitive";
+  fixture.elements.humanInputAmendExpiresAt.value = requestExpiresAtUtc.slice(
+    0,
+    16,
+  );
+  await clickAndFlush(fixture.elements.humanInputAmendButton);
+  await clickAndFlush(fixture.elements.humanInputAmendButton);
+
+  const post = (suffix) => calls.find((call) => call.url.endsWith(suffix));
+  const remind = JSON.parse(post("/remind").options.body);
+  const reroutePrepare = JSON.parse(post("/reroute/prepare").options.body);
+  const rerouteCommit = JSON.parse(post("/reroute").options.body);
+  const amendPrepare = JSON.parse(post("/amend/prepare").options.body);
+  const amendCommit = JSON.parse(post("/amend").options.body);
+  assert.equal(remind.reason, "remind");
+  assert.ok(Number.isFinite(Date.parse(reroutePrepare.candidateExpiresAtUtc)));
+  assert.equal(Object.hasOwn(reroutePrepare, "expiresAtUtc"), false);
+  assert.equal(rerouteCommit.candidateKey, "route-a");
+  assert.equal(rerouteCommit.operationId, reroutePrepare.operationId);
+  assert.equal(
+    Date.parse(amendPrepare.requestExpiresAtUtc),
+    Date.parse(requestExpiresAtUtc.slice(0, 16)),
+  );
+  assert.equal(Object.hasOwn(amendPrepare, "expiresAtUtc"), false);
+  assert.equal(Object.hasOwn(amendPrepare, "candidateExpiresAtUtc"), true);
+  assert.equal(amendCommit.candidateKey, "amend-a");
+  assert.equal(amendCommit.operationId, amendPrepare.operationId);
+  for (const body of [reroutePrepare, amendPrepare, amendCommit]) {
+    assert.equal(Object.hasOwn(body, "actor"), false);
+    assert.equal(Object.hasOwn(body, "binding"), false);
+    assert.equal(Object.hasOwn(body, "respondents"), false);
+    assert.equal(Object.hasOwn(body, "routing"), false);
+  }
+});
+
+test("Human Input preparation retries reuse exact operation and candidate expiry", async () => {
+  const runRetry = async (kind) => {
+    const fixture = createFixture();
+    const current = posture();
+    const calls = [];
+    let attempts = 0;
+    const requestExpiresAtUtc = new Date(
+      Date.now() + 2 * 60 * 60 * 1000,
+    ).toISOString();
+    const candidateExpiresAtUtc = new Date(
+      Date.now() + 10 * 60 * 1000,
+    ).toISOString();
+    const requestJson = async (url, options = {}) => {
+      calls.push({ url, options });
+      if (url === "/api/human-input?maximumCount=50")
+        return { status: "ready", requests: [current], nextCursor: null };
+      if (url === "/api/human-input/request-input-1") return current;
+      if (url.endsWith(`/${kind}/prepare`)) {
+        attempts++;
+        if (attempts === 1)
+          throw Object.assign(new Error("temporary"), { status: 503 });
+        return kind === "reroute"
+          ? {
+              status: "ready",
+              requestId: "request-input-1",
+              options: [
+                {
+                  candidateKey: "route-retry",
+                  label: "Alternative route",
+                  eligibleRespondentCount: 1,
+                  expiresAtUtc: candidateExpiresAtUtc,
+                },
+              ],
+              expiresAtUtc: candidateExpiresAtUtc,
+            }
+          : {
+              status: "ready",
+              requestId: "request-input-1",
+              candidateKey: "amend-retry",
+              expiresAtUtc: requestExpiresAtUtc,
+            };
+      }
+      throw new Error("unexpected request");
+    };
+    const surface = createHumanInputSurface({
+      document: fixture.document,
+      window: { crypto: { randomUUID: () => `${kind}-retry-operation` } },
+      requestJson,
+    });
+    await surface.activate();
+    if (kind === "reroute") {
+      fixture.elements.humanInputRerouteExpiresAt.value =
+        localDateInputAfter(10);
+      await clickAndFlush(fixture.elements.humanInputRerouteButton);
+      await clickAndFlush(fixture.elements.humanInputRerouteButton);
+    } else {
+      fixture.elements.humanInputAmendPurpose.value = "Amended purpose";
+      fixture.elements.humanInputAmendPrompt.value = "Amended prompt";
+      fixture.elements.humanInputAmendPrivacyClass.value = "sensitive";
+      fixture.elements.humanInputAmendExpiresAt.value =
+        requestExpiresAtUtc.slice(0, 16);
+      await clickAndFlush(fixture.elements.humanInputAmendButton);
+      await clickAndFlush(fixture.elements.humanInputAmendButton);
+    }
+    const prepares = calls.filter((call) =>
+      call.url.endsWith(`/${kind}/prepare`),
+    );
+    assert.equal(prepares.length, 2);
+    const first = JSON.parse(prepares[0].options.body);
+    const second = JSON.parse(prepares[1].options.body);
+    assert.equal(second.operationId, first.operationId);
+    assert.equal(second.candidateExpiresAtUtc, first.candidateExpiresAtUtc);
+    if (kind === "amend")
+      assert.equal(second.requestExpiresAtUtc, first.requestExpiresAtUtc);
+  };
+  await runRetry("reroute");
+  await runRetry("amend");
+});
+
+test("Human Input invalidates prepared candidates when their editable intent changes", async () => {
+  const fixture = createFixture();
+  const current = posture();
+  const calls = [];
+  let reroutePreparationCount = 0;
+  let amendPreparationCount = 0;
+  const requestJson = async (url, options = {}) => {
+    calls.push({ url, options });
+    if (url === "/api/human-input?maximumCount=50")
+      return { status: "ready", requests: [current], nextCursor: null };
+    if (url === "/api/human-input/request-input-1") return current;
+    if (url.endsWith("/reroute/prepare")) {
+      reroutePreparationCount++;
+      return {
+        status: "ready",
+        requestId: "request-input-1",
+        options: [
+          {
+            candidateKey: `route-${reroutePreparationCount}`,
+            label: "Alternative route",
+            eligibleRespondentCount: 1,
+            expiresAtUtc: "2026-09-01T13:00:00Z",
+          },
+        ],
+        expiresAtUtc: "2026-09-01T13:00:00Z",
+      };
+    }
+    if (url.endsWith("/reroute")) return { status: "committed" };
+    if (url.endsWith("/amend/prepare")) {
+      amendPreparationCount++;
+      return {
+        status: "ready",
+        requestId: "request-input-1",
+        candidateKey: `amend-${amendPreparationCount}`,
+        expiresAtUtc: "2026-09-01T13:00:00Z",
+      };
+    }
+    if (url.endsWith("/amend")) return { status: "committed" };
+    throw new Error("unexpected request");
+  };
+  const surface = createHumanInputSurface({
+    document: fixture.document,
+    window: { crypto: { randomUUID: () => "invalidate-operation" } },
+    requestJson,
+  });
+
+  await surface.activate();
+  await clickAndFlush(fixture.elements.humanInputRerouteButton);
+  assert.match(fixture.elements.humanInputRerouteButton.textContent, /commit/i);
+  fixture.elements.humanInputRerouteExpiresAt.value = localDateInputAfter(11);
+  fixture.elements.humanInputRerouteExpiresAt.dispatchEvent({ type: "input" });
+  assert.match(
+    fixture.elements.humanInputRerouteButton.textContent,
+    /prepare/i,
+  );
+  await clickAndFlush(fixture.elements.humanInputRerouteButton);
+  assert.equal(calls.filter((call) => call.url.endsWith("/reroute")).length, 0);
+  assert.match(fixture.elements.humanInputRerouteButton.textContent, /commit/i);
+  await clickAndFlush(fixture.elements.humanInputRerouteButton);
+
+  fixture.elements.humanInputAmendPurpose.value = "Updated purpose";
+  fixture.elements.humanInputAmendPrompt.value = "Updated prompt";
+  fixture.elements.humanInputAmendPrivacyClass.value = "sensitive";
+  fixture.elements.humanInputAmendExpiresAt.value = localDateInputAfter(20);
+  await clickAndFlush(fixture.elements.humanInputAmendButton);
+  assert.match(fixture.elements.humanInputAmendButton.textContent, /commit/i);
+  const amendFields = [
+    [fixture.elements.humanInputAmendPurpose, "Changed purpose"],
+    [fixture.elements.humanInputAmendPrompt, "Changed prompt"],
+    [fixture.elements.humanInputAmendPrivacyClass, "private"],
+    [fixture.elements.humanInputAmendExpiresAt, localDateInputAfter(21)],
+  ];
+  let amendCommitCount = 0;
+  for (const [element, value] of amendFields) {
+    element.value = value;
+    element.dispatchEvent({ type: "input" });
+    assert.match(
+      fixture.elements.humanInputAmendButton.textContent,
+      /prepare/i,
+    );
+    await clickAndFlush(fixture.elements.humanInputAmendButton);
+    assert.equal(
+      calls.filter((call) => call.url.endsWith("/amend")).length,
+      amendCommitCount,
+    );
+    assert.match(fixture.elements.humanInputAmendButton.textContent, /commit/i);
+    await clickAndFlush(fixture.elements.humanInputAmendButton);
+    amendCommitCount++;
+    assert.equal(
+      calls.filter((call) => call.url.endsWith("/amend")).length,
+      amendCommitCount,
+    );
+  }
+});
+
+test("Human Input preserves a typed limit-exceeded status from an HTTP 409", async () => {
+  const fixture = createFixture();
+  const current = posture();
+  const requestJson = async (url, options = {}) => {
+    if (url === "/api/human-input?maximumCount=50")
+      return { status: "ready", requests: [current], nextCursor: null };
+    if (url === "/api/human-input/request-input-1") return current;
+    if (options.method === "POST")
+      throw Object.assign(new Error("canonical limit"), {
+        status: 409,
+        payload: { status: "limit-exceeded" },
+      });
+    throw new Error("unexpected request");
+  };
+  const surface = createHumanInputSurface({
+    document: fixture.document,
+    window: { crypto: { randomUUID: () => "limit-operation" } },
+    requestJson,
+  });
+  await surface.activate();
+  await clickAndFlush(fixture.elements.humanInputRemindButton);
+  assert.match(
+    fixture.elements.humanInputResponseStatus.textContent,
+    /bounded Human Input lifecycle limit/i,
+  );
+});
+
 test("Human Input conflict and transport error feedback survive canonical rereads", async () => {
   for (const outcome of ["conflict", "error"]) {
     const fixture = createFixture();
@@ -1017,9 +1416,22 @@ function setResponseEditorValues(fixture, values) {
   });
 }
 
+function localDateInputAfter(minutes) {
+  const date = new Date(Date.now() + minutes * 60 * 1000);
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
 function createFixture() {
   const ids = [
     "humanInputActionsSection",
+    "humanInputAmendButton",
+    "humanInputAmendExpiresAt",
+    "humanInputAmendPrivacyClass",
+    "humanInputAmendPrompt",
+    "humanInputAmendPurpose",
+    "humanInputAmendSection",
+    "humanInputAmendStatus",
     "humanInputCancelButton",
     "humanInputDetailPanel",
     "humanInputDetailRefreshButton",
@@ -1035,6 +1447,12 @@ function createFixture() {
     "humanInputPurpose",
     "humanInputRefreshButton",
     "humanInputRejectButton",
+    "humanInputRemindButton",
+    "humanInputRerouteButton",
+    "humanInputRerouteExpiresAt",
+    "humanInputRerouteOptions",
+    "humanInputRerouteSection",
+    "humanInputRerouteStatus",
     "humanInputResponseEditor",
     "humanInputResponseForm",
     "humanInputResponseSection",
@@ -1054,6 +1472,8 @@ function createFixture() {
   elements.humanInputDetailPanel.hidden = true;
   elements.humanInputEmpty.hidden = false;
   elements.humanInputSupersedeSection.hidden = true;
+  elements.humanInputRerouteSection.hidden = true;
+  elements.humanInputAmendSection.hidden = true;
   return { document, elements };
 }
 
@@ -1139,6 +1559,11 @@ class FakeElement {
     const event = { preventDefault() {} };
     for (const handler of this.listeners.get("click") ?? [])
       await handler(event);
+  }
+
+  dispatchEvent(event) {
+    for (const handler of this.listeners.get(event?.type) ?? []) handler(event);
+    return true;
   }
 
   setAttribute(name, value) {

@@ -48,17 +48,26 @@ public sealed class WebHumanInputAuthorityProvider : IAgentRuntimeHumanInputAuth
             return Task.FromResult(new AgentRuntimeHumanInputLifecycleTerms(sessionStatus, null, null));
         }
 
-        if (string.Equals(request.Kind.ToString(), "Reject", StringComparison.Ordinal)
-            || string.Equals(request.Kind.ToString(), "Cancel", StringComparison.Ordinal))
+        var kind = request.Kind.ToString();
+        if (kind is "Reject" or "Cancel")
         {
             return Task.FromResult(new AgentRuntimeHumanInputLifecycleTerms(AgentRuntimeHumanInputAuthorityStatus.Ready, null, null));
         }
 
-        if (!string.Equals(request.Kind.ToString(), "Supersede", StringComparison.Ordinal)
+        // Remind has no candidate key or browser-supplied grant. Startup obtains and revalidates the
+        // current canonical grant while constructing the lifecycle command.
+        if (string.Equals(kind, "Remind", StringComparison.Ordinal))
+        {
+            return Task.FromResult(request.ExpectedRequest is not null && string.IsNullOrWhiteSpace(request.CandidateKey)
+                ? new AgentRuntimeHumanInputLifecycleTerms(AgentRuntimeHumanInputAuthorityStatus.Ready, null, null)
+                : new AgentRuntimeHumanInputLifecycleTerms(AgentRuntimeHumanInputAuthorityStatus.Unavailable, null, null));
+        }
+
+        if (kind is not ("Reroute" or "Amend" or "Supersede")
             || request.ExpectedRequest is null
             || string.IsNullOrWhiteSpace(request.CandidateKey)
             || string.IsNullOrWhiteSpace(_workspaceId)
-            || !_registry.TryResolve(request.CandidateKey, _workspaceId, WorkspaceActors.Web, request.OperationId, request.RequestId, request.ExpectedLifecycleVersion, request.ExpectedRequest.RequestVersionId, request.ExpectedRequest.RequestHash, _timeProvider.GetUtcNow(), out var resolution)
+            || !_registry.TryResolve(request.Kind, request.CandidateKey, _workspaceId, WorkspaceActors.Web, request.OperationId, request.RequestId, request.ExpectedLifecycleVersion, request.ExpectedRequest.RequestVersionId, request.ExpectedRequest.RequestHash, _timeProvider.GetUtcNow(), out var resolution)
             || resolution is null)
         {
             return Task.FromResult(new AgentRuntimeHumanInputLifecycleTerms(AgentRuntimeHumanInputAuthorityStatus.Unavailable, null, null));

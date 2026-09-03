@@ -105,6 +105,31 @@ internal static class HumanInputBrowserFixture
         await SeedRequestLifecycleAsync(paths, capabilityTrustRoot, request, dependencies.GrantReference, now).ConfigureAwait(false);
     }
 
+    internal static async Task SeedPendingWithEligibleRespondentsAsync(
+        WorkspacePaths paths,
+        string requestId,
+        string prompt,
+        string capabilityTrustRoot,
+        IReadOnlyList<string> eligibleRespondentIds,
+        HumanInputPrivacyClass privacyClass = HumanInputPrivacyClass.Private)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        ArgumentException.ThrowIfNullOrWhiteSpace(requestId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(prompt);
+        ArgumentException.ThrowIfNullOrWhiteSpace(capabilityTrustRoot);
+        ArgumentNullException.ThrowIfNull(eligibleRespondentIds);
+        if (eligibleRespondentIds.Count is < 2 or > HumanInputLimits.MaxEligibleRespondents)
+        {
+            throw new ArgumentOutOfRangeException(nameof(eligibleRespondentIds));
+        }
+
+        var now = DateTimeOffset.UtcNow.AddMinutes(-5);
+        var workspaceId = CapabilityWorkspaceScopeId.Create(paths.RootPath);
+        var dependencies = await EnsureAuthorityDependenciesAsync(paths, capabilityTrustRoot, workspaceId, now).ConfigureAwait(false);
+        var request = CreateRequest(workspaceId, requestId, prompt, dependencies.Publication, now, null, null, privacyClass, eligibleRespondentIds);
+        await SeedRequestLifecycleAsync(paths, capabilityTrustRoot, request, dependencies.GrantReference, now).ConfigureAwait(false);
+    }
+
     internal static async Task SeedWaitingAsync(WorkspacePaths paths, string requestId, string prompt, string capabilityTrustRoot)
     {
         ArgumentNullException.ThrowIfNull(paths);
@@ -335,10 +360,14 @@ internal static class HumanInputBrowserFixture
     }
 
     private static HumanInputRequest CreateRequest(string workspaceId, string requestId, string prompt, GovernedLoopRevisionPublicationPin publication, DateTimeOffset requestedAtUtc, TimeSpan? requestLifetime, DateTimeOffset? requestExpiresAtUtc, HumanInputPrivacyClass privacyClass, string? eligibleRespondentId)
+        => CreateRequest(workspaceId, requestId, prompt, publication, requestedAtUtc, requestLifetime, requestExpiresAtUtc, privacyClass, [eligibleRespondentId ?? WorkspaceActors.Web]);
+
+    private static HumanInputRequest CreateRequest(string workspaceId, string requestId, string prompt, GovernedLoopRevisionPublicationPin publication, DateTimeOffset requestedAtUtc, TimeSpan? requestLifetime, DateTimeOffset? requestExpiresAtUtc, HumanInputPrivacyClass privacyClass, IReadOnlyList<string> eligibleRespondentIds)
     {
         var binding = new HumanInputRequestBinding(workspaceId, publication.Revision.GraphId, publication.Revision.RevisionId, NodeId, requestId, CheckpointId);
         var expiresAtUtc = requestExpiresAtUtc?.ToUniversalTime() ?? requestedAtUtc.Add(requestLifetime ?? TimeSpan.FromHours(1));
-        var request = new HumanInputRequest(1, requestId, requestId + "-v1", binding, "Collect one bounded browser response.", prompt, new HumanInputResponseSchema(HumanInputResponseKind.Text, 128, null, null, null), privacyClass, [new HumanInputEligibleRespondent(eligibleRespondentId ?? WorkspaceActors.Web, "web-respondent", "web")], new HumanInputTiming(requestedAtUtc, expiresAtUtc), new HumanInputResponsePolicy(HumanInputResponsePolicyKind.FirstValid, null, null), new HumanInputContinuationBinding(HumanInputContinuationPolicyKind.BoundNodeAndCheckpointOnly, NodeId, CheckpointId), string.Empty);
+        var eligibleRespondents = eligibleRespondentIds.Select((respondentId, index) => new HumanInputEligibleRespondent(respondentId, "web-respondent-" + (index + 1), "web-route-" + (index + 1))).ToArray();
+        var request = new HumanInputRequest(1, requestId, requestId + "-v1", binding, "Collect one bounded browser response.", prompt, new HumanInputResponseSchema(HumanInputResponseKind.Text, 128, null, null, null), privacyClass, eligibleRespondents, new HumanInputTiming(requestedAtUtc, expiresAtUtc), new HumanInputResponsePolicy(HumanInputResponsePolicyKind.FirstValid, null, null), new HumanInputContinuationBinding(HumanInputContinuationPolicyKind.BoundNodeAndCheckpointOnly, NodeId, CheckpointId), string.Empty);
         return HumanInputRequestHash.Apply(request);
     }
 

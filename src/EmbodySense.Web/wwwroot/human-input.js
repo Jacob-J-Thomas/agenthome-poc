@@ -4,6 +4,7 @@ const maximumAggregateItems = 500;
 const maximumDisplayCharacters = 1024;
 const maximumOperationEntries = 128;
 const maximumEligibleRespondents = 16;
+const maximumRerouteOptions = 16;
 const maximumChoices = 16;
 const maximumStructuredFields = 12;
 const maximumResponseCharacters = 4000;
@@ -13,6 +14,7 @@ const maximumPromptCharacters = 4000;
 const maximumRequestBodyBytes = 16_384;
 const minimumRequestLifetimeMilliseconds = 60 * 1000;
 const maximumRequestLifetimeMilliseconds = 30 * 24 * 60 * 60 * 1000;
+const maximumCandidateLifetimeMilliseconds = 15 * 60 * 1000;
 const sha256Pattern = /^[0-9a-f]{64}$/;
 const identifierPattern = /^[a-z0-9][a-z0-9._-]{0,119}$/;
 const cursorPattern = /^[A-Za-z0-9_-]+$/;
@@ -51,6 +53,7 @@ const terminalStatuses = new Set([
   "answered",
 ]);
 const conflictTokenPattern = /^[a-z][a-z0-9-]{0,119}$/;
+const opaqueCandidateKeyPattern = /^[A-Za-z0-9_-]{1,120}$/;
 
 /** Normalizes server enum spellings without accepting caller-provided paths. */
 export function normalizeHumanInputStatus(value) {
@@ -102,6 +105,169 @@ export function projectHumanInputPage(response) {
   if (cursor !== null && !isValidCursor(cursor))
     return Object.freeze({ status: "invalid", items: [], cursor: null });
   return Object.freeze({ status, items: Object.freeze(items), cursor });
+}
+
+/** Projects the bounded opaque route alternatives returned by Startup. */
+export function projectHumanInputReroutePreparation(response) {
+  const status = normalizeHumanInputStatus(response?.status);
+  if (status !== "ready")
+    return Object.freeze({
+      status,
+      options: Object.freeze([]),
+      expiresAtUtc: null,
+    });
+  if (!response || typeof response !== "object")
+    return Object.freeze({
+      status: "invalid",
+      options: Object.freeze([]),
+      expiresAtUtc: null,
+    });
+  const responseFields = [
+    "status",
+    "requestId",
+    "options",
+    "expiresAtUtc",
+    "error",
+  ];
+  if (Object.keys(response).some((field) => !responseFields.includes(field)))
+    return Object.freeze({
+      status: "invalid",
+      options: Object.freeze([]),
+      expiresAtUtc: null,
+    });
+  if (!Array.isArray(response.options))
+    return Object.freeze({
+      status: "invalid",
+      options: Object.freeze([]),
+      expiresAtUtc: null,
+    });
+  if (!isIdentifier(response.requestId))
+    return Object.freeze({
+      status: "invalid",
+      options: Object.freeze([]),
+      expiresAtUtc: null,
+    });
+  if (
+    response.options.length < 1 ||
+    response.options.length > maximumRerouteOptions
+  )
+    return Object.freeze({
+      status: "invalid",
+      options: Object.freeze([]),
+      expiresAtUtc: null,
+    });
+  const responseExpiry = validTimestamp(response.expiresAtUtc);
+  if (!responseExpiry)
+    return Object.freeze({
+      status: "invalid",
+      options: Object.freeze([]),
+      expiresAtUtc: null,
+    });
+  const options = response.options.map((option) =>
+    projectHumanInputRerouteOption(option, responseExpiry),
+  );
+  if (
+    options.some((option) => option === null) ||
+    new Set(options.map((option) => option.candidateKey)).size !==
+      options.length
+  )
+    return Object.freeze({
+      status: "invalid",
+      options: Object.freeze([]),
+      expiresAtUtc: null,
+    });
+  return Object.freeze({
+    status: "ready",
+    requestId: response.requestId,
+    options: Object.freeze(options),
+    expiresAtUtc: responseExpiry,
+  });
+}
+
+/** Projects one server-owned opaque successor candidate without exposing route or binding data. */
+export function projectHumanInputCandidatePreparation(response) {
+  const status = normalizeHumanInputStatus(response?.status);
+  if (status !== "ready")
+    return Object.freeze({ status, candidateKey: null, expiresAtUtc: null });
+  if (!response || typeof response !== "object")
+    return Object.freeze({
+      status: "invalid",
+      candidateKey: null,
+      expiresAtUtc: null,
+    });
+  if (!isIdentifier(response.requestId))
+    return Object.freeze({
+      status: "invalid",
+      candidateKey: null,
+      expiresAtUtc: null,
+    });
+  const candidateKey = response.candidateKey;
+  const responseFields = [
+    "status",
+    "requestId",
+    "candidateKey",
+    "expiresAtUtc",
+    "error",
+  ];
+  if (Object.keys(response).some((field) => !responseFields.includes(field)))
+    return Object.freeze({
+      status: "invalid",
+      candidateKey: null,
+      expiresAtUtc: null,
+    });
+  const expiresAtUtc = validTimestamp(response.expiresAtUtc);
+  if (!expiresAtUtc)
+    return Object.freeze({
+      status: "invalid",
+      candidateKey: null,
+      expiresAtUtc: null,
+    });
+  if (
+    typeof candidateKey !== "string" ||
+    !opaqueCandidateKeyPattern.test(candidateKey)
+  )
+    return Object.freeze({
+      status: "invalid",
+      candidateKey: null,
+      expiresAtUtc: null,
+    });
+  return Object.freeze({
+    status: "ready",
+    requestId: response.requestId,
+    candidateKey,
+    expiresAtUtc,
+  });
+}
+
+function projectHumanInputRerouteOption(value, responseExpiry) {
+  if (!value || typeof value !== "object") return null;
+  const optionFields = [
+    "candidateKey",
+    "label",
+    "eligibleRespondentCount",
+    "expiresAtUtc",
+  ];
+  if (Object.keys(value).some((field) => !optionFields.includes(field)))
+    return null;
+  const candidateKey = value.candidateKey;
+  const label = value.label;
+  const eligibleRespondentCount = value.eligibleRespondentCount;
+  const expiresAtUtc = validTimestamp(value.expiresAtUtc);
+  if (
+    typeof candidateKey !== "string" ||
+    !opaqueCandidateKeyPattern.test(candidateKey) ||
+    !boundedString(label, 240) ||
+    !boundedEligibleCount(eligibleRespondentCount) ||
+    !expiresAtUtc ||
+    (responseExpiry !== null && expiresAtUtc !== responseExpiry)
+  )
+    return null;
+  return Object.freeze({
+    candidateKey,
+    label,
+    eligibleRespondentCount,
+    expiresAtUtc,
+  });
 }
 
 /** Projects one exact posture while excluding routing, authority, and binding material. */
@@ -273,6 +439,8 @@ export function humanInputOutcomeMessage(status, httpStatus = null) {
     return "This server-owned respondent is not authorized for the exact request.";
   if (normalized === "late")
     return "The response window closed before this operation was accepted.";
+  if (normalized === "limit-exceeded" || normalized === "capacity-exceeded")
+    return "The bounded Human Input lifecycle limit was reached. Reread canonical state before trying again.";
   if (
     normalized === "conflict" ||
     normalized === "ambiguous" ||
@@ -319,11 +487,19 @@ export function createHumanInputSurface({
     ),
     detailStatus: document.getElementById("humanInputDetailStatus"),
     empty: document.getElementById("humanInputEmpty"),
+    amendButton: document.getElementById("humanInputAmendButton"),
+    amendExpiresAt: document.getElementById("humanInputAmendExpiresAt"),
+    amendPrivacyClass: document.getElementById("humanInputAmendPrivacyClass"),
+    amendPrompt: document.getElementById("humanInputAmendPrompt"),
+    amendPurpose: document.getElementById("humanInputAmendPurpose"),
+    amendSection: document.getElementById("humanInputAmendSection"),
+    amendStatus: document.getElementById("humanInputAmendStatus"),
     explanation: document.getElementById("humanInputExplanation"),
     identity: document.getElementById("humanInputIdentity"),
     lifecycleStatus: document.getElementById("humanInputLifecycleStatus"),
     list: document.getElementById("humanInputList"),
     listStatus: document.getElementById("humanInputListStatus"),
+    remindButton: document.getElementById("humanInputRemindButton"),
     privacySummary: document.getElementById("humanInputPrivacySummary"),
     prompt: document.getElementById("humanInputPrompt"),
     purpose: document.getElementById("humanInputPurpose"),
@@ -343,12 +519,21 @@ export function createHumanInputSurface({
     supersedePurpose: document.getElementById("humanInputSupersedePurpose"),
     supersedeSection: document.getElementById("humanInputSupersedeSection"),
     supersedeStatus: document.getElementById("humanInputSupersedeStatus"),
+    rerouteButton: document.getElementById("humanInputRerouteButton"),
+    rerouteExpiresAt: document.getElementById("humanInputRerouteExpiresAt"),
+    rerouteOptions: document.getElementById("humanInputRerouteOptions"),
+    rerouteSection: document.getElementById("humanInputRerouteSection"),
+    rerouteStatus: document.getElementById("humanInputRerouteStatus"),
     title: document.getElementById("humanInputTitle"),
   };
   const state = {
     actionInFlight: false,
     active: false,
     candidate: null,
+    amendCandidate: null,
+    amendOperation: null,
+    amendOperationKey: null,
+    amendCandidateExpiresAtUtc: null,
     controlNumber: 0,
     editor: null,
     items: [],
@@ -356,9 +541,15 @@ export function createHumanInputSurface({
     operations: new Map(),
     operationFeedback: null,
     responseDraft: null,
+    rerouteCandidate: null,
+    rerouteOperation: null,
+    rerouteOperationKey: null,
+    rerouteOptions: [],
+    reroutePreparationGeneration: 0,
     refreshPromise: null,
     selectedPosture: null,
     selectionGeneration: 0,
+    amendPreparationGeneration: 0,
   };
 
   function activate() {
@@ -480,8 +671,9 @@ export function createHumanInputSurface({
     state.selectedPosture = ready ? posture : selected;
     if (ready) {
       state.candidate = null;
+      clearLifecycleCandidates();
       if (terminalStatuses.has(posture.status)) state.responseDraft = null;
-    }
+    } else clearLifecycleCandidates();
     renderDetail(selected, result, ready ? posture : null);
   }
 
@@ -489,6 +681,7 @@ export function createHumanInputSurface({
     const selected = state.items.find((item) => item.requestId === requestId);
     if (!selected) return Promise.resolve(false);
     clearActionDrafts();
+    clearLifecycleCandidates();
     clearOperationFeedback();
     setSupersedeStatus("", "");
     state.selectedPosture = selected;
@@ -539,7 +732,7 @@ export function createHumanInputSurface({
   async function submitLifecycle(action) {
     const posture = state.selectedPosture;
     if (!posture || state.actionInFlight || !canLifecycle(posture)) return;
-    const reason = action === "reject" ? "reject" : "cancel";
+    const reason = action;
     const key = `${humanInputIdentity(posture)}:${action}`;
     const operationHandle = getOperation(key);
     if (!operationHandle) {
@@ -555,6 +748,273 @@ export function createHumanInputSurface({
       reason,
     };
     await submitOperation(action, payload, operationHandle, posture.requestId);
+  }
+
+  async function submitRemind() {
+    await submitLifecycle("remind");
+  }
+
+  async function prepareOrCommitReroute() {
+    const posture = state.selectedPosture;
+    if (!posture || state.actionInFlight || !canReroute(posture)) return;
+    if (state.rerouteCandidate?.requestId === posture.requestId) {
+      const operationHandle =
+        state.rerouteOperation ??
+        getOperation(
+          `${humanInputIdentity(posture)}:reroute:${state.rerouteCandidate.expiresAtUtc}`,
+        );
+      if (!operationHandle) {
+        setRerouteStatus(humanInputOperationCapacityMessage(), "warning");
+        return;
+      }
+      const { operation } = operationHandle;
+      await submitOperation(
+        "reroute",
+        {
+          operationId: operation.operationId,
+          expectedLifecycleVersion: posture.lifecycleVersion,
+          expectedLifecycleStatus: posture.status,
+          expectedRequest: requestReference(posture),
+          reason: "reroute",
+          candidateKey: state.rerouteCandidate.candidateKey,
+        },
+        operationHandle,
+        posture.requestId,
+      );
+      return;
+    }
+    const expiresAtUtc = candidateExpiry(elements.rerouteExpiresAt);
+    if (!expiresAtUtc) {
+      setRerouteStatus(
+        "Choose a bounded future expiry before preparing a reroute.",
+        "warning",
+      );
+      return;
+    }
+    const operationKey = `${humanInputIdentity(posture)}:reroute:${expiresAtUtc}`;
+    const exactOperationHandle =
+      state.rerouteOperation && state.rerouteOperationKey === operationKey
+        ? state.rerouteOperation
+        : getOperation(operationKey);
+    if (!exactOperationHandle) {
+      setRerouteStatus(humanInputOperationCapacityMessage(), "warning");
+      return;
+    }
+    const { operation } = exactOperationHandle;
+    const preparationGeneration = state.reroutePreparationGeneration;
+    const body = serializeHumanInputRequest({
+      operationId: operation.operationId,
+      expectedLifecycleVersion: posture.lifecycleVersion,
+      expectedLifecycleStatus: posture.status,
+      expectedRequest: requestReference(posture),
+      candidateExpiresAtUtc: expiresAtUtc,
+    });
+    if (!body) {
+      releaseLocallyRejectedOperation(exactOperationHandle);
+      setRerouteStatus(humanInputRequestBodyCapacityMessage(), "warning");
+      return;
+    }
+    state.actionInFlight = true;
+    state.rerouteOperation = exactOperationHandle;
+    state.rerouteOperationKey = operationKey;
+    setBusy(true);
+    try {
+      const response = await requestJson(
+        `/api/human-input/${encodeURIComponent(posture.requestId)}/reroute/prepare`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body,
+        },
+      );
+      const preparation = projectHumanInputReroutePreparation(response);
+      if (preparationGeneration !== state.reroutePreparationGeneration) {
+        setRerouteStatus(
+          "Reroute inputs changed while preparation was in progress. Prepare again.",
+          "warning",
+        );
+        return;
+      }
+      if (
+        preparation.status === "ready" &&
+        preparation.requestId === posture.requestId
+      ) {
+        state.rerouteOptions = preparation.options;
+        state.rerouteCandidate = null;
+        renderRerouteOptions(preparation.options);
+        selectRerouteCandidate(preparation.options[0]?.candidateKey ?? null);
+        setRerouteStatus(
+          "A server-owned reroute is prepared. Select an opaque option, then commit.",
+          "success",
+        );
+      } else {
+        setRerouteStatus(
+          humanInputOutcomeMessage(preparation.status),
+          "warning",
+        );
+      }
+    } catch (error) {
+      setRerouteStatus(
+        humanInputOutcomeMessage(
+          error?.payload?.status ?? null,
+          error?.status ?? null,
+        ),
+        "error",
+      );
+    } finally {
+      state.actionInFlight = false;
+      setBusy(false);
+      if (state.selectedPosture?.requestId === posture.requestId)
+        configureControls(state.selectedPosture, true);
+    }
+  }
+
+  async function prepareOrCommitAmend() {
+    const posture = state.selectedPosture;
+    if (!posture || state.actionInFlight || !canAmend(posture)) return;
+    if (state.amendCandidate?.requestId === posture.requestId) {
+      const operationHandle =
+        state.amendOperation ??
+        (state.amendCandidate.operationId
+          ? {
+              operation: { operationId: state.amendCandidate.operationId },
+              key: null,
+              isNew: false,
+            }
+          : getOperation(
+              `${humanInputIdentity(posture)}:amend:${state.amendCandidate.requestExpiresAtUtc}`,
+            ));
+      if (!operationHandle) {
+        setAmendStatus(humanInputOperationCapacityMessage(), "warning");
+        return;
+      }
+      const { operation } = operationHandle;
+      await submitOperation(
+        "amend",
+        {
+          operationId: operation.operationId,
+          expectedLifecycleVersion: posture.lifecycleVersion,
+          expectedLifecycleStatus: posture.status,
+          expectedRequest: requestReference(posture),
+          reason: "amend",
+          candidateKey: state.amendCandidate.candidateKey,
+        },
+        operationHandle,
+        posture.requestId,
+      );
+      return;
+    }
+    const purpose = boundedInputValue(
+      elements.amendPurpose,
+      maximumPurposeCharacters,
+    ).trim();
+    const prompt = boundedInputValue(
+      elements.amendPrompt,
+      maximumPromptCharacters,
+    ).trim();
+    const privacyClass = normalizeHumanInputStatus(
+      boundedInputValue(elements.amendPrivacyClass, 32),
+    );
+    const requestExpiresAtUtc = requestExpiry(elements.amendExpiresAt);
+    if (
+      !boundedString(purpose, maximumPurposeCharacters) ||
+      !boundedString(prompt, maximumPromptCharacters) ||
+      !privacyClasses.has(privacyClass) ||
+      !requestExpiresAtUtc
+    ) {
+      setAmendStatus(
+        "Provide bounded purpose, prompt, privacy, and future expiry values.",
+        "warning",
+      );
+      return;
+    }
+    const operationKey = `${humanInputIdentity(posture)}:amend:${purpose}:${prompt}:${privacyClass}:${requestExpiresAtUtc}`;
+    const operationHandle =
+      state.amendOperation && state.amendOperationKey === operationKey
+        ? state.amendOperation
+        : getOperation(operationKey);
+    if (!operationHandle) {
+      setAmendStatus(humanInputOperationCapacityMessage(), "warning");
+      return;
+    }
+    const candidateExpiresAtUtc =
+      state.amendOperationKey === operationKey &&
+      state.amendCandidateExpiresAtUtc
+        ? state.amendCandidateExpiresAtUtc
+        : candidateExpiryValue();
+    const { operation } = operationHandle;
+    const body = serializeHumanInputRequest({
+      operationId: operation.operationId,
+      expectedLifecycleVersion: posture.lifecycleVersion,
+      expectedLifecycleStatus: posture.status,
+      expectedRequest: requestReference(posture),
+      purpose,
+      prompt,
+      privacyClass,
+      requestExpiresAtUtc,
+      candidateExpiresAtUtc,
+    });
+    if (!body) {
+      releaseLocallyRejectedOperation(operationHandle);
+      setAmendStatus(humanInputRequestBodyCapacityMessage(), "warning");
+      return;
+    }
+    const preparationGeneration = state.amendPreparationGeneration;
+    state.actionInFlight = true;
+    state.amendOperation = operationHandle;
+    state.amendOperationKey = operationKey;
+    state.amendCandidateExpiresAtUtc = candidateExpiresAtUtc;
+    setBusy(true);
+    try {
+      const response = await requestJson(
+        `/api/human-input/${encodeURIComponent(posture.requestId)}/amend/prepare`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body,
+        },
+      );
+      const preparation = projectHumanInputCandidatePreparation(response);
+      if (preparationGeneration !== state.amendPreparationGeneration) {
+        setAmendStatus(
+          "Amendment inputs changed while preparation was in progress. Prepare again.",
+          "warning",
+        );
+        return;
+      }
+      if (
+        preparation.status === "ready" &&
+        preparation.requestId === posture.requestId
+      ) {
+        state.amendOperation = operationHandle;
+        state.amendCandidate = Object.freeze({
+          requestId: posture.requestId,
+          candidateKey: preparation.candidateKey,
+          expiresAtUtc: preparation.expiresAtUtc,
+          operationId: operation.operationId,
+          requestExpiresAtUtc,
+        });
+        setAmendStatus(
+          "A server-owned amendment is prepared. Select the button again to commit.",
+          "success",
+        );
+      } else {
+        setAmendStatus(humanInputOutcomeMessage(preparation.status), "warning");
+      }
+    } catch (error) {
+      setAmendStatus(
+        humanInputOutcomeMessage(
+          error?.payload?.status ?? null,
+          error?.status ?? null,
+        ),
+        "error",
+      );
+    } finally {
+      state.actionInFlight = false;
+      setBusy(false);
+      if (state.selectedPosture?.requestId === posture.requestId)
+        configureControls(state.selectedPosture, true);
+    }
   }
 
   async function prepareOrCommitSupersede() {
@@ -667,7 +1127,10 @@ export function createHumanInputSurface({
       }
     } catch (error) {
       setSupersedeStatus(
-        humanInputOutcomeMessage(null, error?.status ?? null),
+        humanInputOutcomeMessage(
+          error?.payload?.status ?? null,
+          error?.status ?? null,
+        ),
         "error",
       );
     } finally {
@@ -707,7 +1170,10 @@ export function createHumanInputSurface({
       await refresh(requestId);
     } catch (error) {
       setOperationFeedback(
-        humanInputOutcomeMessage(null, error?.status ?? null),
+        humanInputOutcomeMessage(
+          error?.payload?.status ?? null,
+          error?.status ?? null,
+        ),
         "error",
       );
       await refresh(requestId);
@@ -806,6 +1272,7 @@ export function createHumanInputSurface({
     clearCollection(elements.responseEditor);
     elements.prompt.textContent = "";
     elements.responseSchema.textContent = "";
+    clearLifecycleCandidates();
     renderOperationFeedback();
     configureControls(posture, false);
   }
@@ -852,6 +1319,26 @@ export function createHumanInputSurface({
         posture.presentation.prompt,
         maximumPromptCharacters,
       );
+    if (elements.amendPurpose && !elements.amendPurpose.value)
+      elements.amendPurpose.value = boundedHumanInputText(
+        posture.presentation.purpose,
+        maximumPurposeCharacters,
+      );
+    if (elements.amendPrompt && !elements.amendPrompt.value)
+      elements.amendPrompt.value = boundedHumanInputText(
+        posture.presentation.prompt,
+        maximumPromptCharacters,
+      );
+    if (elements.amendPrivacyClass) {
+      renderAmendPrivacyOptions(posture.presentation.privacyClass);
+      elements.amendPrivacyClass.value = posture.presentation.privacyClass;
+    }
+    if (elements.amendExpiresAt && !elements.amendExpiresAt.value)
+      elements.amendExpiresAt.value = inputDateValue(
+        posture.presentation.timing.expiresAtUtc,
+      );
+    if (elements.rerouteExpiresAt && !elements.rerouteExpiresAt.value)
+      elements.rerouteExpiresAt.value = inputDateValue(candidateExpiryValue());
     configureControls(posture, true);
     renderOperationFeedback();
   }
@@ -945,6 +1432,50 @@ export function createHumanInputSurface({
     }
   }
 
+  function renderRerouteOptions(options) {
+    if (!elements.rerouteOptions) return;
+    elements.rerouteOptions.replaceChildren();
+    for (const option of options) {
+      const choice = document.createElement("option");
+      choice.value = option.candidateKey;
+      choice.textContent = `${boundedHumanInputText(option.label, 240)} · ${option.eligibleRespondentCount} eligible · expires ${formatTimestamp(option.expiresAtUtc)}`;
+      elements.rerouteOptions.append(choice);
+    }
+    elements.rerouteOptions.disabled = options.length === 0;
+  }
+
+  function renderAmendPrivacyOptions(currentPrivacyClass) {
+    if (!elements.amendPrivacyClass) return;
+    const options =
+      currentPrivacyClass === "sensitive"
+        ? ["sensitive"]
+        : ["private", "sensitive"];
+    elements.amendPrivacyClass.replaceChildren();
+    for (const value of options) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = formatToken(value);
+      elements.amendPrivacyClass.append(option);
+    }
+  }
+
+  function selectRerouteCandidate(candidateKey) {
+    const option = state.rerouteOptions.find(
+      (item) => item.candidateKey === candidateKey,
+    );
+    if (!option) {
+      state.rerouteCandidate = null;
+      if (elements.rerouteOptions) elements.rerouteOptions.value = "";
+      return;
+    }
+    if (elements.rerouteOptions) elements.rerouteOptions.value = candidateKey;
+    state.rerouteCandidate = Object.freeze({
+      requestId: state.selectedPosture?.requestId ?? "",
+      candidateKey: option.candidateKey,
+      expiresAtUtc: option.expiresAtUtc,
+    });
+  }
+
   function configureControls(posture, detailReady) {
     const pending = posture.status === "pending";
     const canAnswer = detailReady && pending && state.editor !== null;
@@ -959,6 +1490,31 @@ export function createHumanInputSurface({
     if (elements.cancelButton)
       elements.cancelButton.disabled =
         !detailReady || !pending || state.actionInFlight;
+    const lifecycleAllowed = detailReady && pending && !state.actionInFlight;
+    if (elements.remindButton)
+      elements.remindButton.disabled = !lifecycleAllowed;
+    const rerouteAllowed = detailReady && pending;
+    if (elements.rerouteSection)
+      elements.rerouteSection.hidden = !rerouteAllowed;
+    if (elements.rerouteButton) {
+      elements.rerouteButton.disabled =
+        !rerouteAllowed ||
+        state.actionInFlight ||
+        (state.rerouteOptions.length > 0 && !state.rerouteCandidate);
+      elements.rerouteButton.textContent = state.rerouteCandidate
+        ? "Commit reroute"
+        : "Prepare reroute";
+    }
+    if (elements.rerouteOptions && state.rerouteOptions.length === 0)
+      elements.rerouteOptions.disabled = true;
+    const amendAllowed = detailReady && pending;
+    if (elements.amendSection) elements.amendSection.hidden = !amendAllowed;
+    if (elements.amendButton) {
+      elements.amendButton.disabled = !amendAllowed || state.actionInFlight;
+      elements.amendButton.textContent = state.amendCandidate
+        ? "Commit amendment"
+        : "Prepare amendment";
+    }
     const supersedeAllowed = detailReady && pending && canSupersede(posture);
     if (elements.supersedeSection)
       elements.supersedeSection.hidden = !supersedeAllowed;
@@ -978,6 +1534,7 @@ export function createHumanInputSurface({
     state.selectedPosture = null;
     state.editor = null;
     state.candidate = null;
+    clearLifecycleCandidates();
     state.responseDraft = null;
     state.selectionGeneration++;
     clearCollection(elements.summary);
@@ -1011,9 +1568,20 @@ export function createHumanInputSurface({
     if (elements.cancelButton && state.selectedPosture)
       elements.cancelButton.disabled =
         blocked || !canLifecycle(state.selectedPosture);
+    if (elements.remindButton && state.selectedPosture)
+      elements.remindButton.disabled =
+        blocked || !canLifecycle(state.selectedPosture);
     if (elements.supersedeButton && state.selectedPosture)
       elements.supersedeButton.disabled =
         blocked || !canSupersede(state.selectedPosture);
+    if (elements.rerouteButton && state.selectedPosture)
+      elements.rerouteButton.disabled =
+        blocked ||
+        !canReroute(state.selectedPosture) ||
+        (state.rerouteOptions.length > 0 && !state.rerouteCandidate);
+    if (elements.amendButton && state.selectedPosture)
+      elements.amendButton.disabled =
+        blocked || !canAmend(state.selectedPosture);
   }
 
   function setResponseStatus(message, tone) {
@@ -1047,8 +1615,29 @@ export function createHumanInputSurface({
 
   function clearActionDrafts() {
     if (elements.explanation) elements.explanation.value = "";
+    if (elements.amendExpiresAt) elements.amendExpiresAt.value = "";
+    if (elements.amendPrivacyClass) elements.amendPrivacyClass.value = "";
+    if (elements.amendPurpose) elements.amendPurpose.value = "";
+    if (elements.amendPrompt) elements.amendPrompt.value = "";
+    if (elements.rerouteExpiresAt) elements.rerouteExpiresAt.value = "";
     if (elements.supersedePurpose) elements.supersedePurpose.value = "";
     if (elements.supersedePrompt) elements.supersedePrompt.value = "";
+  }
+
+  function clearLifecycleCandidates() {
+    state.amendPreparationGeneration++;
+    state.reroutePreparationGeneration++;
+    state.amendCandidate = null;
+    state.amendOperation = null;
+    state.amendOperationKey = null;
+    state.amendCandidateExpiresAtUtc = null;
+    state.rerouteCandidate = null;
+    state.rerouteOperation = null;
+    state.rerouteOperationKey = null;
+    state.rerouteOptions = [];
+    renderRerouteOptions([]);
+    setRerouteStatus("", "");
+    setAmendStatus("", "");
   }
 
   function setSupersedeStatus(message, tone) {
@@ -1057,6 +1646,59 @@ export function createHumanInputSurface({
     elements.supersedeStatus.className = tone
       ? `human-input-response-status ${tone}`
       : "human-input-response-status";
+  }
+
+  function setRerouteStatus(message, tone) {
+    if (!elements.rerouteStatus) return;
+    elements.rerouteStatus.textContent = boundedHumanInputText(message);
+    elements.rerouteStatus.className = tone
+      ? `human-input-response-status ${tone}`
+      : "human-input-response-status";
+  }
+
+  function setAmendStatus(message, tone) {
+    if (!elements.amendStatus) return;
+    elements.amendStatus.textContent = boundedHumanInputText(message);
+    elements.amendStatus.className = tone
+      ? `human-input-response-status ${tone}`
+      : "human-input-response-status";
+  }
+
+  function invalidateReroutePreparation() {
+    state.reroutePreparationGeneration++;
+    const hadPreparation =
+      state.rerouteCandidate !== null ||
+      state.rerouteOptions.length > 0 ||
+      state.rerouteOperation !== null;
+    state.rerouteCandidate = null;
+    state.rerouteOperation = null;
+    state.rerouteOperationKey = null;
+    state.rerouteOptions = [];
+    renderRerouteOptions([]);
+    if (hadPreparation) {
+      setRerouteStatus(
+        "Reroute inputs changed. Prepare a new server-owned option before committing.",
+        "warning",
+      );
+      if (state.selectedPosture) configureControls(state.selectedPosture, true);
+    }
+  }
+
+  function invalidateAmendPreparation() {
+    state.amendPreparationGeneration++;
+    const hadPreparation =
+      state.amendCandidate !== null || state.amendOperation !== null;
+    state.amendCandidate = null;
+    state.amendOperation = null;
+    state.amendOperationKey = null;
+    state.amendCandidateExpiresAtUtc = null;
+    if (hadPreparation) {
+      setAmendStatus(
+        "Amendment inputs changed. Prepare a new server-owned candidate before committing.",
+        "warning",
+      );
+      if (state.selectedPosture) configureControls(state.selectedPosture, true);
+    }
   }
 
   function bind() {
@@ -1083,6 +1725,41 @@ export function createHumanInputSurface({
     elements.cancelButton?.addEventListener(
       "click",
       () => void submitLifecycle("cancel"),
+    );
+    elements.remindButton?.addEventListener("click", () => void submitRemind());
+    elements.rerouteButton?.addEventListener(
+      "click",
+      () => void prepareOrCommitReroute(),
+    );
+    elements.rerouteOptions?.addEventListener("change", () => {
+      selectRerouteCandidate(elements.rerouteOptions.value);
+      if (state.selectedPosture) configureControls(state.selectedPosture, true);
+    });
+    for (const eventName of ["input", "change"]) {
+      elements.rerouteExpiresAt?.addEventListener(
+        eventName,
+        invalidateReroutePreparation,
+      );
+      elements.amendPurpose?.addEventListener(
+        eventName,
+        invalidateAmendPreparation,
+      );
+      elements.amendPrompt?.addEventListener(
+        eventName,
+        invalidateAmendPreparation,
+      );
+      elements.amendPrivacyClass?.addEventListener(
+        eventName,
+        invalidateAmendPreparation,
+      );
+      elements.amendExpiresAt?.addEventListener(
+        eventName,
+        invalidateAmendPreparation,
+      );
+    }
+    elements.amendButton?.addEventListener(
+      "click",
+      () => void prepareOrCommitAmend(),
     );
     elements.supersedeButton?.addEventListener(
       "click",
@@ -1114,6 +1791,55 @@ export function createHumanInputSurface({
       posture.status === "pending" &&
       responsePolicies.has(posture.presentation.responsePolicyKind)
     );
+  }
+
+  function canReroute(posture) {
+    return posture.status === "pending";
+  }
+
+  function canAmend(posture) {
+    return posture.status === "pending";
+  }
+
+  function candidateExpiry(element) {
+    if (!element) return candidateExpiryValue();
+    const value = String(element.value ?? "").trim();
+    if (!value) return null;
+    const milliseconds = Date.parse(value);
+    if (!Number.isFinite(milliseconds)) return null;
+    const lifetime = milliseconds - Date.now();
+    if (
+      lifetime < minimumRequestLifetimeMilliseconds ||
+      lifetime > maximumCandidateLifetimeMilliseconds
+    )
+      return null;
+    return new Date(milliseconds).toISOString();
+  }
+
+  function candidateExpiryValue() {
+    return new Date(Date.now() + 10 * 60 * 1000).toISOString();
+  }
+
+  function requestExpiry(element) {
+    if (!element) return null;
+    const value = String(element.value ?? "").trim();
+    if (!value) return null;
+    const milliseconds = Date.parse(value);
+    if (!Number.isFinite(milliseconds)) return null;
+    const lifetime = milliseconds - Date.now();
+    if (
+      lifetime < minimumRequestLifetimeMilliseconds ||
+      lifetime > maximumRequestLifetimeMilliseconds
+    )
+      return null;
+    return new Date(milliseconds).toISOString();
+  }
+
+  function inputDateValue(value) {
+    const date = new Date(value ?? "");
+    if (Number.isNaN(date.valueOf())) return "";
+    const pad = (part) => String(part).padStart(2, "0");
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
   }
 
   function collectResponseValue() {

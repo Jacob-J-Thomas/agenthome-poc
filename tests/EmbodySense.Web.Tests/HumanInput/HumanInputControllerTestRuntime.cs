@@ -14,6 +14,10 @@ internal sealed class HumanInputControllerTestRuntime : IWebHumanInputRuntime
 
     internal HumanInputSupersedePreparationResult? PreparationResponse { get; set; } = new(HumanInputSupersedePreparationStatus.NotFound, "request-1", null, null, "request_not_found");
 
+    internal HumanInputReroutePreparationResult? ReroutePreparationResponse { get; set; } = new(HumanInputSupersedePreparationStatus.NotFound, "request-1", [], null, "request_not_found");
+
+    internal HumanInputAmendPreparationResult? AmendPreparationResponse { get; set; } = new(HumanInputSupersedePreparationStatus.NotFound, "request-1", null, null, "request_not_found");
+
     internal Exception? ListException { get; set; }
 
     internal Exception? ReadException { get; set; }
@@ -31,6 +35,10 @@ internal sealed class HumanInputControllerTestRuntime : IWebHumanInputRuntime
     internal HumanInputSurfaceResponseOperationInput? LastResponseInput { get; private set; }
 
     internal HumanInputSupersedePreparationInput? LastPreparationInput { get; private set; }
+
+    internal HumanInputReroutePreparationInput? LastReroutePreparationInput { get; private set; }
+
+    internal HumanInputAmendPreparationInput? LastAmendPreparationInput { get; private set; }
 
     public Task<HumanInputRequestPosturePage> ListAsync(HumanInputRequestPosturePageRequest request, CancellationToken cancellationToken = default)
     {
@@ -85,5 +93,27 @@ internal sealed class HumanInputControllerTestRuntime : IWebHumanInputRuntime
 
         LastPreparationInput = input;
         return Task.FromResult(PreparationResponse!);
+    }
+
+    public Task<HumanInputReroutePreparationResult> PrepareRerouteAsync(HumanInputReroutePreparationInput input, CancellationToken cancellationToken = default)
+    {
+        if (PreparationException is not null)
+        {
+            throw PreparationException;
+        }
+
+        LastReroutePreparationInput = input;
+        return Task.FromResult(ReroutePreparationResponse!);
+    }
+
+    public Task<HumanInputAmendPreparationResult> PrepareAmendAsync(HumanInputAmendPreparationInput input, CancellationToken cancellationToken = default)
+    {
+        if (PreparationException is not null)
+        {
+            throw PreparationException;
+        }
+
+        LastAmendPreparationInput = input;
+        return Task.FromResult(AmendPreparationResponse!);
     }
 }

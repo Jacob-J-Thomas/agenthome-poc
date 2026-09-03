@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using EmbodySense.Core.Application.Capabilities;
 using EmbodySense.Core.Application.Governance.Authority.Grants;
+using EmbodySense.Core.Application.Governance.Authority.Grants.Models;
 using EmbodySense.Core.Application.HumanInput.Catalog;
 using EmbodySense.Core.Application.HumanInput.Catalog.Models;
 using EmbodySense.Core.Application.HumanInput.Lifecycle;
@@ -10,6 +11,7 @@ using EmbodySense.Core.Application.HumanInput.Lifecycle.Models;
 using EmbodySense.Core.Application.HumanInput.Responses;
 using EmbodySense.Core.Application.HumanInput.Responses.Models;
 using EmbodySense.Core.Common.Authority;
+using EmbodySense.Core.Common.Authority.Grants.Models;
 using EmbodySense.Core.Common.HumanInput;
 using EmbodySense.Core.Common.HumanInput.Lifecycle;
 using EmbodySense.Core.Common.HumanInput.Lifecycle.Models;
@@ -133,6 +135,24 @@ public sealed class HumanInputRuntimeFacade
         => _candidatePreparer is null
             ? Task.FromResult(new HumanInputSupersedePreparationResult(HumanInputSupersedePreparationStatus.Unavailable, input?.RequestId ?? string.Empty, null, null, "candidate_preparer_unavailable"))
             : _candidatePreparer.PrepareAsync(input, cancellationToken);
+
+    /// <summary>Prepares bounded opaque server-generated reroute alternatives from canonical respondent routing.</summary>
+    /// <param name="input">The exact optimistic request identity and short candidate expiry.</param>
+    /// <param name="cancellationToken">A token that cancels before preparation completes.</param>
+    /// <returns>Generic opaque options or a value-free fail-closed result.</returns>
+    public Task<HumanInputReroutePreparationResult> PrepareRerouteAsync(HumanInputReroutePreparationInput? input, CancellationToken cancellationToken = default)
+        => _candidatePreparer is null
+            ? Task.FromResult(new HumanInputReroutePreparationResult(HumanInputSupersedePreparationStatus.Unavailable, input?.RequestId ?? string.Empty, [], null, "candidate_preparer_unavailable"))
+            : _candidatePreparer.PrepareRerouteAsync(input, cancellationToken);
+
+    /// <summary>Prepares one bounded opaque server-generated amend candidate from canonical request state.</summary>
+    /// <param name="input">The exact optimistic request identity and bounded amend terms.</param>
+    /// <param name="cancellationToken">A token that cancels before preparation completes.</param>
+    /// <returns>An opaque candidate key or a value-free fail-closed result.</returns>
+    public Task<HumanInputAmendPreparationResult> PrepareAmendAsync(HumanInputAmendPreparationInput? input, CancellationToken cancellationToken = default)
+        => _candidatePreparer is null
+            ? Task.FromResult(new HumanInputAmendPreparationResult(HumanInputSupersedePreparationStatus.Unavailable, input?.RequestId ?? string.Empty, null, null, "candidate_preparer_unavailable"))
+            : _candidatePreparer.PrepareAmendAsync(input, cancellationToken);
 
     /// <summary>Submits one Web/other surface lifecycle intent using Startup-owned primitive boundary types.</summary>
     /// <param name="input">The surface operation with no lower-layer or authority types.</param>
@@ -288,7 +308,7 @@ public sealed class HumanInputRuntimeFacade
 
         if (terms is null || terms.Status != AgentRuntimeHumanInputAuthorityStatus.Ready
             || RequiresCandidate(input.Kind) != (terms.CandidateRequest is not null)
-            || RequiresGrant(input.Kind) != (terms.GrantReference is not null))
+            || input.Kind != HumanInputRequestLifecycleOperationKind.Remind && RequiresGrant(input.Kind) != (terms.GrantReference is not null))
         {
             return terms?.Status == AgentRuntimeHumanInputAuthorityStatus.Denied
                 ? Denied(input.OperationId)
@@ -296,6 +316,7 @@ public sealed class HumanInputRuntimeFacade
         }
 
         HumanInputRequestBinding? expectedBinding = null;
+        HumanInputRequestCatalogEntry? expectedEntry = null;
         if (input.Kind != HumanInputRequestLifecycleOperationKind.Create)
         {
             var expected = await ReadExpectedRequestAsync(input.RequestId, input.ExpectedRequest, cancellationToken).ConfigureAwait(false);
@@ -319,7 +340,19 @@ public sealed class HumanInputRuntimeFacade
                 return new HumanInputOperationResult(HumanInputOperationStatus.Ambiguous, input.OperationId, null, null, []);
             }
 
+            expectedEntry = expected.Entry;
             expectedBinding = matchingRequests[0].Binding;
+        }
+
+        if (input.Kind == HumanInputRequestLifecycleOperationKind.Remind && terms.GrantReference is null)
+        {
+            var grant = await ResolveCurrentGrantAsync(expectedEntry ?? observed.Entry!, input.OperationId, input.ExpectedLifecycleVersion, input.ExpectedLifecycleStatus.ToString(), input.ExpectedRequest, cancellationToken).ConfigureAwait(false);
+            if (grant.Status != HumanInputOperationStatus.Committed || grant.GrantReference is null)
+            {
+                return grant.Failure!;
+            }
+
+            terms = terms with { GrantReference = grant.GrantReference };
         }
 
         HumanInputRequestLifecycleCommand command;
@@ -655,6 +688,66 @@ public sealed class HumanInputRuntimeFacade
             _authorityTransaction,
             _workspaceId,
             _timeProvider);
+
+    private async Task<(HumanInputOperationStatus Status, AuthorityGrantReference? GrantReference, HumanInputOperationResult? Failure)> ResolveCurrentGrantAsync(
+        HumanInputRequestCatalogEntry entry,
+        string operationId,
+        long expectedLifecycleVersion,
+        string expectedLifecycleStatus,
+        HumanInputRequestReference? expectedRequest,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var head = entry.Lifecycle.Head;
+            if (head is null
+                || head.Status != HumanInputRequestLifecycleStatus.Pending
+                || head.LifecycleVersion != expectedLifecycleVersion
+                || !string.Equals(expectedLifecycleStatus, HumanInputRequestLifecycleStatus.Pending.ToString(), StringComparison.OrdinalIgnoreCase)
+                || !Equals(head.CurrentRequest, expectedRequest))
+            {
+                return (HumanInputOperationStatus.Conflict, null, Conflict(operationId));
+            }
+
+            var evidence = entry.Lifecycle.Operations
+                .Where(operation => operation is not null && operation.Outcome == HumanInputRequestLifecycleOperationOutcome.Committed
+                    && operation.GrantReference is not null
+                    && Equals(operation.ResultHead, head))
+                .OrderByDescending(operation => operation.RecordedAtUtc)
+                .ThenByDescending(operation => operation.OperationId, StringComparer.Ordinal)
+                .Take(2)
+                .ToArray();
+            if (evidence.Length != 1
+                || evidence[0].GrantReference is null
+                || !HumanInputRequestLifecycleValidator.ValidateEvidence(evidence[0]).IsValid
+                || !Equals(evidence[0].ResultHead, head))
+            {
+                return (HumanInputOperationStatus.Ambiguous, null, Ambiguous(operationId));
+            }
+
+            var resolution = await _grantResolver.ResolveAsync(evidence[0].GrantReference, cancellationToken).ConfigureAwait(false);
+            if (resolution is null || resolution.Status != AuthorityGrantResolutionStatus.Active || !Equals(resolution.RequestedReference, evidence[0].GrantReference))
+            {
+                return resolution?.Status switch
+                {
+                    AuthorityGrantResolutionStatus.NotFound or AuthorityGrantResolutionStatus.Invalid => (HumanInputOperationStatus.NotFound, null, new HumanInputOperationResult(HumanInputOperationStatus.NotFound, operationId, null, null, [])),
+                    AuthorityGrantResolutionStatus.Unavailable => (HumanInputOperationStatus.Unavailable, null, Unavailable(operationId)),
+                    AuthorityGrantResolutionStatus.Unknown => (HumanInputOperationStatus.Ambiguous, null, Ambiguous(operationId)),
+                    _ => (HumanInputOperationStatus.Denied, null, Denied(operationId))
+                };
+            }
+
+            return (HumanInputOperationStatus.Committed, evidence[0].GrantReference, null);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            return (HumanInputOperationStatus.Unavailable, null, Unavailable(operationId));
+        }
+    }
 
     private async Task<HumanInputOperationResult> MapLifecycleResultAsync(
         HumanInputRequestLifecycleMutationResult result,

@@ -32,11 +32,16 @@ public sealed class WebHumanInputRuntimeAdapterTests
         var lifecycle = await adapter.SubmitLifecycleAsync(new HumanInputSurfaceLifecycleOperationInput("operation-1", "Reject", "missing-request", 1, "Pending", null, null, "reason"));
         var response = await adapter.SubmitResponseAsync(new HumanInputSurfaceResponseOperationInput("operation-2", "Submit", "missing-request", 1, "Pending", null, "response-1", JsonDocument.Parse("null").RootElement.Clone(), null));
         var preparation = await adapter.PrepareSupersedeAsync(new HumanInputSupersedePreparationInput("operation-3", "missing-request", null, 1, "Pending", "purpose", "prompt", JsonDocument.Parse("{}").RootElement.Clone(), "Public", DateTimeOffset.UtcNow.AddMinutes(1), JsonDocument.Parse("{}").RootElement.Clone()));
+        var candidateExpiry = DateTimeOffset.UtcNow.AddMinutes(1);
+        var reroutePreparation = await adapter.PrepareRerouteAsync(new HumanInputReroutePreparationInput("operation-4", "missing-request", null, 1, "Pending", candidateExpiry));
+        var amendPreparation = await adapter.PrepareAmendAsync(new HumanInputAmendPreparationInput("operation-5", "missing-request", null, 1, "Pending", "purpose", "prompt", "Public", DateTimeOffset.UtcNow.AddMinutes(1), candidateExpiry));
 
         Assert.Equal(HumanInputRequestPosturePageStatus.Ready, page.Status);
         Assert.Equal(HumanInputRequestPostureReadStatus.NotFound, read.Status);
         Assert.Equal(HumanInputOperationStatus.Unavailable, lifecycle.Status);
         Assert.Equal(HumanInputOperationStatus.Invalid, response.Status);
         Assert.Equal(HumanInputSupersedePreparationStatus.Invalid, preparation.Status);
+        Assert.Equal(HumanInputSupersedePreparationStatus.Invalid, reroutePreparation.Status);
+        Assert.Equal(HumanInputSupersedePreparationStatus.Invalid, amendPreparation.Status);
     }
 }
