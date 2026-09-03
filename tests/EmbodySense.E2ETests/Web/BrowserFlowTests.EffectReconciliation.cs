@@ -152,7 +152,7 @@ public sealed partial class BrowserFlowTests
             var escapedCaseId = Uri.EscapeDataString(seeded.CaseId);
             var casePath = $"/api/effect-reconciliation/{escapedCaseId}?";
             var resolutionPath = $"/api/effect-reconciliation/{escapedCaseId}/resolution";
-            await browser.AssertHealthyAsync((casePath, 503), (resolutionPath, 404), (resolutionPath, 503));
+            await browser.AssertHealthyAsync([(resolutionPath, 404)], [(casePath, 503), (resolutionPath, 503)]);
         }
         catch
         {
