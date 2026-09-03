@@ -128,10 +128,10 @@ public sealed partial class BrowserFlowTests
             await browser.WaitForExpressionAsync("document.getElementById('clientStatus').textContent === 'Web primary'");
             await browser.ReloadAsync();
             await InitializeWorkspaceAsyncIfNeededAsync(browser);
-            await browser.EndExpectedServerRestartAsync();
             await OpenHumanInputAsync(browser);
             await SelectHumanInputAsync(browser, RerouteId);
             await WaitForHumanInputLifecycleAsync(browser, "pending");
+            await browser.EndExpectedServerRestartAsync();
             Assert.False(await browser.EvaluateBooleanAsync("Object.keys(localStorage).some(key => key.toLowerCase().includes('human-input') || key.toLowerCase().includes('operation'))"));
 
             await SelectHumanInputAsync(browser, AmendId);
@@ -178,10 +178,10 @@ public sealed partial class BrowserFlowTests
             await browser.WaitForExpressionAsync("document.getElementById('clientStatus').textContent === 'Web primary'");
             await browser.ReloadAsync();
             await InitializeWorkspaceAsyncIfNeededAsync(browser);
-            await browser.EndExpectedServerRestartAsync();
             await OpenHumanInputAsync(browser);
             await SelectHumanInputAsync(browser, AmendId);
             await WaitForHumanInputLifecycleAsync(browser, "pending");
+            await browser.EndExpectedServerRestartAsync();
             Assert.True(await browser.EvaluateBooleanAsync("document.getElementById('humanInputPurpose').textContent.includes('Amended purpose through the visible control.') && document.getElementById('humanInputPrompt').textContent.includes('Amended prompt through the visible control.')"));
             Assert.False(await browser.EvaluateBooleanAsync("Object.keys(localStorage).some(key => key.toLowerCase().includes('human-input') || key.toLowerCase().includes('operation'))"));
             app.AssertHealthy();
