@@ -64,7 +64,7 @@ using EmbodySense.Tests.Support;
 
 namespace EmbodySense.E2ETests.Web;
 
-internal static class HumanReviewBrowserFixture
+internal static partial class HumanReviewBrowserFixture
 {
     private const string ConversationTurnCapabilityId = "org.embodysense/conversation-turn";
     private const string PreDispatchEffectInput = "{\"precondition\":{\"kind\":\"expectedAbsent\"},\"schemaVersion\":1,\"scopeId\":\"workspace\",\"segments\":[{\"kind\":\"literalUtf8\",\"literal\":\"reviewed marker\"}],\"target\":\"shared/process-observable-marker.txt\"}";

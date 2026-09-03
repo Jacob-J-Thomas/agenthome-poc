@@ -9,6 +9,10 @@
     <link rel="stylesheet" href="/loop-builder.css?v=governed-graph-v4" />
     <link rel="stylesheet" href="/human-review.css?v=human-review-v1" />
     <link rel="stylesheet" href="/human-input.css?v=human-input-v1" />
+    <link
+      rel="stylesheet"
+      href="/effect-reconciliation.css?v=effect-reconciliation-v1"
+    />
   </head>
   <body>
     <div id="appShell" class="app-shell">
@@ -71,6 +75,19 @@
           >
             <span class="rail-glyph" aria-hidden="true">&#9998;</span
             ><span>Input</span>
+          </button>
+          <button
+            id="effectReconciliationNav"
+            class="rail-button"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="effectReconciliationView"
+            data-app-view="effect-reconciliation"
+            data-testid="effect-reconciliation-nav"
+          >
+            <span class="rail-glyph" aria-hidden="true">&#9888;</span
+            ><span>Reconcile</span>
           </button>
           <a id="capabilitiesNav" class="rail-button" href="/capabilities.html">
             <span class="rail-glyph" aria-hidden="true">&#9711;</span
@@ -1606,6 +1623,268 @@
           </section>
 
           <section
+            id="effectReconciliationView"
+            class="app-view effect-reconciliation-view"
+            role="tabpanel"
+            aria-labelledby="effectReconciliationNav"
+            hidden
+          >
+            <div class="effect-reconciliation-shell">
+              <aside
+                class="effect-reconciliation-catalog"
+                aria-label="Effect Reconciliation catalog"
+              >
+                <header class="effect-reconciliation-catalog-header">
+                  <div>
+                    <p class="eyebrow">Canonical ambiguous effects</p>
+                    <h1>Reconcile</h1>
+                  </div>
+                  <button
+                    id="effectReconciliationRefreshButton"
+                    class="secondary-button"
+                    type="button"
+                    data-testid="effect-reconciliation-refresh"
+                  >
+                    Refresh
+                  </button>
+                </header>
+                <p
+                  id="effectReconciliationListStatus"
+                  class="effect-reconciliation-status"
+                  role="status"
+                  aria-live="polite"
+                >
+                  Loading canonical cases…
+                </p>
+                <div
+                  id="effectReconciliationList"
+                  class="effect-reconciliation-list"
+                  role="listbox"
+                  aria-label="Effect Reconciliation cases"
+                  aria-describedby="effectReconciliationListStatus"
+                ></div>
+              </aside>
+
+              <section
+                class="effect-reconciliation-detail"
+                aria-label="Effect Reconciliation detail"
+              >
+                <div
+                  id="effectReconciliationEmpty"
+                  class="effect-reconciliation-empty"
+                >
+                  <p class="eyebrow">Canonical case state</p>
+                  <h2>Select a case</h2>
+                  <p>
+                    Inspect detached evidence and take a bounded disposition for
+                    one exact case version.
+                  </p>
+                </div>
+                <article
+                  id="effectReconciliationDetailPanel"
+                  class="effect-reconciliation-detail-panel"
+                  hidden
+                >
+                  <header class="effect-reconciliation-detail-header">
+                    <div>
+                      <p class="eyebrow">Effect Reconciliation</p>
+                      <h2 id="effectReconciliationTitle">
+                        Reconciliation case
+                      </h2>
+                      <p
+                        id="effectReconciliationIdentity"
+                        class="effect-reconciliation-identity"
+                      ></p>
+                    </div>
+                    <button
+                      id="effectReconciliationDetailRefreshButton"
+                      class="secondary-button"
+                      type="button"
+                      data-testid="effect-reconciliation-detail-refresh"
+                    >
+                      Reread canonical state
+                    </button>
+                  </header>
+                  <p
+                    id="effectReconciliationDetailStatus"
+                    class="effect-reconciliation-status"
+                    role="status"
+                    aria-live="polite"
+                  ></p>
+                  <dl
+                    id="effectReconciliationSummary"
+                    class="effect-reconciliation-summary"
+                  ></dl>
+
+                  <section
+                    class="effect-reconciliation-section"
+                    aria-labelledby="effectReconciliationContractTitle"
+                  >
+                    <div class="effect-reconciliation-section-heading">
+                      <h3 id="effectReconciliationContractTitle">
+                        Pinned contract
+                      </h3>
+                      <span
+                        id="effectReconciliationPosture"
+                        class="effect-reconciliation-state-chip"
+                      ></span>
+                    </div>
+                    <dl
+                      id="effectReconciliationContract"
+                      class="effect-reconciliation-subsummary"
+                    ></dl>
+                  </section>
+
+                  <section
+                    class="effect-reconciliation-section"
+                    aria-labelledby="effectReconciliationEvidenceTitle"
+                  >
+                    <div class="effect-reconciliation-section-heading">
+                      <h3 id="effectReconciliationEvidenceTitle">Evidence</h3>
+                      <span class="effect-reconciliation-redaction-note"
+                        >Value-free projections</span
+                      >
+                    </div>
+                    <ul
+                      id="effectReconciliationEvidenceSources"
+                      class="effect-reconciliation-evidence-list"
+                    ></ul>
+                    <ol
+                      id="effectReconciliationEvidence"
+                      class="effect-reconciliation-evidence-list"
+                    ></ol>
+                  </section>
+
+                  <section
+                    class="effect-reconciliation-section"
+                    aria-labelledby="effectReconciliationProbeCatalogTitle"
+                  >
+                    <div class="effect-reconciliation-section-heading">
+                      <div>
+                        <h3 id="effectReconciliationProbeCatalogTitle">
+                          Registered probes
+                        </h3>
+                        <p>
+                          Only server-registered read-only probes are available.
+                        </p>
+                      </div>
+                      <span class="effect-reconciliation-redaction-note"
+                        >No actuator access</span
+                      >
+                    </div>
+                    <p
+                      id="effectReconciliationProbeStatus"
+                      class="effect-reconciliation-status"
+                      role="status"
+                      aria-live="polite"
+                    ></p>
+                    <div
+                      id="effectReconciliationProbeCatalog"
+                      class="effect-reconciliation-probe-list"
+                    ></div>
+                    <button
+                      id="effectReconciliationProbeButton"
+                      class="secondary-button"
+                      type="button"
+                      data-testid="effect-reconciliation-probe"
+                    >
+                      Run registered probe
+                    </button>
+                  </section>
+
+                  <section
+                    class="effect-reconciliation-section effect-reconciliation-actions-section"
+                    aria-labelledby="effectReconciliationActionsTitle"
+                  >
+                    <div class="effect-reconciliation-section-heading">
+                      <div>
+                        <h3 id="effectReconciliationActionsTitle">
+                          Assessment and disposition
+                        </h3>
+                        <p>
+                          Every action is revalidated against this exact case
+                          reference.
+                        </p>
+                      </div>
+                    </div>
+                    <p
+                      id="effectReconciliationActionStatus"
+                      class="effect-reconciliation-action-status"
+                      role="status"
+                      aria-live="assertive"
+                    ></p>
+                    <div class="effect-reconciliation-actions">
+                      <button
+                        id="effectReconciliationAssessButton"
+                        class="primary-button"
+                        type="button"
+                        data-testid="effect-reconciliation-assess"
+                      >
+                        Assess current evidence
+                      </button>
+                      <label
+                        class="effect-reconciliation-disposition-field"
+                        for="effectReconciliationDispositionKind"
+                      >
+                        <span>Disposition</span>
+                        <select id="effectReconciliationDispositionKind">
+                          <option value="">Choose a disposition</option>
+                          <option value="accept-proved-not-applied">
+                            Accept: proved not applied
+                          </option>
+                          <option value="accept-proved-applied">
+                            Accept: proved applied
+                          </option>
+                          <option value="quarantine-unresolved">
+                            Quarantine unresolved
+                          </option>
+                        </select>
+                      </label>
+                      <label
+                        class="effect-reconciliation-disposition-field"
+                        for="effectReconciliationDispositionDetail"
+                      >
+                        <span>Optional operator note</span>
+                        <textarea
+                          id="effectReconciliationDispositionDetail"
+                          maxlength="1024"
+                          rows="2"
+                        ></textarea>
+                      </label>
+                      <button
+                        id="effectReconciliationDisposeButton"
+                        class="danger-button"
+                        type="button"
+                        data-testid="effect-reconciliation-dispose"
+                      >
+                        Record disposition
+                      </button>
+                    </div>
+                  </section>
+
+                  <section
+                    class="effect-reconciliation-section"
+                    aria-labelledby="effectReconciliationResolutionTitle"
+                  >
+                    <div class="effect-reconciliation-section-heading">
+                      <h3 id="effectReconciliationResolutionTitle">
+                        Immutable resolution readback
+                      </h3>
+                      <span class="effect-reconciliation-redaction-note"
+                        >Read-only</span
+                      >
+                    </div>
+                    <div
+                      id="effectReconciliationResolution"
+                      class="effect-reconciliation-resolution"
+                    ></div>
+                  </section>
+                </article>
+              </section>
+            </div>
+          </section>
+
+          <section
             id="configurationView"
             class="app-view configuration-view"
             role="tabpanel"
@@ -1723,5 +2002,9 @@
     <script src="/loop-builder.js?v=governed-graph-v4" type="module"></script>
     <script src="/human-review.js?v=human-review-v1" type="module"></script>
     <script src="/human-input.js?v=human-input-v1" type="module"></script>
+    <script
+      src="/effect-reconciliation.js?v=effect-reconciliation-v1"
+      type="module"
+    ></script>
   </body>
 </html>

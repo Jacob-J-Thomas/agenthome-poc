@@ -5,6 +5,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using EmbodySense.Core.Startup.Loops;
 using EmbodySense.Core.Startup.Loops.Execution;
+using EmbodySense.Core.Startup.Loops.Execution.Reconciliation;
 using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Core.Startup.Capabilities;
@@ -113,6 +114,7 @@ public static class Program
         services.AddSingleton<IWebClientNotifier, SignalRWebClientNotifier>();
         services.AddSingleton<HumanReviewLocalDecisionAuthorizationPolicy>();
         services.AddSingleton<IHumanReviewDecisionAuthorizationProvider, WebHumanReviewDecisionAuthorizationProvider>();
+        services.AddSingleton<IGovernedLoopEffectReconciliationAuthorizationProvider, WebEffectReconciliationAuthorizationProvider>();
         services.AddSingleton<IWebHumanReviewNotifier, SignalRWebHumanReviewNotifier>();
         services.AddSingleton<IAgentRuntimeConversationPublicationObserver, WebConversationPublicationObserver>();
         services.AddSingleton<WebApprovalCoordinator>();
@@ -127,6 +129,7 @@ public static class Program
             var approvals = provider.GetRequiredService<WebApprovalCoordinator>();
             var observer = provider.GetRequiredService<IAgentRuntimeConversationPublicationObserver>();
             var decisionAuthorizationProvider = provider.GetRequiredService<IHumanReviewDecisionAuthorizationProvider>();
+            var reconciliationAuthorizationProvider = provider.GetRequiredService<IGovernedLoopEffectReconciliationAuthorizationProvider>();
             var humanInputAuthorityProvider = provider.GetRequiredService<IAgentRuntimeHumanInputAuthorityProvider>();
             var humanInputCandidateRegistry = provider.GetRequiredService<IHumanInputSupersedeCandidateRegistry>();
             return new WebAgentRuntimeHost(
@@ -136,11 +139,13 @@ public static class Program
                 observer,
                 runtimeStatus => new AgentRuntimeFactory(approvals, observer, runtimeStatus)
                     .WithHumanReviewDecisionAuthorizationProvider(decisionAuthorizationProvider)
+                    .WithGovernedLoopEffectReconciliationAuthorizationProvider(reconciliationAuthorizationProvider)
                     .WithHumanInputAuthorityProvider(humanInputAuthorityProvider)
                     .WithHumanInputSupersedeCandidateRegistry(humanInputCandidateRegistry)
                     .WithoutLegacyCustomLoopToolApprovals());
         });
         services.AddSingleton<IWebHumanReviewRuntime>(provider => provider.GetRequiredService<WebAgentRuntimeHost>());
+        services.AddSingleton<IWebEffectReconciliationRuntime>(provider => provider.GetRequiredService<WebAgentRuntimeHost>());
         services.AddSingleton<IWebHumanInputRuntime>(provider => new WebHumanInputRuntimeAdapter(provider.GetRequiredService<WebAgentRuntimeHost>()));
         services.AddSingleton(provider => new WebGovernedLoopBackgroundHostedService(provider.GetRequiredService<WebAgentRuntimeHost>()));
         services.AddSingleton<IHostedService>(provider => provider.GetRequiredService<WebGovernedLoopBackgroundHostedService>());
@@ -166,7 +171,8 @@ public static class Program
             context.Response.Headers["Content-Security-Policy"] = "default-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'";
             context.Response.Headers["X-Content-Type-Options"] = "nosniff";
             context.Response.Headers["Referrer-Policy"] = "no-referrer";
-            if (context.Request.Path.StartsWithSegments("/api/human-reviews"))
+            if (context.Request.Path.StartsWithSegments("/api/human-reviews")
+                || context.Request.Path.StartsWithSegments("/api/effect-reconciliation"))
             {
                 context.Response.Headers.CacheControl = "no-store";
             }
