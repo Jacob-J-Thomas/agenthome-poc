@@ -9,6 +9,7 @@ public sealed class GovernedLoopEffectReconciliationPublicSurfaceTests
 {
     private const string CommonProject = "EmbodySense.Core.Common";
     private const string ApplicationProject = "EmbodySense.Core.Application";
+    private const string StartupProject = "EmbodySense.Core.Startup";
     private const string ReconciliationPath = "Loops/Execution/Reconciliation";
     private static readonly IReadOnlyDictionary<string, string[]> _expectedApplicationPorts = new Dictionary<string, string[]>(StringComparer.Ordinal)
     {
@@ -49,7 +50,84 @@ public sealed class GovernedLoopEffectReconciliationPublicSurfaceTests
         "IServiceCollection",
     ];
     private static readonly string[] _forbiddenOperationTerms = ["Dispatch", "Recover", "Recovery", "Retry"];
+    private static readonly string[] _forbiddenProjectionMemberNames =
+    [
+        "ActuatorOperationId",
+        "AuthorityEvidenceHash",
+        "BeforeEvidenceId",
+        "CanonicalJson",
+        "EffectGeneration",
+        "EffectId",
+        "ImplementationId",
+        "InputFingerprint",
+        "NodeId",
+        "OperationDescriptorHash",
+        "OperationId",
+        "PreconditionEvidenceHash",
+        "ProviderId",
+        "RegistrationEvidenceHash",
+        "RevisionId",
+        "RunId",
+        "SafeDetail",
+        "SafeSummary",
+        "TargetFingerprint",
+        "WorkspaceId",
+    ];
+    private static readonly string[] _forbiddenStartupSurfaceDependencies =
+    [
+        "ActuatorOperationId",
+        "AuthorityEvidenceHash",
+        "CanonicalJson",
+        "CapabilityImplementation",
+        "GovernedActuatorInputEvidence",
+        "GovernedLoopEffectAttempt",
+        "GovernedLoopEffectReconciliationBinding",
+        "GovernedLoopEffectReconciliationProbeTarget",
+        "IGovernedLoopEffectReconciliationProbe",
+        "ImplementationId",
+        "OperationDescriptorHash",
+        "ProviderId",
+        "RegistrationEvidenceHash",
+        "SafeDetail",
+        "SafeSummary",
+    ];
     private static readonly string[] _forbiddenTestHookTerms = ["Fake", "ForTest", "Hook", "Mock", "Stub", "TestOnly"];
+    private static readonly string[] _expectedStartupSurfaceTypes =
+    [
+        "GovernedLoopEffectReconciliationAssessmentProjection",
+        "GovernedLoopEffectReconciliationAssessmentKind",
+        "GovernedLoopEffectReconciliationAuthorizationRequest",
+        "GovernedLoopEffectReconciliationAuthorizationResult",
+        "GovernedLoopEffectReconciliationAuthorizationStatus",
+        "GovernedLoopEffectReconciliationCaseDetail",
+        "GovernedLoopEffectReconciliationCasePosture",
+        "GovernedLoopEffectReconciliationCaseReference",
+        "GovernedLoopEffectReconciliationCaseSummary",
+        "GovernedLoopEffectReconciliationContractProjection",
+        "GovernedLoopEffectReconciliationDispositionKind",
+        "GovernedLoopEffectReconciliationDispositionProjection",
+        "GovernedLoopEffectReconciliationEvidenceSourceProjection",
+        "GovernedLoopEffectReconciliationEvidenceSourceKind",
+        "GovernedLoopEffectReconciliationFacade",
+        "GovernedLoopEffectReconciliationObservationProjection",
+        "GovernedLoopEffectReconciliationObservationKind",
+        "GovernedLoopEffectReconciliationObservedOutcome",
+        "GovernedLoopEffectReconciliationOperationResult",
+        "GovernedLoopEffectReconciliationOperationStatus",
+        "GovernedLoopEffectReconciliationPage",
+        "GovernedLoopEffectReconciliationPageRequest",
+        "GovernedLoopEffectReconciliationPageStatus",
+        "GovernedLoopEffectReconciliationProbeCatalogPage",
+        "GovernedLoopEffectReconciliationProbeCatalogStatus",
+        "GovernedLoopEffectReconciliationReadResult",
+        "GovernedLoopEffectReconciliationReadStatus",
+        "GovernedLoopEffectReconciliationReliabilityPosture",
+        "GovernedLoopEffectReconciliationResolutionProjection",
+        "GovernedLoopEffectReconciliationResolutionOutcome",
+        "GovernedLoopEffectReconciliationResolutionReadResult",
+        "GovernedLoopEffectReconciliationResolutionReadStatus",
+        "IGovernedLoopEffectReconciliationAuthorizationProvider",
+    ];
 
     [Fact]
     public void Common_reconciliation_contracts_remain_dependency_free()
@@ -115,7 +193,9 @@ public sealed class GovernedLoopEffectReconciliationPublicSurfaceTests
     public void Reconciliation_contracts_use_one_matching_public_type_per_file_and_models_layout()
     {
         var root = FindRepositoryRoot();
-        var sources = ReadContractSources(root, CommonProject).Concat(ReadContractSources(root, ApplicationProject));
+        var sources = ReadContractSources(root, CommonProject)
+            .Concat(ReadContractSources(root, ApplicationProject))
+            .Concat(ReadContractSources(root, StartupProject));
         var violations = new List<string>();
 
         foreach (var source in sources)
@@ -156,7 +236,9 @@ public sealed class GovernedLoopEffectReconciliationPublicSurfaceTests
     public void Reconciliation_public_contracts_expose_no_dispatch_retry_or_recovery_surface()
     {
         var root = FindRepositoryRoot();
-        var sources = ReadContractSources(root, CommonProject).Concat(ReadContractSources(root, ApplicationProject));
+        var sources = ReadContractSources(root, CommonProject)
+            .Concat(ReadContractSources(root, ApplicationProject))
+            .Concat(ReadContractSources(root, StartupProject));
         var violations = sources
             .SelectMany(source => PublicTopLevelTypes(source.Root)
                 .SelectMany(declaration => PublicOperationNames(declaration)
@@ -167,6 +249,35 @@ public sealed class GovernedLoopEffectReconciliationPublicSurfaceTests
             .ToArray();
 
         Assert.Empty(violations);
+    }
+
+    [Fact]
+    public void Startup_reconciliation_surface_is_closed_and_value_free()
+    {
+        var root = FindRepositoryRoot();
+        var sources = ReadContractSources(root, StartupProject);
+        var publicTypes = sources
+            .SelectMany(source => PublicTopLevelTypes(source.Root).Select(type => (source.Path, Declaration: type)))
+            .OrderBy(value => value.Declaration.Identifier.ValueText, StringComparer.Ordinal)
+            .ToArray();
+        var violations = publicTypes
+            .SelectMany(value => _forbiddenStartupSurfaceDependencies
+                .Where(term => PublicSurfaceText(value.Declaration).Contains(term, StringComparison.Ordinal))
+                .Select(term => $"{value.Path} exposes forbidden reconciliation material {term}"))
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        var projectionMemberViolations = publicTypes
+            .Where(value => value.Path.Contains($"{Path.DirectorySeparatorChar}Models{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+                && value.Declaration.Identifier.ValueText is not ("GovernedLoopEffectReconciliationAuthorizationRequest" or "GovernedLoopEffectReconciliationAuthorizationResult"))
+            .SelectMany(value => PublicDataMemberNames(value.Declaration)
+                .Where(name => _forbiddenProjectionMemberNames.Contains(name, StringComparer.Ordinal))
+                .Select(name => $"{value.Path} exposes forbidden projection member {name}"))
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Equal(_expectedStartupSurfaceTypes.Order(StringComparer.Ordinal), publicTypes.Select(value => value.Declaration.Identifier.ValueText));
+        Assert.Empty(violations);
+        Assert.Empty(projectionMemberViolations);
     }
 
     [Fact]
@@ -239,17 +350,43 @@ public sealed class GovernedLoopEffectReconciliationPublicSurfaceTests
         }
     }
 
+    private static IEnumerable<string> PublicDataMemberNames(BaseTypeDeclarationSyntax declaration)
+    {
+        if (declaration is RecordDeclarationSyntax { ParameterList: not null } record)
+        {
+            foreach (var parameter in record.ParameterList.Parameters)
+            {
+                yield return parameter.Identifier.ValueText;
+            }
+        }
+
+        if (declaration is not TypeDeclarationSyntax typeDeclaration)
+        {
+            yield break;
+        }
+
+        foreach (var property in typeDeclaration.Members.OfType<PropertyDeclarationSyntax>()
+            .Where(property => property.Modifiers.Any(modifier => modifier.IsKind(SyntaxKind.PublicKeyword))))
+        {
+            yield return property.Identifier.ValueText;
+        }
+    }
+
     [Fact]
-    public void Reconciliation_public_contracts_are_confined_to_common_and_application_without_test_hooks()
+    public void Reconciliation_public_contracts_are_confined_to_canonical_contract_and_startup_projection_namespaces_without_test_hooks()
     {
         var root = FindRepositoryRoot();
-        var contractSources = ReadContractSources(root, CommonProject).Concat(ReadContractSources(root, ApplicationProject)).ToArray();
+        var contractSources = ReadContractSources(root, CommonProject)
+            .Concat(ReadContractSources(root, ApplicationProject))
+            .Concat(ReadContractSources(root, StartupProject))
+            .ToArray();
         var contractTypeNames = contractSources.SelectMany(source => PublicTopLevelTypes(source.Root)).Select(type => type.Identifier.ValueText).ToHashSet(StringComparer.Ordinal);
         var sourceRoot = Path.Combine(root, "src");
         var allowedDirectories = new[]
         {
             NormalizePath(Path.Combine(sourceRoot, CommonProject, ReconciliationPath)),
             NormalizePath(Path.Combine(sourceRoot, ApplicationProject, ReconciliationPath)),
+            NormalizePath(Path.Combine(sourceRoot, StartupProject, ReconciliationPath)),
         };
         var duplicateDeclarations = Directory.EnumerateFiles(sourceRoot, "*.cs", SearchOption.AllDirectories)
             .Where(path => !allowedDirectories.Any(directory => NormalizePath(path).StartsWith(directory + '/', StringComparison.Ordinal)))
