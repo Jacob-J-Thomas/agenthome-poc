@@ -67,15 +67,35 @@ public sealed partial class BrowserFlowTests
     private static readonly TimeSpan _visibleGovernedInvocationTimeout = TimeSpan.FromSeconds(150);
 
     [Fact]
-    public void Browser_health_http_failure_matcher_requires_exact_route_and_status()
+    public void Browser_health_optional_failure_filter_is_empty_safe_allowlisted_and_exact()
     {
-        const string Route = "/api/effect-reconciliation/case?";
-        var expected = (UrlFragment: Route, StatusCode: 503);
+        const string CaseRoute = "/api/effect-reconciliation/case?";
+        const string ResolutionRoute = "/api/effect-reconciliation/case/resolution";
+        var mandatory = (UrlFragment: ResolutionRoute, StatusCode: 404);
+        var optional = new[]
+        {
+            (UrlFragment: CaseRoute, StatusCode: 503),
+            (UrlFragment: ResolutionRoute, StatusCode: 503),
+        };
+        var diagnostics = new List<string>
+        {
+            "HTTP error response: {\"url\":\"https://example.test/api/effect-reconciliation/case/resolution\",\"status\":404}",
+            "HTTP error response: {\"url\":\"https://example.test/api/effect-reconciliation/case?\",\"status\":503}",
+            "browser error for /api/effect-reconciliation/case/resolution with status of 503 (Service Unavailable)",
+        };
 
-        Assert.True(HeadlessBrowserSession.MatchesExpectedHttpFailure("HTTP error response: {\"url\":\"https://example.test/api/effect-reconciliation/case?\",\"status\":503}", expected));
-        Assert.True(HeadlessBrowserSession.MatchesExpectedHttpFailure("browser error for /api/effect-reconciliation/case? with status of 503 (Service Unavailable)", expected));
-        Assert.False(HeadlessBrowserSession.MatchesExpectedHttpFailure("HTTP error response: {\"url\":\"https://example.test/api/effect-reconciliation/other?\",\"status\":503}", expected));
-        Assert.False(HeadlessBrowserSession.MatchesExpectedHttpFailure("HTTP error response: {\"url\":\"https://example.test/api/effect-reconciliation/case?\",\"status\":500}", expected));
+        Assert.Equal(0, HeadlessBrowserSession.RemoveMatchingExpectedHttpFailureDiagnostics(diagnostics, []));
+        Assert.Equal(1, HeadlessBrowserSession.RemoveMatchingExpectedHttpFailureDiagnostics(diagnostics, [mandatory]));
+        Assert.Equal(2, HeadlessBrowserSession.RemoveMatchingExpectedHttpFailureDiagnostics(diagnostics, optional));
+        Assert.Empty(diagnostics);
+
+        var unexpected = new List<string>
+        {
+            "HTTP error response: {\"url\":\"https://example.test/api/effect-reconciliation/other?\",\"status\":503}",
+            "HTTP error response: {\"url\":\"https://example.test/api/effect-reconciliation/case?\",\"status\":500}",
+        };
+        Assert.Equal(0, HeadlessBrowserSession.RemoveMatchingExpectedHttpFailureDiagnostics(unexpected, optional));
+        Assert.Equal(2, unexpected.Count);
     }
 
     [Fact]
@@ -2455,7 +2475,7 @@ public sealed partial class BrowserFlowTests
 
         public async Task AssertHealthyAsync(
             IReadOnlyList<(string UrlFragment, int StatusCode)> expectedHttpFailures,
-            IReadOnlyList<(string UrlFragment, int StatusCode)> atLeastOneExpectedHttpFailures)
+            IReadOnlyList<(string UrlFragment, int StatusCode)> optionalExpectedHttpFailures)
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
             _ = await EvaluateAsync("true", timeout.Token);
@@ -2467,25 +2487,29 @@ public sealed partial class BrowserFlowTests
             {
                 ArgumentException.ThrowIfNullOrWhiteSpace(expected.UrlFragment);
                 Assert.InRange(expected.StatusCode, 400, 599);
-                var removed = diagnostics.RemoveAll(item => MatchesExpectedHttpFailure(item, expected));
+                var removed = RemoveMatchingExpectedHttpFailureDiagnostics(diagnostics, [expected]);
                 Assert.True(removed > 0, $"The expected browser HTTP {expected.StatusCode} failure for `{expected.UrlFragment}` was not observed.");
             }
 
-            var observedAtLeastOneExpectedHttpFailure = false;
-            foreach (var expected in atLeastOneExpectedHttpFailures)
+            foreach (var expected in optionalExpectedHttpFailures)
             {
                 ArgumentException.ThrowIfNullOrWhiteSpace(expected.UrlFragment);
                 Assert.InRange(expected.StatusCode, 400, 599);
-                observedAtLeastOneExpectedHttpFailure |= diagnosticsSnapshot.Any(item => MatchesExpectedHttpFailure(item, expected));
             }
 
-            foreach (var expected in atLeastOneExpectedHttpFailures)
-            {
-                _ = diagnostics.RemoveAll(item => MatchesExpectedHttpFailure(item, expected));
-            }
-
-            Assert.True(atLeastOneExpectedHttpFailures.Count == 0 || observedAtLeastOneExpectedHttpFailure, "At least one allowlisted browser HTTP failure was not observed.");
+            _ = RemoveMatchingExpectedHttpFailureDiagnostics(diagnostics, optionalExpectedHttpFailures);
             Assert.Empty(diagnostics);
+        }
+
+        internal static int RemoveMatchingExpectedHttpFailureDiagnostics(List<string> diagnostics, IReadOnlyList<(string UrlFragment, int StatusCode)> expectedHttpFailures)
+        {
+            var removed = 0;
+            foreach (var expected in expectedHttpFailures)
+            {
+                removed += diagnostics.RemoveAll(item => MatchesExpectedHttpFailure(item, expected));
+            }
+
+            return removed;
         }
 
         internal static bool MatchesExpectedHttpFailure(string diagnostic, (string UrlFragment, int StatusCode) expected)
