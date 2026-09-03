@@ -20,6 +20,7 @@ using EmbodySense.Core.Application.Loops.EffectAuthorityUsage;
 using EmbodySense.Core.Application.Loops.Execution;
 using EmbodySense.Core.Application.Loops.Execution.Authority;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
+using EmbodySense.Core.Application.Loops.Execution.Reconciliation.Models;
 using EmbodySense.Core.Application.Loops.Authoring;
 using EmbodySense.Core.Application.Loops.Failures;
 using EmbodySense.Core.Application.Loops.GraphAuthoring;
@@ -75,6 +76,7 @@ using EmbodySense.Core.Startup.Loops;
 using EmbodySense.Core.Startup.Loops.Execution;
 using EmbodySense.Core.Startup.Loops.Execution.Effects;
 using EmbodySense.Core.Startup.Loops.Execution.Retry;
+using EmbodySense.Core.Startup.Loops.Execution.Reconciliation;
 using EmbodySense.Core.Startup.Loops.Execution.Sleep;
 using EmbodySense.Core.Startup.Loops.Execution.Sleep.Models;
 using EmbodySense.Core.Startup.Loops.Posture;
@@ -108,6 +110,7 @@ public sealed class AgentRuntimeFactory
     private readonly IAgentRuntimeHumanInputAuthorityProvider? _humanInputAuthorityProvider;
     private readonly IHumanInputSupersedeCandidateRegistry? _humanInputSupersedeCandidateRegistry;
     private readonly IHumanReviewDecisionAuthorizationProvider? _humanReviewDecisionAuthorizationProvider;
+    private readonly IGovernedLoopEffectReconciliationAuthorizationProvider? _governedLoopEffectReconciliationAuthorizationProvider;
     private readonly IAgentRuntimeGovernedLoopCoordinatorRepairAuthorityProvider? _governedLoopCoordinatorRepairAuthorityProvider;
     private readonly IGovernedModelPrimaryExecutionBoundaryObserver? _governedModelExecutionObserver;
     private readonly IGovernedLoopLocalCoordinatorBoundaryObserver? _governedLoopLocalCoordinatorBoundaryObserver;
@@ -200,7 +203,8 @@ public sealed class AgentRuntimeFactory
             _governedLoopCoordinatorRepairAuthorityProvider,
             _humanReviewDecisionAuthorizationProvider,
             _humanInputSupersedeCandidateRegistry,
-            _customLoopApprovalPrompt);
+            _customLoopApprovalPrompt,
+            _governedLoopEffectReconciliationAuthorizationProvider);
     }
 
     /// <summary>Returns an equivalent factory that composes one explicit server-owned Human Input authority provider.</summary>
@@ -225,7 +229,8 @@ public sealed class AgentRuntimeFactory
             _governedLoopCoordinatorRepairAuthorityProvider,
             _humanReviewDecisionAuthorizationProvider,
             _humanInputSupersedeCandidateRegistry,
-            _customLoopApprovalPrompt);
+            _customLoopApprovalPrompt,
+            _governedLoopEffectReconciliationAuthorizationProvider);
     }
 
     /// <summary>Returns an equivalent factory with one bounded Web supersede-candidate registry.</summary>
@@ -249,7 +254,8 @@ public sealed class AgentRuntimeFactory
             _governedLoopCoordinatorRepairAuthorityProvider,
             _humanReviewDecisionAuthorizationProvider,
             registry,
-            _customLoopApprovalPrompt);
+            _customLoopApprovalPrompt,
+            _governedLoopEffectReconciliationAuthorizationProvider);
     }
 
     /// <summary>Returns an equivalent factory with one explicit server-owned Human Review decision authority provider.</summary>
@@ -274,7 +280,34 @@ public sealed class AgentRuntimeFactory
             _governedLoopCoordinatorRepairAuthorityProvider,
             provider,
             _humanInputSupersedeCandidateRegistry,
-            _customLoopApprovalPrompt);
+            _customLoopApprovalPrompt,
+            _governedLoopEffectReconciliationAuthorizationProvider);
+    }
+
+    /// <summary>Returns an equivalent factory with request-scoped authenticated Effect Reconciliation authority.</summary>
+    /// <remarks>Without this provider, reads remain available while assessment, probe, disposition, and resolution operations fail closed as unavailable.</remarks>
+    /// <param name="provider">The trusted interface boundary that derives current actor and scope for exact reconciliation purposes.</param>
+    /// <returns>A factory preserving the single runtime and stores with the supplied authority provider.</returns>
+    public AgentRuntimeFactory WithGovernedLoopEffectReconciliationAuthorizationProvider(IGovernedLoopEffectReconciliationAuthorizationProvider provider)
+    {
+        ArgumentNullException.ThrowIfNull(provider);
+        return new AgentRuntimeFactory(
+            _approvalPrompt,
+            _conversationPublicationObserver,
+            _codexRuntimeStatus,
+            _capabilityTrustProvider,
+            _governedModelExecutionObserver,
+            _additionalModelProfileProviders,
+            _authenticatedWakeVerifier,
+            _humanInputAuthorityProvider,
+            _commandActionRuntimeProvider,
+            _customLoopRunStoreProvider,
+            _governedLoopLocalCoordinatorBoundaryObserver,
+            _governedLoopCoordinatorRepairAuthorityProvider,
+            _humanReviewDecisionAuthorizationProvider,
+            _humanInputSupersedeCandidateRegistry,
+            _customLoopApprovalPrompt,
+            provider);
     }
 
     /// <summary>Returns an equivalent factory with authenticated current-operator authority for coordinator repair.</summary>
@@ -300,7 +333,8 @@ public sealed class AgentRuntimeFactory
             provider,
             _humanReviewDecisionAuthorizationProvider,
             _humanInputSupersedeCandidateRegistry,
-            _customLoopApprovalPrompt);
+            _customLoopApprovalPrompt,
+            _governedLoopEffectReconciliationAuthorizationProvider);
     }
 
     /// <summary>Returns an equivalent factory with one explicit server-owned structured command Action provider.</summary>
@@ -324,7 +358,8 @@ public sealed class AgentRuntimeFactory
             _governedLoopCoordinatorRepairAuthorityProvider,
             _humanReviewDecisionAuthorizationProvider,
             _humanInputSupersedeCandidateRegistry,
-            _customLoopApprovalPrompt);
+            _customLoopApprovalPrompt,
+            _governedLoopEffectReconciliationAuthorizationProvider);
     }
 
     /// <summary>
@@ -350,7 +385,8 @@ public sealed class AgentRuntimeFactory
             _governedLoopCoordinatorRepairAuthorityProvider,
             _humanReviewDecisionAuthorizationProvider,
             _humanInputSupersedeCandidateRegistry,
-            _customLoopApprovalPrompt);
+            _customLoopApprovalPrompt,
+            _governedLoopEffectReconciliationAuthorizationProvider);
     }
 
     /// <summary>Returns an equivalent factory with one diagnostic observer for local coordinator heartbeat boundaries.</summary>
@@ -376,7 +412,8 @@ public sealed class AgentRuntimeFactory
             _governedLoopCoordinatorRepairAuthorityProvider,
             _humanReviewDecisionAuthorizationProvider,
             _humanInputSupersedeCandidateRegistry,
-            _customLoopApprovalPrompt);
+            _customLoopApprovalPrompt,
+            _governedLoopEffectReconciliationAuthorizationProvider);
     }
 
     /// <summary>Returns an equivalent factory that rejects legacy custom-loop tool approvals at the runtime boundary.</summary>
@@ -402,7 +439,8 @@ public sealed class AgentRuntimeFactory
             _governedLoopCoordinatorRepairAuthorityProvider,
             _humanReviewDecisionAuthorizationProvider,
             _humanInputSupersedeCandidateRegistry,
-            CanonicalGovernedLoopApprovalPrompt.Instance);
+            CanonicalGovernedLoopApprovalPrompt.Instance,
+            _governedLoopEffectReconciliationAuthorizationProvider);
     }
 
     internal AgentRuntimeFactory(
@@ -420,7 +458,8 @@ public sealed class AgentRuntimeFactory
         IAgentRuntimeGovernedLoopCoordinatorRepairAuthorityProvider? governedLoopCoordinatorRepairAuthorityProvider = null,
         IHumanReviewDecisionAuthorizationProvider? humanReviewDecisionAuthorizationProvider = null,
         IHumanInputSupersedeCandidateRegistry? humanInputSupersedeCandidateRegistry = null,
-        IToolApprovalPrompt? customLoopApprovalPrompt = null)
+        IToolApprovalPrompt? customLoopApprovalPrompt = null,
+        IGovernedLoopEffectReconciliationAuthorizationProvider? governedLoopEffectReconciliationAuthorizationProvider = null)
     {
         ArgumentNullException.ThrowIfNull(approvalPrompt);
         if (codexRuntimeStatus is not null && codexRuntimeStatus.Compatibility != CodexRuntimeCompatibility.Compatible)
@@ -442,6 +481,7 @@ public sealed class AgentRuntimeFactory
         _humanInputAuthorityProvider = humanInputAuthorityProvider;
         _humanInputSupersedeCandidateRegistry = humanInputSupersedeCandidateRegistry;
         _humanReviewDecisionAuthorizationProvider = humanReviewDecisionAuthorizationProvider;
+        _governedLoopEffectReconciliationAuthorizationProvider = governedLoopEffectReconciliationAuthorizationProvider;
         _governedLoopCoordinatorRepairAuthorityProvider = governedLoopCoordinatorRepairAuthorityProvider;
         _governedModelExecutionObserver = governedModelExecutionObserver;
         _governedLoopLocalCoordinatorBoundaryObserver = governedLoopLocalCoordinatorBoundaryObserver;
@@ -775,6 +815,7 @@ public sealed class AgentRuntimeFactory
                 capabilityAuthority,
                 permissionService);
             var governedEffectAttemptComposition = GovernedLoopEffectAttemptComposition.Create(paths, customRunStore);
+            _ = await governedEffectAttemptComposition.IsStorageHealthyAsync(cancellationToken).ConfigureAwait(false);
             var governedWorkspaceActionFacade = governedEffectAttemptComposition.CreateFacade(
                 graphCapabilityCatalog,
                 governedWorkspaceActionRegistry,
@@ -785,6 +826,7 @@ public sealed class AgentRuntimeFactory
             var governedWorkspaceActionExecutor = new GovernedLoopWorkspaceActionExecutor(governedWorkspaceActionFacade);
             GovernedLoopCommandActionExecutor? governedCommandActionExecutor = null;
             CommandActionRegistrationRegistry? governedCommandActionRegistrations = null;
+            EmbodySense.Core.Application.Loops.Execution.Effects.GovernedActuatorOperationRegistry? governedCommandActionOperations = null;
             ICommandActionNativeHost? governedCommandActionNativeHost = null;
             if (_commandActionRuntimeProvider is { } commandActionRuntime)
             {
@@ -801,9 +843,59 @@ public sealed class AgentRuntimeFactory
                     CapabilityHostRuntime.Platform,
                     operationalClock);
                 governedCommandActionRegistrations = commandActions.Registrations;
+                governedCommandActionOperations = commandActions.Operations;
                 governedCommandActionNativeHost = commandActions.NativeHost;
                 governedCommandActionExecutor = new GovernedLoopCommandActionExecutor(commandActionFacade, commandActions.Registrations);
             }
+            var reconciliationInputSource = new GovernedLoopEffectReconciliationRuntimeInputSource(
+                customRunStore,
+                governedGraphStore,
+                governedEffectAttemptComposition.AttemptReadStore,
+                governedCommandActionRegistrations,
+                governedWorkspaceActionRegistry);
+            var reconciliationProbeRegistry = GovernedLoopEffectReconciliationProbeRegistry.Create(
+                [governedWorkspaceActionRegistry, governedCommandActionOperations],
+                governedEffectAttemptComposition.ReconciliationCases,
+                reconciliationInputSource,
+                operationalClock);
+            var reconciliationAdmissionApplicationService = new EmbodySense.Core.Application.Loops.Execution.Reconciliation.GovernedLoopEffectReconciliationService(
+                governedEffectAttemptComposition.ReconciliationCases,
+                new GovernedLoopEffectReconciliationAdmissionAuthorizationSource(),
+                reconciliationInputSource,
+                reconciliationProbeRegistry,
+                governedEffectAttemptComposition.ReconciliationProbeReservations,
+                operationalClock);
+            var reconciliationAdmission = new GovernedLoopEffectReconciliationAdmissionService(
+                workspaceId,
+                customRunStore,
+                governedEffectAttemptComposition.AttemptReadStore,
+                reconciliationProbeRegistry,
+                reconciliationAdmissionApplicationService,
+                operationalClock);
+            var reconciliationRecovery = await reconciliationAdmission.RecoverAsync(cancellationToken).ConfigureAwait(false);
+            // Corrupt run evidence remains non-executable, but the read-only reconciliation facade must stay available to inspect already-durable cases.
+            if (reconciliationRecovery is not (GovernedLoopEffectReconciliationAdmissionStatus.NotApplicable
+                or GovernedLoopEffectReconciliationAdmissionStatus.Opened
+                or GovernedLoopEffectReconciliationAdmissionStatus.Replayed
+                or GovernedLoopEffectReconciliationAdmissionStatus.Corrupt))
+            {
+                throw new InvalidOperationException($"effect_reconciliation_recovery_failed: durable ambiguity admission returned {reconciliationRecovery}.");
+            }
+            var reconciliationService = new EmbodySense.Core.Application.Loops.Execution.Reconciliation.GovernedLoopEffectReconciliationService(
+                governedEffectAttemptComposition.ReconciliationCases,
+                new AgentRuntimeGovernedLoopEffectReconciliationAuthorizationAdapter(
+                    workspaceId,
+                    runtimeSurface.Id,
+                    _governedLoopEffectReconciliationAuthorizationProvider),
+                reconciliationInputSource,
+                reconciliationProbeRegistry,
+                governedEffectAttemptComposition.ReconciliationProbeReservations,
+                operationalClock);
+            var reconciliationFacade = new GovernedLoopEffectReconciliationFacade(
+                governedEffectAttemptComposition.ReconciliationCases,
+                reconciliationService,
+                reconciliationProbeRegistry,
+                governedEffectAttemptComposition.ReconciliationResolutions);
             var governedModelUsageLedger = new EmbodySense.Core.Persistence.Inference.Profiles.GovernedModelUsageLedgerStore(
                 paths,
                 _capabilityTrustProvider,
@@ -884,7 +976,8 @@ public sealed class AgentRuntimeFactory
                 humanInputBindingSource: humanInputBindingSource,
                 humanInputRequestPublicationService: humanInputPublication,
                 humanInputCancellationConvergence: humanInputCancellationConvergence,
-                humanReviewAdmissionService: humanReviewAdmission);
+                humanReviewAdmissionService: humanReviewAdmission,
+                effectReconciliationAdmissionService: reconciliationAdmission);
             var governedAdmissionStore = new GovernedLoopAdmissionStore(paths, _capabilityTrustProvider, authorityTransaction: capabilityAuthority);
             var governedAdmission = new GovernedLoopAdmissionService(
                 workspaceId,
@@ -1280,6 +1373,7 @@ public sealed class AgentRuntimeFactory
                 modelProfileCatalogFacade,
                 humanInputFacade,
                 humanReviewFacade,
+                reconciliationFacade,
                 defaultConversationReviews,
                 codexRuntimeStatus,
                 triggerAuthorizer,

@@ -15,6 +15,8 @@ using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Execution.Models;
 using EmbodySense.Core.Common.Loops.Execution.Retry;
 using EmbodySense.Core.Common.Loops.Execution.Retry.Models;
+using EmbodySense.Core.Common.Loops.Execution.Reconciliation;
+using EmbodySense.Core.Common.Loops.Execution.Reconciliation.Models;
 using EmbodySense.Core.Common.Loops.Execution.Wait;
 using EmbodySense.Core.Common.Loops.Execution.Wait.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
@@ -1476,6 +1478,11 @@ public static class CustomLoopRunValidator
         }
 
         var integrityWarnings = run.Events.Count(item => item is { Kind: CustomLoopRunEventKind.IntegrityWarning });
+        var reconciliationBindings = run.Events.Count(item => item?.EffectReconciliationBinding is not null);
+        if (reconciliationBindings > 1)
+        {
+            Add(errors, "too_many_effect_reconciliation_bindings", "events", "A terminal run can retain at most one exact actuator reconciliation binding.");
+        }
         if (!run.IsTerminal && lifecycleControlEvents > CustomLoopLimits.MaxNonterminalLifecycleControlEventsPerRun)
         {
             Add(errors, "terminal_control_slots_not_reserved", "events", $"A nonterminal run can retain at most {CustomLoopLimits.MaxNonterminalLifecycleControlEventsPerRun} lifecycle/control events so one terminal lifecycle event and one optional post-terminal integrity warning remain possible.");
@@ -1575,6 +1582,7 @@ public static class CustomLoopRunValidator
             ValidateToolEvidence(item.ToolEvidence, $"{field}.toolEvidence", run, errors);
             ValidatePureNodeOutcome(item, field, run, errors);
             ValidateSequentialNodeEvidence(item, index, field, run, sequentialStarts, sequentialTerminals, sequentialReviewBlocks, latestSequentialVisits, errors);
+            ValidateEffectReconciliationBinding(item, field, run, errors);
             ValidateFailureEvidence(item, field, run, errors);
             ValidateRetryState(item, index, field, run, retrySeriesByActivation, latestRetryStateBySeries, errors);
             ValidateWaitContinuationEvent(item, field, run, errors);
@@ -4574,7 +4582,54 @@ public static class CustomLoopRunValidator
             && string.Equals(left.HumanReviewEvidence?.EvidenceHash, right.HumanReviewEvidence?.EvidenceHash, StringComparison.Ordinal)
             && Equals(left.HumanReviewAdmissionBinding, right.HumanReviewAdmissionBinding)
             && Equals(left.HumanReviewDecisionOperation, right.HumanReviewDecisionOperation)
-            && Equals(left.HumanReviewContinuationReservation, right.HumanReviewContinuationReservation);
+            && Equals(left.HumanReviewContinuationReservation, right.HumanReviewContinuationReservation)
+            && Equals(left.EffectReconciliationBinding, right.EffectReconciliationBinding);
+    }
+
+    private static void ValidateEffectReconciliationBinding(
+        CustomLoopRunEvent item,
+        string field,
+        CustomLoopRunRecord run,
+        List<CustomLoopValidationError> errors)
+    {
+        if (item.EffectReconciliationBinding is not { } binding)
+        {
+            return;
+        }
+
+        var evidence = item.SequentialNodeEvidence;
+        var adapter = run.SequentialAdapterBinding;
+        if (!GovernedLoopEffectReconciliationContractValidator.Validate(binding).IsValid)
+        {
+            Add(errors, "invalid_effect_reconciliation_binding", $"{field}.effectReconciliationBinding", "An actuator reconciliation binding must be structurally valid and hash-bound.");
+            return;
+        }
+
+        if (item.Kind != CustomLoopRunEventKind.NodeAttemptFailed
+            || evidence is not
+            {
+                Kind: CustomLoopSequentialNodeEvidenceKind.AmbiguityAttention,
+                Disposition: CustomLoopSequentialNodeDisposition.NeedsReview,
+            }
+            || item.FailureEvidence is not
+            {
+                FailureClass: GovernedLoopFailureClass.AmbiguousExternalOutcome,
+                EffectCertainty: GovernedLoopFailureEffectCertainty.Ambiguous,
+            }
+            || adapter is null
+            || !string.Equals(binding.WorkspaceId, adapter.WorkspaceId, StringComparison.Ordinal)
+            || !Equals(binding.Execution, adapter.ExecutionBinding)
+            || !string.Equals(binding.NodeId, item.StepId, StringComparison.Ordinal)
+            || binding.NodeAttempt != item.Attempt
+            || binding.ActivationOrdinal != evidence.ActivationOrdinal
+            || binding.VisitOrdinal != evidence.VisitOrdinal
+            || !string.Equals(binding.WorkspaceId, evidence.WorkspaceId, StringComparison.Ordinal)
+            || !string.Equals(binding.Execution.RunId, evidence.RunId, StringComparison.Ordinal)
+            || !Equals(binding.Execution.Revision, evidence.Revision)
+            || binding.Execution.ExecutionGeneration != evidence.ExecutionGeneration)
+        {
+            Add(errors, "effect_reconciliation_binding_mismatch", $"{field}.effectReconciliationBinding", "Only an exact ambiguous actuator outcome may retain a reconciliation binding for the same run activation.");
+        }
     }
 
     private static void ValidateModelExecutionEvidence(

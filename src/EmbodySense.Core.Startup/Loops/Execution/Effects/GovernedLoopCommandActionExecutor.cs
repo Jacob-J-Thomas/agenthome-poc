@@ -11,7 +11,9 @@ using EmbodySense.Core.Common.CommandActions;
 using EmbodySense.Core.Common.CommandActions.Models;
 using EmbodySense.Core.Common.Loops.Admission;
 using EmbodySense.Core.Common.Loops.Custom;
+using EmbodySense.Core.Common.Loops.Execution.Effects.Models;
 using EmbodySense.Core.Common.Loops.Execution.Models;
+using EmbodySense.Core.Common.Loops.Execution.Reconciliation;
 using EmbodySense.Core.Common.Loops.Revisions;
 
 namespace EmbodySense.Core.Startup.Loops.Execution.Effects;
@@ -123,7 +125,12 @@ public sealed class GovernedLoopCommandActionExecutor : IGovernedLoopCommandActi
                         GovernedLoopCommandActionExecutionStatus.OperationInProgress,
                         null,
                         "Another executor owns the exact command Action effect attempt."),
-                _ => Review($"The structured command Action requires reconciliation with posture `{result.Status}`."),
+                _ => Review(
+                    $"The structured command Action requires reconciliation with posture `{result.Status}`.",
+                    binding.WorkspaceId,
+                    dispatch.Activation.ActivationOrdinal,
+                    dispatch.Activation.VisitOrdinal,
+                    result.Attempt),
             };
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -225,6 +232,32 @@ public sealed class GovernedLoopCommandActionExecutor : IGovernedLoopCommandActi
 
     private static GovernedLoopCommandActionExecutionResult Review(string detail)
         => new(GovernedLoopCommandActionExecutionStatus.NeedsReview, null, detail);
+
+    private static GovernedLoopCommandActionExecutionResult Review(
+        string detail,
+        string workspaceId,
+        int activationOrdinal,
+        int visitOrdinal,
+        GovernedLoopEffectAttempt? attempt)
+    {
+        if (attempt?.Payload.Phase != GovernedLoopEffectPhase.ReconciliationRequired)
+        {
+            return Review(detail);
+        }
+
+        try
+        {
+            return new GovernedLoopCommandActionExecutionResult(
+                GovernedLoopCommandActionExecutionStatus.NeedsReview,
+                null,
+                detail,
+                ReconciliationBinding: GovernedLoopEffectReconciliationContract.CreateBinding(workspaceId, activationOrdinal, visitOrdinal, attempt));
+        }
+        catch (ArgumentException)
+        {
+            return Review(detail);
+        }
+    }
 
     private sealed record ValidatedCommandAction(
         CommandActionRegistration Registration,

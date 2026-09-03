@@ -22,6 +22,8 @@ using EmbodySense.Core.Application.Loops.EffectAuthorityUsage.Models;
 using EmbodySense.Core.Application.Loops.EffectAuthorityEvidence.Models;
 using EmbodySense.Core.Application.Loops.Execution.Authority;
 using EmbodySense.Core.Application.Loops.Execution.Authority.Models;
+using EmbodySense.Core.Application.Loops.Execution.Reconciliation;
+using EmbodySense.Core.Application.Loops.Execution.Reconciliation.Models;
 using EmbodySense.Core.Application.Loops.Diagnostics;
 using EmbodySense.Core.Application.Loops.Failures;
 using EmbodySense.Core.Application.Loops.Failures.Models;
@@ -45,6 +47,7 @@ using EmbodySense.Core.Common.Loops.Execution.Effects;
 using EmbodySense.Core.Common.Loops.Execution.Effects.Models;
 using EmbodySense.Core.Common.Loops.Execution.Models;
 using EmbodySense.Core.Common.Loops.Execution.Retry.Models;
+using EmbodySense.Core.Common.Loops.Execution.Reconciliation.Models;
 using EmbodySense.Core.Common.Loops.Execution.Wait;
 using EmbodySense.Core.Common.Loops.Execution.Wait.Models;
 using EmbodySense.Core.Common.Loops.Failures;
@@ -128,6 +131,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
     private readonly IGovernedLoopFailureClassifier _failureClassifier;
     private readonly HumanInputPolicyResolutionService? _humanInputPolicyResolutionService;
     private readonly IHumanReviewAdmissionService? _humanReviewAdmissionService;
+    private readonly IGovernedLoopEffectReconciliationAdmissionService? _effectReconciliationAdmissionService;
     private readonly IGovernedLoopSequentialHumanInputBindingSource? _humanInputBindingSource;
     private readonly IHumanInputRequestPublicationService? _humanInputRequestPublicationService;
     private readonly ICustomLoopHumanInputCancellationConvergence? _humanInputCancellationConvergence;
@@ -159,6 +163,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
     /// <param name="humanInputRequestPublicationService">The canonical checkpoint-to-request-ledger publisher. When Human Input policy resolution is configured, a missing publisher prevents checkpoint creation.</param>
     /// <param name="humanInputCancellationConvergence">The canonical request/run convergence guard required before a checkpoint-backed run can terminalize as cancelled.</param>
     /// <param name="humanReviewAdmissionService">The exact atomic request-and-frontier admission boundary required to expose a canonical Human Review request.</param>
+    /// <param name="effectReconciliationAdmissionService">The server-owned case-publication boundary invoked only after a reconciliation-required actuator ambiguity is durably ReviewBlocked.</param>
     public CustomLoopOrderedRunner(
         ICustomLoopRunStore runStore,
         CustomLoopContextResolver contextResolver,
@@ -180,7 +185,8 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         IGovernedLoopSequentialHumanInputBindingSource? humanInputBindingSource = null,
         IHumanInputRequestPublicationService? humanInputRequestPublicationService = null,
         ICustomLoopHumanInputCancellationConvergence? humanInputCancellationConvergence = null,
-        IHumanReviewAdmissionService? humanReviewAdmissionService = null)
+        IHumanReviewAdmissionService? humanReviewAdmissionService = null,
+        IGovernedLoopEffectReconciliationAdmissionService? effectReconciliationAdmissionService = null)
     {
         _runStore = runStore ?? throw new ArgumentNullException(nameof(runStore));
         _contextResolver = contextResolver ?? throw new ArgumentNullException(nameof(contextResolver));
@@ -203,6 +209,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         _humanInputRequestPublicationService = humanInputRequestPublicationService;
         _humanInputCancellationConvergence = humanInputCancellationConvergence;
         _humanReviewAdmissionService = humanReviewAdmissionService;
+        _effectReconciliationAdmissionService = effectReconciliationAdmissionService;
     }
 
     /// <summary>
@@ -2424,6 +2431,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             truncated: conclusiveFailure ? false : null,
             retained: conclusiveFailure,
             published: false);
+        failure = failure with { EffectReconciliationBinding = needsReview ? result.ReconciliationBinding : null };
         failure = ClassifySequentialFailure(
             run,
             failure,
@@ -2501,7 +2509,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         }
 
         var ambiguous = await TerminateAsync(run, actor, CustomLoopRunStatus.NeedsReview, "command_action_reconciliation_required", terminal.Detail);
-        return new RunAdvance(ambiguous.Run, ambiguous);
+        return await AdmitEffectReconciliationAsync(ambiguous, terminal.EffectReconciliationBinding);
     }
 
     private async Task<RunAdvance> DispatchAndAdvanceSequentialWorkspaceActionAsync(
@@ -2730,6 +2738,7 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
             activation.CycleIteration ?? run.Checkpoint.Iteration,
             node.NodeId,
             attempt);
+        failure = failure with { EffectReconciliationBinding = needsReview ? result.ReconciliationBinding : null };
         failure = ClassifySequentialFailure(
             run,
             failure,
@@ -2804,7 +2813,36 @@ public sealed class CustomLoopOrderedRunner : ICustomLoopResumeExecutor, ICustom
         }
 
         var ambiguous = await TerminateAsync(run, actor, CustomLoopRunStatus.NeedsReview, "workspace_action_reconciliation_required", terminal.Detail);
-        return new RunAdvance(ambiguous.Run, ambiguous);
+        return await AdmitEffectReconciliationAsync(ambiguous, terminal.EffectReconciliationBinding);
+    }
+
+    private async Task<RunAdvance> AdmitEffectReconciliationAsync(
+        CustomLoopOrderedRunResult terminal,
+        GovernedLoopEffectReconciliationBinding? binding)
+    {
+        if (binding is null || _effectReconciliationAdmissionService is null || terminal.Run is null)
+        {
+            return new RunAdvance(terminal.Run, terminal);
+        }
+
+        GovernedLoopEffectReconciliationAdmissionResult? admission = null;
+        try
+        {
+            admission = await _effectReconciliationAdmissionService.AdmitAsync(terminal.Run, binding, IntegrityToken()).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is not (OutOfMemoryException or StackOverflowException))
+        {
+        }
+
+        if (admission?.Status is GovernedLoopEffectReconciliationAdmissionStatus.Opened or GovernedLoopEffectReconciliationAdmissionStatus.Replayed)
+        {
+            return new RunAdvance(terminal.Run, terminal);
+        }
+
+        var status = admission?.Status.ToString() ?? "Unavailable";
+        var warning = $"The canonical reconciliation-required effect remains ReviewBlocked, but its non-notifying attention case could not be published ({status}).";
+        var warned = await AppendTerminalIntegrityWarningAsync(terminal.Run, terminal.Status, warning).ConfigureAwait(false);
+        return new RunAdvance(warned.Run, warned);
     }
 
     private async Task<RunAdvance> PersistSequentialRecoverableActionEventAsync(

@@ -30,6 +30,7 @@ using EmbodySense.Core.Startup.Loops.GraphAuthoring;
 using EmbodySense.Core.Startup.Inference.Profiles;
 using EmbodySense.Core.Startup.HumanInput;
 using EmbodySense.Core.Startup.HumanReview;
+using EmbodySense.Core.Startup.Loops.Execution.Reconciliation;
 using EmbodySense.Core.Startup.Loops.InvocationPreparation;
 using EmbodySense.Core.Startup.Loops.InvocationPreparation.Models;
 using EmbodySense.Core.Startup.Loops.Schedules;
@@ -67,6 +68,7 @@ public sealed class AgentRuntime : IAsyncDisposable
     private readonly IModelProfileCatalogFacade _modelProfiles;
     private readonly HumanInputRuntimeFacade _humanInput;
     private readonly HumanReviewRuntimeFacade _humanReview;
+    private readonly GovernedLoopEffectReconciliationFacade _effectReconciliation;
     private readonly HumanInputConversationCommandAdapter? _humanInputConversationCommands;
     private readonly DefaultConversationTurnReviewService _defaultConversationReviews;
     private readonly ITriggerWorkerCurrentEvidenceAuthorizer _triggerWorkerCurrentEvidenceAuthorizer;
@@ -97,6 +99,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         IModelProfileCatalogFacade modelProfiles,
         HumanInputRuntimeFacade humanInput,
         HumanReviewRuntimeFacade humanReview,
+        GovernedLoopEffectReconciliationFacade effectReconciliation,
         DefaultConversationTurnReviewService defaultConversationReviews,
         CodexRuntimeStatus codexRuntimeStatus,
         ITriggerWorkerCurrentEvidenceAuthorizer triggerWorkerCurrentEvidenceAuthorizer,
@@ -122,6 +125,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(modelProfiles);
         ArgumentNullException.ThrowIfNull(humanInput);
         ArgumentNullException.ThrowIfNull(humanReview);
+        ArgumentNullException.ThrowIfNull(effectReconciliation);
         ArgumentNullException.ThrowIfNull(defaultConversationReviews);
         ArgumentNullException.ThrowIfNull(triggerWorkerCurrentEvidenceAuthorizer);
         ArgumentNullException.ThrowIfNull(governedBackgroundRuntimeHost);
@@ -148,6 +152,7 @@ public sealed class AgentRuntime : IAsyncDisposable
         _modelProfiles = modelProfiles;
         _humanInput = humanInput;
         _humanReview = humanReview;
+        _effectReconciliation = effectReconciliation;
         _humanInputConversationCommands = surface == AgentRuntimeSurface.Cli
             ? new HumanInputConversationCommandAdapter(humanInput)
             : null;
@@ -208,6 +213,13 @@ public sealed class AgentRuntime : IAsyncDisposable
     /// store or background worker and remains valid only while this runtime is retained.
     /// </remarks>
     public HumanReviewRuntimeFacade HumanReview => _humanReview;
+
+    /// <summary>Gets the bounded, surface-neutral reconciliation facade over this runtime's canonical effect and case stores.</summary>
+    /// <remarks>
+    /// The facade exposes detached value-free evidence and exact immutable operations. It does not own a worker, recovery
+    /// path, actuator dispatch capability, or separate store, and remains valid only while this runtime is retained.
+    /// </remarks>
+    public GovernedLoopEffectReconciliationFacade EffectReconciliation => _effectReconciliation;
 
     /// <summary>Gets the surface-neutral preview and submit facade for governed recovery of a durably failed local coordinator.</summary>
     public GovernedLoopCoordinatorRepairFacade GovernedLoopCoordinatorRepair => _governedLoopCoordinatorRepair;

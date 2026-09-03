@@ -55,6 +55,16 @@ internal static class WorkspaceToolAuthorityTestFixture
         string ActionInputJson) CreateAction()
         => CreateDetailed(actionNode: true);
 
+    internal static (
+        GovernedLoopAdmissionReceipt Receipt,
+        GovernedLoopExecutionBinding Binding,
+        GovernedLoopGraphRevisionArtifact Artifact,
+        ToolRequest ToolRequest,
+        GovernedLoopSequentialRunAnchor Anchor,
+        GovernedLoopSequentialPlan Plan,
+        string ActionInputJson) CreateReconciliationAction(string workspaceId)
+        => CreateDetailed(actionNode: true, workspaceId, actionOnly: true);
+
     private static (
         GovernedLoopAdmissionReceipt Receipt,
         GovernedLoopExecutionBinding Binding,
@@ -62,9 +72,10 @@ internal static class WorkspaceToolAuthorityTestFixture
         ToolRequest ToolRequest,
         GovernedLoopSequentialRunAnchor Anchor,
         GovernedLoopSequentialPlan Plan,
-        string ActionInputJson) CreateDetailed(bool actionNode)
+        string ActionInputJson) CreateDetailed(bool actionNode, string? workspaceId = null, bool actionOnly = false)
     {
-        var artifact = CreateArtifact(actionNode);
+        var exactWorkspaceId = workspaceId ?? WorkspaceId;
+        var artifact = CreateArtifact(actionNode, actionOnly);
         var binding = GovernedLoopExecutionBinding.Create(1, "run-workspace-tool-1", artifact.RevisionArtifact.Revision, 1);
         var publication = GovernedLoopRevisionPublicationPinFactory.Create(1, binding.Revision, "publish-workspace-tool", Hash('7'));
         Assert.True(AuthorityGrantId.TryParse("grant-workspace-tool", out var grantId, out _));
@@ -93,7 +104,7 @@ internal static class WorkspaceToolAuthorityTestFixture
             "web"));
         var intent = new GovernedLoopAdmissionIntent(
             GovernedLoopAdmissionIntent.CurrentSchemaVersion,
-            WorkspaceId,
+            exactWorkspaceId,
             admissionRequest.OperationId,
             admissionRequest.RequestHash,
             publication,
@@ -103,7 +114,7 @@ internal static class WorkspaceToolAuthorityTestFixture
             admissionRequest.Surface,
             artifact.ArtifactHash,
             artifact.LayoutHash);
-        var capabilityAdmission = TestCapabilityAdmissionFactory.Create(CreateManifest(), Now) with { WorkspaceScopeId = WorkspaceId };
+        var capabilityAdmission = TestCapabilityAdmissionFactory.Create(CreateManifest(actionOnly ? artifact.ArtifactHash : null, actionOnly), Now) with { WorkspaceScopeId = exactWorkspaceId };
         if (actionNode)
         {
             capabilityAdmission = WithExactBuiltInWorkspacePin(capabilityAdmission);
@@ -118,7 +129,7 @@ internal static class WorkspaceToolAuthorityTestFixture
             true);
         var grantProfile = new AuthorityGrantProfilePin(new AuthorityProfileReference(profileId!, profileRevision!), profileHash!);
         var grantBoundary = new AuthorityGrantBoundary(Now.AddHours(-1), Now.AddHours(1), AuthorityGrantCompletionConstraintKind.None);
-        var evidence = actionNode
+        var evidence = actionNode && !actionOnly
             ? EmbodySense.Core.Application.Tests.GovernedModelProfileApplicationTestFixture.RoutingEvidenceForInference(
                 intent,
                 binding,
@@ -147,7 +158,7 @@ internal static class WorkspaceToolAuthorityTestFixture
         Assert.True(GovernedLoopAdmissionValidator.Validate(receipt).IsValid);
         var adapterBinding = GovernedLoopSequentialContractHash.Apply(new GovernedLoopSequentialAdapterBinding(
             GovernedLoopSequentialAdapterBinding.CurrentSchemaVersion,
-            WorkspaceId,
+            exactWorkspaceId,
             binding,
             admissionRequest.OperationId,
             receipt,
@@ -158,11 +169,12 @@ internal static class WorkspaceToolAuthorityTestFixture
             artifact.LayoutHash,
             [],
             string.Empty));
+        var planResult = GovernedLoopSequentialPlanBuilder.Build(artifact);
+        Assert.True(planResult.Plan is not null, planResult.Status.ToString());
+        var plan = Assert.IsType<GovernedLoopSequentialPlan>(planResult.Plan);
         var anchorResult = GovernedLoopSequentialRunAnchorGuard.Create(adapterBinding, admissionRequest, receipt, invocation, artifact);
         Assert.True(anchorResult.Anchor is not null, anchorResult.Status.ToString());
         var anchor = Assert.IsType<GovernedLoopSequentialRunAnchor>(anchorResult.Anchor);
-        var planResult = GovernedLoopSequentialPlanBuilder.Build(artifact);
-        var plan = Assert.IsType<GovernedLoopSequentialPlan>(planResult.Plan);
         var request = new ToolRequest(
             ToolCommand.Read,
             "shared/note.txt",
@@ -185,7 +197,7 @@ internal static class WorkspaceToolAuthorityTestFixture
         return (receipt, binding, artifact, request, anchor, plan, ActionInputJson);
     }
 
-    private static GovernedLoopGraphRevisionArtifact CreateArtifact(bool actionNode)
+    private static GovernedLoopGraphRevisionArtifact CreateArtifact(bool actionNode, bool actionOnly)
     {
         var owningRole = new ContextualRoleRevisionPin(new ContextualRoleRevisionIdentity("workspace-helper", 1), Hash('b'));
         var operationNode = actionNode
@@ -219,7 +231,7 @@ internal static class WorkspaceToolAuthorityTestFixture
             [Port("result", GovernedLoopPortDirection.Input, GovernedLoopBindingKind.Data), Port("published-result", GovernedLoopPortDirection.Output, GovernedLoopBindingKind.Data)],
             GovernedLoopAuthorityCeiling.Create(["org.embodysense/conversation-turn"]),
             new Dictionary<string, string>());
-        GovernedLoopNodeDefinition[] nodes = actionNode ? [trigger, inference, operationNode, exit] : [trigger, operationNode, exit];
+        GovernedLoopNodeDefinition[] nodes = actionNode && !actionOnly ? [trigger, inference, operationNode, exit] : [trigger, operationNode, exit];
         var graph = GovernedLoopGraphDefinition.Create(
             1,
             "workspace-tool-loop",
@@ -228,10 +240,12 @@ internal static class WorkspaceToolAuthorityTestFixture
             owningRole,
             "trigger",
             ["exit"],
-            GovernedLoopAuthorityCeiling.Create(["org.embodysense/conversation-turn", "org.embodysense/model-inference", "org.embodysense/model-profile/codex", WorkspaceCommandCapabilityId]),
+            GovernedLoopAuthorityCeiling.Create(actionNode && actionOnly
+                ? ["org.embodysense/conversation-turn", WorkspaceCommandCapabilityId]
+                : ["org.embodysense/conversation-turn", "org.embodysense/model-inference", "org.embodysense/model-profile/codex", WorkspaceCommandCapabilityId]),
             [new GovernedLoopValueSchemaDefinition("text", GovernedLoopValueKind.Text, false)],
             nodes,
-            actionNode
+            actionNode && !actionOnly
                 ? [
                     new GovernedLoopControlEdgeDefinition("trigger-to-infer", "trigger", "infer-00", GovernedLoopControlCondition.Always),
                     new GovernedLoopControlEdgeDefinition("infer-to-action", "infer-00", NodeId, GovernedLoopControlCondition.Success),
@@ -242,11 +256,15 @@ internal static class WorkspaceToolAuthorityTestFixture
                     new GovernedLoopControlEdgeDefinition("infer-to-exit", NodeId, "exit", GovernedLoopControlCondition.Success),
                 ],
             actionNode
-                ? [
-                    new GovernedLoopBindingDefinition("request-to-infer", GovernedLoopBindingKind.Data, "trigger", "request", "infer-00", "request"),
-                    new GovernedLoopBindingDefinition("context-to-infer", GovernedLoopBindingKind.Context, "trigger", "invocation-context", "infer-00", "invocation-context"),
-                    new GovernedLoopBindingDefinition("result-to-exit", GovernedLoopBindingKind.Data, NodeId, "result", "exit", "result"),
-                ]
+                ? actionOnly
+                    ? [
+                        new GovernedLoopBindingDefinition("result-to-exit", GovernedLoopBindingKind.Data, NodeId, "result", "exit", "result"),
+                    ]
+                    : [
+                        new GovernedLoopBindingDefinition("request-to-infer", GovernedLoopBindingKind.Data, "trigger", "request", "infer-00", "request"),
+                        new GovernedLoopBindingDefinition("context-to-infer", GovernedLoopBindingKind.Context, "trigger", "invocation-context", "infer-00", "invocation-context"),
+                        new GovernedLoopBindingDefinition("result-to-exit", GovernedLoopBindingKind.Data, NodeId, "result", "exit", "result"),
+                    ]
                 : [
                     new GovernedLoopBindingDefinition("request-to-infer", GovernedLoopBindingKind.Data, "trigger", "request", NodeId, "request"),
                     new GovernedLoopBindingDefinition("context-to-infer", GovernedLoopBindingKind.Context, "trigger", "invocation-context", NodeId, "invocation-context"),
@@ -262,22 +280,32 @@ internal static class WorkspaceToolAuthorityTestFixture
         return GovernedLoopGraphRevisionArtifactFactory.Create(1, revision, graph);
     }
 
-    private static CapabilityDependencyManifest CreateManifest()
+    private static CapabilityDependencyManifest CreateManifest(string? artifactChecksum = null, bool actionOnly = false)
     {
         Assert.True(CapabilityId.TryParse("org.embodysense/effect-tool-test", out var subject, out _));
         Assert.True(CapabilityVersionRange.TryParse("[1.0.0,2.0.0)", out var range, out _));
+        CapabilityIntegrityDigest? checksum = null;
+        if (artifactChecksum is not null)
+        {
+            Assert.True(CapabilityIntegrityDigest.TryParse("sha256:" + artifactChecksum, out checksum, out _));
+        }
         return new CapabilityDependencyManifest(
             CapabilityDependencyManifest.CurrentSchemaVersion,
             CapabilityDependencyManifestKind.LoopPackage,
             subject!,
-            [
-                new CapabilityDependency(Capability("org.embodysense/conversation-turn"), range!),
-                new CapabilityDependency(Capability("org.embodysense/model-inference"), range!),
-                new CapabilityDependency(Capability("org.embodysense/model-profile/codex"), range!),
-                new CapabilityDependency(Capability(WorkspaceCommandCapabilityId), range!),
-            ],
+            actionOnly
+                ? [
+                    new CapabilityDependency(Capability("org.embodysense/conversation-turn"), range!),
+                    new CapabilityDependency(Capability(WorkspaceCommandCapabilityId), range!),
+                ]
+                : [
+                    new CapabilityDependency(Capability("org.embodysense/conversation-turn"), range!),
+                    new CapabilityDependency(Capability("org.embodysense/model-inference"), range!),
+                    new CapabilityDependency(Capability("org.embodysense/model-profile/codex"), range!),
+                    new CapabilityDependency(Capability(WorkspaceCommandCapabilityId), range!),
+                ],
             [],
-            new CapabilityDependencyArtifactMetadata(null, null));
+            new CapabilityDependencyArtifactMetadata(checksum, null));
     }
 
     private static CapabilityAdmissionSnapshot WithExactBuiltInWorkspacePin(CapabilityAdmissionSnapshot snapshot)

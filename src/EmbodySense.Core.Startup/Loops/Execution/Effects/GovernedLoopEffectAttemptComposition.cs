@@ -5,41 +5,45 @@ using EmbodySense.Core.Application.Loops.EffectAttempts;
 using EmbodySense.Core.Application.Loops.EffectAttempts.Models;
 using EmbodySense.Core.Application.Loops.Execution.Authority;
 using EmbodySense.Core.Application.Loops.Execution.Effects;
+using EmbodySense.Core.Application.Loops.Execution.Reconciliation;
 using EmbodySense.Core.Common.Capabilities;
 using EmbodySense.Core.Common.Capabilities.Models;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Loops.EffectAttempts;
 using EmbodySense.Core.Persistence.Loops.EffectAttempts.Models;
+using EmbodySense.Core.Persistence.Loops.Execution.Reconciliation;
 
 namespace EmbodySense.Core.Startup.Loops.Execution.Effects;
 
-/// <summary>Owns one workspace-scoped effect-attempt store and its canonical Human Review evidence projection.</summary>
+/// <summary>Owns one workspace-scoped effect-attempt store plus its Human Review and Effect Reconciliation projections.</summary>
 /// <remarks>
-/// A runtime creates this composition once and asks it for one facade per registered operation registry. The facades
-/// have independent catalog and authority resolvers, but all effect execution and Human Review evidence reads use the
-/// same durable attempt store and the same read-only evidence source. This prevents a release decision from being
-/// evaluated against a second attempt ledger.
+/// A runtime creates this composition once and asks it for facades over registered operation registries. Effect
+/// execution, Human Review evidence, and reconciliation cases share the same durable attempt store and mutation lease.
+/// This prevents a release or reconciliation decision from being evaluated against a second attempt ledger.
 /// </remarks>
 internal sealed class GovernedLoopEffectAttemptComposition
 {
     private readonly GovernedLoopEffectAttemptStore _attemptStorage;
     private readonly CanonicalHumanReviewEffectEvidenceSource _humanReviewEvidence;
+    private readonly GovernedLoopEffectReconciliationCaseStore _reconciliationCases;
 
     private GovernedLoopEffectAttemptComposition(
         GovernedLoopEffectAttemptStore attemptStore,
-        CanonicalHumanReviewEffectEvidenceSource humanReviewEvidence)
+        CanonicalHumanReviewEffectEvidenceSource humanReviewEvidence,
+        GovernedLoopEffectReconciliationCaseStore reconciliationCases)
     {
         _attemptStorage = attemptStore;
         AttemptStore = attemptStore;
         AttemptReadStore = attemptStore;
         _humanReviewEvidence = humanReviewEvidence;
+        _reconciliationCases = reconciliationCases;
     }
 
     /// <summary>Gets the single mutable effect-attempt port shared by all facades from this composition.</summary>
     /// <remarks>The port is server-owned and must not be replaced by a surface-specific or request-scoped store.</remarks>
     internal IGovernedLoopEffectAttemptStore AttemptStore { get; }
 
-    /// <summary>Gets the read-only current-attempt port used by the canonical Human Review evidence projection.</summary>
+    /// <summary>Gets the read-only current-attempt port shared by Human Review and reconciliation input reconstruction.</summary>
     internal IGovernedLoopEffectAttemptReadStore AttemptReadStore { get; }
 
     /// <summary>Gets the canonical Human Review current-attempt evidence projection.</summary>
@@ -51,11 +55,20 @@ internal sealed class GovernedLoopEffectAttemptComposition
     /// <summary>Gets the canonical effect certainty projection used to distinguish safe and ambiguous release.</summary>
     internal IGovernedLoopEffectCertaintySnapshotSource HumanReviewEffectCertainty => _humanReviewEvidence;
 
+    /// <summary>Gets the canonical reconciliation case store sharing this composition's effect root and mutation lease.</summary>
+    internal IGovernedLoopEffectReconciliationCaseStore ReconciliationCases => _reconciliationCases;
+
+    /// <summary>Gets the immutable reconciliation resolution reader over the shared case and effect root.</summary>
+    internal IGovernedLoopEffectReconciliationResolutionReader ReconciliationResolutions => _reconciliationCases;
+
+    /// <summary>Gets the durable read-only probe reservation boundary over the shared case and effect root.</summary>
+    internal IGovernedLoopEffectReconciliationProbeReservationStore ReconciliationProbeReservations => _reconciliationCases;
+
     /// <summary>Creates one shared-store composition for a canonical workspace and run store.</summary>
     /// <param name="paths">The server-owned workspace paths used by the durable attempt store.</param>
     /// <param name="runStore">The canonical custom-loop run store that retains reviewed effect bindings.</param>
     /// <param name="options">Optional bounded attempt-store limits.</param>
-    /// <returns>A composition whose facades share one effect ledger and evidence source.</returns>
+    /// <returns>A composition whose effect, Human Review, and reconciliation facades share one effect ledger.</returns>
     /// <exception cref="ArgumentNullException">Thrown when a required dependency is missing.</exception>
     internal static GovernedLoopEffectAttemptComposition Create(
         WorkspacePaths paths,
@@ -68,7 +81,8 @@ internal sealed class GovernedLoopEffectAttemptComposition
         var attempts = new GovernedLoopEffectAttemptStore(paths, options);
         return new GovernedLoopEffectAttemptComposition(
             attempts,
-            new CanonicalHumanReviewEffectEvidenceSource(runStore, attempts));
+            new CanonicalHumanReviewEffectEvidenceSource(runStore, attempts),
+            new GovernedLoopEffectReconciliationCaseStore(attempts));
     }
 
     /// <summary>Creates a surface-neutral effect facade over this composition's shared attempt and evidence ports.</summary>
@@ -109,7 +123,16 @@ internal sealed class GovernedLoopEffectAttemptComposition
     /// Missing evidence is healthy for an empty workspace. Any other closed result is treated as unavailable or corrupt so
     /// Human Review cannot advertise executability before its canonical evidence source is readable.
     /// </remarks>
-    internal async Task<bool> IsHumanReviewEvidenceStorageHealthyAsync(CancellationToken cancellationToken = default)
+    internal Task<bool> IsHumanReviewEvidenceStorageHealthyAsync(CancellationToken cancellationToken = default)
+        => IsStorageHealthyAsync(cancellationToken);
+
+    /// <summary>Initializes and validates the shared effect-attempt and reconciliation storage envelope without mutating evidence.</summary>
+    /// <remarks>
+    /// A fresh workspace may require creation of the zero-byte coordination lock before reconciliation readers can
+    /// distinguish an empty ledger from an incomplete envelope. A false result leaves the retained runtime available so
+    /// each facade can project its own closed corrupt or unavailable posture.
+    /// </remarks>
+    internal async Task<bool> IsStorageHealthyAsync(CancellationToken cancellationToken = default)
     {
         try
         {
