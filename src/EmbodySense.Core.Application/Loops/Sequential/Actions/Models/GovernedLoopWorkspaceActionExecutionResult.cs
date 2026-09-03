@@ -1,4 +1,5 @@
 using EmbodySense.Core.Common.Loops.Execution.Effects.Models;
+using EmbodySense.Core.Common.Loops.Execution.Reconciliation.Models;
 
 namespace EmbodySense.Core.Application.Loops.Sequential.Actions.Models;
 
@@ -7,8 +8,10 @@ namespace EmbodySense.Core.Application.Loops.Sequential.Actions.Models;
 /// <param name="CanonicalOutput">The exact value-free canonical result JSON for a completed outcome.</param>
 /// <param name="Detail">The bounded non-sensitive explanation.</param>
 /// <param name="PreparedEffectAttempt">The exact pre-dispatch retained effect when the executor requires governed Human Review.</param>
+/// <param name="ReconciliationBinding">The exact value-free current binding when a durable reconciliation-required attempt exists.</param>
 public sealed record GovernedLoopWorkspaceActionExecutionResult(
     GovernedLoopWorkspaceActionExecutionStatus Status,
     string? CanonicalOutput,
     string Detail,
-    GovernedLoopEffectAttempt? PreparedEffectAttempt = null);
+    GovernedLoopEffectAttempt? PreparedEffectAttempt = null,
+    GovernedLoopEffectReconciliationBinding? ReconciliationBinding = null);

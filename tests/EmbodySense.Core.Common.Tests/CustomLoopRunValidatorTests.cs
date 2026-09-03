@@ -10,7 +10,11 @@ using EmbodySense.Core.Common.Inference.Models;
 using EmbodySense.Core.Common.Loops.Models.Custom;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Execution;
+using EmbodySense.Core.Common.Loops.Execution.Effects;
+using EmbodySense.Core.Common.Loops.Execution.Effects.Models;
 using EmbodySense.Core.Common.Loops.Execution.Models;
+using EmbodySense.Core.Common.Loops.Execution.Reconciliation;
+using EmbodySense.Core.Common.Loops.Execution.Reconciliation.Models;
 using EmbodySense.Core.Common.Loops.Execution.Sleep;
 using EmbodySense.Core.Common.Loops.Execution.Sleep.Models;
 using EmbodySense.Core.Common.Loops.Execution.Wait;
@@ -738,6 +742,41 @@ public sealed class CustomLoopRunValidatorTests
 
             Assert.True(CustomLoopRunValidator.ValidateUpdate(running, review).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.ValidateUpdate(running, review).Errors));
         }
+    }
+
+    [Fact]
+    public void Needs_review_frontier_retains_only_one_exact_hash_bound_effect_reconciliation_binding()
+    {
+        var valid = CreateEffectReconciliationRun('1', activationOrdinal: 1);
+        var exactCopy = valid with { Events = valid.Events.Select(item => item with { ContextBlocks = [.. item.ContextBlocks] }).ToArray() };
+        var distinct = CreateEffectReconciliationRun('2', activationOrdinal: 1);
+        var ambiguityIndex = Array.FindIndex(valid.Events, item => item.EffectReconciliationBinding is not null);
+        var ambiguity = valid.Events[ambiguityIndex];
+        var malformedBinding = ambiguity.EffectReconciliationBinding! with { ContentHash = new string('0', 64) };
+        var malformedEvent = WithSequentialEvidence(
+            ambiguity with { EffectReconciliationBinding = malformedBinding, SequentialNodeEvidence = null },
+            valid.SequentialAdapterBinding!,
+            "step-1",
+            1,
+            CustomLoopSequentialNodeEvidenceKind.AmbiguityAttention,
+            CustomLoopSequentialNodeDisposition.NeedsReview);
+        var wrongCoordinates = CreateEffectReconciliationRun('3', activationOrdinal: 2);
+        var misplacedEvent = WithSequentialEvidence(
+            ambiguity with { Kind = CustomLoopRunEventKind.NodeAttemptCompleted, SequentialNodeEvidence = null },
+            valid.SequentialAdapterBinding!,
+            "step-1",
+            1,
+            CustomLoopSequentialNodeEvidenceKind.CompletedOutcome,
+            CustomLoopSequentialNodeDisposition.Completed);
+
+        Assert.True(CustomLoopRunValidator.Validate(valid).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(valid).Errors));
+        Assert.True(CustomLoopRunValidator.HasSameDurableVersion(valid, exactCopy));
+        Assert.True(CustomLoopRunValidator.Validate(distinct).IsValid, string.Join(Environment.NewLine, CustomLoopRunValidator.Validate(distinct).Errors));
+        Assert.False(CustomLoopRunValidator.HasSameDurableVersion(valid, distinct));
+        AssertCodes(CustomLoopRunValidator.Validate(valid with { Events = ReplaceEvent(valid.Events, ambiguityIndex, malformedEvent) }), "invalid_effect_reconciliation_binding");
+        AssertCodes(CustomLoopRunValidator.Validate(wrongCoordinates), "effect_reconciliation_binding_mismatch");
+        AssertCodes(CustomLoopRunValidator.Validate(valid with { Events = ReplaceEvent(valid.Events, ambiguityIndex, misplacedEvent) }), "effect_reconciliation_binding_mismatch");
+        AssertCodes(CustomLoopRunValidator.Validate(valid with { Events = [.. valid.Events, ambiguity with { Sequence = valid.Events.Length + 1L, EventId = "duplicate-reconciliation-binding" }] }), "too_many_effect_reconciliation_bindings");
     }
 
     [Fact]
@@ -2198,6 +2237,66 @@ public sealed class CustomLoopRunValidatorTests
                 : null,
         };
         return WithSequentialEvidence(runEvent, binding, nodeId, 1, evidenceKind, disposition);
+    }
+
+    private static CustomLoopRunRecord CreateEffectReconciliationRun(char identity, int activationOrdinal)
+    {
+        var admitted = WithSequentialToolAssignments(
+            CreateSequentialRun(),
+            [CustomLoopToolAssignment.List, CustomLoopToolAssignment.Read, CustomLoopToolAssignment.Search],
+            [ConversationTurnCapabilityId, ModelInferenceCapabilityId, WorkspaceCommandCapabilityId]);
+        var running = CreateRunningSequentialRun(admitted);
+        var reviewBaseSeed = Advance(running, CustomLoopRunStatus.NeedsReview);
+        var adapter = running.SequentialAdapterBinding!;
+        var pin = adapter.AdmissionReceipt.Evidence.CapabilityAdmission.Pins.Single(candidate => candidate.DescriptorIdentity.Id.Value == WorkspaceCommandCapabilityId);
+        var prepared = GovernedLoopEffectAttemptContract.Prepare(
+            adapter.ExecutionBinding,
+            "step-1",
+            1,
+            pin.DescriptorIdentity,
+            pin.Implementation,
+            "workspace/write",
+            new string('4', 64),
+            $"effect-reconciliation-{identity}",
+            $"operation-reconciliation-{identity}",
+            1,
+            new string('5', 64),
+            new string('6', 64),
+            new string('7', 64),
+            adapter.AdmissionReceiptHash,
+            "before-reconciliation",
+            reviewBaseSeed.UpdatedAtUtc.AddMinutes(-3));
+        var authorized = GovernedLoopEffectAttemptContract.AttachDispatchAuthority(prepared, new string('8', 64), reviewBaseSeed.UpdatedAtUtc.AddMinutes(-2));
+        var crossed = GovernedLoopEffectAttemptContract.Advance(authorized, GovernedLoopEffectPhase.DispatchBoundaryReached, GovernedLoopEffectOutcome.OutcomeUnknown, GovernedLoopEffectEvidenceStatus.Pending, null, null, reviewBaseSeed.UpdatedAtUtc.AddMinutes(-1));
+        var attempt = GovernedLoopEffectAttemptContract.Advance(crossed, GovernedLoopEffectPhase.ReconciliationRequired, GovernedLoopEffectOutcome.OutcomeUnknown, GovernedLoopEffectEvidenceStatus.Incomplete, null, null, reviewBaseSeed.UpdatedAtUtc);
+        var reconciliationBinding = GovernedLoopEffectReconciliationContract.CreateBinding(adapter.WorkspaceId, activationOrdinal, 1, attempt);
+        var ambiguityBase = SequentialEvent(
+            running.Events.Length + 1L,
+            $"review-reconciliation-{identity}",
+            CustomLoopRunEventKind.NodeAttemptFailed,
+            adapter,
+            "step-1",
+            "step-1",
+            CustomLoopSequentialNodeEvidenceKind.AmbiguityAttention,
+            CustomLoopSequentialNodeDisposition.NeedsReview,
+            reviewBaseSeed.UpdatedAtUtc);
+        var ambiguity = WithSequentialEvidence(
+            ambiguityBase with { EffectReconciliationBinding = reconciliationBinding, SequentialNodeEvidence = null },
+            adapter,
+            "step-1",
+            1,
+            CustomLoopSequentialNodeEvidenceKind.AmbiguityAttention,
+            CustomLoopSequentialNodeDisposition.NeedsReview);
+        var lifecycle = reviewBaseSeed.Events[^1] with
+        {
+            Sequence = ambiguity.Sequence + 1,
+            EventId = $"event-review-reconciliation-{identity}",
+        };
+        var reviewBase = reviewBaseSeed with { Events = [.. running.Events, ambiguity, lifecycle] };
+        return reviewBase with
+        {
+            Frontier = TransitionInferenceFrontier(running.Frontier!, GovernedLoopFrontierStatus.ReviewBlocked, GovernedLoopNodeExecutionStatus.ReviewBlocked, reviewBase.UpdatedAtUtc, ambiguity),
+        };
     }
 
     private static CustomLoopRunEvent PureSequentialEvent(

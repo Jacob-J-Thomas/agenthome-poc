@@ -1,7 +1,17 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using EmbodySense.Core.Application.Capabilities;
+using EmbodySense.Core.Application.Loops.EffectAttempts.Models;
+using EmbodySense.Core.Application.Loops.TraceRetention;
+using EmbodySense.Core.Application.Loops.TraceRetention.Models;
 using EmbodySense.Core.Clients.Capabilities;
+using EmbodySense.Core.Common.Loops.Custom;
+using EmbodySense.Core.Common.Loops.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Execution.Models;
+using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
 using EmbodySense.Core.Common.Workspace;
+using EmbodySense.Core.Persistence.Loops;
+using EmbodySense.Core.Persistence.Loops.EffectAttempts;
 using EmbodySense.Core.Startup.Loops.Execution.Effects;
 using EmbodySense.Core.Startup.Loops.Execution.Reconciliation;
 using EmbodySense.Core.Startup.Loops.Execution.Reconciliation.Models;
@@ -30,7 +40,7 @@ public sealed partial class AgentRuntimeFactoryTests
         Assert.Empty(page.Items);
         Assert.Null(page.NextCursor);
         Assert.Equal(GovernedLoopEffectReconciliationProbeCatalogStatus.Ready, catalog.Status);
-        Assert.Empty(catalog.Contracts);
+        Assert.Equal(3, catalog.Contracts.Count);
         Assert.Equal(GovernedLoopEffectReconciliationPageStatus.Invalid, (await runtime.EffectReconciliation.ListAsync(new GovernedLoopEffectReconciliationPageRequest(1, "foreign-cursor"))).Status);
         Assert.Equal(GovernedLoopEffectReconciliationReadStatus.NotFound, (await runtime.EffectReconciliation.ReadAsync(missing)).Status);
         Assert.Equal(GovernedLoopEffectReconciliationResolutionReadStatus.NotFound, (await runtime.EffectReconciliation.ReadResolutionAsync(missing)).Status);
@@ -327,17 +337,20 @@ public sealed partial class AgentRuntimeFactoryTests
 
         var catalog = await runtime.EffectReconciliation.ListProbeContractsAsync();
         var invalid = await runtime.EffectReconciliation.ListProbeContractsAsync(new GovernedLoopEffectReconciliationPageRequest(1, "foreign-cursor"));
-        var outOfRange = await runtime.EffectReconciliation.ListProbeContractsAsync(new GovernedLoopEffectReconciliationPageRequest(1, "reconciliation-probe-cursor-v1-2"));
+        var outOfRange = await runtime.EffectReconciliation.ListProbeContractsAsync(new GovernedLoopEffectReconciliationPageRequest(1, "reconciliation-probe-cursor-v1-5"));
         var nonCanonical = await runtime.EffectReconciliation.ListProbeContractsAsync(new GovernedLoopEffectReconciliationPageRequest(1, "reconciliation-probe-cursor-v1-01"));
 
         Assert.Equal(GovernedLoopEffectReconciliationProbeCatalogStatus.Ready, catalog.Status);
-        var contract = Assert.Single(catalog.Contracts);
-        Assert.StartsWith("command-reconciliation-", contract.ContractId, StringComparison.Ordinal);
-        Assert.StartsWith("command-outcome-probe-", contract.ProbeContractId, StringComparison.Ordinal);
-        Assert.Equal(1, contract.ContractVersion);
-        Assert.Equal(1, contract.ProbeContractVersion);
-        Assert.Equal(64, contract.ContractHash.Length);
-        Assert.Equal(64, contract.ProbeContractHash.Length);
+        Assert.Equal(4, catalog.Contracts.Count);
+        Assert.All(catalog.Contracts, contract =>
+        {
+            Assert.StartsWith("actuator-reconciliation-", contract.ContractId, StringComparison.Ordinal);
+            Assert.StartsWith("actuator-outcome-probe-", contract.ProbeContractId, StringComparison.Ordinal);
+            Assert.Equal(1, contract.ContractVersion);
+            Assert.Equal(1, contract.ProbeContractVersion);
+            Assert.Equal(64, contract.ContractHash.Length);
+            Assert.Equal(64, contract.ProbeContractHash.Length);
+        });
         Assert.Equal(GovernedLoopEffectReconciliationProbeCatalogStatus.Invalid, invalid.Status);
         Assert.Empty(invalid.Contracts);
         Assert.Null(invalid.NextCursor);
@@ -449,6 +462,60 @@ public sealed partial class AgentRuntimeFactoryTests
         Assert.DoesNotContain(seeded.Attempt.Payload.OperationId, json, StringComparison.Ordinal);
         Assert.DoesNotContain(seeded.Attempt.ActuatorOperationId, json, StringComparison.Ordinal);
         Assert.DoesNotContain(seeded.Attempt.InputFingerprint, json, StringComparison.Ordinal);
+        Assert.DoesNotContain("WorkspaceId", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("ProbeTarget", json, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Effect_reconciliation_facade_invokes_one_registered_read_only_workspace_probe_and_replays_exactly()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var seeded = await GovernedLoopEffectReconciliationCommandStartupTestFixture.SeedWorkspaceAsync(workspace);
+        var provider = new RecordingGovernedLoopEffectReconciliationAuthorizationProvider();
+        GovernedLoopEffectReconciliationCaseDetail detail;
+        GovernedLoopEffectReconciliationOperationResult applied;
+        await using (var runtime = await CreateEffectReconciliationRuntimeAsync(workspace, provider))
+        {
+            var attention = await runtime.EffectReconciliation.ListAsync();
+            Assert.Equal(GovernedLoopEffectReconciliationPageStatus.Ready, attention.Status);
+            var summary = Assert.Single(attention.Items);
+            Assert.Equal("case-effect-reconciliation-" + seeded.Binding.ContentHash, summary.Reference.CaseId);
+            Assert.Equal(GovernedLoopEffectReconciliationCasePosture.Open, summary.Posture);
+            var reference = summary.Reference;
+
+            applied = await runtime.EffectReconciliation.ProbeAsync("probe-workspace-surface", reference);
+            var replayed = await runtime.EffectReconciliation.ProbeAsync("probe-workspace-surface", reference);
+
+            Assert.Equal(GovernedLoopEffectReconciliationOperationStatus.Applied, applied.Status);
+            detail = Assert.IsType<GovernedLoopEffectReconciliationCaseDetail>(applied.Detail);
+            Assert.Equal(reference.CaseVersion + 1, detail.Reference.CaseVersion);
+            var observation = Assert.Single(detail.Observations);
+            Assert.Equal(GovernedLoopEffectReconciliationObservedOutcome.AppliedSucceeded, observation.ObservedOutcome);
+            Assert.StartsWith("outcome-", observation.EvidenceReference, StringComparison.Ordinal);
+            Assert.Equal(64, Assert.IsType<string>(observation.EvidenceHash).Length);
+            Assert.Equal(GovernedLoopEffectReconciliationOperationStatus.Replayed, replayed.Status);
+            Assert.Equal(JsonSerializer.Serialize(detail), JsonSerializer.Serialize(replayed.Detail));
+            Assert.Equal(3, provider.Calls);
+        }
+
+        await using (var restarted = await CreateEffectReconciliationRuntimeAsync(workspace))
+        {
+            var replayedAttention = await restarted.EffectReconciliation.ListAsync();
+            var replayedSummary = Assert.Single(replayedAttention.Items);
+            Assert.Equal(GovernedLoopEffectReconciliationPageStatus.Ready, replayedAttention.Status);
+            Assert.Equal(detail.Reference, replayedSummary.Reference);
+            Assert.Equal(GovernedLoopEffectReconciliationCasePosture.Open, replayedSummary.Posture);
+        }
+
+        var json = JsonSerializer.Serialize(applied);
+        Assert.DoesNotContain(seeded.Binding.WorkspaceId, json, StringComparison.Ordinal);
+        Assert.DoesNotContain(seeded.Binding.Execution.RunId, json, StringComparison.Ordinal);
+        Assert.DoesNotContain(seeded.Binding.OperationId, json, StringComparison.Ordinal);
+        Assert.DoesNotContain(seeded.Binding.EffectId, json, StringComparison.Ordinal);
+        Assert.DoesNotContain(seeded.Attempt.ActuatorOperationId, json, StringComparison.Ordinal);
+        Assert.DoesNotContain(seeded.Attempt.InputFingerprint, json, StringComparison.Ordinal);
+        Assert.DoesNotContain("replacement", json, StringComparison.Ordinal);
         Assert.DoesNotContain("WorkspaceId", json, StringComparison.Ordinal);
         Assert.DoesNotContain("ProbeTarget", json, StringComparison.Ordinal);
     }
@@ -678,6 +745,148 @@ public sealed partial class AgentRuntimeFactoryTests
     }
 
     [Fact]
+    public async Task Effect_reconciliation_factory_recovers_one_durable_ambiguous_command_case_exactly_across_restart()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var seeded = await GovernedLoopEffectReconciliationCommandStartupTestFixture.SeedAsync(workspace, persistCase: false, retainRunBinding: true);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        CustomLoopRunRecord originalRun;
+        using (var runs = new CustomLoopRunStore(paths))
+        {
+            originalRun = await runs.GetAsync(seeded.Binding.Execution.RunId)
+                ?? throw new InvalidOperationException("The durable reconciliation candidate run was not found.");
+        }
+        var originalAttempt = await new GovernedLoopEffectAttemptStore(paths).ReadAsync(
+            seeded.Binding.WorkspaceId,
+            seeded.Binding.OperationId,
+            seeded.Binding.EffectGeneration);
+        Assert.Equal(GovernedLoopEffectAttemptReadStatus.Current, originalAttempt.Status);
+        Assert.Equal(seeded.Attempt.ContentHash, originalAttempt.Attempt?.ContentHash);
+        Assert.Equal(CustomLoopRunStatus.NeedsReview, originalRun.Status);
+        Assert.Equal(GovernedLoopFrontierStatus.ReviewBlocked, originalRun.Frontier?.Payload.Status);
+        var validation = CustomLoopRunValidator.Validate(originalRun);
+        Assert.True(validation.IsValid, string.Join(Environment.NewLine, validation.Errors));
+        var ambiguity = Assert.Single(originalRun.Events, item => Equals(item.EffectReconciliationBinding, seeded.Binding));
+        var frontierNode = Assert.Single(originalRun.Frontier!.Payload.Nodes, node => node.ActivationOrdinal == seeded.Binding.ActivationOrdinal);
+        Assert.Equal(seeded.Binding.VisitOrdinal, frontierNode.VisitOrdinal);
+        Assert.Equal(seeded.Binding.NodeId, frontierNode.NodeId);
+        Assert.Equal(seeded.Binding.NodeAttempt, frontierNode.Attempt);
+        Assert.Equal(GovernedLoopNodeExecutionStatus.ReviewBlocked, frontierNode.Status);
+        Assert.Equal(ambiguity.EventId, frontierNode.OutcomeEvidenceId);
+        Assert.Equal(ambiguity.SequentialNodeEvidence?.OutcomeArtifactHash, frontierNode.OutcomeEvidenceHash);
+        Assert.Equal(
+            seeded.Binding,
+            EmbodySense.Core.Common.Loops.Execution.Reconciliation.GovernedLoopEffectReconciliationContract.CreateBinding(
+                seeded.Binding.WorkspaceId,
+                seeded.Binding.ActivationOrdinal,
+                seeded.Binding.VisitOrdinal,
+                originalAttempt.Attempt!));
+
+        var expectedCaseId = "case-effect-reconciliation-" + seeded.Binding.ContentHash;
+        GovernedLoopEffectReconciliationCaseReference firstReference;
+        await using (var firstRuntime = await CreateEffectReconciliationRuntimeAsync(workspace, commandActionRuntimeProvider: seeded.RuntimeProvider))
+        {
+            var page = await firstRuntime.EffectReconciliation.ListAsync();
+            Assert.Equal(GovernedLoopEffectReconciliationPageStatus.Ready, page.Status);
+            var summary = Assert.Single(page.Items);
+            Assert.Equal(expectedCaseId, summary.Reference.CaseId);
+            Assert.Equal(seeded.Binding.ContentHash, summary.Reference.BindingHash);
+            Assert.Equal(GovernedLoopEffectReconciliationCasePosture.Open, summary.Posture);
+            firstReference = summary.Reference;
+
+            var read = await firstRuntime.EffectReconciliation.ReadAsync(firstReference);
+            Assert.Equal(GovernedLoopEffectReconciliationReadStatus.Found, read.Status);
+            var detail = Assert.IsType<GovernedLoopEffectReconciliationCaseDetail>(read.Detail);
+            Assert.Equal(firstReference, detail.Reference);
+            Assert.Equal(GovernedLoopEffectReconciliationCasePosture.Open, detail.Posture);
+            Assert.Empty(detail.Observations);
+            Assert.Empty(detail.Assessments);
+            Assert.Null(detail.Disposition);
+            Assert.Null(detail.Resolution);
+
+            var json = JsonSerializer.Serialize(new object[] { page, read });
+            Assert.DoesNotContain(seeded.Binding.WorkspaceId, json, StringComparison.Ordinal);
+            Assert.DoesNotContain(seeded.Binding.Execution.RunId, json, StringComparison.Ordinal);
+            Assert.DoesNotContain(seeded.Binding.NodeId, json, StringComparison.Ordinal);
+            Assert.DoesNotContain(seeded.Binding.OperationId, json, StringComparison.Ordinal);
+            Assert.DoesNotContain(seeded.Binding.EffectId, json, StringComparison.Ordinal);
+            Assert.DoesNotContain(seeded.Attempt.ActuatorOperationId, json, StringComparison.Ordinal);
+            Assert.DoesNotContain(seeded.Attempt.InputFingerprint, json, StringComparison.Ordinal);
+            Assert.DoesNotContain("org.example", json, StringComparison.Ordinal);
+            Assert.DoesNotContain("WorkspaceId", json, StringComparison.Ordinal);
+            Assert.DoesNotContain("RunId", json, StringComparison.Ordinal);
+            Assert.DoesNotContain("NodeId", json, StringComparison.Ordinal);
+            Assert.DoesNotContain("EffectId", json, StringComparison.Ordinal);
+            Assert.DoesNotContain("OperationId", json, StringComparison.Ordinal);
+        }
+
+        await using (var secondRuntime = await CreateEffectReconciliationRuntimeAsync(workspace, commandActionRuntimeProvider: seeded.RuntimeProvider))
+        {
+            var replayedPage = await secondRuntime.EffectReconciliation.ListAsync();
+            var replayedSummary = Assert.Single(replayedPage.Items);
+            Assert.Equal(GovernedLoopEffectReconciliationPageStatus.Ready, replayedPage.Status);
+            Assert.Equal(firstReference, replayedSummary.Reference);
+            Assert.Equal(GovernedLoopEffectReconciliationCasePosture.Open, replayedSummary.Posture);
+            var replayedRead = await secondRuntime.EffectReconciliation.ReadAsync(replayedSummary.Reference);
+            Assert.Equal(GovernedLoopEffectReconciliationReadStatus.Found, replayedRead.Status);
+            Assert.Equal(replayedSummary.Reference, Assert.IsType<GovernedLoopEffectReconciliationCaseDetail>(replayedRead.Detail).Reference);
+        }
+
+        using (var runs = new CustomLoopRunStore(paths))
+        {
+            var currentRun = await runs.GetAsync(seeded.Binding.Execution.RunId);
+            Assert.NotNull(currentRun);
+            Assert.True(CustomLoopRunValidator.HasSameDurableVersion(originalRun, currentRun!));
+        }
+        var currentAttempt = await new GovernedLoopEffectAttemptStore(paths).ReadAsync(
+            seeded.Binding.WorkspaceId,
+            seeded.Binding.OperationId,
+            seeded.Binding.EffectGeneration);
+        Assert.Equal(GovernedLoopEffectAttemptReadStatus.Current, currentAttempt.Status);
+        Assert.Equal(seeded.Attempt.ContentHash, currentAttempt.Attempt?.ContentHash);
+    }
+
+    [Fact]
+    public async Task Effect_reconciliation_factory_scans_bounded_tombstones_before_recovering_a_live_ambiguous_case()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var seeded = await GovernedLoopEffectReconciliationCommandStartupTestFixture.SeedAsync(workspace, persistCase: false, retainRunBinding: true);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        DateTimeOffset createdAtUtc;
+        using (var runs = new CustomLoopRunStore(paths))
+        {
+            var candidate = await runs.GetAsync(seeded.Binding.Execution.RunId)
+                ?? throw new InvalidOperationException("The durable reconciliation candidate run was not found.");
+            createdAtUtc = candidate.CreatedAtUtc.AddTicks(1);
+        }
+        await WriteNewerTraceTombstonesAsync(paths, CustomLoopLimits.MaxRunTracesPerWorkspace, seeded.Binding.Execution.RunId, createdAtUtc);
+
+        await using var runtime = await CreateEffectReconciliationRuntimeAsync(workspace, commandActionRuntimeProvider: seeded.RuntimeProvider);
+
+        var page = await runtime.EffectReconciliation.ListAsync();
+        var summary = Assert.Single(page.Items);
+        Assert.Equal(GovernedLoopEffectReconciliationPageStatus.Ready, page.Status);
+        Assert.Equal("case-effect-reconciliation-" + seeded.Binding.ContentHash, summary.Reference.CaseId);
+        Assert.Equal(seeded.Binding.ContentHash, summary.Reference.BindingHash);
+        Assert.Equal(GovernedLoopEffectReconciliationCasePosture.Open, summary.Posture);
+    }
+
+    [Fact]
+    public async Task Effect_reconciliation_factory_fails_closed_when_a_durable_candidate_has_no_registered_probe()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        await GovernedLoopEffectReconciliationCommandStartupTestFixture.SeedAsync(workspace, persistCase: false, retainRunBinding: true);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => CreateEffectReconciliationRuntimeAsync(workspace));
+
+        Assert.Contains("effect_reconciliation_recovery_failed", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("RepairRequired", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Effect_reconciliation_factory_clone_is_immutable_and_rejects_a_missing_authority_provider()
     {
         using var workspace = new TestWorkspace();
@@ -699,6 +908,46 @@ public sealed partial class AgentRuntimeFactoryTests
 
     private static GovernedLoopEffectReconciliationCaseReference Reference(EmbodySense.Core.Common.Loops.Execution.Reconciliation.Models.GovernedLoopEffectReconciliationCase value)
         => new(value.CaseId, value.CaseVersion, value.ContentHash, value.Binding.ContentHash);
+
+    private static async Task WriteNewerTraceTombstonesAsync(WorkspacePaths paths, int count, string retainedRunId, DateTimeOffset createdAtUtc)
+    {
+        var loopId = "loop-reconciliation-tombstones";
+        var directory = Path.Combine(paths.CustomLoopRunsPath, loopId);
+        Directory.CreateDirectory(directory);
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        options.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.CamelCase, allowIntegerValues: false));
+        for (var index = 0; index < count; index++)
+        {
+            var runId = $"run-reconciliation-tombstone-{index:D3}";
+            Assert.NotEqual(retainedRunId, runId);
+            var operationId = $"delete-reconciliation-tombstone-{index:D3}";
+            var traceHash = GovernedLoopEffectReconciliationStartupTestFixture.Hash("trace-" + index);
+            var request = new CustomLoopTraceDeletionRequest(runId, traceHash, operationId, "actor-user", "web");
+            var tombstone = new CustomLoopTraceTombstone(
+                CustomLoopTraceTombstone.CurrentSchemaVersion,
+                CustomLoopTraceTombstone.CurrentArtifactKind,
+                runId,
+                loopId,
+                $"admit-reconciliation-tombstone-{index:D3}",
+                GovernedLoopEffectReconciliationStartupTestFixture.Hash("admission-" + index),
+                CustomLoopRunStatus.Completed,
+                1,
+                GovernedLoopEffectReconciliationStartupTestFixture.Hash("definition-" + index),
+                traceHash,
+                1,
+                createdAtUtc,
+                createdAtUtc,
+                createdAtUtc,
+                request.Actor,
+                request.Surface,
+                operationId,
+                CustomLoopTraceDeletionRequestHash.Compute(request),
+                operationId,
+                operationId,
+                CustomLoopTraceDeletionIntegrity.Complete);
+            await File.WriteAllTextAsync(Path.Combine(directory, runId + ".json"), JsonSerializer.Serialize(tombstone, options) + "\n");
+        }
+    }
 
     private static async Task<AgentRuntime> CreateEffectReconciliationRuntimeAsync(
         TestWorkspace workspace,

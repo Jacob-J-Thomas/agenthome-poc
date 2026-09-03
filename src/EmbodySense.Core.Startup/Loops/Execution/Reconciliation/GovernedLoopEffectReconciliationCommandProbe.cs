@@ -14,6 +14,7 @@ namespace EmbodySense.Core.Startup.Loops.Execution.Reconciliation;
 internal sealed class GovernedLoopEffectReconciliationCommandProbe : IGovernedLoopEffectReconciliationProbe
 {
     private const string CommandOutcomePrefix = "command-outcome-";
+    private const string WorkspaceOutcomePrefix = "outcome-";
     private readonly IGovernedLoopEffectReconciliationCaseStore _cases;
     private readonly GovernedLoopEffectReconciliationContractMetadata _contract;
     private readonly GovernedActuatorOperationDescriptor _descriptor;
@@ -179,12 +180,16 @@ internal sealed class GovernedLoopEffectReconciliationCommandProbe : IGovernedLo
     private static bool TryReadEvidenceHash(string? evidenceId, out string? evidenceHash)
     {
         evidenceHash = null;
-        if (evidenceId?.Length != CommandOutcomePrefix.Length + GovernedLoopEffectReconciliationContractLimits.Sha256HexCharacters
-            || !evidenceId.StartsWith(CommandOutcomePrefix, StringComparison.Ordinal))
+        var prefix = evidenceId?.StartsWith(CommandOutcomePrefix, StringComparison.Ordinal) == true
+            ? CommandOutcomePrefix
+            : evidenceId?.StartsWith(WorkspaceOutcomePrefix, StringComparison.Ordinal) == true
+                ? WorkspaceOutcomePrefix
+                : null;
+        if (prefix is null || evidenceId!.Length != prefix.Length + GovernedLoopEffectReconciliationContractLimits.Sha256HexCharacters)
         {
             return false;
         }
-        var candidate = evidenceId[CommandOutcomePrefix.Length..];
+        var candidate = evidenceId[prefix.Length..];
         if (candidate.Any(character => character is not (>= '0' and <= '9') and not (>= 'a' and <= 'f')))
         {
             return false;
@@ -195,7 +200,7 @@ internal sealed class GovernedLoopEffectReconciliationCommandProbe : IGovernedLo
 
     private static string Hash(params string[] values)
     {
-        var builder = new StringBuilder("embodysense.command-reconciliation-observation.v1\n");
+        var builder = new StringBuilder("embodysense.actuator-reconciliation-observation.v1\n");
         foreach (var value in values)
         {
             builder.Append(value.Length).Append(':').Append(value).Append('\n');

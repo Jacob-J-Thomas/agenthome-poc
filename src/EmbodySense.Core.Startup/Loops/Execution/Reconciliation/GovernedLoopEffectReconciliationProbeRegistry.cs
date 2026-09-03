@@ -42,26 +42,54 @@ internal sealed class GovernedLoopEffectReconciliationProbeRegistry : IGovernedL
         IGovernedLoopEffectReconciliationCaseStore cases,
         IGovernedLoopEffectReconciliationInputSource inputs,
         TimeProvider timeProvider)
+        => Create([operations], cases, inputs, timeProvider);
+
+    internal static GovernedLoopEffectReconciliationProbeRegistry Create(
+        IEnumerable<GovernedActuatorOperationRegistry?> operationRegistries,
+        IGovernedLoopEffectReconciliationCaseStore cases,
+        IGovernedLoopEffectReconciliationInputSource inputs,
+        TimeProvider timeProvider)
     {
+        ArgumentNullException.ThrowIfNull(operationRegistries);
         ArgumentNullException.ThrowIfNull(cases);
         ArgumentNullException.ThrowIfNull(inputs);
         ArgumentNullException.ThrowIfNull(timeProvider);
-        if (operations is null)
-        {
-            return new GovernedLoopEffectReconciliationProbeRegistry([]);
-        }
 
         var registrations = new List<GovernedLoopEffectReconciliationProbeRegistration>();
-        foreach (var descriptor in operations.Descriptors)
+        foreach (var operations in operationRegistries.Where(value => value is not null))
         {
-            if (!operations.TryResolve(descriptor, out var operation) || operation is not IGovernedActuatorOutcomeProbe outcomeProbe)
+            foreach (var descriptor in operations!.Descriptors)
             {
-                continue;
+                if (!operations.TryResolve(descriptor, out var operation) || operation is not IGovernedActuatorOutcomeProbe outcomeProbe)
+                {
+                    continue;
+                }
+                var metadata = CreateMetadata(descriptor);
+                registrations.Add(new GovernedLoopEffectReconciliationProbeRegistration(metadata, new GovernedLoopEffectReconciliationCommandProbe(metadata, descriptor, outcomeProbe, cases, inputs, timeProvider)));
             }
-            var metadata = CreateMetadata(descriptor);
-            registrations.Add(new GovernedLoopEffectReconciliationProbeRegistration(metadata, new GovernedLoopEffectReconciliationCommandProbe(metadata, descriptor, outcomeProbe, cases, inputs, timeProvider)));
         }
         return new GovernedLoopEffectReconciliationProbeRegistry(registrations);
+    }
+
+    internal bool TryResolve(GovernedLoopEffectAttempt? attempt, out GovernedLoopEffectReconciliationContractMetadata? metadata)
+    {
+        metadata = null;
+        if (attempt is null)
+        {
+            return false;
+        }
+
+        var matches = _ordered.Where(value => Equals(value.Contract.Capability, attempt.Capability)
+            && Equals(value.Contract.Implementation, attempt.Implementation)
+            && string.Equals(value.Contract.ActuatorOperationId, attempt.ActuatorOperationId, StringComparison.Ordinal)
+            && string.Equals(value.Contract.OperationDescriptorHash, attempt.OperationDescriptorHash, StringComparison.Ordinal)).Take(2).ToArray();
+        if (matches.Length != 1)
+        {
+            return false;
+        }
+
+        metadata = GovernedLoopEffectReconciliationContractCopy.Copy(matches[0].Contract);
+        return true;
     }
 
     public Task<GovernedLoopEffectReconciliationProbeRegistryPage> ListAsync(GovernedLoopEffectReconciliationProbeRegistryListRequest request, CancellationToken cancellationToken = default)
@@ -98,13 +126,13 @@ internal sealed class GovernedLoopEffectReconciliationProbeRegistry : IGovernedL
         var probeHash = Hash("probe-contract", descriptor.ContentHash, descriptor.Capability.Hash.Value, descriptor.OperationId);
         return GovernedLoopEffectReconciliationContractHash.Apply(new GovernedLoopEffectReconciliationContractMetadata(
             GovernedLoopEffectReconciliationContractLimits.CurrentSchemaVersion,
-            "command-reconciliation-" + discriminator,
+            "actuator-reconciliation-" + discriminator,
             1,
             descriptor.Capability,
             descriptor.Implementation,
             descriptor.OperationId,
             descriptor.ContentHash,
-            "command-outcome-probe-" + discriminator,
+            "actuator-outcome-probe-" + discriminator,
             1,
             probeHash,
             string.Empty));
@@ -130,7 +158,7 @@ internal sealed class GovernedLoopEffectReconciliationProbeRegistry : IGovernedL
 
     private static string Hash(string domain, params string[] values)
     {
-        var builder = new StringBuilder("embodysense.command-reconciliation.v1\n").Append(domain).Append('\n');
+        var builder = new StringBuilder("embodysense.actuator-reconciliation.v1\n").Append(domain).Append('\n');
         foreach (var value in values)
         {
             builder.Append(value.Length).Append(':').Append(value).Append('\n');

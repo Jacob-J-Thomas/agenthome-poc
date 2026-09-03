@@ -20,6 +20,7 @@ using EmbodySense.Core.Application.Loops.EffectAuthorityUsage;
 using EmbodySense.Core.Application.Loops.Execution;
 using EmbodySense.Core.Application.Loops.Execution.Authority;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
+using EmbodySense.Core.Application.Loops.Execution.Reconciliation.Models;
 using EmbodySense.Core.Application.Loops.Authoring;
 using EmbodySense.Core.Application.Loops.Failures;
 using EmbodySense.Core.Application.Loops.GraphAuthoring;
@@ -850,12 +851,36 @@ public sealed class AgentRuntimeFactory
                 customRunStore,
                 governedGraphStore,
                 governedEffectAttemptComposition.AttemptReadStore,
-                governedCommandActionRegistrations);
+                governedCommandActionRegistrations,
+                governedWorkspaceActionRegistry);
             var reconciliationProbeRegistry = GovernedLoopEffectReconciliationProbeRegistry.Create(
-                governedCommandActionOperations,
+                [governedWorkspaceActionRegistry, governedCommandActionOperations],
                 governedEffectAttemptComposition.ReconciliationCases,
                 reconciliationInputSource,
                 operationalClock);
+            var reconciliationAdmissionApplicationService = new EmbodySense.Core.Application.Loops.Execution.Reconciliation.GovernedLoopEffectReconciliationService(
+                governedEffectAttemptComposition.ReconciliationCases,
+                new GovernedLoopEffectReconciliationAdmissionAuthorizationSource(),
+                reconciliationInputSource,
+                reconciliationProbeRegistry,
+                governedEffectAttemptComposition.ReconciliationProbeReservations,
+                operationalClock);
+            var reconciliationAdmission = new GovernedLoopEffectReconciliationAdmissionService(
+                workspaceId,
+                customRunStore,
+                governedEffectAttemptComposition.AttemptReadStore,
+                reconciliationProbeRegistry,
+                reconciliationAdmissionApplicationService,
+                operationalClock);
+            var reconciliationRecovery = await reconciliationAdmission.RecoverAsync(cancellationToken).ConfigureAwait(false);
+            // Corrupt run evidence remains non-executable, but the read-only reconciliation facade must stay available to inspect already-durable cases.
+            if (reconciliationRecovery is not (GovernedLoopEffectReconciliationAdmissionStatus.NotApplicable
+                or GovernedLoopEffectReconciliationAdmissionStatus.Opened
+                or GovernedLoopEffectReconciliationAdmissionStatus.Replayed
+                or GovernedLoopEffectReconciliationAdmissionStatus.Corrupt))
+            {
+                throw new InvalidOperationException($"effect_reconciliation_recovery_failed: durable ambiguity admission returned {reconciliationRecovery}.");
+            }
             var reconciliationService = new EmbodySense.Core.Application.Loops.Execution.Reconciliation.GovernedLoopEffectReconciliationService(
                 governedEffectAttemptComposition.ReconciliationCases,
                 new AgentRuntimeGovernedLoopEffectReconciliationAuthorizationAdapter(
@@ -951,7 +976,8 @@ public sealed class AgentRuntimeFactory
                 humanInputBindingSource: humanInputBindingSource,
                 humanInputRequestPublicationService: humanInputPublication,
                 humanInputCancellationConvergence: humanInputCancellationConvergence,
-                humanReviewAdmissionService: humanReviewAdmission);
+                humanReviewAdmissionService: humanReviewAdmission,
+                effectReconciliationAdmissionService: reconciliationAdmission);
             var governedAdmissionStore = new GovernedLoopAdmissionStore(paths, _capabilityTrustProvider, authorityTransaction: capabilityAuthority);
             var governedAdmission = new GovernedLoopAdmissionService(
                 workspaceId,

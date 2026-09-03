@@ -23,6 +23,7 @@ using EmbodySense.Core.Application.Loops.EffectAuthorityUsage.Models;
 using EmbodySense.Core.Application.Loops.Execution.Authority;
 using EmbodySense.Core.Application.Loops.Execution.Authority.Models;
 using EmbodySense.Core.Application.Loops.Execution.Custom;
+using EmbodySense.Core.Application.Loops.Execution.Reconciliation;
 using EmbodySense.Core.Application.Loops.Diagnostics;
 using EmbodySense.Core.Application.Loops.Failures;
 using EmbodySense.Core.Application.Loops.Failures.Models;
@@ -7086,7 +7087,8 @@ public sealed partial class CustomLoopOrderedRunnerTests
         HumanInputPolicyResolutionService? humanInputPolicyResolutionService = null,
         IGovernedLoopSequentialHumanInputBindingSource? humanInputBindingSource = null,
         IHumanInputRequestPublicationService? humanInputRequestPublicationService = null,
-        IHumanReviewAdmissionService? humanReviewAdmissionService = null)
+        IHumanReviewAdmissionService? humanReviewAdmissionService = null,
+        IGovernedLoopEffectReconciliationAdmissionService? effectReconciliationAdmissionService = null)
     {
         return new CustomLoopOrderedRunner(
             store,
@@ -7112,7 +7114,8 @@ public sealed partial class CustomLoopOrderedRunnerTests
             humanInputPolicyResolutionService: humanInputPolicyResolutionService,
             humanInputBindingSource: humanInputBindingSource,
             humanInputRequestPublicationService: humanInputRequestPublicationService,
-            humanReviewAdmissionService: humanReviewAdmissionService);
+            humanReviewAdmissionService: humanReviewAdmissionService,
+            effectReconciliationAdmissionService: effectReconciliationAdmissionService);
     }
 
     private static GovernedLoopWorkspaceActionExecutionResult WorkspaceActionOutcome(WorkspaceActionResultStatus status)

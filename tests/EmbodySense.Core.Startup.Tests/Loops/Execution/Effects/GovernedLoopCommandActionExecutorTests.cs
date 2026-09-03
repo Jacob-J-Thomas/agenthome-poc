@@ -64,7 +64,9 @@ public sealed class GovernedLoopCommandActionExecutorTests
         GovernedLoopCommandActionExecutionStatus expectedStatus)
     {
         var fixture = CommandActionExecutionTestFixture.Create();
-        var service = new CapturingCommandActionEffectService(_ => new GovernedLoopEffectAttemptExecutionResult(effectStatus, null, "test posture"));
+        var service = new CapturingCommandActionEffectService(request => effectStatus == GovernedLoopEffectAttemptExecutionStatus.ReconciliationRequired
+            ? ReconciliationRequiredResult(request)
+            : new GovernedLoopEffectAttemptExecutionResult(effectStatus, null, "test posture"));
         var executor = new GovernedLoopCommandActionExecutor(
             new GovernedLoopEffectAttemptFacade(UnusedCommandActionCatalog.Instance, service),
             new CommandActionRegistrationRegistry([fixture.Registration]));
@@ -75,6 +77,18 @@ public sealed class GovernedLoopCommandActionExecutorTests
         Assert.Null(result.CanonicalOutput);
         Assert.NotNull(service.Request);
         Assert.NotEmpty(result.Detail);
+        if (effectStatus == GovernedLoopEffectAttemptExecutionStatus.ReconciliationRequired)
+        {
+            Assert.NotNull(result.ReconciliationBinding);
+            Assert.Equal(fixture.Request.Dispatch.Anchor.AdapterBinding.WorkspaceId, result.ReconciliationBinding.WorkspaceId);
+            Assert.Equal(fixture.Request.Dispatch.Activation.ActivationOrdinal, result.ReconciliationBinding.ActivationOrdinal);
+            Assert.Equal(fixture.Request.Dispatch.Activation.VisitOrdinal, result.ReconciliationBinding.VisitOrdinal);
+            Assert.Equal(service.Request!.IdempotencyOperationId, result.ReconciliationBinding.OperationId);
+        }
+        else
+        {
+            Assert.Null(result.ReconciliationBinding);
+        }
     }
 
     [Fact]
@@ -145,5 +159,30 @@ public sealed class GovernedLoopCommandActionExecutorTests
             "after-evidence",
             CommandActionExecutionTestFixture.Now.AddSeconds(4));
         return new GovernedLoopEffectAttemptExecutionResult(status, terminal, "durable test result");
+    }
+
+    private static GovernedLoopEffectAttemptExecutionResult ReconciliationRequiredResult(GovernedLoopEffectAttemptRequest request)
+    {
+        var prepared = GovernedLoopEffectAttemptContract.Prepare(
+            request.ExecutionBinding,
+            request.NodeId,
+            request.NodeAttempt,
+            request.CapabilityPin.DescriptorIdentity,
+            request.CapabilityPin.Implementation,
+            request.ActuatorOperationId,
+            GovernedLoopEffectAttemptTestFixture.Hash('a'),
+            request.EffectId,
+            request.IdempotencyOperationId,
+            request.EffectGeneration,
+            GovernedLoopEffectAttemptTestFixture.HashInput(request.InputJson),
+            GovernedLoopEffectAttemptTestFixture.HashInput("command-target"),
+            GovernedLoopEffectAttemptTestFixture.Hash('b'),
+            request.AdmissionReceipt.ContentHash,
+            null,
+            CommandActionExecutionTestFixture.Now);
+        var authorized = GovernedLoopEffectAttemptContract.AttachDispatchAuthority(prepared, GovernedLoopEffectAttemptTestFixture.Hash('c'), CommandActionExecutionTestFixture.Now.AddSeconds(1));
+        var crossed = GovernedLoopEffectAttemptContract.Advance(authorized, GovernedLoopEffectPhase.DispatchBoundaryReached, GovernedLoopEffectOutcome.OutcomeUnknown, GovernedLoopEffectEvidenceStatus.Pending, null, null, CommandActionExecutionTestFixture.Now.AddSeconds(2));
+        var ambiguous = GovernedLoopEffectAttemptContract.Advance(crossed, GovernedLoopEffectPhase.ReconciliationRequired, GovernedLoopEffectOutcome.OutcomeUnknown, GovernedLoopEffectEvidenceStatus.Incomplete, null, null, CommandActionExecutionTestFixture.Now.AddSeconds(3));
+        return new GovernedLoopEffectAttemptExecutionResult(GovernedLoopEffectAttemptExecutionStatus.ReconciliationRequired, ambiguous, "durable reconciliation-required test result");
     }
 }

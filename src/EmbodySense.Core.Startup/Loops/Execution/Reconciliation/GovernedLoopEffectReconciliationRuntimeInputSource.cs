@@ -1,6 +1,7 @@
 using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.EffectAttempts;
 using EmbodySense.Core.Application.Loops.EffectAttempts.Models;
+using EmbodySense.Core.Application.Loops.Execution.Effects;
 using EmbodySense.Core.Application.Loops.Execution.Reconciliation;
 using EmbodySense.Core.Application.Loops.Execution.Reconciliation.Models;
 using EmbodySense.Core.Application.Loops.GraphAuthoring;
@@ -14,7 +15,10 @@ using EmbodySense.Core.Common.Loops.Execution.Effects.Models;
 using EmbodySense.Core.Common.Loops.Execution.Models;
 using EmbodySense.Core.Common.Loops.Execution.Reconciliation;
 using EmbodySense.Core.Common.Loops.Models.Custom.Execution;
+using EmbodySense.Core.Common.Loops.Models.Custom.Graph;
 using EmbodySense.Core.Common.Loops.Revisions;
+using EmbodySense.Core.Common.LocalWorkspace.Actions;
+using EmbodySense.Core.Common.LocalWorkspace.Actions.Models;
 using EmbodySense.Core.Startup.Loops.Execution.Effects;
 
 namespace EmbodySense.Core.Startup.Loops.Execution.Reconciliation;
@@ -25,13 +29,20 @@ internal sealed class GovernedLoopEffectReconciliationRuntimeInputSource : IGove
     private readonly IGovernedLoopEffectAttemptReadStore _effects;
     private readonly IGovernedLoopGraphRevisionStore _graphs;
     private readonly ICustomLoopRunStore _runs;
+    private readonly GovernedActuatorOperationRegistry? _workspaceActions;
 
-    internal GovernedLoopEffectReconciliationRuntimeInputSource(ICustomLoopRunStore runs, IGovernedLoopGraphRevisionStore graphs, IGovernedLoopEffectAttemptReadStore effects, CommandActionRegistrationRegistry? commands)
+    internal GovernedLoopEffectReconciliationRuntimeInputSource(
+        ICustomLoopRunStore runs,
+        IGovernedLoopGraphRevisionStore graphs,
+        IGovernedLoopEffectAttemptReadStore effects,
+        CommandActionRegistrationRegistry? commands,
+        GovernedActuatorOperationRegistry? workspaceActions = null)
     {
         _runs = runs ?? throw new ArgumentNullException(nameof(runs));
         _graphs = graphs ?? throw new ArgumentNullException(nameof(graphs));
         _effects = effects ?? throw new ArgumentNullException(nameof(effects));
         _commands = commands;
+        _workspaceActions = workspaceActions;
     }
 
     public async Task<GovernedLoopEffectReconciliationInputReadResult> ReadAsync(GovernedLoopEffectReconciliationInputReadRequest request, CancellationToken cancellationToken = default)
@@ -136,10 +147,7 @@ internal sealed class GovernedLoopEffectReconciliationRuntimeInputSource : IGove
             || !string.Equals(artifact.LayoutHash, adapter.GraphLayoutHash, StringComparison.Ordinal)
             || graphNodes.Length != 1
             || !Equals(graphNodes[0].Descriptor, frontierNode!.Descriptor)
-            || _commands is null
-            || !_commands.TryResolve(graphNodes[0].Descriptor, out var command)
-            || command is null
-            || !TryCreateInput(graphNodes[0].Parameters, command, out var input)
+            || !TryCreateInput(graphNodes[0], out var input)
             || !string.Equals(input!.Fingerprint, effectRead.Attempt.InputFingerprint, StringComparison.Ordinal))
         {
             return Closed(GovernedLoopEffectReconciliationInputReadStatus.Conflict);
@@ -224,6 +232,37 @@ internal sealed class GovernedLoopEffectReconciliationRuntimeInputSource : IGove
         {
             return false;
         }
+    }
+
+    private bool TryCreateInput(GovernedLoopNodeDefinition node, out GovernedActuatorInputEvidence? input)
+    {
+        input = null;
+        GovernedActuatorInputEvidence? commandInput = null;
+        GovernedActuatorInputEvidence? workspaceEvidence = null;
+        var commandMatched = _commands is not null
+            && _commands.TryResolve(node.Descriptor, out var command)
+            && command is not null
+            && TryCreateInput(node.Parameters, command, out commandInput);
+        var workspaceKindMatched = WorkspaceActionNodeDescriptors.TryResolve(node.Descriptor, out var kind);
+        var workspaceDescriptors = workspaceKindMatched && _workspaceActions is not null
+            ? _workspaceActions.Descriptors.Where(descriptor => string.Equals(descriptor.OperationId, WorkspaceActionOperationIds.For(kind), StringComparison.Ordinal)).Take(2).ToArray()
+            : [];
+        var workspaceMatched = _workspaceActions is not null
+            && workspaceDescriptors.Length == 1
+            && _workspaceActions.TryResolve(workspaceDescriptors[0], out var workspaceOperation)
+            && workspaceOperation is not null
+            && node.Parameters.Count == 1
+            && node.Parameters.TryGetValue("input", out var canonicalWorkspaceInput)
+            && WorkspaceActionInputContract.TryParse(canonicalWorkspaceInput, kind, out var workspaceInput, out _)
+            && string.Equals(WorkspaceActionInputContract.Encode(workspaceInput!), canonicalWorkspaceInput, StringComparison.Ordinal)
+            && GovernedActuatorInputContract.TryCanonicalize(canonicalWorkspaceInput, out workspaceEvidence, out _);
+        if (commandMatched == workspaceMatched)
+        {
+            return false;
+        }
+
+        input = commandMatched ? commandInput : workspaceEvidence;
+        return input is not null;
     }
 
     private static GovernedLoopEffectReconciliationInputReadResult Closed(GovernedLoopEffectReconciliationInputReadStatus status)

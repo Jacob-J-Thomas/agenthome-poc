@@ -13,6 +13,7 @@ public sealed class GovernedLoopEffectReconciliationPublicSurfaceTests
     private const string ReconciliationPath = "Loops/Execution/Reconciliation";
     private static readonly IReadOnlyDictionary<string, string[]> _expectedApplicationPorts = new Dictionary<string, string[]>(StringComparer.Ordinal)
     {
+        ["IGovernedLoopEffectReconciliationAdmissionService"] = ["AdmitAsync"],
         ["IGovernedLoopEffectReconciliationAuthorizationSource"] = ["AuthorizeAsync"],
         ["IGovernedLoopEffectReconciliationCaseStore"] = ["CompareExchangeAsync", "ListAsync", "ReadAsync"],
         ["IGovernedLoopEffectReconciliationInputSource"] = ["ReadAsync"],

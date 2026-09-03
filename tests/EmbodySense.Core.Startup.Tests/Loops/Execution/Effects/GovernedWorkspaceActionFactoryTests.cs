@@ -23,6 +23,7 @@ using EmbodySense.Core.Common.Loops.Execution.Effects.Models;
 using EmbodySense.Core.Common.Loops.Execution.Authority;
 using EmbodySense.Core.Common.Loops.Execution.Authority.Models;
 using EmbodySense.Core.Common.Loops.Execution;
+using EmbodySense.Core.Common.Loops.Execution.Effects;
 using EmbodySense.Core.Common.Loops.Execution.Models;
 using EmbodySense.Core.Common.Workspace;
 using EmbodySense.Core.Persistence.Capabilities;
@@ -174,6 +175,17 @@ public sealed class GovernedWorkspaceActionFactoryTests
 
         Assert.Equal(expectedStatus, result.Status);
         Assert.Null(result.CanonicalOutput);
+        if (effectStatus == GovernedLoopEffectAttemptExecutionStatus.ReconciliationRequired)
+        {
+            Assert.NotNull(result.ReconciliationBinding);
+            Assert.Equal(request.Dispatch.Anchor.AdapterBinding.WorkspaceId, result.ReconciliationBinding.WorkspaceId);
+            Assert.Equal(request.Dispatch.Activation.ActivationOrdinal, result.ReconciliationBinding.ActivationOrdinal);
+            Assert.Equal(request.Dispatch.Activation.VisitOrdinal, result.ReconciliationBinding.VisitOrdinal);
+        }
+        else
+        {
+            Assert.Null(result.ReconciliationBinding);
+        }
     }
 
     [Fact]
@@ -300,11 +312,36 @@ public sealed class GovernedWorkspaceActionFactoryTests
         {
             cancellationToken.ThrowIfCancellationRequested();
             Request = request;
-            return Task.FromResult(new GovernedLoopEffectAttemptExecutionResult(
-                status,
-                null,
-                "test stop"));
+            return Task.FromResult(status == GovernedLoopEffectAttemptExecutionStatus.ReconciliationRequired
+                ? ReconciliationRequiredResult(request)
+                : new GovernedLoopEffectAttemptExecutionResult(status, null, "test stop"));
         }
+    }
+
+    private static GovernedLoopEffectAttemptExecutionResult ReconciliationRequiredResult(GovernedLoopEffectAttemptRequest request)
+    {
+        var now = WorkspaceToolAuthorityTestFixture.Now.AddMinutes(1);
+        var prepared = GovernedLoopEffectAttemptContract.Prepare(
+            request.ExecutionBinding,
+            request.NodeId,
+            request.NodeAttempt,
+            request.CapabilityPin.DescriptorIdentity,
+            request.CapabilityPin.Implementation,
+            request.ActuatorOperationId,
+            new string('a', 64),
+            request.EffectId,
+            request.IdempotencyOperationId,
+            request.EffectGeneration,
+            Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(request.InputJson))).ToLowerInvariant(),
+            new string('b', 64),
+            new string('c', 64),
+            request.AdmissionReceipt.ContentHash,
+            null,
+            now);
+        var authorized = GovernedLoopEffectAttemptContract.AttachDispatchAuthority(prepared, new string('d', 64), now.AddSeconds(1));
+        var crossed = GovernedLoopEffectAttemptContract.Advance(authorized, GovernedLoopEffectPhase.DispatchBoundaryReached, GovernedLoopEffectOutcome.OutcomeUnknown, GovernedLoopEffectEvidenceStatus.Pending, null, null, now.AddSeconds(2));
+        var ambiguous = GovernedLoopEffectAttemptContract.Advance(crossed, GovernedLoopEffectPhase.ReconciliationRequired, GovernedLoopEffectOutcome.OutcomeUnknown, GovernedLoopEffectEvidenceStatus.Incomplete, null, null, now.AddSeconds(3));
+        return new GovernedLoopEffectAttemptExecutionResult(GovernedLoopEffectAttemptExecutionStatus.ReconciliationRequired, ambiguous, "durable reconciliation-required test result");
     }
 
     private sealed class DirectAuthorityBoundary(ICapabilityAuthorityTransaction authorityTransaction) : IGovernedLoopEffectAuthorityDecisionBoundary

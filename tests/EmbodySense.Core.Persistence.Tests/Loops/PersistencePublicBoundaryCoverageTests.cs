@@ -445,6 +445,15 @@ public sealed class PersistencePublicBoundaryCoverageTests
     }
 
     [Fact]
+    public void Artifact_deserializer_rejects_an_event_without_its_effect_reconciliation_binding_slot()
+    {
+        var root = Parse(Artifact());
+        Assert.True(FirstEvent(root).Remove("effectReconciliationBinding"));
+
+        Assert.Throws<FormatException>(() => CustomLoopRunArtifactSerializer.Deserialize(Encoding.UTF8.GetBytes(root.ToJsonString() + "\n")));
+    }
+
+    [Fact]
     public void Tool_evidence_artifact_round_trips_all_success_phases_and_integrity_markers()
     {
         var run = CreateToolRun(includeIntegrity: true);
