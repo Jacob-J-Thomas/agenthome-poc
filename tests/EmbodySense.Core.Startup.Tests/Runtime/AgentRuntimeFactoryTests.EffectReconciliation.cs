@@ -47,7 +47,6 @@ public sealed partial class AgentRuntimeFactoryTests
         Assert.Equal(GovernedLoopEffectReconciliationOperationStatus.NotFound, (await runtime.EffectReconciliation.ProbeAsync("probe-missing", missing)).Status);
         Assert.Equal(GovernedLoopEffectReconciliationOperationStatus.NotFound, (await runtime.EffectReconciliation.AssessAsync("assess-missing", missing)).Status);
         Assert.Equal(GovernedLoopEffectReconciliationOperationStatus.NotFound, (await runtime.EffectReconciliation.DisposeAsync("dispose-missing", missing, GovernedLoopEffectReconciliationDispositionKind.QuarantineUnresolved)).Status);
-        Assert.Equal(GovernedLoopEffectReconciliationOperationStatus.NotFound, (await runtime.EffectReconciliation.ResolveAsync("resolve-missing", missing)).Status);
         Assert.Equal(GovernedLoopEffectReconciliationReadStatus.Invalid, (await runtime.EffectReconciliation.ReadAsync(null)).Status);
         Assert.Equal(GovernedLoopEffectReconciliationResolutionReadStatus.Invalid, (await runtime.EffectReconciliation.ReadResolutionAsync(null)).Status);
         Assert.Equal(GovernedLoopEffectReconciliationPageStatus.Invalid, (await runtime.EffectReconciliation.ListAsync(null)).Status);
@@ -369,7 +368,7 @@ public sealed partial class AgentRuntimeFactoryTests
     }
 
     [Fact]
-    public async Task Effect_reconciliation_facade_applies_and_replays_assessment_and_disposition_then_publishes_resolution()
+    public async Task Effect_reconciliation_facade_applies_and_replays_assessment_and_disposition()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
@@ -418,19 +417,9 @@ public sealed partial class AgentRuntimeFactoryTests
         var disposedSummary = Assert.Single((await runtime.EffectReconciliation.ListAsync()).Items, value => value.Reference.CaseId == disposedDetail.Reference.CaseId);
         Assert.Equal(GovernedLoopEffectReconciliationCasePosture.Accepted, disposedSummary.Posture);
 
-        var resolved = await runtime.EffectReconciliation.ResolveAsync("resolve-surface-chain", disposedDetail.Reference, "private resolution surface detail");
-
-        Assert.Equal(GovernedLoopEffectReconciliationOperationStatus.Applied, resolved.Status);
-        var resolvedDetail = Assert.IsType<GovernedLoopEffectReconciliationCaseDetail>(resolved.Detail);
-        Assert.Equal(GovernedLoopEffectReconciliationCasePosture.Resolved, resolvedDetail.Posture);
-        Assert.Equal(GovernedLoopEffectReconciliationResolutionOutcome.Succeeded, resolvedDetail.Resolution?.Outcome);
-        var resolvedSummary = Assert.Single((await runtime.EffectReconciliation.ListAsync()).Items, value => value.Reference.CaseId == resolvedDetail.Reference.CaseId);
-        Assert.Equal(GovernedLoopEffectReconciliationCasePosture.Resolved, resolvedSummary.Posture);
-
-        var json = JsonSerializer.Serialize(new[] { assessed, disposed, resolved });
+        var json = JsonSerializer.Serialize(new[] { assessed, disposed });
         Assert.DoesNotContain("private assessment surface detail", json, StringComparison.Ordinal);
         Assert.DoesNotContain("private disposition surface detail", json, StringComparison.Ordinal);
-        Assert.DoesNotContain("private resolution surface detail", json, StringComparison.Ordinal);
         Assert.DoesNotContain("AuthorityEvidence", json, StringComparison.OrdinalIgnoreCase);
     }
 
@@ -564,9 +553,10 @@ public sealed partial class AgentRuntimeFactoryTests
         Assert.Equal(GovernedLoopEffectReconciliationAssessmentKind.ProvedAppliedFailed, Assert.Single(assessedDetail.Assessments).Kind);
         var disposed = await runtime.EffectReconciliation.DisposeAsync("dispose-command-failed-outcome", assessedDetail.Reference, GovernedLoopEffectReconciliationDispositionKind.AcceptProvedApplied);
         var disposedDetail = Assert.IsType<GovernedLoopEffectReconciliationCaseDetail>(disposed.Detail);
-        var resolved = await runtime.EffectReconciliation.ResolveAsync("resolve-command-failed-outcome", disposedDetail.Reference);
-        Assert.Equal(GovernedLoopEffectReconciliationOperationStatus.Applied, resolved.Status);
-        Assert.Equal(GovernedLoopEffectReconciliationResolutionOutcome.Failed, Assert.IsType<GovernedLoopEffectReconciliationCaseDetail>(resolved.Detail).Resolution?.Outcome);
+        Assert.Equal(GovernedLoopEffectReconciliationOperationStatus.Applied, disposed.Status);
+        Assert.Equal(GovernedLoopEffectReconciliationCasePosture.Accepted, disposedDetail.Posture);
+        Assert.Equal(GovernedLoopEffectReconciliationDispositionKind.AcceptProvedApplied, disposedDetail.Disposition?.Kind);
+        Assert.Null(disposedDetail.Resolution);
     }
 
     [Fact]

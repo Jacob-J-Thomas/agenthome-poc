@@ -197,17 +197,6 @@ public sealed class GovernedLoopEffectReconciliationFacade
         return OperateAsync(operationId, reference, (id, value) => _service.DisposeAsync(new AppModels.GovernedLoopEffectReconciliationDispositionRequest(id, value, GovernedLoopEffectReconciliationProjectionMapper.DispositionKind(kind), safeDetail), cancellationToken), cancellationToken, safeDetail);
     }
 
-    /// <summary>Publishes one proof-backed immutable resolution and direct reconciled effect successor.</summary>
-    /// <remarks>This operation changes only canonical reconciliation and effect evidence; it invokes no recovery policy.</remarks>
-    /// <param name="operationId">The caller's stable idempotency identity for this resolution.</param>
-    /// <param name="reference">The exact current redacted case reference.</param>
-    /// <param name="safeDetail">Optional bounded operator context that is never treated as evidence and is omitted from returned projections.</param>
-    /// <param name="cancellationToken">A token that cancels work before the durable resolution boundary.</param>
-    /// <returns>The closed operation status and a detached case only when safely available.</returns>
-    /// <exception cref="OperationCanceledException">The supplied cancellation token was canceled.</exception>
-    public Task<SurfaceModels.GovernedLoopEffectReconciliationOperationResult> ResolveAsync(string? operationId, SurfaceModels.GovernedLoopEffectReconciliationCaseReference? reference, string? safeDetail = null, CancellationToken cancellationToken = default)
-        => OperateAsync(operationId, reference, (id, value) => _service.ResolveAsync(new AppModels.GovernedLoopEffectReconciliationResolutionRequest(id, value, safeDetail), cancellationToken), cancellationToken, safeDetail);
-
     /// <summary>Reads one exact immutable resolution without invoking recovery or changing dispatch eligibility.</summary>
     /// <param name="reference">The redacted exact case version and binding hash.</param>
     /// <param name="cancellationToken">A token that cancels the canonical read.</param>
