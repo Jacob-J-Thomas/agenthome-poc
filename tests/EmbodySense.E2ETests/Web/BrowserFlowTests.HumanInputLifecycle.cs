@@ -126,6 +126,7 @@ public sealed partial class BrowserFlowTests
             browser.MarkExpectedReplacementServerStarting();
             app = await ExternalWebApplicationProcess.StartBrowserProfileHostAsync(workspace.RootPath, port, codexExecutable, "gpt-test", capabilityTrustRoot, [profile]);
             await browser.WaitForExpressionAsync("document.getElementById('clientStatus').textContent === 'Web primary'");
+            await ClickAsync(browser, "[data-app-view=\"chat\"]");
             await browser.ReloadAsync();
             await InitializeWorkspaceAsyncIfNeededAsync(browser);
             await OpenHumanInputAsync(browser);
@@ -176,6 +177,7 @@ public sealed partial class BrowserFlowTests
             browser.MarkExpectedReplacementServerStarting();
             app = await ExternalWebApplicationProcess.StartBrowserProfileHostAsync(workspace.RootPath, port, codexExecutable, "gpt-test", capabilityTrustRoot, [profile]);
             await browser.WaitForExpressionAsync("document.getElementById('clientStatus').textContent === 'Web primary'");
+            await ClickAsync(browser, "[data-app-view=\"chat\"]");
             await browser.ReloadAsync();
             await InitializeWorkspaceAsyncIfNeededAsync(browser);
             await OpenHumanInputAsync(browser);
