@@ -22,6 +22,10 @@ internal sealed class RecordingGovernedLoopEffectReconciliationPorts :
 
     internal bool ReturnNullOnRegistryRead { get; set; }
 
+    internal int RegistryReadCalls { get; private set; }
+
+    internal Func<int, GovernedLoopEffectReconciliationProbeRegistryReadResult?>? RegistryReadResultFactory { get; set; }
+
     internal Func<GovernedLoopEffectReconciliationProbeInvocationRequest, GovernedLoopEffectReconciliationProbeInvocationResult>? ProbeResultFactory { get; set; }
 
     internal Exception? ProbeException { get; set; }
@@ -63,6 +67,7 @@ internal sealed class RecordingGovernedLoopEffectReconciliationPorts :
     public Task<GovernedLoopEffectReconciliationProbeRegistryReadResult> ReadAsync(GovernedLoopEffectReconciliationProbeRegistryReadRequest request, CancellationToken cancellationToken = default)
     {
         CancellationTokens.Add(cancellationToken);
+        RegistryReadCalls++;
         if (ThrowOnRegistryRead)
         {
             throw new IOException("The test registry is unavailable.");
@@ -71,6 +76,11 @@ internal sealed class RecordingGovernedLoopEffectReconciliationPorts :
         if (ReturnNullOnRegistryRead)
         {
             return Task.FromResult<GovernedLoopEffectReconciliationProbeRegistryReadResult>(null!);
+        }
+
+        if (RegistryReadResultFactory is not null)
+        {
+            return Task.FromResult(RegistryReadResultFactory(RegistryReadCalls)!);
         }
 
         if (ForcedRegistryStatus is { } forcedStatus)
@@ -85,6 +95,7 @@ internal sealed class RecordingGovernedLoopEffectReconciliationPorts :
 
     public Task<GovernedLoopEffectReconciliationProbeInvocationResult> ProbeAsync(GovernedLoopEffectReconciliationProbeInvocationRequest request, CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         CancellationTokens.Add(cancellationToken);
         ProbeCalls++;
         LastInvocation = request;

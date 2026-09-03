@@ -106,8 +106,8 @@ public sealed class GovernedLoopEffectReconciliationModelCoherenceTests
         Assert.Throws<ArgumentException>(() => new GovernedLoopEffectReconciliationAuthorizationRequest("assess", reference, otherBinding));
         Assert.Throws<ArgumentException>(() => new GovernedLoopEffectReconciliationInputReadRequest(reference, otherBinding));
         Assert.Throws<ArgumentException>(() => new GovernedLoopEffectReconciliationResolutionReadRequest(reference, otherBinding));
-        Assert.Throws<ArgumentException>(() => new GovernedLoopEffectReconciliationProbeInvocationRequest(reference, otherBinding, open.ContractMetadata, input, attempt, source));
-        Assert.Throws<ArgumentException>(() => new GovernedLoopEffectReconciliationProbeInvocationRequest(reference, open.Binding, open.ContractMetadata, corruptInput, attempt, source));
+        Assert.Throws<ArgumentException>(() => new GovernedLoopEffectReconciliationProbeReservationContext(reference, otherBinding, open.ContractMetadata, attempt, source, new GovernedLoopEffectReconciliationProbeTarget(attempt.TargetFingerprint, attempt.PreconditionEvidenceHash, attempt.BeforeEvidenceId), input.Fingerprint));
+        Assert.Throws<ArgumentException>(() => new GovernedLoopEffectReconciliationProbeTarget(Hash('z'), attempt.PreconditionEvidenceHash, attempt.BeforeEvidenceId));
     }
 
     [Fact]

@@ -213,18 +213,18 @@ public sealed class GovernedLoopEffectReconciliationServiceTests
         {
             var observation = GovernedLoopEffectReconciliationContractHash.Apply(new GovernedLoopEffectReconciliationObservation(
                 GovernedLoopEffectReconciliationContractLimits.CurrentSchemaVersion,
-                invocation.Case.CaseId,
-                invocation.Binding.ContentHash,
+                value.CaseId,
+                value.Binding.ContentHash,
                 "probe-observation-1",
-                invocation.Source.SourceId,
-                invocation.Source.ContentHash,
+                source.SourceId,
+                source.ContentHash,
                 GovernedLoopEffectReconciliationObservationKind.Evidence,
-                invocation.Source.ReliabilityPosture,
+                source.ReliabilityPosture,
                 GovernedLoopEffectReconciliationObservedOutcome.NotApplied,
                 "probe-evidence-1",
                 GovernedLoopEffectAttemptTestFixture.Hash('c'),
-                invocation.EffectHead.Payload.UpdatedAtUtc.AddSeconds(1),
-                invocation.EffectHead.Payload.UpdatedAtUtc.AddSeconds(2),
+                attempt.Payload.UpdatedAtUtc.AddSeconds(1),
+                attempt.Payload.UpdatedAtUtc.AddSeconds(2),
                 "No matching external effect exists.",
                 string.Empty));
             return new GovernedLoopEffectReconciliationProbeInvocationResult(GovernedLoopEffectReconciliationProbeInvocationStatus.Ready, observation);
@@ -240,15 +240,138 @@ public sealed class GovernedLoopEffectReconciliationServiceTests
         Assert.NotNull(applied.Case);
         Assert.Single(applied.Case!.ObservationHistory);
         Assert.Equal(attempt.ContentHash, applied.EffectHead!.ContentHash);
-        Assert.Equal(attempt.TargetFingerprint, registry.LastInvocation!.EffectHead.TargetFingerprint);
-        Assert.Equal(attempt.PreconditionEvidenceHash, registry.LastInvocation.EffectHead.PreconditionEvidenceHash);
-        Assert.Equal(attempt.BeforeEvidenceId, registry.LastInvocation.EffectHead.BeforeEvidenceId);
-        Assert.Equal(source.SourceId, registry.LastInvocation.Source.SourceId);
-        Assert.Equal(source.ContentHash, registry.LastInvocation.Source.ContentHash);
+        Assert.Equal(attempt.TargetFingerprint, registry.LastInvocation!.Target.TargetFingerprint);
+        Assert.Equal(attempt.PreconditionEvidenceHash, registry.LastInvocation.Target.PreconditionEvidenceHash);
+        Assert.Equal(attempt.BeforeEvidenceId, registry.LastInvocation.Target.BeforeEvidenceId);
+        Assert.NotEqual(request.OperationId, registry.LastInvocation.ProbeInvocationId);
+        Assert.NotEqual(value.Binding.OperationId, registry.LastInvocation.ProbeInvocationId);
+        Assert.NotEqual(value.ContractMetadata.ActuatorOperationId, registry.LastInvocation.ProbeInvocationId);
         Assert.Equal(1, registry.ProbeCalls);
         Assert.Equal(2, store.ProbeReservationCalls);
         Assert.Equal(1, store.ProbeCommitCalls);
         Assert.Equal(attempt.ContentHash, replayed.EffectHead!.ContentHash);
+    }
+
+    [Fact]
+    public async Task Probe_revalidates_the_canonical_case_head_and_skips_callback_after_an_intervening_advance()
+    {
+        var (value, attempt, inputValue, source) = GovernedLoopEffectReconciliationApplicationTestFixture.ProbeCase();
+        var store = new GovernedLoopEffectReconciliationServiceStore();
+        store.SeedCase(value);
+        store.SeedEffect(attempt);
+        var input = ConfigureInput(inputValue, attempt, value);
+        var registry = new RecordingGovernedLoopEffectReconciliationPorts { RegisteredContract = value.ContractMetadata };
+        registry.ProbeResultFactory = _ => throw new InvalidOperationException("The stale reservation must not reach the callback.");
+        var service = new GovernedLoopEffectReconciliationService(store, new GovernedLoopEffectReconciliationServiceAuthority(), input, registry, store);
+        var assessment = GovernedLoopEffectReconciliationContractHash.Apply(new GovernedLoopEffectReconciliationAssessment(
+            1,
+            value.CaseId,
+            value.Binding.ContentHash,
+            "assessment-intervening",
+            GovernedLoopEffectReconciliationAssessmentKind.Inconclusive,
+            [],
+            attempt.Payload.IntentHash,
+            value.UpdatedAtUtc.AddSeconds(1),
+            "An intervening assessment invalidated the reserved head.",
+            string.Empty));
+        var advanced = GovernedLoopEffectReconciliationContract.Create(
+            value.CaseId,
+            value.CaseVersion + 1,
+            value.Binding,
+            value.ContractMetadata,
+            [source],
+            value.ObservationHistory,
+            [assessment],
+            assessment.ContentHash,
+            null,
+            null,
+            value.CaseReceiptHashes,
+            value.ContentHash,
+            value.OpenedAtUtc,
+            assessment.AssessedAtUtc);
+        store.BeforeCallbackValidationAction = () => store.SeedCase(advanced);
+
+        var result = await service.ProbeAsync(new GovernedLoopEffectReconciliationProbeRequest("probe-operation-stale", Reference(value)));
+
+        Assert.Equal(GovernedLoopEffectReconciliationOperationStatus.Conflict, result.Status);
+        Assert.Equal(0, registry.ProbeCalls);
+    }
+
+    [Fact]
+    public async Task Concurrent_probe_requests_share_one_reservation_and_one_callback()
+    {
+        var (value, attempt, inputValue, source) = GovernedLoopEffectReconciliationApplicationTestFixture.ProbeCase();
+        var store = new GovernedLoopEffectReconciliationServiceStore();
+        store.SeedCase(value);
+        store.SeedEffect(attempt);
+        var input = ConfigureInput(inputValue, attempt, value);
+        var registry = new RecordingGovernedLoopEffectReconciliationPorts { RegisteredContract = value.ContractMetadata };
+        registry.ProbeResultFactory = _ => new GovernedLoopEffectReconciliationProbeInvocationResult(
+            GovernedLoopEffectReconciliationProbeInvocationStatus.Ready,
+            GovernedLoopEffectReconciliationContractHash.Apply(new GovernedLoopEffectReconciliationObservation(
+                GovernedLoopEffectReconciliationContractLimits.CurrentSchemaVersion,
+                value.CaseId,
+                value.Binding.ContentHash,
+                "callback-observation",
+                source.SourceId,
+                source.ContentHash,
+                GovernedLoopEffectReconciliationObservationKind.Evidence,
+                source.ReliabilityPosture,
+                GovernedLoopEffectReconciliationObservedOutcome.NotApplied,
+                "callback-evidence",
+                attempt.PreconditionEvidenceHash,
+                attempt.Payload.UpdatedAtUtc.AddSeconds(1),
+                attempt.Payload.UpdatedAtUtc.AddSeconds(2),
+                "No matching external effect exists.",
+                string.Empty)));
+        var service = new GovernedLoopEffectReconciliationService(store, new GovernedLoopEffectReconciliationServiceAuthority(), input, registry, store);
+        var request = new GovernedLoopEffectReconciliationProbeRequest("probe-operation-concurrent", Reference(value));
+
+        var results = await Task.WhenAll(service.ProbeAsync(request), service.ProbeAsync(request));
+
+        Assert.Single(results, result => result.Status == GovernedLoopEffectReconciliationOperationStatus.Applied);
+        Assert.Single(results, result => result.Status == GovernedLoopEffectReconciliationOperationStatus.Replayed);
+        Assert.Equal(1, registry.ProbeCalls);
+        Assert.Equal(1, store.ProbeCommitCalls);
+    }
+
+    [Fact]
+    public async Task Probe_response_loss_after_durable_commit_replays_without_a_second_callback()
+    {
+        var (value, attempt, inputValue, source) = GovernedLoopEffectReconciliationApplicationTestFixture.ProbeCase();
+        var store = new GovernedLoopEffectReconciliationServiceStore { ThrowAfterProbeCommit = true };
+        store.SeedCase(value);
+        store.SeedEffect(attempt);
+        var input = ConfigureInput(inputValue, attempt, value);
+        var registry = new RecordingGovernedLoopEffectReconciliationPorts { RegisteredContract = value.ContractMetadata };
+        registry.ProbeResultFactory = _ => new GovernedLoopEffectReconciliationProbeInvocationResult(
+            GovernedLoopEffectReconciliationProbeInvocationStatus.Ready,
+            GovernedLoopEffectReconciliationContractHash.Apply(new GovernedLoopEffectReconciliationObservation(
+                GovernedLoopEffectReconciliationContractLimits.CurrentSchemaVersion,
+                value.CaseId,
+                value.Binding.ContentHash,
+                "response-loss-observation",
+                source.SourceId,
+                source.ContentHash,
+                GovernedLoopEffectReconciliationObservationKind.Evidence,
+                source.ReliabilityPosture,
+                GovernedLoopEffectReconciliationObservedOutcome.NotApplied,
+                "response-loss-evidence",
+                attempt.PreconditionEvidenceHash,
+                attempt.Payload.UpdatedAtUtc.AddSeconds(1),
+                attempt.Payload.UpdatedAtUtc.AddSeconds(2),
+                "No matching external effect exists.",
+                string.Empty)));
+        var service = new GovernedLoopEffectReconciliationService(store, new GovernedLoopEffectReconciliationServiceAuthority(), input, registry, store);
+        var request = new GovernedLoopEffectReconciliationProbeRequest("probe-operation-response-loss", Reference(value));
+
+        var lost = await service.ProbeAsync(request);
+        store.ThrowAfterProbeCommit = false;
+        var replayed = await service.ProbeAsync(request);
+
+        Assert.Equal(GovernedLoopEffectReconciliationOperationStatus.Unavailable, lost.Status);
+        Assert.Equal(GovernedLoopEffectReconciliationOperationStatus.Replayed, replayed.Status);
+        Assert.Equal(1, registry.ProbeCalls);
     }
 
     [Fact]
@@ -303,6 +426,7 @@ public sealed class GovernedLoopEffectReconciliationServiceTests
 
         Assert.Equal(GovernedLoopEffectReconciliationOperationStatus.Invalid, (await service.ProbeAsync(null!)).Status);
         Assert.Equal(GovernedLoopEffectReconciliationOperationStatus.Invalid, (await service.ProbeAsync(new GovernedLoopEffectReconciliationProbeRequest(value.Binding.OperationId, Reference(value)))).Status);
+        Assert.Throws<ArgumentException>(() => new GovernedLoopEffectReconciliationProbeRequest(value.ContractMetadata.ActuatorOperationId, Reference(value)));
 
         input.SetStatus(GovernedLoopEffectReconciliationInputReadStatus.NotFound);
         Assert.Equal(GovernedLoopEffectReconciliationOperationStatus.NotFound, (await service.ProbeAsync(new GovernedLoopEffectReconciliationProbeRequest("probe-operation-input", Reference(value)))).Status);
@@ -425,6 +549,102 @@ public sealed class GovernedLoopEffectReconciliationServiceTests
             Assert.Equal(attempt.ContentHash, result.EffectHead?.ContentHash ?? attempt.ContentHash);
         }
     }
+
+    [Fact]
+    public async Task Probe_maps_reachable_dependency_failures_and_cancellation_without_invoking_an_unvalidated_callback()
+    {
+        var registryFailure = CreateProbeHarness();
+        registryFailure.Registry.ThrowOnRegistryRead = true;
+        Assert.Equal(GovernedLoopEffectReconciliationOperationStatus.Unavailable, (await registryFailure.Service.ProbeAsync(ProbeRequest(registryFailure.Value, "registry-throw"))).Status);
+
+        var nullRegistry = CreateProbeHarness();
+        nullRegistry.Registry.ReturnNullOnRegistryRead = true;
+        Assert.Equal(GovernedLoopEffectReconciliationOperationStatus.Unavailable, (await nullRegistry.Service.ProbeAsync(ProbeRequest(nullRegistry.Value, "registry-null"))).Status);
+
+        var reservationFailure = CreateProbeHarness();
+        reservationFailure.Store.ThrowOnProbeReservation = true;
+        Assert.Equal(GovernedLoopEffectReconciliationOperationStatus.Unavailable, (await reservationFailure.Service.ProbeAsync(ProbeRequest(reservationFailure.Value, "reservation-throw"))).Status);
+
+        var nullReservation = CreateProbeHarness();
+        nullReservation.Store.ReturnNullOnProbeReservation = true;
+        Assert.Equal(GovernedLoopEffectReconciliationOperationStatus.Unavailable, (await nullReservation.Service.ProbeAsync(ProbeRequest(nullReservation.Value, "reservation-null"))).Status);
+
+        var changedInput = CreateProbeHarness();
+        changedInput.Input.BeforeRead = call =>
+        {
+            if (call == 2)
+            {
+                changedInput.Input.SetStatus(GovernedLoopEffectReconciliationInputReadStatus.Unavailable);
+            }
+        };
+        Assert.Equal(GovernedLoopEffectReconciliationOperationStatus.Unavailable, (await changedInput.Service.ProbeAsync(ProbeRequest(changedInput.Value, "changed-input"))).Status);
+
+        var changedAuthority = CreateProbeHarness();
+        changedAuthority.Authority.ResultFactory = request => new GovernedLoopEffectReconciliationAuthorizationResult(
+            changedAuthority.Authority.Calls == 1 ? GovernedLoopEffectReconciliationAuthorizationStatus.Ready : GovernedLoopEffectReconciliationAuthorizationStatus.Denied,
+            request.Purpose,
+            request.Case,
+            request.Binding,
+            changedAuthority.Authority.Calls == 1 ? GovernedLoopEffectAttemptTestFixture.Hash('a') : null);
+        Assert.Equal(GovernedLoopEffectReconciliationOperationStatus.Denied, (await changedAuthority.Service.ProbeAsync(ProbeRequest(changedAuthority.Value, "changed-authority"))).Status);
+
+        var changedRegistry = CreateProbeHarness();
+        changedRegistry.Registry.RegistryReadResultFactory = call => call == 1
+            ? new GovernedLoopEffectReconciliationProbeRegistryReadResult(GovernedLoopEffectReconciliationProbeRegistryReadStatus.Found, changedRegistry.Value.ContractMetadata, changedRegistry.Registry)
+            : throw new IOException("The revalidation read is unavailable.");
+        Assert.Equal(GovernedLoopEffectReconciliationOperationStatus.Unavailable, (await changedRegistry.Service.ProbeAsync(ProbeRequest(changedRegistry.Value, "changed-registry"))).Status);
+
+        foreach (var (validationStatus, expectedStatus) in new[]
+        {
+            (GovernedLoopEffectReconciliationProbeReservationStatus.Corrupt, GovernedLoopEffectReconciliationOperationStatus.Corrupt),
+            (GovernedLoopEffectReconciliationProbeReservationStatus.RepairRequired, GovernedLoopEffectReconciliationOperationStatus.RepairRequired),
+            (GovernedLoopEffectReconciliationProbeReservationStatus.Unavailable, GovernedLoopEffectReconciliationOperationStatus.Unavailable)
+        })
+        {
+            var validation = CreateProbeHarness();
+            validation.Store.ForcedCallbackValidationStatus = validationStatus;
+            Assert.Equal(expectedStatus, (await validation.Service.ProbeAsync(ProbeRequest(validation.Value, $"validation-{validationStatus.ToString().ToLowerInvariant()}"))).Status);
+            Assert.Equal(0, validation.Registry.ProbeCalls);
+        }
+
+        var validationFailure = CreateProbeHarness();
+        validationFailure.Store.ThrowOnCallbackValidation = true;
+        Assert.Equal(GovernedLoopEffectReconciliationOperationStatus.Unavailable, (await validationFailure.Service.ProbeAsync(ProbeRequest(validationFailure.Value, "validation-throw"))).Status);
+
+        var commitFailure = CreateProbeHarness();
+        commitFailure.Store.ThrowOnProbeCommit = true;
+        Assert.Equal(GovernedLoopEffectReconciliationOperationStatus.Unavailable, (await commitFailure.Service.ProbeAsync(ProbeRequest(commitFailure.Value, "commit-throw"))).Status);
+
+        var nullCommit = CreateProbeHarness();
+        nullCommit.Store.ReturnNullOnProbeCommit = true;
+        Assert.Equal(GovernedLoopEffectReconciliationOperationStatus.Unavailable, (await nullCommit.Service.ProbeAsync(ProbeRequest(nullCommit.Value, "commit-null"))).Status);
+
+        var cancelled = CreateProbeHarness();
+        using var cancellation = new CancellationTokenSource();
+        cancelled.Store.BeforeCallbackValidationAction = cancellation.Cancel;
+        await Assert.ThrowsAsync<OperationCanceledException>(() => cancelled.Service.ProbeAsync(ProbeRequest(cancelled.Value, "cancelled-callback"), cancellation.Token));
+    }
+
+    private static (
+        GovernedLoopEffectReconciliationService Service,
+        GovernedLoopEffectReconciliationServiceStore Store,
+        GovernedLoopEffectReconciliationServiceInput Input,
+        GovernedLoopEffectReconciliationServiceAuthority Authority,
+        RecordingGovernedLoopEffectReconciliationPorts Registry,
+        GovernedLoopEffectReconciliationCase Value) CreateProbeHarness()
+    {
+        var (value, attempt, inputValue, _) = GovernedLoopEffectReconciliationApplicationTestFixture.ProbeCase();
+        var store = new GovernedLoopEffectReconciliationServiceStore();
+        store.SeedCase(value);
+        store.SeedEffect(attempt);
+        var input = ConfigureInput(inputValue, attempt, value);
+        var authority = new GovernedLoopEffectReconciliationServiceAuthority();
+        var registry = new RecordingGovernedLoopEffectReconciliationPorts { RegisteredContract = value.ContractMetadata };
+        return (new GovernedLoopEffectReconciliationService(store, authority, input, registry, store), store, input, authority, registry, value);
+    }
+
+    private static GovernedLoopEffectReconciliationProbeRequest ProbeRequest(GovernedLoopEffectReconciliationCase value, string suffix)
+        => new($"probe-operation-{suffix}", Reference(value));
 
     private static GovernedLoopEffectReconciliationServiceInput ConfigureInput(GovernedActuatorInputEvidence inputValue, GovernedLoopEffectAttempt attempt, GovernedLoopEffectReconciliationCase value)
     {

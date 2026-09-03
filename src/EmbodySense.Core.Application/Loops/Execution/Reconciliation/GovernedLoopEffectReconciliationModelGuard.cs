@@ -1,4 +1,5 @@
 using EmbodySense.Core.Application.Loops.Execution.Reconciliation.Models;
+using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Common.Loops.Execution;
 using EmbodySense.Core.Common.Loops.Execution.Effects;
 using EmbodySense.Core.Common.Loops.Execution.Effects.Models;
@@ -19,6 +20,14 @@ internal static class GovernedLoopEffectReconciliationModelGuard
 
     internal static string RequireSha256(string? value, string parameterName)
         => GovernedLoopEffectReconciliationProjectionGuard.RequireSha256(value, parameterName);
+
+    internal static string? RequireOptionalSha256(string? value, string parameterName)
+        => value is null ? null : RequireSha256(value, parameterName);
+
+    internal static string? RequireOptionalEvidenceIdentifier(string? value, string parameterName)
+        => value is null ? null : CustomLoopArtifactIdentifier.IsValid(value, GovernedLoopExecutionLimits.MaxEvidenceReferenceCharacters)
+            ? value
+            : throw new ArgumentException("An optional evidence reference must be bounded and canonical.", parameterName);
 
     internal static long? RequireExpectedCaseVersion(
         long? version,
@@ -154,21 +163,6 @@ internal static class GovernedLoopEffectReconciliationModelGuard
         return exact;
     }
 
-    internal static GovernedLoopEffectAttempt CopyRequiredProbeEffect(
-        GovernedLoopEffectAttempt? value,
-        GovernedLoopEffectReconciliationCaseReference caseReference,
-        string parameterName)
-    {
-        ArgumentNullException.ThrowIfNull(value, parameterName);
-        var exact = CopyOptionalAttempt(value, parameterName)!;
-        if (exact.Payload.Phase != GovernedLoopEffectPhase.ReconciliationRequired)
-        {
-            throw new ArgumentException("A probe reservation must retain a reconciliation-required effect head.", parameterName);
-        }
-
-        return exact;
-    }
-
     internal static GovernedLoopEffectReconciliationEvidenceSource CopyProbeSource(
         GovernedLoopEffectReconciliationEvidenceSource? value,
         GovernedLoopEffectReconciliationCaseReference caseReference,
@@ -191,45 +185,36 @@ internal static class GovernedLoopEffectReconciliationModelGuard
         return GovernedLoopEffectReconciliationContractCopy.Copy(value)!;
     }
 
-    internal static GovernedLoopEffectReconciliationEvidenceSource CopyRequiredProbeSource(
-        GovernedLoopEffectReconciliationEvidenceSource? value,
-        GovernedLoopEffectReconciliationCaseReference caseReference,
-        GovernedLoopEffectReconciliationContractMetadata contract,
+    internal static GovernedLoopEffectReconciliationProbeTarget CopyRequiredProbeTarget(
+        GovernedLoopEffectReconciliationProbeTarget? value,
         string parameterName)
     {
         ArgumentNullException.ThrowIfNull(value, parameterName);
-        var exact = GovernedLoopEffectReconciliationContractValidator.Validate(value).IsValid
-            ? GovernedLoopEffectReconciliationContractCopy.Copy(value)
-            : throw new ArgumentException("A probe reservation must retain a canonical source registration.", parameterName);
-        if (!string.Equals(exact.CaseId, caseReference.CaseId, StringComparison.Ordinal)
-            || !string.Equals(exact.BindingHash, caseReference.BindingHash, StringComparison.Ordinal)
-            || !string.Equals(exact.ReconciliationContractId, contract.ContractId, StringComparison.Ordinal)
-            || exact.ReconciliationContractVersion != contract.ContractVersion
-            || !string.Equals(exact.ReconciliationContractHash, contract.ContentHash, StringComparison.Ordinal))
+        return new GovernedLoopEffectReconciliationProbeTarget(value.TargetFingerprint, value.PreconditionEvidenceHash, value.BeforeEvidenceId);
+    }
+
+    internal static GovernedLoopEffectReconciliationProbeTarget CopyRequiredProbeTarget(
+        GovernedLoopEffectReconciliationProbeTarget? value,
+        GovernedLoopEffectAttempt effect,
+        string parameterName)
+    {
+        var exact = CopyRequiredProbeTarget(value, parameterName);
+        if (!string.Equals(exact.TargetFingerprint, effect.TargetFingerprint, StringComparison.Ordinal)
+            || !string.Equals(exact.PreconditionEvidenceHash, effect.PreconditionEvidenceHash, StringComparison.Ordinal)
+            || !string.Equals(exact.BeforeEvidenceId, effect.BeforeEvidenceId, StringComparison.Ordinal))
         {
-            throw new ArgumentException("A probe reservation source is not bound to its exact case and contract.", parameterName);
+            throw new ArgumentException("The probe target must be the exact value-free target retained by the effect head.", parameterName);
         }
 
         return exact;
     }
 
-    internal static GovernedLoopEffectReconciliationProbeInvocationRequest CopyRequiredProbeInvocation(
-        GovernedLoopEffectReconciliationProbeInvocationRequest? value,
+    internal static GovernedLoopEffectReconciliationProbeReservationContext CopyRequiredProbeContext(
+        GovernedLoopEffectReconciliationProbeReservationContext? value,
         string parameterName)
     {
         ArgumentNullException.ThrowIfNull(value, parameterName);
-        if (value.EffectHead is null || value.Source is null)
-        {
-            throw new ArgumentException("A durable probe reservation requires the exact retained effect head and source registration.", parameterName);
-        }
-
-        return new GovernedLoopEffectReconciliationProbeInvocationRequest(
-            value.Case,
-            value.Binding,
-            value.Contract,
-            value.Input,
-            value.EffectHead,
-            value.Source);
+        return new GovernedLoopEffectReconciliationProbeReservationContext(value.Case, value.Binding, value.Contract, value.EffectHead, value.Source, value.Target, value.InputFingerprint);
     }
 
     internal static GovernedLoopEffectReconciliationProbeInvocationResult CopyRequiredProbeResult(
@@ -245,7 +230,7 @@ internal static class GovernedLoopEffectReconciliationModelGuard
         string parameterName)
     {
         ArgumentNullException.ThrowIfNull(value, parameterName);
-        return new GovernedLoopEffectReconciliationProbeReservation(value.OperationId, value.RequestHash, value.Case, value.EffectHead, value.Source, value.Contract, value.ReservedAtUtc);
+        return new GovernedLoopEffectReconciliationProbeReservation(value.OperationId, value.RequestHash, value.ProbeInvocationId, value.Context, value.ReservedAtUtc);
     }
 
     internal static GovernedLoopEffectReconciliationProbeReservation? CopyReservationPayload(

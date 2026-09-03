@@ -89,15 +89,6 @@ internal static class GovernedLoopEffectReconciliationArtifactNames
     internal static bool TryParseProbeJournalFile(string fileName, out string operationKey)
         => TryParseSingleHashFile(fileName, GovernedLoopEffectReconciliationPersistenceLimits.ProbeJournalFilePrefix, out operationKey);
 
-    internal static bool IsReconciliationArtifact(string fileName)
-        => TryParseCaseVersionFile(fileName, out _, out _, out _)
-            || TryParseCaseHeadFile(fileName, out _)
-            || TryParseReceiptFile(fileName, out _)
-            || TryParseJournalFile(fileName, out _)
-            || TryParseProbeReservationFile(fileName, out _)
-            || TryParseProbeObservationFile(fileName, out _)
-            || TryParseProbeJournalFile(fileName, out _);
-
     internal static bool IsInterruptedAtomicWrite(string fileName)
     {
         if (!fileName.StartsWith(".", StringComparison.Ordinal) || !fileName.EndsWith(".tmp", StringComparison.Ordinal))

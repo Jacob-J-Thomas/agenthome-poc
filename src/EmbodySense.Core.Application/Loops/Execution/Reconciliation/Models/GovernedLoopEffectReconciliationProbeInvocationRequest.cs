@@ -1,40 +1,40 @@
-using EmbodySense.Core.Common.Loops.Execution.Effects.Models;
 using EmbodySense.Core.Common.Loops.Execution.Reconciliation;
 using EmbodySense.Core.Common.Loops.Execution.Reconciliation.Models;
-using EmbodySense.Core.Application.Loops.Execution.Reconciliation;
 
 namespace EmbodySense.Core.Application.Loops.Execution.Reconciliation.Models;
 
-/// <summary>Supplies one registered read-only probe with exact immutable reconciliation input.</summary>
-/// <param name="Case">The exact immutable case reference.</param>
-/// <param name="Binding">The exact reconciliation binding.</param>
-/// <param name="Contract">The exact registered actuator and probe pin.</param>
-/// <param name="Input">The exact reconstructed bounded graph and run input.</param>
-/// <param name="EffectHead">The exact retained reconciliation-required effect head.</param>
-/// <param name="Source">The exact retained source registration used for this invocation.</param>
+/// <summary>Supplies one registered read-only probe with only independent value-free identity and target evidence.</summary>
+/// <param name="ProbeInvocationId">The independent probe invocation identity, never the original actuator operation identity.</param>
+/// <param name="Case">The value-free exact case reference.</param>
+/// <param name="SourceId">The registered probe-source identity.</param>
+/// <param name="SourceRegistrationHash">The exact immutable source registration hash.</param>
+/// <param name="SourceReliabilityPosture">The registered source reliability posture.</param>
+/// <param name="Target">The exact registered target that may be inspected.</param>
 public sealed record GovernedLoopEffectReconciliationProbeInvocationRequest(
+    string ProbeInvocationId,
     GovernedLoopEffectReconciliationCaseReference Case,
-    GovernedLoopEffectReconciliationBinding Binding,
-    GovernedLoopEffectReconciliationContractMetadata Contract,
-    GovernedActuatorInputEvidence Input,
-    GovernedLoopEffectAttempt EffectHead,
-    GovernedLoopEffectReconciliationEvidenceSource Source)
+    string SourceId,
+    string SourceRegistrationHash,
+    GovernedLoopEffectReconciliationReliabilityPosture SourceReliabilityPosture,
+    GovernedLoopEffectReconciliationProbeTarget Target)
 {
-    /// <summary>Gets a detached exact case reference.</summary>
+    /// <summary>Gets the independent probe operation identity.</summary>
+    public string ProbeInvocationId { get; } = GovernedLoopEffectReconciliationModelGuard.RequireIdentifier(ProbeInvocationId, nameof(ProbeInvocationId));
+
+    /// <summary>Gets the detached value-free exact case reference.</summary>
     public GovernedLoopEffectReconciliationCaseReference Case { get; } = GovernedLoopEffectReconciliationModelGuard.CopyRequiredReference(Case, nameof(Case));
 
-    /// <summary>Gets a detached exact reconciliation binding.</summary>
-    public GovernedLoopEffectReconciliationBinding Binding { get; } = GovernedLoopEffectReconciliationModelGuard.CopyBoundBinding(Case, Binding, nameof(Binding));
+    /// <summary>Gets the registered probe-source identity.</summary>
+    public string SourceId { get; } = GovernedLoopEffectReconciliationModelGuard.RequireIdentifier(SourceId, nameof(SourceId));
 
-    /// <summary>Gets a detached exact actuator and probe contract.</summary>
-    public GovernedLoopEffectReconciliationContractMetadata Contract { get; } = GovernedLoopEffectReconciliationModelGuard.CopyRequiredMetadata(Contract, nameof(Contract));
+    /// <summary>Gets the exact immutable source registration hash.</summary>
+    public string SourceRegistrationHash { get; } = GovernedLoopEffectReconciliationModelGuard.RequireSha256(SourceRegistrationHash, nameof(SourceRegistrationHash));
 
-    /// <summary>Gets a detached exact reconstructed input.</summary>
-    public GovernedActuatorInputEvidence Input { get; } = GovernedLoopEffectReconciliationModelGuard.CopyRequiredInput(Input, nameof(Input));
+    /// <summary>Gets the registered source reliability posture.</summary>
+    public GovernedLoopEffectReconciliationReliabilityPosture SourceReliabilityPosture { get; } = Enum.IsDefined(SourceReliabilityPosture) && SourceReliabilityPosture != GovernedLoopEffectReconciliationReliabilityPosture.Unknown
+        ? SourceReliabilityPosture
+        : throw new ArgumentOutOfRangeException(nameof(SourceReliabilityPosture));
 
-    /// <summary>Gets a detached exact retained reconciliation-required effect head.</summary>
-    public GovernedLoopEffectAttempt EffectHead { get; } = GovernedLoopEffectReconciliationModelGuard.CopyProbeEffect(EffectHead, Binding, nameof(EffectHead));
-
-    /// <summary>Gets a detached exact retained source registration.</summary>
-    public GovernedLoopEffectReconciliationEvidenceSource Source { get; } = GovernedLoopEffectReconciliationModelGuard.CopyProbeSource(Source, Case, Binding, Contract, nameof(Source));
+    /// <summary>Gets a detached exact registered probe target.</summary>
+    public GovernedLoopEffectReconciliationProbeTarget Target { get; } = GovernedLoopEffectReconciliationModelGuard.CopyRequiredProbeTarget(Target, nameof(Target));
 }

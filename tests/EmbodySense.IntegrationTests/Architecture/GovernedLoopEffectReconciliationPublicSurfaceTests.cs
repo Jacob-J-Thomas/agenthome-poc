@@ -17,7 +17,7 @@ public sealed class GovernedLoopEffectReconciliationPublicSurfaceTests
         ["IGovernedLoopEffectReconciliationInputSource"] = ["ReadAsync"],
         ["IGovernedLoopEffectReconciliationProbe"] = ["ProbeAsync"],
         ["IGovernedLoopEffectReconciliationProbeRegistry"] = ["ListAsync", "ReadAsync"],
-        ["IGovernedLoopEffectReconciliationProbeReservationStore"] = ["CommitObservationAsync", "ReserveAsync"],
+        ["IGovernedLoopEffectReconciliationProbeReservationStore"] = ["CommitObservationAsync", "ReserveAsync", "ValidateBeforeCallbackAsync"],
         ["IGovernedLoopEffectReconciliationResolutionReader"] = ["ReadAsync"],
         ["IGovernedLoopEffectReconciliationService"] = ["AssessAsync", "DisposeAsync", "OpenAsync", "ProbeAsync", "ReadAsync", "ResolveAsync"],
     };
@@ -167,6 +167,35 @@ public sealed class GovernedLoopEffectReconciliationPublicSurfaceTests
             .ToArray();
 
         Assert.Empty(violations);
+    }
+
+    [Fact]
+    public void Probe_callback_request_is_value_free_and_carries_no_original_operation_identity()
+    {
+        var root = FindRepositoryRoot();
+        var path = Path.Combine(root, "src", ApplicationProject, ReconciliationPath, "Models", "GovernedLoopEffectReconciliationProbeInvocationRequest.cs");
+        var source = CSharpSyntaxTree.ParseText(File.ReadAllText(path)).GetRoot();
+        var request = Assert.Single(PublicTopLevelTypes(source).OfType<RecordDeclarationSyntax>());
+        Assert.Equal("GovernedLoopEffectReconciliationProbeInvocationRequest", request.Identifier.ValueText);
+        Assert.Equal(
+            ["ProbeInvocationId", "Case", "SourceId", "SourceRegistrationHash", "SourceReliabilityPosture", "Target"],
+            request.ParameterList!.Parameters.Select(parameter => parameter.Identifier.ValueText));
+        Assert.Equal(
+            ["string", "GovernedLoopEffectReconciliationCaseReference", "string", "string", "GovernedLoopEffectReconciliationReliabilityPosture", "GovernedLoopEffectReconciliationProbeTarget"],
+            request.ParameterList.Parameters.Select(parameter => parameter.Type!.ToString()));
+        Assert.Equal(
+            ["ProbeInvocationId", "Case", "SourceId", "SourceRegistrationHash", "SourceReliabilityPosture", "Target"],
+            request.Members.OfType<PropertyDeclarationSyntax>().Select(property => property.Identifier.ValueText));
+        Assert.Equal(
+            ["string", "GovernedLoopEffectReconciliationCaseReference", "string", "string", "GovernedLoopEffectReconciliationReliabilityPosture", "GovernedLoopEffectReconciliationProbeTarget"],
+            request.Members.OfType<PropertyDeclarationSyntax>().Select(property => property.Type.ToString()));
+        var callbackSurface = request.WithoutTrivia().NormalizeWhitespace().ToFullString();
+        Assert.DoesNotContain("OperationId", callbackSurface, StringComparison.Ordinal);
+        Assert.DoesNotContain("ActuatorOperationId", callbackSurface, StringComparison.Ordinal);
+        Assert.DoesNotContain("EffectHead", callbackSurface, StringComparison.Ordinal);
+        Assert.DoesNotContain("CanonicalJson", callbackSurface, StringComparison.Ordinal);
+        Assert.DoesNotContain("Capability", callbackSurface, StringComparison.Ordinal);
+        Assert.DoesNotContain("Authority", callbackSurface, StringComparison.Ordinal);
     }
 
     private static IEnumerable<string> PublicOperationNames(BaseTypeDeclarationSyntax declaration)
