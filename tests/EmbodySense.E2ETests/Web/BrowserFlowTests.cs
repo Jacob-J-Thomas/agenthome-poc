@@ -67,6 +67,18 @@ public sealed partial class BrowserFlowTests
     private static readonly TimeSpan _visibleGovernedInvocationTimeout = TimeSpan.FromSeconds(150);
 
     [Fact]
+    public void Browser_health_http_failure_matcher_requires_exact_route_and_status()
+    {
+        const string Route = "/api/effect-reconciliation/case?";
+        var expected = (UrlFragment: Route, StatusCode: 503);
+
+        Assert.True(HeadlessBrowserSession.MatchesExpectedHttpFailure("HTTP error response: {\"url\":\"https://example.test/api/effect-reconciliation/case?\",\"status\":503}", expected));
+        Assert.True(HeadlessBrowserSession.MatchesExpectedHttpFailure("browser error for /api/effect-reconciliation/case? with status of 503 (Service Unavailable)", expected));
+        Assert.False(HeadlessBrowserSession.MatchesExpectedHttpFailure("HTTP error response: {\"url\":\"https://example.test/api/effect-reconciliation/other?\",\"status\":503}", expected));
+        Assert.False(HeadlessBrowserSession.MatchesExpectedHttpFailure("HTTP error response: {\"url\":\"https://example.test/api/effect-reconciliation/case?\",\"status\":500}", expected));
+    }
+
+    [Fact]
     public void Restart_diagnostic_classifier_accepts_connection_reset_only_for_expected_target_traffic()
     {
         const string TargetAuthority = "127.0.0.1:5001";
@@ -2438,24 +2450,48 @@ public sealed partial class BrowserFlowTests
             }
         }
 
-        public async Task AssertHealthyAsync(params (string UrlFragment, int StatusCode)[] expectedHttpFailures)
+        public Task AssertHealthyAsync(params (string UrlFragment, int StatusCode)[] expectedHttpFailures)
+            => AssertHealthyAsync(expectedHttpFailures, []);
+
+        public async Task AssertHealthyAsync(
+            IReadOnlyList<(string UrlFragment, int StatusCode)> expectedHttpFailures,
+            IReadOnlyList<(string UrlFragment, int StatusCode)> atLeastOneExpectedHttpFailures)
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
             _ = await EvaluateAsync("true", timeout.Token);
             Assert.False(_process.HasExited, $"Browser process exited unexpectedly.{Environment.NewLine}{FormatOutput()}");
             Assert.Null(_readerFailure);
-            var diagnostics = GetDiagnosticsSnapshot().ToList();
+            var diagnosticsSnapshot = GetDiagnosticsSnapshot();
+            var diagnostics = diagnosticsSnapshot.ToList();
             foreach (var expected in expectedHttpFailures)
             {
                 ArgumentException.ThrowIfNullOrWhiteSpace(expected.UrlFragment);
                 Assert.InRange(expected.StatusCode, 400, 599);
-                var removed = diagnostics.RemoveAll(item => item.Contains(expected.UrlFragment, StringComparison.Ordinal)
-                    && (item.Contains($"\"status\":{expected.StatusCode}", StringComparison.Ordinal)
-                        || item.Contains($"status of {expected.StatusCode} (", StringComparison.Ordinal)));
+                var removed = diagnostics.RemoveAll(item => MatchesExpectedHttpFailure(item, expected));
                 Assert.True(removed > 0, $"The expected browser HTTP {expected.StatusCode} failure for `{expected.UrlFragment}` was not observed.");
             }
+
+            var observedAtLeastOneExpectedHttpFailure = false;
+            foreach (var expected in atLeastOneExpectedHttpFailures)
+            {
+                ArgumentException.ThrowIfNullOrWhiteSpace(expected.UrlFragment);
+                Assert.InRange(expected.StatusCode, 400, 599);
+                observedAtLeastOneExpectedHttpFailure |= diagnosticsSnapshot.Any(item => MatchesExpectedHttpFailure(item, expected));
+            }
+
+            foreach (var expected in atLeastOneExpectedHttpFailures)
+            {
+                _ = diagnostics.RemoveAll(item => MatchesExpectedHttpFailure(item, expected));
+            }
+
+            Assert.True(atLeastOneExpectedHttpFailures.Count == 0 || observedAtLeastOneExpectedHttpFailure, "At least one allowlisted browser HTTP failure was not observed.");
             Assert.Empty(diagnostics);
         }
+
+        internal static bool MatchesExpectedHttpFailure(string diagnostic, (string UrlFragment, int StatusCode) expected)
+            => diagnostic.Contains(expected.UrlFragment, StringComparison.Ordinal)
+                && (diagnostic.Contains($"\"status\":{expected.StatusCode}", StringComparison.Ordinal)
+                    || diagnostic.Contains($"status of {expected.StatusCode} (", StringComparison.Ordinal));
 
         public async Task WriteDiagnosticsAsync(string directory)
         {
