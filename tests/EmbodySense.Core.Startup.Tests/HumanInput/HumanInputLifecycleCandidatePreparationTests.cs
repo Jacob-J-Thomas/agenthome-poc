@@ -185,16 +185,175 @@ public sealed class HumanInputLifecycleCandidatePreparationTests
         Assert.Null(result.CandidateKey);
     }
 
-    private static Fixture CreateFixture(HumanInputResponsePolicyKind policyKind, long lifecycleVersion = 1)
+    [Fact]
+    public async Task Reroute_and_amend_map_catalog_and_expected_state_failures_without_payloads()
+    {
+        var fixture = CreateFixture(HumanInputResponsePolicyKind.FirstValid);
+        var rerouteInput = RerouteInput(fixture.Request, fixture.Clock.GetUtcNow().AddMinutes(5));
+        var amendInput = AmendInput(fixture.Request, fixture.Clock.GetUtcNow().AddMinutes(5), fixture.Clock.GetUtcNow().AddMinutes(30));
+        var catalogEntry = fixture.Catalog.ReadResponse!.Entry;
+
+        foreach (var (status, expected) in new[]
+        {
+            (HumanInputRequestCatalogReadStatus.NotFound, HumanInputSupersedePreparationStatus.NotFound),
+            (HumanInputRequestCatalogReadStatus.Invalid, HumanInputSupersedePreparationStatus.Invalid),
+            (HumanInputRequestCatalogReadStatus.Unavailable, HumanInputSupersedePreparationStatus.Unavailable),
+            (HumanInputRequestCatalogReadStatus.Ambiguous, HumanInputSupersedePreparationStatus.Ambiguous),
+            (HumanInputRequestCatalogReadStatus.Unknown, HumanInputSupersedePreparationStatus.Ambiguous)
+        })
+        {
+            fixture.Catalog.ReadResponse = new HumanInputRequestCatalogReadResult(status, 1, null);
+            var suffix = status.ToString().ToLowerInvariant();
+            var reroute = await fixture.Preparer.PrepareRerouteAsync(rerouteInput with { OperationId = $"reroute-catalog-{suffix}" });
+            var amend = await fixture.Preparer.PrepareAmendAsync(amendInput with { OperationId = $"amend-catalog-{suffix}" });
+            Assert.Equal(expected, reroute.Status);
+            Assert.Equal(expected, amend.Status);
+            Assert.Empty(reroute.Options);
+            Assert.Null(amend.CandidateKey);
+        }
+
+        fixture.Catalog.ReadResponse = null!;
+        Assert.Equal(HumanInputSupersedePreparationStatus.NotFound, (await fixture.Preparer.PrepareRerouteAsync(rerouteInput)).Status);
+
+        fixture.Catalog.ReadResponse = new HumanInputRequestCatalogReadResult(HumanInputRequestCatalogReadStatus.Ready, 1, null);
+        var emptyEntry = await fixture.Preparer.PrepareAmendAsync(amendInput);
+        Assert.Equal(HumanInputSupersedePreparationStatus.Ambiguous, emptyEntry.Status);
+
+        var conflictingHead = fixture.Lifecycle.Head! with { LifecycleVersion = fixture.Lifecycle.Head.LifecycleVersion + 1 };
+        fixture.Catalog.ReadResponse = new HumanInputRequestCatalogReadResult(
+            HumanInputRequestCatalogReadStatus.Ready,
+            1,
+            new HumanInputRequestCatalogEntry(new HumanInputRequestLifecycleStoreSnapshot(conflictingHead, [fixture.Request], fixture.Lifecycle.Operations), null!));
+        var conflict = await fixture.Preparer.PrepareRerouteAsync(rerouteInput);
+        Assert.Equal(HumanInputSupersedePreparationStatus.Conflict, conflict.Status);
+        Assert.Empty(conflict.Options);
+
+        fixture.Catalog.ReadResponse = new HumanInputRequestCatalogReadResult(HumanInputRequestCatalogReadStatus.Ready, 1, catalogEntry);
+        var invalidExpected = await fixture.Preparer.PrepareAmendAsync(amendInput with { ExpectedLifecycleStatus = "Completed" });
+        Assert.Equal(HumanInputSupersedePreparationStatus.Invalid, invalidExpected.Status);
+        Assert.Null(invalidExpected.CandidateKey);
+    }
+
+    [Fact]
+    public async Task Reroute_rejects_ambiguous_request_or_grant_evidence_before_candidate_generation()
+    {
+        var fixture = CreateFixture(HumanInputResponsePolicyKind.FirstValid);
+        var input = RerouteInput(fixture.Request, fixture.Clock.GetUtcNow().AddMinutes(5));
+
+        var duplicateVersions = new HumanInputRequestLifecycleStoreSnapshot(fixture.Lifecycle.Head, [fixture.Request, fixture.Request], fixture.Lifecycle.Operations);
+        fixture.Catalog.ReadResponse = new HumanInputRequestCatalogReadResult(HumanInputRequestCatalogReadStatus.Ready, 1, new HumanInputRequestCatalogEntry(duplicateVersions, null!));
+        var duplicate = await fixture.Preparer.PrepareRerouteAsync(input);
+        Assert.Equal(HumanInputSupersedePreparationStatus.Ambiguous, duplicate.Status);
+
+        var malformedVersion = fixture.Request with { RequestHash = "invalid" };
+        var malformedVersions = new HumanInputRequestLifecycleStoreSnapshot(fixture.Lifecycle.Head, [malformedVersion], fixture.Lifecycle.Operations);
+        fixture.Catalog.ReadResponse = new HumanInputRequestCatalogReadResult(HumanInputRequestCatalogReadStatus.Ready, 1, new HumanInputRequestCatalogEntry(malformedVersions, null!));
+        var malformed = await fixture.Preparer.PrepareRerouteAsync(input);
+        Assert.Equal(HumanInputSupersedePreparationStatus.Ambiguous, malformed.Status);
+
+        var missingGrant = new HumanInputRequestLifecycleStoreSnapshot(fixture.Lifecycle.Head, [fixture.Request], []);
+        fixture.Catalog.ReadResponse = new HumanInputRequestCatalogReadResult(HumanInputRequestCatalogReadStatus.Ready, 1, new HumanInputRequestCatalogEntry(missingGrant, null!));
+        var noGrant = await fixture.Preparer.PrepareRerouteAsync(input);
+        Assert.Equal(HumanInputSupersedePreparationStatus.Ambiguous, noGrant.Status);
+    }
+
+    [Theory]
+    [InlineData(AuthorityGrantResolutionStatus.NotFound, HumanInputSupersedePreparationStatus.NotFound)]
+    [InlineData(AuthorityGrantResolutionStatus.Invalid, HumanInputSupersedePreparationStatus.NotFound)]
+    [InlineData(AuthorityGrantResolutionStatus.Revoked, HumanInputSupersedePreparationStatus.Denied)]
+    [InlineData(AuthorityGrantResolutionStatus.Unavailable, HumanInputSupersedePreparationStatus.Denied)]
+    [InlineData(AuthorityGrantResolutionStatus.Unknown, HumanInputSupersedePreparationStatus.Denied)]
+    public async Task Reroute_maps_non_active_grants_without_exposing_resolution_details(AuthorityGrantResolutionStatus grantStatus, HumanInputSupersedePreparationStatus expectedStatus)
+    {
+        var fixture = CreateFixture(HumanInputResponsePolicyKind.FirstValid);
+        fixture.GrantResolver.Resolution = new AuthorityGrantResolution(grantStatus, fixture.GrantResolver.Resolution.RequestedReference, null!, new AuthorityCeiling([], [], 0, CapabilitySideEffectClass.None, false, false, false), string.Empty, fixture.Clock.GetUtcNow());
+
+        var result = await fixture.Preparer.PrepareRerouteAsync(RerouteInput(fixture.Request, fixture.Clock.GetUtcNow().AddMinutes(5)) with { OperationId = $"reroute-grant-{grantStatus.ToString().ToLowerInvariant()}" });
+
+        Assert.Equal(expectedStatus, result.Status);
+        Assert.Empty(result.Options);
+        Assert.Null(result.ExpiresAtUtc);
+    }
+
+    [Fact]
+    public async Task Reroute_maps_grant_resolver_failure_and_no_valid_option_as_fail_closed()
+    {
+        var resolverFailure = CreateFixture(HumanInputResponsePolicyKind.FirstValid);
+        resolverFailure.GrantResolver.ResolveException = new InvalidOperationException("private grant detail");
+        var unavailable = await resolverFailure.Preparer.PrepareRerouteAsync(RerouteInput(resolverFailure.Request, resolverFailure.Clock.GetUtcNow().AddMinutes(5)));
+        Assert.Equal(HumanInputSupersedePreparationStatus.Unavailable, unavailable.Status);
+        Assert.Empty(unavailable.Options);
+
+        var noOption = CreateFixture(HumanInputResponsePolicyKind.FirstValid, respondentCount: 1);
+        var conflict = await noOption.Preparer.PrepareRerouteAsync(RerouteInput(noOption.Request, noOption.Clock.GetUtcNow().AddMinutes(5)));
+        Assert.Equal(HumanInputSupersedePreparationStatus.Conflict, conflict.Status);
+        Assert.Empty(conflict.Options);
+
+        var atLimit = CreateFixture(HumanInputResponsePolicyKind.FirstValid, HumanInputRequestLifecycleContractLimits.MaxLifecycleVersion);
+        var limited = await atLimit.Preparer.PrepareRerouteAsync(RerouteInput(atLimit.Request, atLimit.Clock.GetUtcNow().AddMinutes(5)) with { ExpectedLifecycleVersion = HumanInputRequestLifecycleContractLimits.MaxLifecycleVersion });
+        Assert.Equal(HumanInputSupersedePreparationStatus.LimitExceeded, limited.Status);
+        Assert.Empty(limited.Options);
+    }
+
+    [Fact]
+    public async Task Reroute_rejects_malformed_shape_and_cancellation_before_catalog_access()
+    {
+        var fixture = CreateFixture(HumanInputResponsePolicyKind.FirstValid);
+        var input = RerouteInput(fixture.Request, fixture.Clock.GetUtcNow().AddMinutes(5));
+
+        Assert.Equal(HumanInputSupersedePreparationStatus.Invalid, (await fixture.Preparer.PrepareRerouteAsync(null)).Status);
+        Assert.Equal(HumanInputSupersedePreparationStatus.Invalid, (await fixture.Preparer.PrepareRerouteAsync(input with { ExpectedRequest = null })).Status);
+        Assert.Equal(HumanInputSupersedePreparationStatus.Invalid, (await fixture.Preparer.PrepareRerouteAsync(input with { ExpectedRequest = input.ExpectedRequest! with { RequestHash = "invalid" } })).Status);
+        Assert.Equal(HumanInputSupersedePreparationStatus.Invalid, (await fixture.Preparer.PrepareRerouteAsync(input with { CandidateExpiresAtUtc = fixture.Clock.GetUtcNow().AddMinutes(5).ToOffset(TimeSpan.FromHours(1)) })).Status);
+
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => fixture.Preparer.PrepareRerouteAsync(input, cancellation.Token));
+    }
+
+    [Fact]
+    public async Task Amend_rejects_expiry_privacy_and_content_validation_failures()
+    {
+        var fixture = CreateFixture(HumanInputResponsePolicyKind.FirstValid);
+        var now = fixture.Clock.GetUtcNow();
+        var input = AmendInput(fixture.Request, now.AddMinutes(5), now.AddMinutes(30));
+
+        Assert.Equal(HumanInputSupersedePreparationStatus.Invalid, (await fixture.Preparer.PrepareAmendAsync(input with { RequestExpiresAtUtc = fixture.Request.Timing.RequestedAtUtc.AddTicks(-1) })).Status);
+        Assert.Equal(HumanInputSupersedePreparationStatus.Invalid, (await fixture.Preparer.PrepareAmendAsync(input with { RequestExpiresAtUtc = fixture.Request.Timing.RequestedAtUtc.Add(HumanInputLimits.MaxResponseWindow).AddTicks(1) })).Status);
+        Assert.Equal(HumanInputSupersedePreparationStatus.Invalid, (await fixture.Preparer.PrepareAmendAsync(input with { PrivacyClass = "Unknown" })).Status);
+        Assert.Equal(HumanInputSupersedePreparationStatus.Invalid, (await fixture.Preparer.PrepareAmendAsync(input with { Purpose = new string('x', HumanInputLimits.MaxPurposeCharacters + 1) })).Status);
+        Assert.Equal(HumanInputSupersedePreparationStatus.Invalid, (await fixture.Preparer.PrepareAmendAsync(input with { CandidateExpiresAtUtc = now.AddMinutes(5).ToOffset(TimeSpan.FromHours(1)) })).Status);
+
+        var sensitive = CreateFixture(HumanInputResponsePolicyKind.FirstValid, privacyClass: HumanInputPrivacyClass.Sensitive);
+        var downgrade = AmendInput(sensitive.Request, sensitive.Clock.GetUtcNow().AddMinutes(5), sensitive.Clock.GetUtcNow().AddMinutes(30)) with { PrivacyClass = HumanInputPrivacyClass.Private.ToString() };
+        var result = await sensitive.Preparer.PrepareAmendAsync(downgrade);
+        Assert.Equal(HumanInputSupersedePreparationStatus.Invalid, result.Status);
+        Assert.Null(result.CandidateKey);
+    }
+
+    [Fact]
+    public async Task Amend_rejects_malformed_shape_and_cancellation_without_catalog_access()
+    {
+        var fixture = CreateFixture(HumanInputResponsePolicyKind.FirstValid);
+        var input = AmendInput(fixture.Request, fixture.Clock.GetUtcNow().AddMinutes(5), fixture.Clock.GetUtcNow().AddMinutes(30));
+
+        Assert.Equal(HumanInputSupersedePreparationStatus.Invalid, (await fixture.Preparer.PrepareAmendAsync(null)).Status);
+        Assert.Equal(HumanInputSupersedePreparationStatus.Invalid, (await fixture.Preparer.PrepareAmendAsync(input with { ExpectedRequest = null })).Status);
+        Assert.Equal(HumanInputSupersedePreparationStatus.Invalid, (await fixture.Preparer.PrepareAmendAsync(input with { RequestExpiresAtUtc = default })).Status);
+
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => fixture.Preparer.PrepareAmendAsync(input, cancellation.Token));
+    }
+
+    private static Fixture CreateFixture(HumanInputResponsePolicyKind policyKind, long lifecycleVersion = 1, int respondentCount = 3, HumanInputPrivacyClass privacyClass = HumanInputPrivacyClass.Private)
     {
         var policyName = policyKind.ToString().ToLowerInvariant();
         var baseMutation = HumanInputRequestStoreTestData.CreateMutation($"request-candidate-{policyName}", $"version-candidate-{policyName}", $"create-candidate-{policyName}");
-        var respondents = new[]
-        {
-            new HumanInputEligibleRespondent("user-one", "role-one", "route-one"),
-            new HumanInputEligibleRespondent("user-two", "role-two", "route-two"),
-            new HumanInputEligibleRespondent("user-three", "role-three", "route-three")
-        };
+        var respondentNames = new[] { "one", "two", "three" };
+        var respondents = respondentNames.Take(respondentCount)
+            .Select(name => new HumanInputEligibleRespondent($"user-{name}", $"role-{name}", $"route-{name}"))
+            .ToArray();
         var policy = policyKind switch
         {
             HumanInputResponsePolicyKind.FirstValid => new HumanInputResponsePolicy(policyKind, null, null),
@@ -204,7 +363,7 @@ public sealed class HumanInputLifecycleCandidatePreparationTests
             HumanInputResponsePolicyKind.ManualSelection => new HumanInputResponsePolicy(policyKind, null, ["role-one"]),
             _ => throw new ArgumentOutOfRangeException(nameof(policyKind))
         };
-        var request = HumanInputRequestHash.Apply(baseMutation.RequestToAppend! with { EligibleRespondents = respondents, ResponsePolicy = policy, RequestHash = string.Empty });
+        var request = HumanInputRequestHash.Apply(baseMutation.RequestToAppend! with { EligibleRespondents = respondents, ResponsePolicy = policy, PrivacyClass = privacyClass, RequestHash = string.Empty });
         var head = HumanInputRequestStoreTestData.Head(request, lifecycleVersion, HumanInputRequestLifecycleStatus.Pending, 0, null, null, baseMutation.Operation.OperationId, HumanInputRequestStoreTestData.Time);
         var evidence = HumanInputRequestStoreTestData.Evidence(HumanInputRequestLifecycleOperationKind.Create, request.RequestId, baseMutation.Operation.OperationId, request.RequestHash, HumanInputRequestStoreTestData.Time, null, head, request);
         var lifecycle = new HumanInputRequestLifecycleStoreSnapshot(head, [request], [evidence]);
