@@ -153,18 +153,19 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - name: Download solution evidence
+      - name: Download solution receipts
         uses: actions/download-artifact@v7
         with:
-          name: verification-solution-receipt-${{ github.run_attempt }}
+          pattern: verification-solution-receipt-*
           path: fan-in/solution
+          merge-multiple: false
 
-      # Follow-up: https://github.com/Jacob-J-Thomas/agenthome-poc/issues/511 tracks mixed-attempt receipts after a failed-only rerun.
-      - name: Download static evidence
+      - name: Download static receipts
         uses: actions/download-artifact@v7
         with:
-          name: verification-contract-receipt-${{ github.run_attempt }}
+          pattern: verification-contract-receipt-*
           path: fan-in/static
+          merge-multiple: false
 
       - name: Authenticate complete verification evidence
         shell: pwsh
