@@ -26,11 +26,15 @@ internal sealed class HumanInputRuntimeFacadeTestAuthorityProvider : IAgentRunti
 
     internal HumanInputRequest? LifecycleCandidateRequest { get; set; }
 
+    internal IDictionary<string, HumanInputRequest> LifecycleCandidates { get; } = new Dictionary<string, HumanInputRequest>(StringComparer.Ordinal);
+
     internal AuthorityGrantReference? LifecycleGrantReference { get; set; }
 
     internal bool DelayLifecycleTermsUntilCancellation { get; set; }
 
     internal bool ThrowDuringLifecycleTerms { get; set; }
+
+    internal bool ReturnNullLifecycleTerms { get; set; }
 
     internal int LifecycleAuthorizations { get; private set; }
 
@@ -54,12 +58,20 @@ internal sealed class HumanInputRuntimeFacadeTestAuthorityProvider : IAgentRunti
             throw new InvalidOperationException("The test authority boundary is unavailable.");
         }
 
+        if (ReturnNullLifecycleTerms)
+        {
+            return null!;
+        }
+
         if (DelayLifecycleTermsUntilCancellation)
         {
             await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
         }
 
-        return new AgentRuntimeHumanInputLifecycleTerms(LifecycleTermsStatus, LifecycleCandidateRequest, LifecycleGrantReference);
+        var candidate = request.CandidateKey is not null && LifecycleCandidates.TryGetValue(request.CandidateKey, out var selectedCandidate)
+            ? selectedCandidate
+            : LifecycleCandidateRequest;
+        return new AgentRuntimeHumanInputLifecycleTerms(LifecycleTermsStatus, candidate, LifecycleGrantReference);
     }
 
     public Task<AgentRuntimeHumanInputLifecycleAuthorization> AuthorizeLifecycleAsync(

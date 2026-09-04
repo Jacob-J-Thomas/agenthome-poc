@@ -1,0 +1,93 @@
+using EmbodySense.Core.Application.HumanInput.Lifecycle.Models;
+using EmbodySense.Core.Common.HumanInput.Lifecycle.Models;
+using EmbodySense.Core.Common.HumanInput.Models;
+using EmbodySense.Core.Common.Workspace;
+using EmbodySense.Core.Persistence.Capabilities;
+using EmbodySense.Core.Persistence.HumanInput.Requests;
+using EmbodySense.Core.Persistence.Tests.HumanInput.Requests;
+using EmbodySense.Core.Startup.HumanInput.Models;
+using EmbodySense.Core.Startup.Runtime;
+using EmbodySense.Core.Startup.Runtime.Models;
+using EmbodySense.Core.Startup.Tests.Runtime;
+using EmbodySense.Core.Startup.Workspace;
+using EmbodySense.Tests.Support;
+
+namespace EmbodySense.Core.Startup.Tests.HumanInput;
+
+public sealed class HumanInputRuntimeFacadeRerouteReplayTests
+{
+    [Fact]
+    public async Task Reroute_replay_requires_the_selected_candidate_to_match_durable_evidence()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var store = new HumanInputRequestStore(new WorkspacePaths(workspace.RootPath), new FileCapabilityCatalogTrustProvider(workspace.ServerStatePath));
+        var create = AgentRuntimeFactoryTests.CreateFreshHumanInputMutation(
+            workspace.RootPath,
+            "request-reroute-replay-selection",
+            "version-reroute-replay-selection",
+            "create-reroute-replay-selection",
+            HumanInputRequestStoreTestData.HashA);
+        var request = Assert.IsType<HumanInputRequest>(create.RequestToAppend);
+        var head = Assert.IsType<HumanInputRequestLifecycleHead>(create.PrimaryHeadToWrite);
+        var selectedCandidate = HumanInputRequestStoreTestData.Rehash(request with
+        {
+            RequestVersionId = "version-reroute-selected",
+            EligibleRespondents = [new HumanInputEligibleRespondent("user-two", "role-two", "route-two")],
+            RequestHash = string.Empty
+        });
+        var otherCandidate = HumanInputRequestStoreTestData.Rehash(request with
+        {
+            RequestVersionId = "version-reroute-other",
+            EligibleRespondents = [new HumanInputEligibleRespondent("user-three", "role-three", "route-three")],
+            RequestHash = string.Empty
+        });
+        var reroute = AgentRuntimeFactoryTests.CreateDurableLifecycleReplayMutation(
+            HumanInputRequestLifecycleOperationKind.Reroute,
+            request,
+            head,
+            1,
+            "reroute-replay-selection",
+            selectedCandidate);
+        Assert.Equal(HumanInputRequestLifecycleStoreCommitStatus.Committed, (await store.CommitAsync(create)).Status);
+        Assert.Equal(HumanInputRequestLifecycleStoreCommitStatus.Committed, (await store.CommitAsync(reroute)).Status);
+
+        var provider = new HumanInputRuntimeFacadeTestAuthorityProvider
+        {
+            LifecycleGrantReference = reroute.Operation.GrantReference
+        };
+        provider.LifecycleCandidates.Add("candidate-selected", selectedCandidate);
+        provider.LifecycleCandidates.Add("candidate-other", otherCandidate);
+        await using var runtime = await AgentRuntimeFactoryTests.CreateRuntimeAsync(workspace, AgentRuntimeSurface.Web, humanInputAuthorityProvider: provider);
+        var input = new HumanInputLifecycleOperationInput(
+            "reroute-replay-selection",
+            HumanInputRequestLifecycleOperationKind.Reroute,
+            request.RequestId,
+            head.LifecycleVersion,
+            head.Status,
+            HumanInputRequestStoreTestData.Reference(request),
+            "candidate-selected",
+            "Replay one exact lifecycle operation.");
+
+        var replayed = await runtime.HumanInput.SubmitLifecycleAsync(input);
+        var conflict = await runtime.HumanInput.SubmitLifecycleAsync(input with { CandidateKey = "candidate-other" });
+        provider.LifecycleTermsStatus = AgentRuntimeHumanInputAuthorityStatus.Unavailable;
+        var replayedAfterRegistryLoss = await runtime.HumanInput.SubmitLifecycleAsync(input with { CandidateKey = null });
+        provider.LifecycleTermsStatus = AgentRuntimeHumanInputAuthorityStatus.Ready;
+        provider.ThrowDuringLifecycleTerms = true;
+        var providerFailure = await runtime.HumanInput.SubmitLifecycleAsync(input with { CandidateKey = "candidate-provider-failure" });
+        provider.ThrowDuringLifecycleTerms = false;
+        provider.ReturnNullLifecycleTerms = true;
+        var nullTerms = await runtime.HumanInput.SubmitLifecycleAsync(input with { CandidateKey = "candidate-null-terms" });
+        var posture = await runtime.HumanInput.ReadAsync(request.RequestId);
+
+        Assert.Equal(HumanInputOperationStatus.Replayed, replayed.Status);
+        Assert.Equal(HumanInputOperationStatus.Conflict, conflict.Status);
+        Assert.Equal(HumanInputOperationStatus.Replayed, replayedAfterRegistryLoss.Status);
+        Assert.Equal(HumanInputOperationStatus.Unavailable, providerFailure.Status);
+        Assert.Equal(HumanInputOperationStatus.Unavailable, nullTerms.Status);
+        Assert.Equal(selectedCandidate.RequestVersionId, posture.Request!.CurrentRequest.RequestVersionId);
+        Assert.Equal(5, provider.LifecycleTermsResolutions);
+        Assert.Equal(2, provider.LifecycleAuthorizations);
+    }
+}

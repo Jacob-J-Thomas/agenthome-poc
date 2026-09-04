@@ -228,10 +228,11 @@ public sealed class HumanInputRuntimeFacade
     /// <exception cref="OperationCanceledException">Thrown when cancellation is requested before durable intent begins.</exception>
     /// <remarks>When one exact same-target operation is already durable, the facade reconstructs its server-owned binding,
     /// candidate, grant, and reason from authenticated evidence instead of resolving mutable current terms. The lifecycle service
-    /// still reauthorizes the current actor before returning replay evidence. For Reroute and Amend, a committed operation is
-    /// replayed from durable operation evidence using its operation identifier and exact expected request state; the ephemeral
-    /// candidate key is intentionally not replay authority and may differ or be absent after a process restart. Before commit,
-    /// a candidate key must still resolve exactly and a mismatched key fails closed.</remarks>
+    /// still reauthorizes the current actor before returning replay evidence. A resolvable Reroute candidate key must match the
+    /// durable selection, so another option for the same operation identity cannot replay a prior route. Candidate keys remain
+    /// process-local and are not durable replay authority: after registry loss or restart, the durable operation can still replay.
+    /// Other candidate-bearing operations replay from durable evidence because their preparation admits only one candidate for an
+    /// operation identity.</remarks>
     public async Task<HumanInputOperationResult> SubmitLifecycleAsync(
         HumanInputLifecycleOperationInput? input,
         CancellationToken cancellationToken = default)
@@ -552,6 +553,12 @@ public sealed class HumanInputRuntimeFacade
             return Conflict(input.OperationId);
         }
 
+        var rerouteSelectionFailure = await ValidateRerouteReplayCandidateSelectionAsync(input, evidence, cancellationToken).ConfigureAwait(false);
+        if (rerouteSelectionFailure is not null)
+        {
+            return rerouteSelectionFailure;
+        }
+
         HumanInputRequest? candidate = null;
         if (evidence.CandidateRequest is { } candidateReference)
         {
@@ -610,6 +617,69 @@ public sealed class HumanInputRuntimeFacade
         }
 
         return await MutateLifecycleAsync(command, input.RequestId, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<HumanInputOperationResult?> ValidateRerouteReplayCandidateSelectionAsync(
+        HumanInputLifecycleOperationInput input,
+        HumanInputRequestLifecycleOperationEvidence evidence,
+        CancellationToken cancellationToken)
+    {
+        if (input.Kind != HumanInputRequestLifecycleOperationKind.Reroute
+            || evidence.Outcome != HumanInputRequestLifecycleOperationOutcome.Committed)
+        {
+            return null;
+        }
+
+        if (evidence.CandidateRequest is not { } expectedCandidate)
+        {
+            return Ambiguous(input.OperationId);
+        }
+
+        AgentRuntimeHumanInputLifecycleTerms terms;
+        try
+        {
+            terms = await _provider!.ResolveLifecycleTermsAsync(
+                new AgentRuntimeHumanInputLifecycleTermsRequest(
+                    input.OperationId,
+                    input.Kind,
+                    input.RequestId,
+                    input.ExpectedLifecycleVersion,
+                    input.ExpectedLifecycleStatus,
+                    input.ExpectedRequest,
+                    input.CandidateKey,
+                    input.Reason),
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            return Unavailable(input.OperationId);
+        }
+
+        if (terms is null)
+        {
+            return Unavailable(input.OperationId);
+        }
+
+        if (terms.Status == AgentRuntimeHumanInputAuthorityStatus.Unavailable)
+        {
+            return null;
+        }
+
+        if (terms.Status != AgentRuntimeHumanInputAuthorityStatus.Ready
+            || terms.CandidateRequest is null || terms.GrantReference is null)
+        {
+            return terms.Status == AgentRuntimeHumanInputAuthorityStatus.Denied
+                ? Denied(input.OperationId)
+                : Unavailable(input.OperationId);
+        }
+
+        return Matches(terms.CandidateRequest, expectedCandidate)
+            ? null
+            : Conflict(input.OperationId);
     }
 
     private async Task<HumanInputOperationResult> SubmitPersistedResponseReplayAsync(
