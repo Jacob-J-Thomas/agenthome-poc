@@ -171,8 +171,8 @@ function Get-FanInSourceOwnedLaneDefinitions {
     foreach ($project in $projects) {
         $lanes = @(Get-VerificationTestProjectLanes -TestProject $project -NestedProcessOnly:($Component -ceq "NestedProcess") -SolutionCoreOnly:($Component -ceq "Solution"))
         foreach ($lane in $lanes) {
-            $additionalExclusions = if ($project.Name -ceq "EmbodySense.E2ETests.csproj") { @("BrowserFlowTests") } else { @() }
-            $definitions.Add([pscustomobject]@{ name = "tests-$($project.BaseName)-$($lane.Name)"; projectName = $project.BaseName; filter = Get-VerificationTestLaneFilter -Lane $lane -AdditionalExclusions $additionalExclusions })
+            $additionalExclusions = @(if ($project.Name -ceq "EmbodySense.E2ETests.csproj") { "BrowserFlowTests" })
+            $definitions.Add([pscustomobject]@{ name = "$($project.BaseName)-$($lane.Name)"; projectName = $project.BaseName; filter = Get-VerificationTestLaneFilter -Lane $lane -AdditionalExclusions $additionalExclusions })
         }
     }
     return @($definitions)
@@ -183,7 +183,7 @@ function Assert-FanInSolutionEvidence {
 
     $laneDefinitions = Read-FanInJsonFile -Path (Join-Path $ResultsRoot "required-test-lanes.json") -Description "Required-test lane definitions"
     $lanes = @($laneDefinitions.lanes)
-    Assert-FanInCondition -Condition ($laneDefinitions.schemaVersion -eq 1 -and $lanes.Count -eq 9 -and @($lanes | Group-Object name | Where-Object Count -ne 1).Count -eq 0 -and @($lanes | Where-Object { [string]$_.name -ceq "tests-EmbodySense.Core.Startup.Tests-nested-process" }).Count -eq 0) -Message "Solution evidence must contain nine unique non-nested required-test lanes."
+    Assert-FanInCondition -Condition ($laneDefinitions.schemaVersion -eq 1 -and $lanes.Count -eq 9 -and @($lanes | Group-Object name | Where-Object Count -ne 1).Count -eq 0 -and @($lanes | Where-Object { [string]$_.name -ceq "EmbodySense.Core.Startup.Tests-nested-process" }).Count -eq 0) -Message "Solution evidence must contain nine unique non-nested required-test lanes."
     Assert-FanInCondition -Condition ([int]$Evidence.laneCount -eq 9) -Message "Solution component evidence lane count is not nine."
     $sourceLanes = @(Get-FanInSourceOwnedLaneDefinitions -Component "Solution")
     Assert-FanInCondition -Condition ($sourceLanes.Count -eq 9) -Message "Solution source-owned lane partition is not exactly nine lanes."
@@ -221,7 +221,7 @@ function Assert-FanInNestedEvidence {
     Assert-FanInCondition -Condition ([int]$Evidence.laneCount -eq 1 -and [bool]$Evidence.inventoryComplete -and [bool]$Evidence.coverageComplete) -Message "Nested-process component evidence is incomplete."
     $laneDefinitions = Read-FanInJsonFile -Path (Join-Path $ResultsRoot "required-test-lanes.json") -Description "Nested required-test lane definitions"
     $lanes = @($laneDefinitions.lanes)
-    $expectedLaneName = "tests-EmbodySense.Core.Startup.Tests-nested-process"
+    $expectedLaneName = "EmbodySense.Core.Startup.Tests-nested-process"
     $nestedFilter = [string]$lanes[0].filter
     Assert-FanInCondition -Condition ($laneDefinitions.schemaVersion -eq 1 -and $lanes.Count -eq 1 -and [string]$lanes[0].name -ceq $expectedLaneName -and [string]$lanes[0].projectName -ceq "EmbodySense.Core.Startup.Tests" -and @([regex]::Matches($nestedFilter, "FullyQualifiedName=")).Count -eq 5 -and $nestedFilter -match "VerificationTier!=Stress") -Message "Nested-process lane ownership is not the exact source-owned Startup fixture lane."
     $sourceLanes = @(Get-FanInSourceOwnedLaneDefinitions -Component "NestedProcess")
@@ -380,7 +380,11 @@ function Resolve-FanInCoverageFilePath {
         }
     }
 
-    if ($null -eq $resolvedPath -or (-not $resolvedPath.StartsWith($packageRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -and $resolvedPath -cne $packageRoot) -or (-not $resolvedPath.StartsWith($sourceRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -and $resolvedPath -cne $sourceRoot) -or -not (Test-Path -LiteralPath $resolvedPath -PathType Leaf)) {
+    # The pinned SDK reports the regex generator's virtual source in Cobertura but
+    # does not emit that file to disk. Retain its authenticated line keys and hits.
+    $generatedRegexPath = Join-Path $packageRoot "obj/Release/net10.0/System.Text.RegularExpressions.Generator/System.Text.RegularExpressions.Generator.RegexGenerator/RegexGenerator.g.cs"
+    $isGeneratedRegexSource = $null -ne $resolvedPath -and $resolvedPath.Equals($generatedRegexPath, [StringComparison]::OrdinalIgnoreCase)
+    if ($null -eq $resolvedPath -or (-not $resolvedPath.StartsWith($packageRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -and $resolvedPath -cne $packageRoot) -or (-not $resolvedPath.StartsWith($sourceRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -and $resolvedPath -cne $sourceRoot) -or (-not $isGeneratedRegexSource -and -not (Test-Path -LiteralPath $resolvedPath -PathType Leaf))) {
         throw "Coverage report file path does not identify an existing source file beneath src/${PackageName}: $FileName"
     }
     return $resolvedPath
@@ -414,7 +418,7 @@ function Invoke-FanInCoverageAggregate {
         $sourceProjectNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
         foreach ($lane in @($laneDocument.lanes)) {
             Assert-FanInCondition -Condition (-not [string]::IsNullOrWhiteSpace([string]$lane.name) -and -not [string]::IsNullOrWhiteSpace([string]$lane.projectName)) -Message "Component source-owned lane definitions contain an incomplete lane identity."
-            [void]$sourceLaneNames.Add([string]$lane.name)
+            [void]$sourceLaneNames.Add("tests-$($lane.name)")
             [void]$sourceProjectNames.Add([string]$lane.projectName)
         }
         Assert-FanInCondition -Condition ([int]$coverageManifest.laneReportCount -eq $sourceLaneNames.Count) -Message "Component coverage manifest lane count does not match its source-owned lane definition."
@@ -438,7 +442,7 @@ function Invoke-FanInCoverageAggregate {
             $artifact = Get-FanInCoverageArtifactFile -ResultsRoot $resultsRoot -ArtifactEntries $manifestEntries -CoveragePath $coveragePath -DeclaredResultsRoot $declaredResultsRoot -Description "Coverage report"
             if ($reportKind -ceq "lane") {
                 $trxArtifact = Get-FanInCoverageArtifactFile -ResultsRoot $resultsRoot -ArtifactEntries $manifestEntries -CoveragePath ([string]$report.trxPath) -DeclaredResultsRoot $declaredResultsRoot -Description "Coverage lane TRX"
-                Assert-FanInCondition -Condition ([IO.Path]::GetFileNameWithoutExtension($trxArtifact.Path) -ceq [string]$report.laneName) -Message "Coverage lane report TRX filename is not bound to its source-owned lane: $coveragePath"
+                Assert-FanInCondition -Condition (("tests-" + [IO.Path]::GetFileNameWithoutExtension($trxArtifact.Path)) -ceq [string]$report.laneName) -Message "Coverage lane report TRX filename is not bound to its source-owned lane: $coveragePath"
             }
             Assert-FanInCondition -Condition ([int64]$report.length -eq (Get-Item -LiteralPath $artifact.Path).Length -and [string]$report.sha256 -ceq (Get-FileHash -LiteralPath $artifact.Path -Algorithm SHA256).Hash.ToLowerInvariant()) -Message "Coverage report hash or length is not authenticated: $coveragePath"
             $artifactByCoveragePath[$coveragePath] = $artifact
@@ -547,7 +551,7 @@ function Invoke-FanInInventoryAggregate {
     }
 
     Assert-FanInCondition -Condition ($lanes.Count -eq 10 -and @($lanes.Values | ForEach-Object projectName | Sort-Object -Unique).Count -eq 9) -Message "Aggregate must reconstruct exactly ten disjoint lanes across nine canonical projects."
-    Assert-FanInCondition -Condition (@($lanes.Keys | Where-Object { $_ -ceq "tests-EmbodySense.Core.Startup.Tests-nested-process" }).Count -eq 1) -Message "Aggregate is missing the exact Startup nested-process lane."
+    Assert-FanInCondition -Condition (@($lanes.Keys | Where-Object { $_ -ceq "EmbodySense.Core.Startup.Tests-nested-process" }).Count -eq 1) -Message "Aggregate is missing the exact Startup nested-process lane."
     $actualById = $actualResults | Group-Object TestId -AsHashTable
     foreach ($expectedId in $expectedById.Keys) {
         Assert-FanInCondition -Condition $actualById.ContainsKey($expectedId) -Message "Aggregate execution inventory is missing test ID: $expectedId"

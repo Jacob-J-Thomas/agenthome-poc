@@ -138,7 +138,7 @@ function New-TestComponent {
         Write-TestJson -Path (Join-Path $resultsRoot "required-test-partition.json") -Value ([ordered]@{ schemaVersion = 1; canonicalInventoryCount = if ($Component -ceq "nested-process") { 1 } else { 9 }; laneDefinitionCount = if ($Component -ceq "nested-process") { 1 } else { 9 }; canonicalTestCount = $expectedCount; laneTestCount = $expectedCount; emptyLanes = @(); missing = @(); unexpected = @(); overlap = @(); duplicateCanonical = @(); duplicateExecutionIds = @() })
         Write-TestJson -Path (Join-Path $resultsRoot "required-execution-tests.json") -Value ([ordered]@{ schemaVersion = 1; totalTests = $expectedCount; tests = @($expectedTests) })
         Write-TestJson -Path (Join-Path $resultsRoot "required-test-report.json") -Value ([ordered]@{ schemaVersion = 1; expectedCount = $expectedCount; executedCount = $expectedCount; uniqueExecutedCount = $expectedCount; missing = @(); unexpected = @(); crossReportOverlap = @(); duplicateExecutionId = @(); nonPassing = @() })
-        $reportEntries = @($tests | ForEach-Object { $file = Get-Item -LiteralPath $_.CoveragePath; [ordered]@{ kind = "lane"; laneName = $_.Lane.name; laneResultsRoot = [IO.Path]::GetDirectoryName($_.CoveragePath); trxPath = $_.TrxPath; deploymentRoot = "Deployment"; path = $_.CoveragePath; length = $file.Length; sha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant() } })
+        $reportEntries = @($tests | ForEach-Object { $file = Get-Item -LiteralPath $_.CoveragePath; [ordered]@{ kind = "lane"; laneName = "tests-$($_.Lane.name)"; laneResultsRoot = [IO.Path]::GetDirectoryName($_.CoveragePath); trxPath = $_.TrxPath; deploymentRoot = "Deployment"; path = $_.CoveragePath; length = $file.Length; sha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant() } })
         Write-TestJson -Path (Join-Path $resultsRoot "coverage-manifest.json") -Value ([ordered]@{ schemaVersion = 1; resultsRoot = $resultsRoot; minimumWriteTimeUtc = "2026-01-01T00:00:00.0000000Z"; laneReportCount = $tests.Count; childReportCount = 0; aliasReportCount = 0; reports = @($reportEntries); aliases = @() })
         Write-TestJson -Path (Join-Path $resultsRoot "coverage-summary.json") -Value ([ordered]@{ schemaVersion = 1; threshold = 0.9; reports = @($reportEntries | ForEach-Object { [ordered]@{ path = $_.path } }); packages = @(Get-TestPackages | ForEach-Object { [ordered]@{ package = $_; lineRate = 1 } }); failures = @() })
         $laneCount = $tests.Count
@@ -170,6 +170,15 @@ try {
     New-TestComponent -Root $solutionRoot -Component "solution"
     New-TestComponent -Root $nestedRoot -Component "nested-process"
     New-TestComponent -Root $staticRoot -Component "static-contracts"
+    $productionNestedLane = Get-Content -LiteralPath (Join-Path $nestedRoot "VerificationResults/required-test-lanes.json") -Raw | ConvertFrom-Json
+    $productionNestedCoverage = Get-Content -LiteralPath (Join-Path $nestedRoot "VerificationResults/coverage-manifest.json") -Raw | ConvertFrom-Json
+    Assert-True -Condition ($productionNestedLane.lanes[0].name -ceq "EmbodySense.Core.Startup.Tests-nested-process") -Message "Inventory lane identity must match the canonical verifier producer."
+    Assert-True -Condition ($productionNestedCoverage.reports[0].laneName -ceq "tests-EmbodySense.Core.Startup.Tests-nested-process") -Message "Coverage phase identity must retain the canonical tests prefix."
+    $productionSolutionLanes = Get-Content -LiteralPath (Join-Path $solutionRoot "VerificationResults/required-test-lanes.json") -Raw | ConvertFrom-Json
+    $ordinaryLane = @($productionSolutionLanes.lanes | Where-Object { $_.projectName -ceq "EmbodySense.Cli.Command.Tests" })
+    $browserLane = @($productionSolutionLanes.lanes | Where-Object { $_.projectName -ceq "EmbodySense.E2ETests" })
+    Assert-True -Condition ($ordinaryLane.Count -eq 1 -and $ordinaryLane[0].filter -ceq "(VerificationTier!=Stress)") -Message "Empty additional exclusions must preserve the canonical ordinary-project filter."
+    Assert-True -Condition ($browserLane.Count -eq 1 -and $browserLane[0].filter -ceq "(FullyQualifiedName!~BrowserFlowTests)&(VerificationTier!=Stress)") -Message "The required inventory must retain the canonical BrowserFlowTests exclusion."
     $output = Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot
     $outputText = [string]::Join("`n", @($output | ForEach-Object { [string]$_ }))
     Assert-True -Condition $outputText.Contains("lanes=10 projects=9") -Message "The successful fan-in did not prove the ten-lane nine-project aggregate."
@@ -236,6 +245,14 @@ try {
         New-TestComponent -Root $nestedRoot -Component "nested-process" -NestedTestCount $nestedCount
         Assert-Throws -Message "nested fixture count $nestedCount" -ExpectedMessage "Nested-process partition reconciliation is incomplete or non-clean" -Action { Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot }
     }
+    New-TestComponent -Root $nestedRoot -Component "nested-process"
+
+    $nestedCoverageManifestPath = Join-Path $nestedRoot "VerificationResults/coverage-manifest.json"
+    $wrongCoveragePhase = Get-Content -LiteralPath $nestedCoverageManifestPath -Raw | ConvertFrom-Json
+    $wrongCoveragePhase.reports[0].laneName = "EmbodySense.Core.Startup.Tests-nested-process"
+    Write-TestJson -Path $nestedCoverageManifestPath -Value $wrongCoveragePhase
+    Update-TestComponentAuth -Root $nestedRoot
+    Assert-Throws -Message "coverage phase identity lacks producer prefix" -ExpectedMessage "not bound to one source-owned lane" -Action { Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot }
     New-TestComponent -Root $nestedRoot -Component "nested-process"
 
     Assert-Throws -Message "failed nested child" -Action { Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot -NestedResult "failure" }
@@ -308,6 +325,25 @@ try {
     [IO.File]::WriteAllText($nestedTrx.FullName, $failedTrxText, [Text.UTF8Encoding]::new($false))
     Update-TestComponentAuth -Root $nestedRoot
     Assert-Throws -Message "non-passed nested outcome" -ExpectedMessage "non-passing test results" -Action { Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot }
+
+    New-TestComponent -Root $solutionRoot -Component "solution"
+    New-TestComponent -Root $nestedRoot -Component "nested-process"
+    $nestedCoverage = Get-ChildItem -LiteralPath (Join-Path $nestedRoot "VerificationResults") -Recurse -Filter "*.cobertura.xml" -File | Select-Object -First 1
+    $clientsSourceFile = Get-TestSourceFile -PackageName "EmbodySense.Core.Clients"
+    $clientsRelativeFile = [IO.Path]::GetRelativePath($repoRoot, $clientsSourceFile.FullName).Replace([IO.Path]::DirectorySeparatorChar, "/")
+    $generatedRegexFile = "src/EmbodySense.Core.Clients/obj/Release/net10.0/System.Text.RegularExpressions.Generator/System.Text.RegularExpressions.Generator.RegexGenerator/RegexGenerator.g.cs"
+    $generatedCoverageText = (Get-Content -LiteralPath $nestedCoverage.FullName -Raw).Replace($clientsRelativeFile, $generatedRegexFile)
+    [IO.File]::WriteAllText($nestedCoverage.FullName, $generatedCoverageText, [Text.UTF8Encoding]::new($false))
+    Update-TestCoverageAuth -Root $nestedRoot
+    Update-TestComponentAuth -Root $nestedRoot
+    $generatedOutput = Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot
+    Assert-True -Condition ([string]::Join("`n", @($generatedOutput)).Contains("lanes=10 projects=9")) -Message "Authenticated virtual regex-generator source must survive aggregation on a clean checkout."
+    $generatedPattern = '(<package name="EmbodySense.Core.Clients".*?<line number="1" hits=")1"'
+    $uncoveredGeneratedText = [regex]::Replace($generatedCoverageText, $generatedPattern, { param($match) $match.Groups[1].Value + '0"' }, [Text.RegularExpressions.RegexOptions]::Singleline)
+    [IO.File]::WriteAllText($nestedCoverage.FullName, $uncoveredGeneratedText, [Text.UTF8Encoding]::new($false))
+    Update-TestCoverageAuth -Root $nestedRoot
+    Update-TestComponentAuth -Root $nestedRoot
+    Assert-Throws -Message "uncovered generated source retains coverage denominator" -ExpectedMessage "below the unchanged 90% floor" -Action { Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot }
 
     New-TestComponent -Root $solutionRoot -Component "solution"
     New-TestComponent -Root $nestedRoot -Component "nested-process"
