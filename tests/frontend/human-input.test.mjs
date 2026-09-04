@@ -1000,8 +1000,12 @@ test("Human Input retains bounded reroute and amend commit envelopes after respo
     const fixture = createFixture();
     const current = posture();
     const calls = [];
-    const candidateExpiresAtUtc = new Date(Date.now() + 10 * 60 * 1000).toISOString();
-    const requestExpiresAtUtc = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
+    const candidateExpiresAtUtc = new Date(
+      Date.now() + 10 * 60 * 1000,
+    ).toISOString();
+    const requestExpiresAtUtc = new Date(
+      Date.now() + 2 * 60 * 60 * 1000,
+    ).toISOString();
     let commitAttempts = 0;
     const requestJson = async (url, options = {}) => {
       calls.push({ url, options });
@@ -1038,18 +1042,24 @@ test("Human Input retains bounded reroute and amend commit envelopes after respo
     };
     const surface = createHumanInputSurface({
       document: fixture.document,
-      window: { crypto: { randomUUID: () => `${kind}-response-loss-operation` } },
+      window: {
+        crypto: { randomUUID: () => `${kind}-response-loss-operation` },
+      },
       requestJson,
     });
     await surface.activate();
     if (kind === "reroute") {
-      fixture.elements.humanInputRerouteExpiresAt.value = localDateInputAfter(10);
+      fixture.elements.humanInputRerouteExpiresAt.value =
+        localDateInputAfter(10);
       await clickAndFlush(fixture.elements.humanInputRerouteButton);
     } else {
-      fixture.elements.humanInputAmendPurpose.value = "Amended response-loss purpose";
-      fixture.elements.humanInputAmendPrompt.value = "Amended response-loss prompt";
+      fixture.elements.humanInputAmendPurpose.value =
+        "Amended response-loss purpose";
+      fixture.elements.humanInputAmendPrompt.value =
+        "Amended response-loss prompt";
       fixture.elements.humanInputAmendPrivacyClass.value = "sensitive";
-      fixture.elements.humanInputAmendExpiresAt.value = requestExpiresAtUtc.slice(0, 16);
+      fixture.elements.humanInputAmendExpiresAt.value =
+        requestExpiresAtUtc.slice(0, 16);
       await clickAndFlush(fixture.elements.humanInputAmendButton);
     }
     await clickAndFlush(
