@@ -563,6 +563,11 @@ Assert-Contains -Actual $verifyWorkflow -Expected "run: ./scripts/verify-with-wa
 Assert-Contains -Actual $verifyWorkflow -Expected "uses: actions/download-artifact@v7" -Message "The protected fan-in must transport child artifacts explicitly."
 Assert-Contains -Actual $verifyWorkflow -Expected 'name: verification-solution-diagnostics-${{ github.run_attempt }}' -Message "The solution evidence artifact must bind to the current workflow attempt."
 Assert-Contains -Actual $verifyWorkflow -Expected 'name: verification-contract-diagnostics-${{ github.run_attempt }}' -Message "The static evidence artifact must bind to the current workflow attempt."
+Assert-Contains -Actual $verifyWorkflow -Expected 'cache: "npm"' -Message "Hosted static verification must restore the lockfile-keyed npm package cache."
+Assert-Contains -Actual $verifyWorkflow -Expected 'cache-dependency-path: package-lock.json' -Message "Hosted npm cache identity must remain bound to the canonical dependency lockfile."
+Assert-Contains -Actual $verifyWorkflow -Expected 'package-manager-cache: false' -Message "Explicit npm cache configuration must not be replaced by package metadata inference."
+Assert-True -Condition ([regex]::Matches($verifyWorkflow, [regex]::Escape('cache: "npm"')).Count -eq 1) -Message "The npm cache must have exactly one hosted verification owner."
+Assert-True -Condition ([regex]::Matches($verifyWorkflow, [regex]::Escape('cache-dependency-path: package-lock.json')).Count -eq 1) -Message "The canonical lockfile must be the sole hosted npm cache dependency path."
 Assert-Contains -Actual $verifyWorkflow -Expected 'name: verification-solution-receipt-${{ github.run_attempt }}' -Message "The protected solution receipt must bind to the current workflow attempt."
 Assert-Contains -Actual $verifyWorkflow -Expected 'name: verification-contract-receipt-${{ github.run_attempt }}' -Message "The protected static receipt must bind to the current workflow attempt."
 foreach ($solutionReceiptPath in @("verification-component-evidence.json", "verification-component-manifest.json", "verification-watchdog-evidence.json", "watchdog.log", "required-test-lanes.json", "required-test-partition.json", "required-execution-tests.json", "required-test-report.json", "coverage-manifest.json", "coverage-summary.json", "**/*.trx")) {
