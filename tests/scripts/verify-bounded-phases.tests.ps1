@@ -32,6 +32,9 @@ $cancellationHostProjectPath = Join-Path $repoRoot "tests\EmbodySense.Cancellati
 $cancellationHostProgramPath = Join-Path $repoRoot "tests\EmbodySense.CancellationHost\Program.cs"
 $scheduleStoreTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Triggers\Schedules\ScheduleStoreTests.cs"
 $scheduleStoreHostPath = Join-Path $repoRoot "tests\Shared\ScheduleStoreCrossProcessHost.cs"
+$customLoopRunStoreTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Loops\CustomLoopRunStoreTests.cs"
+$restrictiveReaderProcessPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Verification\WindowsRestrictiveReaderProcess.cs"
+$restrictiveReaderHostPath = Join-Path $repoRoot "tests\Shared\WindowsRestrictiveReaderCrossProcessHost.cs"
 $reconciliationProbeProcessTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Loops\Execution\Reconciliation\GovernedLoopEffectReconciliationProbeProcessTests.cs"
 $admissionStoreTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Loops\Admission\GovernedLoopAdmissionStoreTests.cs"
 $admissionStoreFixturePath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Loops\Admission\GovernedLoopAdmissionStoreTestFixture.cs"
@@ -203,6 +206,9 @@ $cancellationHostProject = Get-Content -LiteralPath $cancellationHostProjectPath
 $cancellationHostProgram = Get-Content -LiteralPath $cancellationHostProgramPath -Raw
 $scheduleStoreTest = Get-Content -LiteralPath $scheduleStoreTestPath -Raw
 $scheduleStoreHost = Get-Content -LiteralPath $scheduleStoreHostPath -Raw
+$customLoopRunStoreTest = Get-Content -LiteralPath $customLoopRunStoreTestPath -Raw
+$restrictiveReaderProcess = Get-Content -LiteralPath $restrictiveReaderProcessPath -Raw
+$restrictiveReaderHost = Get-Content -LiteralPath $restrictiveReaderHostPath -Raw
 $reconciliationProbeProcessTest = Get-Content -LiteralPath $reconciliationProbeProcessTestPath -Raw
 $admissionStoreTest = Get-Content -LiteralPath $admissionStoreTestPath -Raw
 $admissionStoreFixture = Get-Content -LiteralPath $admissionStoreFixturePath -Raw
@@ -278,6 +284,23 @@ Assert-Contains -Actual $cancellationHostProgram -Expected '["schedule-store", v
 Assert-Contains -Actual $cancellationHostProject -Expected '..\Shared\ScheduleStoreCrossProcessHost.cs' -Message "The cancellation host must compile the shared schedule worker."
 Assert-Contains -Actual $persistenceTestProject -Expected '..\Shared\ScheduleStoreCrossProcessHost.cs' -Message "Persistence tests must compile the same shared schedule worker."
 Assert-Contains -Actual $cancellationHostProcess -Expected 'internal static CrossProcessProcess StartAppHostOwned' -Message "Direct schedule workers must be job-owned for bounded cleanup."
+Assert-Contains -Actual $restrictiveReaderProcess -Expected 'CancellationHostProcess.StartAppHostOwned(Operation, path, readyPath, releasePath, resultPath)' -Message "Restrictive-reader workers must use the authenticated job-owned apphost route."
+Assert-Contains -Actual $restrictiveReaderProcess -Expected 'CrossProcessReadinessDiagnostics.WaitForChildrenReadyAsync' -Message "Restrictive-reader startup must use bounded child readiness diagnostics."
+Assert-Contains -Actual $restrictiveReaderProcess -Expected 'CrossProcessReadinessDiagnostics.WaitForChildrenCompletedAsync' -Message "Restrictive-reader release must use bounded child completion diagnostics."
+Assert-Contains -Actual $restrictiveReaderProcess -Expected '_readinessTimeout = TimeSpan.FromSeconds(30)' -Message "Restrictive-reader startup must retain the bounded fixture-start allowance."
+Assert-Contains -Actual $restrictiveReaderProcess -Expected '_process.WaitForExitAsync().WaitAsync(_terminationTimeout)' -Message "Restrictive-reader cleanup must wait boundedly for the terminated apphost before disposal."
+Assert-Contains -Actual $restrictiveReaderProcess -Expected '_terminationTimeout = TimeSpan.FromSeconds(5)' -Message "Restrictive-reader cleanup must retain the five-second process-exit bound."
+Assert-Contains -Actual $restrictiveReaderProcess -Expected 'var suffix = Guid.NewGuid().ToString("N")' -Message "Restrictive-reader markers must use an operation-unique identity."
+Assert-Contains -Actual $restrictiveReaderProcess -Expected 'DeleteMarker(_resultPath)' -Message "Restrictive-reader cleanup must remove its result marker after ownership is released."
+Assert-Contains -Actual $restrictiveReaderHost -Expected 'new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read)' -Message "Restrictive-reader host must preserve the exact Windows read-sharing contract."
+Assert-Contains -Actual $restrictiveReaderHost -Expected '_releaseTimeout = TimeSpan.FromSeconds(60)' -Message "Restrictive-reader host release waiting must remain bounded."
+Assert-Contains -Actual $restrictiveReaderHost -Expected 'string.Equals(readyPath, releasePath, StringComparison.Ordinal)' -Message "Restrictive-reader host must reject ambiguous marker identities before opening the target."
+Assert-Contains -Actual $cancellationHostProgram -Expected '["windows-restrictive-reader", var readerPath' -Message "The cancellation host must expose the restrictive-reader apphost operation."
+Assert-Contains -Actual $cancellationHostProject -Expected '..\Shared\WindowsRestrictiveReaderCrossProcessHost.cs' -Message "The cancellation host must compile the shared restrictive-reader worker."
+Assert-Contains -Actual $persistenceTestProject -Expected '..\Shared\WindowsRestrictiveReaderCrossProcessHost.cs' -Message "Persistence tests must compile the same shared restrictive-reader worker."
+Assert-True -Condition ([regex]::Matches($customLoopRunStoreTest, 'WindowsRestrictiveReaderProcess\.StartAsync').Count -eq 3) -Message "All three restrictive-reader facts must use the bounded owned process wrapper."
+Assert-True -Condition ([regex]::Matches($customLoopRunStoreTest, 'restrictiveReader\.ReleaseAsync\(\)').Count -eq 3) -Message "All three restrictive-reader facts must complete the explicit release handshake."
+Assert-True -Condition ($customLoopRunStoreTest.IndexOf('WindowsFileLock.OpenRestrictiveReader', [StringComparison]::Ordinal) -lt 0) -Message "Persistence restrictive-reader tests must not launch the PowerShell WindowsFileLock fixture."
 Assert-Contains -Actual $reconciliationProbeProcessTest -Expected 'public async Task Cross_process_probe_worker()' -Message "The reconciliation probe worker Fact must remain discoverable in the Persistence inventory."
 Assert-Contains -Actual $reconciliationProbeProcessTest -Expected 'CoverageChildProcessAssembly.AddExpectedTerminationVstestArguments(startInfo, assemblyPath, testName);' -Message "Reconciliation probe crash workers must retain the exact expected-termination VSTest route."
 Assert-Contains -Actual $reconciliationProbeProcessTest -Expected 'CoverageChildProcessAssembly.AddCoordinationOnlyVstestArguments(startInfo, assemblyPath, testName);' -Message "Successful reconciliation probe workers must remain report-free coordination children whose production paths are covered by the parent lane."

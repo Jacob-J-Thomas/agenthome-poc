@@ -46,6 +46,7 @@
     <Compile Include="..\EmbodySense.Core.Common.Tests\Triggers\Schedules\ScheduleContractTestData.cs" Link="Support\ScheduleContractTestData.cs" />
     <Compile Include="..\Shared\ScheduleStoreCrossProcessHost.cs" Link="Support\ScheduleStoreCrossProcessHost.cs" />
     <Compile Include="..\Shared\GovernedLoopEffectReconciliationCrossProcessHost.cs" Link="Support\GovernedLoopEffectReconciliationCrossProcessHost.cs" />
+    <Compile Include="..\Shared\WindowsRestrictiveReaderCrossProcessHost.cs" Link="Support\WindowsRestrictiveReaderCrossProcessHost.cs" />
   </ItemGroup>
 
   <PropertyGroup>

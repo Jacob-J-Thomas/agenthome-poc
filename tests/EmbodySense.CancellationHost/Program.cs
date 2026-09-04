@@ -217,6 +217,11 @@ if (args is ["schedule-store", var scheduleWorkspaceRoot, var scheduleGatePath, 
     return await ScheduleStoreCrossProcessHost.RunAsync(scheduleWorkspaceRoot, scheduleGatePath, scheduleReadyPath, scheduleOutputPath, scheduleId, scheduleOperation, scheduleVariant, scheduleMaxDurabilityArtifacts, scheduleCrashBoundary);
 }
 
+if (args is ["windows-restrictive-reader", var readerPath, var readerReadyPath, var readerReleasePath, var readerResultPath])
+{
+    return await WindowsRestrictiveReaderCrossProcessHost.RunAsync(readerPath, readerReadyPath, readerReleasePath, readerResultPath);
+}
+
 if (args is ["sequential-audit-record-then-exit", var auditWorkspaceRoot])
 {
     return await SequentialAuditCrossProcessHost.RecordThenExitAsync(auditWorkspaceRoot);
