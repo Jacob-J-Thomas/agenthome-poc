@@ -48,7 +48,7 @@ function Normalize-ConsoleDiagnostic {
 . $scheduleScriptPath
 
 Assert-Contains -Actual $verifyScript -Expected '$normalPullRequestVerification = $VerificationComponent -eq "Full" -and $VerificationTier -eq "PullRequest" -and -not $BrowserE2EOnly' -Message "Only the complete pull-request verifier may use the full preflight."
-Assert-Contains -Actual $verifyScript -Expected '[ValidateSet("Full", "Solution", "StaticContracts")]' -Message "Hosted verification must expose explicit full, solution, and static component modes."
+Assert-Contains -Actual $verifyScript -Expected '[ValidateSet("Full", "Solution", "StaticContracts", "NestedProcess")]' -Message "Hosted verification must expose explicit full, solution, static, and nested-process component modes."
 Assert-Contains -Actual $verifyScript -Expected 'Invoke-StaticVerificationContracts' -Message "The separate static child must have one serial execution owner."
 Assert-Contains -Actual $verifyScript -Expected '$preflightProcessHeavyWeight = [Math]::Max(1, [int][Math]::Ceiling($preflightResourceCapacity / 2.0))' -Message "The preflight build weight must adapt safely to the explicit four-process capacity."
 Assert-Contains -Actual $verifyScript -Expected 'Add-VerificationParallelPhase -Name "build-pullrequest" -FileName "dotnet" -Arguments $buildArguments -TimeoutSeconds 900 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "build-pullrequest.log") -EstimatedDurationSeconds 90 -Weight $preflightProcessHeavyWeight -ResourceClass "ProcessHeavy"' -Message "The canonical build must be a bounded, logged, process-heavy preflight phase."

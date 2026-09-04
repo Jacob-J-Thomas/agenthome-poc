@@ -3,7 +3,7 @@ param(
     [switch]$SkipRestore,
     [switch]$RunBrowserE2E,
     [switch]$BrowserE2EOnly,
-    [ValidateSet("Full", "Solution", "StaticContracts")]
+    [ValidateSet("Full", "Solution", "StaticContracts", "NestedProcess")]
     [string]$VerificationComponent = "Full",
     [ValidateRange(1, 8)]
     [int]$MaximumTestWorkers = [Math]::Min(8, [Math]::Max(1, [int][Math]::Floor([Environment]::ProcessorCount * 1.5))),
@@ -75,8 +75,8 @@ if ($VerificationComponent -ne "Full" -and ($VerificationTier -ne "PullRequest" 
     throw "A non-Full verification component is valid only for the complete PullRequest verification tier."
 }
 
-if ($VerificationComponent -eq "StaticContracts" -and -not $runningOnWindows) {
-    throw "The StaticContracts verification component is reserved for the hosted Windows verifier."
+if (($VerificationComponent -eq "StaticContracts" -or $VerificationComponent -eq "NestedProcess") -and -not $runningOnWindows) {
+    throw "The $VerificationComponent verification component is reserved for the hosted Windows verifier."
 }
 
 if ($VerificationTier -eq "Stress" -and ($RunBrowserE2E -or $BrowserE2EOnly)) {
@@ -95,7 +95,7 @@ function Invoke-CheckedNativePhase {
 }
 
 function Get-TestProjectFilter {
-    param([System.IO.FileInfo]$TestProject)
+    param([System.IO.FileInfo]$TestProject, [object[]]$Lanes = @())
 
     if ($TestProject.Name -eq "EmbodySense.E2ETests.csproj") {
         return "(FullyQualifiedName!~BrowserFlowTests)&(VerificationTier!=Stress)"
@@ -220,6 +220,24 @@ function Add-TestDiscoveryPhase {
     Add-VerificationParallelPhase -Name "discover-$Name" -FileName $powerShellExecutable -Arguments $arguments -TimeoutSeconds 180 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "discover-$Name.log")
 }
 
+function Get-VerificationComponentTestProjects {
+    param([System.IO.DirectoryInfo]$TestsDirectory, [string]$Component)
+
+    $projects = @(Get-ChildItem -Path $TestsDirectory -Recurse -Filter "*.csproj" | Where-Object {
+        $_.Name -ne "EmbodySense.CancellationHost.csproj" -and
+        $_.Name -ne "EmbodySense.E2EBrowserHost.csproj" -and
+        $_.Name -ne "EmbodySense.HumanInputContinuationHost.csproj" -and
+        $_.Name -ne "EmbodySense.Tests.Support.csproj"
+    } | Sort-Object FullName)
+    if ($Component -eq "NestedProcess") {
+        $projects = @($projects | Where-Object { $_.Name -ceq "EmbodySense.Core.Startup.Tests.csproj" })
+        if ($projects.Count -ne 1) {
+            throw "NestedProcess verification requires exactly one Startup test project; found $($projects.Count)."
+        }
+    }
+    return $projects
+}
+
 function Add-ProfiledRequiredGatePhase {
     param(
         [Parameter(Mandatory = $true)] [string]$Name,
@@ -285,7 +303,7 @@ function Invoke-StaticVerificationContracts {
 
 function Write-VerificationComponentEvidence {
     param(
-        [Parameter(Mandatory = $true)] [ValidateSet("solution", "static-contracts")] [string]$Component,
+        [Parameter(Mandatory = $true)] [ValidateSet("solution", "static-contracts", "nested-process")] [string]$Component,
         [Parameter(Mandatory = $true)] [string[]]$ManifestPaths,
         [int]$LaneCount = 0,
         [bool]$InventoryComplete = $false,
@@ -504,14 +522,23 @@ try {
     }
 
     Write-Output "VERIFY_REQUIRED_TEST_CONTRACT identity=TestCase.Id partition_identity=XunitTestCaseUniqueID filter=VerificationTier!=Stress"
-    $testProjects = @(Get-ChildItem -Path $testsPath -Recurse -Filter "*.csproj" | Where-Object { $_.Name -ne "EmbodySense.CancellationHost.csproj" -and $_.Name -ne "EmbodySense.E2EBrowserHost.csproj" -and $_.Name -ne "EmbodySense.HumanInputContinuationHost.csproj" -and $_.Name -ne "EmbodySense.Tests.Support.csproj" } | Sort-Object FullName)
+    $testProjects = @(Get-VerificationComponentTestProjects -TestsDirectory $testsPath -Component $VerificationComponent)
     $isolations = [Collections.Generic.List[object]]::new()
     foreach ($testProject in $testProjects) {
-        $isolations.Add((Get-ProjectCoverageIsolation -TestProject $testProject -Lanes @(Get-VerificationTestProjectLanes -TestProject $testProject)))
+        $isolations.Add((Get-ProjectCoverageIsolation -TestProject $testProject -Lanes @(Get-VerificationTestProjectLanes -TestProject $testProject -NestedProcessOnly:($VerificationComponent -eq "NestedProcess") -SolutionCoreOnly:($VerificationComponent -eq "Solution"))))
     }
 
     foreach ($isolation in $isolations) {
-        Add-TestDiscoveryPhase -Name "canonical-$($isolation.Project.BaseName)" -AssemblyPath $isolation.CanonicalAssemblyPath -Filter (Get-TestProjectFilter -TestProject $isolation.Project) -OutputPath (Join-Path $canonicalInventoryRoot "$($isolation.Project.BaseName).json")
+        $discoveryFilter = Get-TestProjectFilter -TestProject $isolation.Project
+        if ($VerificationComponent -eq "NestedProcess" -or ($VerificationComponent -eq "Solution" -and $isolation.Project.Name -ceq "EmbodySense.Core.Startup.Tests.csproj")) {
+            $componentLaneName = if ($VerificationComponent -eq "NestedProcess") { "nested-process" } else { "remainder" }
+            $componentLane = @($isolation.Lanes | Where-Object { $_.ShardName -ceq $componentLaneName })
+            if ($componentLane.Count -ne 1) {
+                throw "$VerificationComponent verification requires exactly one '$componentLaneName' lane for $($isolation.Project.BaseName)."
+            }
+            $discoveryFilter = $componentLane[0].Filter
+        }
+        Add-TestDiscoveryPhase -Name "canonical-$($isolation.Project.BaseName)" -AssemblyPath $isolation.CanonicalAssemblyPath -Filter $discoveryFilter -OutputPath (Join-Path $canonicalInventoryRoot "$($isolation.Project.BaseName).json")
     }
     Write-Output "VERIFY_PARALLEL_PLAN kind=discovery phases=$($script:VerificationParallelPhases.Count) requested_workers=$MaximumTestWorkers maximum_workers=$hardwareBoundedResourceCapacity maximum_resource_capacity=$hardwareBoundedResourceCapacity"
     Invoke-VerificationParallelPhases -MaximumWorkers $hardwareBoundedResourceCapacity -MaximumResourceCapacity $hardwareBoundedResourceCapacity | Out-Null
@@ -536,7 +563,7 @@ try {
     Invoke-CheckedNativePhase -Name "test-partition-reconciliation" -FileName $powerShellExecutable -Arguments $partitionArguments -TimeoutSeconds 120
 
     $coverageStartedUtc = [DateTime]::UtcNow
-    if ($VerificationComponent -ne "Solution") {
+    if ($VerificationComponent -eq "Full") {
         Add-ProfiledRequiredGatePhase -Name "git-diff-check" -FileName "git" -Arguments @("diff", "--check") -OutputPath (Join-Path $verificationLogsPath "git-diff-check.log")
         Add-ProfiledRequiredGatePhase -Name "format-whitespace" -FileName "dotnet" -Arguments @("format", "whitespace", "EmbodySense.sln", "--verify-no-changes", "--no-restore", "--verbosity", "minimal") -OutputPath (Join-Path $verificationLogsPath "format-whitespace.log")
         Add-ProfiledRequiredGatePhase -Name "format-naming-style" -FileName "dotnet" -Arguments @("format", "style", "EmbodySense.sln", "--verify-no-changes", "--no-restore", "--severity", "warn", "--diagnostics", "IDE1006", "--verbosity", "minimal") -OutputPath (Join-Path $verificationLogsPath "format-naming-style.log")
@@ -547,7 +574,17 @@ try {
         }
     }
 
-    $excludedRequiredGateNames = if ($VerificationComponent -eq "Solution") { @("git-diff-check", "format-whitespace", "format-naming-style") } else { @() }
+    $excludedRequiredGateNames = switch ($VerificationComponent) {
+        "Solution" {
+            @("tests-EmbodySense.Core.Startup.Tests-nested-process", "git-diff-check", "format-whitespace", "format-naming-style")
+            break
+        }
+        "NestedProcess" {
+            @("tests-EmbodySense.Core.Persistence.Tests-all", "tests-EmbodySense.Core.Startup.Tests-remainder", "tests-EmbodySense.Web.Tests-all", "tests-EmbodySense.IntegrationTests-all", "tests-EmbodySense.Core.Application.Tests-all", "tests-EmbodySense.Core.Common.Tests-all", "tests-EmbodySense.Core.Clients.Tests-all", "tests-EmbodySense.E2ETests-all", "tests-EmbodySense.Cli.Command.Tests-all", "git-diff-check", "format-whitespace", "format-naming-style")
+            break
+        }
+        default { @() }
+    }
     Assert-VerificationRequiredGateSchedule -Phases @($script:VerificationParallelPhases) -ExcludedNames $excludedRequiredGateNames
     Write-Output "VERIFY_PARALLEL_PLAN kind=required-gates phases=$($script:VerificationParallelPhases.Count) maximum_workers=$requiredGateMaximumWorkers maximum_resource_capacity=$requiredGateResourceCapacity maximum_process_heavy=$effectiveRequiredGateMaximumProcessHeavyWorkers maximum_cpu_bound=$effectiveRequiredGateMaximumCpuBoundWorkers scheduling=singleton-class-backlog-priority-lpt coverage=$(-not $SkipCoverage)"
     $gateResults = @(Invoke-VerificationParallelPhases -MaximumWorkers $requiredGateMaximumWorkers -MaximumResourceCapacity $requiredGateResourceCapacity -MaximumProcessHeavyWorkers $effectiveRequiredGateMaximumProcessHeavyWorkers -MaximumCpuBoundWorkers $effectiveRequiredGateMaximumCpuBoundWorkers)
@@ -574,6 +611,9 @@ try {
         $coverageArguments = @("-NoProfile")
         if ($runningOnWindows) { $coverageArguments += @("-ExecutionPolicy", "Bypass") }
         $coverageArguments += @("-File", (Join-Path $PSScriptRoot "verify-coverage.ps1"), "-MinimumWriteTimeUtc", $coverageStartedUtc.ToString("O"), "-ResultsRoot", $verificationResultsPath, "-ManifestPath", $coverageManifestPath, "-ReportPath", $coverageSummaryPath)
+        if ($VerificationComponent -eq "Solution" -or $VerificationComponent -eq "NestedProcess") {
+            $coverageArguments += "-CollectOnly"
+        }
         Add-VerificationParallelPhase -Name "coverage-thresholds" -FileName $powerShellExecutable -Arguments $coverageArguments -TimeoutSeconds 180 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "coverage-thresholds.log")
     }
     Write-Output "VERIFY_PARALLEL_PLAN kind=reconciliation phases=$($script:VerificationParallelPhases.Count) maximum_resource_capacity=$([Math]::Min(2, $hardwareBoundedResourceCapacity))"
@@ -588,7 +628,7 @@ finally {
     }
 }
 
-$solutionManifestPaths = @(
+$componentManifestPaths = @(
     (Join-Path $verificationResultsPath "required-test-lanes.json"),
     (Join-Path $verificationResultsPath "required-test-partition.json"),
     (Join-Path $verificationResultsPath "required-execution-tests.json"),
@@ -597,14 +637,27 @@ $solutionManifestPaths = @(
     (Join-Path $verificationResultsPath "coverage-summary.json")
 )
 if ($VerificationComponent -eq "Solution") {
-    $solutionManifestPaths += @($testResults | ForEach-Object { $_.TrxPath })
-    Write-VerificationComponentEvidence -Component "solution" -ManifestPaths $solutionManifestPaths -LaneCount $testResults.Count -InventoryComplete $true -CoverageComplete $true
+    $componentManifestPaths += @($testResults | ForEach-Object { $_.TrxPath })
+    $coverageManifest = Get-Content -LiteralPath $coverageManifestPath -Raw | ConvertFrom-Json
+    $componentManifestPaths += @($coverageManifest.reports | ForEach-Object { $_.path })
+    $componentManifestPaths += @($coverageManifest.aliases | ForEach-Object { $_.path })
+    Write-VerificationComponentEvidence -Component "solution" -ManifestPaths $componentManifestPaths -LaneCount $testResults.Count -InventoryComplete $true -CoverageComplete $true
+}
+elseif ($VerificationComponent -eq "NestedProcess") {
+    $componentManifestPaths += @($testResults | ForEach-Object { $_.TrxPath })
+    $coverageManifest = Get-Content -LiteralPath $coverageManifestPath -Raw | ConvertFrom-Json
+    $componentManifestPaths += @($coverageManifest.reports | ForEach-Object { $_.path })
+    $componentManifestPaths += @($coverageManifest.aliases | ForEach-Object { $_.path })
+    Write-VerificationComponentEvidence -Component "nested-process" -ManifestPaths $componentManifestPaths -LaneCount $testResults.Count -InventoryComplete $true -CoverageComplete $true
 }
 
 $verificationStopwatch.Stop()
 $elapsedText = $verificationStopwatch.Elapsed.TotalSeconds.ToString("0.###", [Globalization.CultureInfo]::InvariantCulture)
 if ($VerificationComponent -eq "Solution") {
     Write-Output "VERIFY_COMPLETE schema_version=1 component=solution status=passed elapsed_seconds=$elapsedText"
+}
+elseif ($VerificationComponent -eq "NestedProcess") {
+    Write-Output "VERIFY_COMPLETE schema_version=1 component=nested-process status=passed elapsed_seconds=$elapsedText"
 }
 else {
     Write-Output "VERIFY_COMPLETE schema_version=1 status=passed elapsed_seconds=$elapsedText"

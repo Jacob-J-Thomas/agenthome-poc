@@ -2,6 +2,7 @@ Set-StrictMode -Version Latest
 
 $script:VerificationQualificationWatchdogDeadlineSeconds = 1680
 $script:VerificationStaticContractsWatchdogDeadlineSeconds = 600
+$script:VerificationNestedProcessWatchdogDeadlineSeconds = 600
 $script:VerificationFullWatchdogMaximumDeadlineSeconds = 1200
 $script:VerificationSolutionWatchdogDeadlineSeconds = 1500
 
@@ -11,7 +12,7 @@ function Assert-VerificationWatchdogDeadlineContract {
         [bool]$Qualification,
 
         [Parameter(Mandatory = $true)]
-        [ValidateSet("Full", "Solution", "StaticContracts")]
+        [ValidateSet("Full", "Solution", "StaticContracts", "NestedProcess")]
         [string]$VerificationComponent,
 
         [Parameter(Mandatory = $true)]
@@ -31,6 +32,7 @@ function Assert-VerificationWatchdogDeadlineContract {
     $expectedDeadlineSeconds = switch ($VerificationComponent) {
         "Solution" { $script:VerificationSolutionWatchdogDeadlineSeconds; break }
         "StaticContracts" { $script:VerificationStaticContractsWatchdogDeadlineSeconds; break }
+        "NestedProcess" { $script:VerificationNestedProcessWatchdogDeadlineSeconds; break }
         "Full" { $null; break }
     }
     if ($null -eq $expectedDeadlineSeconds) {
