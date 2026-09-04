@@ -33,6 +33,9 @@ $cancellationHostProgramPath = Join-Path $repoRoot "tests\EmbodySense.Cancellati
 $scheduleStoreTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Triggers\Schedules\ScheduleStoreTests.cs"
 $scheduleStoreHostPath = Join-Path $repoRoot "tests\Shared\ScheduleStoreCrossProcessHost.cs"
 $humanReviewOrderedReleaseTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\HumanReview\HumanReviewOrderedReleasePersistenceTests.cs"
+$humanReviewOrderedReleaseHostPath = Join-Path $repoRoot "tests\EmbodySense.CancellationHost\Persistence\HumanReviewOrderedReleaseProcessHost.cs"
+$humanReviewOrderedReleaseAuthorityPath = Join-Path $repoRoot "tests\EmbodySense.CancellationHost\Persistence\HumanReviewOrderedReleaseProcessAuthority.cs"
+$humanReviewOrderedReleaseRaceGateStorePath = Join-Path $repoRoot "tests\EmbodySense.CancellationHost\Persistence\HumanReviewOrderedReleaseRaceGateStore.cs"
 $reconciliationProbeProcessTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Loops\Execution\Reconciliation\GovernedLoopEffectReconciliationProbeProcessTests.cs"
 $admissionStoreTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Loops\Admission\GovernedLoopAdmissionStoreTests.cs"
 $admissionStoreFixturePath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Loops\Admission\GovernedLoopAdmissionStoreTestFixture.cs"
@@ -205,6 +208,9 @@ $cancellationHostProgram = Get-Content -LiteralPath $cancellationHostProgramPath
 $scheduleStoreTest = Get-Content -LiteralPath $scheduleStoreTestPath -Raw
 $scheduleStoreHost = Get-Content -LiteralPath $scheduleStoreHostPath -Raw
 $humanReviewOrderedReleaseTest = Get-Content -LiteralPath $humanReviewOrderedReleaseTestPath -Raw
+$humanReviewOrderedReleaseHost = Get-Content -LiteralPath $humanReviewOrderedReleaseHostPath -Raw
+$humanReviewOrderedReleaseAuthority = Get-Content -LiteralPath $humanReviewOrderedReleaseAuthorityPath -Raw
+$humanReviewOrderedReleaseRaceGateStore = Get-Content -LiteralPath $humanReviewOrderedReleaseRaceGateStorePath -Raw
 $reconciliationProbeProcessTest = Get-Content -LiteralPath $reconciliationProbeProcessTestPath -Raw
 $admissionStoreTest = Get-Content -LiteralPath $admissionStoreTestPath -Raw
 $admissionStoreFixture = Get-Content -LiteralPath $admissionStoreFixturePath -Raw
@@ -285,6 +291,15 @@ Assert-True -Condition ($humanReviewOrderedReleaseTest.IndexOf('CancellationHost
 Assert-Contains -Actual $humanReviewOrderedReleaseTest -Expected 'new CrossProcessReadinessChild("first"' -Message "The Human Review effect race must expose the first child through bounded readiness diagnostics."
 Assert-Contains -Actual $humanReviewOrderedReleaseTest -Expected 'CrossProcessReadinessDiagnostics.WaitForChildrenReadyAsync("human-review-ordered-effect-race"' -Message "The Human Review effect race must wait for both children through shared readiness diagnostics."
 Assert-Contains -Actual $humanReviewOrderedReleaseTest -Expected 'await Task.WhenAll(first.WaitForExitAsync(), second.WaitForExitAsync()).WaitAsync(TimeSpan.FromSeconds(30));' -Message "The Human Review effect race must preserve its bounded release/completion wait."
+Assert-Contains -Actual $humanReviewOrderedReleaseHost -Expected 'new HumanReviewOrderedReleaseRaceGateStore(store, readyPath, releasePath)' -Message "The Human Review effect race must synchronize at its test-only whole-run compare-exchange store."
+Assert-Contains -Actual $humanReviewOrderedReleaseHost -Expected 'releaseStore ?? store' -Message "Only the Human Review effect-race release service may receive the synchronization wrapper."
+Assert-True -Condition ($humanReviewOrderedReleaseAuthority.IndexOf('readyPath', [StringComparison]::Ordinal) -lt 0 -and $humanReviewOrderedReleaseAuthority.IndexOf('releasePath', [StringComparison]::Ordinal) -lt 0) -Message "Human Review effect-race readiness must not be misclassified as authority-source entry."
+Assert-Contains -Actual $humanReviewOrderedReleaseRaceGateStore -Expected 'public async Task<CustomLoopRunStoreResult> UpdateAsync(' -Message "The Human Review effect race must synchronize at the existing whole-run compare-exchange call."
+Assert-Contains -Actual $humanReviewOrderedReleaseRaceGateStore -Expected 'Interlocked.Exchange(ref _barrierEntered, 1) == 0' -Message "Each Human Review race worker must enter the compare-exchange barrier exactly once."
+Assert-Contains -Actual $humanReviewOrderedReleaseRaceGateStore -Expected 'GetAsync(string runId, CancellationToken cancellationToken = default) => inner.GetAsync(runId, cancellationToken);' -Message "Human Review race readiness must not be emitted from a pre-compare-exchange canonical read."
+Assert-Contains -Actual $humanReviewOrderedReleaseRaceGateStore -Expected 'await File.WriteAllTextAsync(readyPath, "ready", cancellationToken);' -Message "A Human Review race worker may report ready only when it reaches the compare-exchange barrier."
+Assert-Contains -Actual $humanReviewOrderedReleaseRaceGateStore -Expected 'return await inner.UpdateAsync(run, expectedLifecycleVersion, cancellationToken);' -Message "The Human Review race barrier must preserve the canonical persistence compare-exchange."
+Assert-Contains -Actual $humanReviewOrderedReleaseRaceGateStore -Expected 'WaitForFileAsync(releasePath, TimeSpan.FromSeconds(30), cancellationToken)' -Message "The Human Review race barrier must preserve the bounded functional-child release wait."
 Assert-Contains -Actual $humanReviewOrderedReleaseTest -Expected 'await AssertExpectedHostLossAsync(' -Message "Crash-boundary Human Review workers must retain their existing process-loss assertion helper."
 Assert-Contains -Actual $humanReviewOrderedReleaseTest -Expected '"human-review-ordered-effect-process-loss"' -Message "Crash-boundary Human Review workers must retain their existing process-loss mode."
 Assert-Contains -Actual $humanReviewOrderedReleaseTest -Expected 'using var process = CancellationHostProcess.Start([command, .. arguments]);' -Message "Unchanged Human Review crash/restart helpers must retain the existing raw cancellation-host route."
