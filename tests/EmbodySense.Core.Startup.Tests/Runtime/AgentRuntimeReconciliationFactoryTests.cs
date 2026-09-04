@@ -19,11 +19,12 @@ using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Tests.Loops.Execution.Effects;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Tests.Support;
+using static EmbodySense.Core.Startup.Tests.Runtime.AgentRuntimeFactoryTests;
 using CommonReconciliationModels = EmbodySense.Core.Common.Loops.Execution.Reconciliation.Models;
 
 namespace EmbodySense.Core.Startup.Tests.Runtime;
 
-public sealed partial class AgentRuntimeFactoryTests
+public sealed partial class AgentRuntimeReconciliationFactoryTests
 {
     [Fact]
     public async Task Effect_reconciliation_facade_keeps_empty_missing_invalid_and_canceled_reads_closed()
