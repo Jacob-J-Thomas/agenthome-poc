@@ -171,6 +171,55 @@ try {
     $outputText = [string]::Join("`n", @($output | ForEach-Object { [string]$_ }))
     Assert-True -Condition $outputText.Contains("lanes=10 projects=9") -Message "The successful fan-in did not prove the ten-lane nine-project aggregate."
 
+    $nestedCoverageManifestPath = Join-Path $nestedRoot "VerificationResults/coverage-manifest.json"
+    $nestedCoverageManifest = Get-Content -LiteralPath $nestedCoverageManifestPath -Raw | ConvertFrom-Json
+    $originalResultsRoot = [string]$nestedCoverageManifest.resultsRoot
+    $windowsResultsRoot = 'D:\a\agenthome-poc\agenthome-poc\tests\VerificationResults'
+    foreach ($report in $nestedCoverageManifest.reports) {
+        foreach ($property in @("path", "trxPath", "laneResultsRoot")) {
+            $report.$property = $windowsResultsRoot.ToLowerInvariant() + ([string]$report.$property).Substring($originalResultsRoot.Length).Replace('\', '/')
+        }
+    }
+    $nestedCoverageManifest.resultsRoot = $windowsResultsRoot
+    $nestedCoverageSummaryPath = Join-Path $nestedRoot "VerificationResults/coverage-summary.json"
+    $nestedCoverageSummary = Get-Content -LiteralPath $nestedCoverageSummaryPath -Raw | ConvertFrom-Json
+    $nestedCoverageSummary.reports[0].path = $nestedCoverageManifest.reports[0].path
+    Write-TestJson -Path $nestedCoverageSummaryPath -Value $nestedCoverageSummary
+    Write-TestJson -Path $nestedCoverageManifestPath -Value $nestedCoverageManifest
+    Update-TestComponentAuth -Root $nestedRoot
+    $windowsOutput = Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot
+    Assert-True -Condition ([string]::Join("`n", @($windowsOutput)).Contains("lanes=10 projects=9")) -Message "Windows-origin receipts must retain their declared root across separator and case normalization."
+
+    foreach ($property in @("path", "trxPath")) {
+        $originalPath = [string]$nestedCoverageManifest.reports[0].$property
+        $nestedCoverageManifest.reports[0].$property = 'X:\remapped\VerificationResults' + $originalPath.Substring($windowsResultsRoot.Length)
+        Write-TestJson -Path $nestedCoverageManifestPath -Value $nestedCoverageManifest
+        Update-TestComponentAuth -Root $nestedRoot
+        Assert-Throws -Message "remapped coverage $property" -ExpectedMessage "cannot be mapped to its declared VerificationResults root" -Action { Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot }
+        $nestedCoverageManifest.reports[0].$property = $originalPath
+    }
+
+    $canonicalCoverage = Get-ChildItem -LiteralPath (Join-Path $nestedRoot "VerificationResults") -Recurse -Filter "*.cobertura.xml" -File | Select-Object -First 1
+    $aliasPath = Join-Path $canonicalCoverage.DirectoryName "staging.cobertura.xml"
+    Copy-Item -LiteralPath $canonicalCoverage.FullName -Destination $aliasPath
+    $alias = [ordered]@{
+        path = $windowsResultsRoot + $aliasPath.Substring($originalResultsRoot.Length).Replace('\', '/')
+        canonicalPath = [string]$nestedCoverageManifest.reports[0].path
+        length = $canonicalCoverage.Length
+        sha256 = (Get-FileHash -LiteralPath $canonicalCoverage.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+    $nestedCoverageManifest.aliasReportCount = 1
+    $nestedCoverageManifest.aliases = @($alias)
+    Write-TestJson -Path $nestedCoverageManifestPath -Value $nestedCoverageManifest
+    Update-TestComponentAuth -Root $nestedRoot
+    $aliasOutput = Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot
+    Assert-True -Condition ([string]::Join("`n", @($aliasOutput)).Contains("lanes=10 projects=9")) -Message "A byte-identical staging alias within the declared Windows root must remain admissible."
+    $alias.path = 'X:\remapped\VerificationResults' + ([string]$alias.path).Substring($windowsResultsRoot.Length)
+    Write-TestJson -Path $nestedCoverageManifestPath -Value $nestedCoverageManifest
+    Update-TestComponentAuth -Root $nestedRoot
+    Assert-Throws -Message "remapped coverage alias" -ExpectedMessage "cannot be mapped to its declared VerificationResults root" -Action { Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot }
+    New-TestComponent -Root $nestedRoot -Component "nested-process"
+
     Assert-Throws -Message "failed nested child" -Action { Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot -NestedResult "failure" }
     Assert-Throws -Message "missing nested artifact root" -Action { Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot (Join-Path $fixtureRoot "missing") -StaticRoot $staticRoot }
     Assert-Throws -Message "head mismatch" -Action { Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot -ExpectedHead "wrong-head" }

@@ -306,12 +306,6 @@ function Get-FanInCoverageArtifactRelativePath {
         return $normalizedPath.Substring($normalizedRoot.Length + 1)
     }
 
-    $marker = "/VerificationResults/"
-    $markerIndex = $normalizedPath.LastIndexOf($marker, [StringComparison]::OrdinalIgnoreCase)
-    if ($markerIndex -ge 0) {
-        return $normalizedPath.Substring($markerIndex + $marker.Length)
-    }
-
     throw "Coverage report path cannot be mapped to its declared VerificationResults root: $Path"
 }
 
