@@ -11,6 +11,7 @@ $verifyScriptPath = Join-Path $repoRoot "scripts\verify.ps1"
 $watchdogScriptPath = Join-Path $repoRoot "scripts\verify-with-watchdog.ps1"
 $coverageScriptPath = Join-Path $repoRoot "scripts\verify-coverage.ps1"
 $coverageEvidenceScriptPath = Join-Path $repoRoot "scripts\verification-coverage-evidence.ps1"
+$qualificationPlanScriptPath = Join-Path $repoRoot "scripts\qualification-plan.ps1"
 $verifyWorkflowPath = Join-Path $repoRoot ".github\workflows\verify.yml"
 $qualificationWorkflowPath = Join-Path $repoRoot ".github\workflows\qualification.yml"
 $browserWorkflowPath = Join-Path $repoRoot ".github\workflows\browser-e2e.yml"
@@ -59,6 +60,9 @@ $startupFactoryHumanReviewTestPaths = @(
     "AgentRuntimeHumanReviewTests.Readiness.cs",
     "AgentRuntimeHumanReviewTests.RecoveryCoverage.cs"
 ) | ForEach-Object { Join-Path $repoRoot "tests\EmbodySense.Core.Startup.Tests\Runtime\$_" }
+$applicationTestRoot = Join-Path $repoRoot "tests\EmbodySense.Core.Application.Tests"
+$applicationIsolationMapPath = Join-Path $applicationTestRoot "Verification\ApplicationTestIsolationMap.cs"
+$applicationSerialCollectionPath = Join-Path $applicationTestRoot "Verification\ApplicationSerialStateCollection.cs"
 $powerShellExecutable = (Get-Process -Id $PID).Path
 $functionalChildTimeoutSeconds = 30
 $assertionCount = 0
@@ -72,6 +76,23 @@ function Assert-True {
 function Assert-Contains {
     param([string]$Actual, [string]$Expected, [string]$Message)
     Assert-True -Condition ($Actual.IndexOf($Expected, [StringComparison]::Ordinal) -ge 0) -Message "$Message Expected '$Expected'. Actual: $Actual"
+}
+
+function Get-ApplicationIsolationMapEntries {
+    param([string]$Content, [string]$MapName)
+
+    $pattern = '(?ms)^\s*internal const string ' + [regex]::Escape($MapName) + ' = """\r?\n(?<body>.*?)^\s*""";'
+    $match = [regex]::Match($Content, $pattern)
+    Assert-True -Condition $match.Success -Message "Application test isolation map '$MapName' must remain a statically inspectable raw string."
+    $entries = @($match.Groups["body"].Value -split '\r?\n' | ForEach-Object { $_.Trim() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    Assert-True -Condition ($entries.Count -gt 0) -Message "Application test isolation map '$MapName' cannot be empty."
+    Assert-True -Condition (@($entries | Group-Object -CaseSensitive | Where-Object Count -ne 1).Count -eq 0) -Message "Application test isolation map '$MapName' cannot contain duplicate classes."
+    Assert-True -Condition (($entries -join '|') -ceq ((@($entries | Sort-Object)) -join '|')) -Message "Application test isolation map '$MapName' must retain deterministic ordinal ordering."
+    foreach ($entry in $entries) {
+        Assert-True -Condition ($entry -cmatch '^EmbodySense\.Core\.Application\.Tests\.(?:[A-Za-z_][A-Za-z0-9_]*\.)*[A-Za-z_][A-Za-z0-9_]*Tests$') -Message "Application test isolation entry '$entry' is not one exact test-class identity."
+    }
+
+    return [string[]]$entries
 }
 
 function Invoke-ExpectedFailure {
@@ -96,6 +117,7 @@ Assert-True -Condition ($functionalChildTimeoutSeconds -eq 30) -Message "Functio
 . $phaseScriptPath
 . $tempScriptPath
 . $artifactScriptPath
+. $qualificationPlanScriptPath
 Reset-VerificationPhaseState
 
 $contextLine = Write-VerificationContext -RepositoryRoot $repoRoot -Configuration Debug -VerificationTier PullRequest
@@ -218,6 +240,8 @@ $startupFactoryTest = Get-Content -LiteralPath $startupFactoryTestPath -Raw
 $startupFactoryEffectReconciliationTest = Get-Content -LiteralPath $startupFactoryEffectReconciliationTestPath -Raw
 $startupFactoryEffectReconciliationCoverageTest = Get-Content -LiteralPath $startupFactoryEffectReconciliationCoverageTestPath -Raw
 $startupFactoryHumanReviewTests = @($startupFactoryHumanReviewTestPaths | ForEach-Object { Get-Content -LiteralPath $_ -Raw })
+$applicationIsolationMap = Get-Content -LiteralPath $applicationIsolationMapPath -Raw
+$applicationSerialCollection = Get-Content -LiteralPath $applicationSerialCollectionPath -Raw
 
 Assert-Contains -Actual $verifyScript -Expected '[ValidateSet("PullRequest", "Stress")]' -Message "The verifier must expose only the two owned tiers."
 Assert-Contains -Actual $verifyScript -Expected '[string]$Configuration = "Release"' -Message "The canonical verifier must default to Release."
@@ -315,6 +339,7 @@ Assert-Contains -Actual $verifyScript -Expected '"vstest", $Lane.AssemblyPath' -
 Assert-Contains -Actual $laneScript -Expected 'if ($TestProject.Name -eq "EmbodySense.Core.Startup.Tests.csproj") {' -Message "Only Startup may declare the approved two-lane partition."
 Assert-True -Condition ([regex]::Matches($laneScript, 'New-VerificationTestLane -Name "all"').Count -eq 1 -and [regex]::Matches($laneScript, 'New-VerificationTestLane -Name "remainder"').Count -eq 1 -and [regex]::Matches($laneScript, 'New-VerificationTestLane -Name "nested-process"').Count -eq 1) -Message "The verifier must retain one general lane declaration and exactly the approved two Startup lane declarations."
 foreach ($parallelAssemblyInfoPath in @(
+    "tests\EmbodySense.Core.Application.Tests\AssemblyInfo.cs",
     "tests\EmbodySense.Core.Persistence.Tests\AssemblyInfo.cs",
     "tests\EmbodySense.Core.Startup.Tests\AssemblyInfo.cs",
     "tests\EmbodySense.IntegrationTests\AssemblyInfo.cs",
@@ -322,6 +347,48 @@ foreach ($parallelAssemblyInfoPath in @(
 )) {
     $parallelAssemblyInfo = Get-Content -LiteralPath (Join-Path $repoRoot $parallelAssemblyInfoPath) -Raw
     Assert-Contains -Actual $parallelAssemblyInfo -Expected '[assembly: CollectionBehavior(MaxParallelThreads = 2)]' -Message "Assembly-wide lane '$parallelAssemblyInfoPath' must retain the explicit two-thread xUnit ceiling."
+}
+$applicationAssemblyInfo = Get-Content -LiteralPath (Join-Path $applicationTestRoot "AssemblyInfo.cs") -Raw
+Assert-True -Condition ($applicationAssemblyInfo.IndexOf("DisableTestParallelization", [StringComparison]::Ordinal) -lt 0) -Message "Application class-level parallelism cannot be silently disabled at assembly scope."
+Assert-Contains -Actual $applicationSerialCollection -Expected '[CollectionDefinition(Name, DisableParallelization = true)]' -Message "Application tests that touch shared state must remain exclusive of the parallel-safe class pool."
+Assert-Contains -Actual $applicationSerialCollection -Expected 'public const string Name = "Application serial state";' -Message "Application shared-state tests must retain one exact named serial collection."
+$applicationSerialClasses = @(Get-ApplicationIsolationMapEntries -Content $applicationIsolationMap -MapName "SerialStateTestClasses")
+$applicationParallelSafeClasses = @(Get-ApplicationIsolationMapEntries -Content $applicationIsolationMap -MapName "ParallelSafeTestClasses")
+$applicationMappedClasses = @($applicationSerialClasses + $applicationParallelSafeClasses)
+Assert-True -Condition (@($applicationMappedClasses | Group-Object -CaseSensitive | Where-Object Count -ne 1).Count -eq 0) -Message "Every Application test class must have exactly one serial-state or parallel-safe classification."
+Assert-True -Condition ($applicationParallelSafeClasses -ccontains "EmbodySense.Core.Application.Tests.Loops.Execution.Custom.CustomLoopOrderedRunnerTests") -Message "The long ordered-runner class must remain admitted to bounded class-level parallelism without changing its test identities."
+
+$applicationClassSources = @{}
+foreach ($applicationTestSource in @(Get-ChildItem -LiteralPath $applicationTestRoot -Recurse -Filter "*.cs" | Sort-Object FullName)) {
+    $applicationTestContent = Get-Content -LiteralPath $applicationTestSource.FullName -Raw
+    if (@(Get-QualificationDirectXunitTestTypeNames -Content $applicationTestContent).Count -eq 0) {
+        continue
+    }
+
+    $applicationTestRelativePath = [IO.Path]::GetRelativePath($repoRoot, $applicationTestSource.FullName).Replace('\', '/')
+    foreach ($applicationTestClass in @(Get-QualificationDirectXunitTestClasses -Path $applicationTestRelativePath -Content $applicationTestContent)) {
+        if (-not $applicationClassSources.ContainsKey($applicationTestClass)) {
+            $applicationClassSources[$applicationTestClass] = [Collections.Generic.List[string]]::new()
+        }
+        $applicationClassSources[$applicationTestClass].Add($applicationTestSource.FullName)
+    }
+}
+$applicationDiscoveredClasses = @($applicationClassSources.Keys | Sort-Object)
+Assert-True -Condition (($applicationDiscoveredClasses -join '|') -ceq ((@($applicationMappedClasses | Sort-Object)) -join '|')) -Message "The source-owned Application isolation map must classify every Roslyn-authenticated xUnit class and no stale class."
+$applicationSerialAttribute = '[Collection(Verification.ApplicationSerialStateCollection.Name)]'
+foreach ($applicationSerialClass in $applicationSerialClasses) {
+    $attributeCount = 0
+    foreach ($sourcePath in $applicationClassSources[$applicationSerialClass]) {
+        $attributeCount += [regex]::Matches((Get-Content -LiteralPath $sourcePath -Raw), [regex]::Escape($applicationSerialAttribute)).Count
+    }
+    Assert-True -Condition ($attributeCount -eq 1) -Message "Serial-state Application test class '$applicationSerialClass' must declare exactly one exclusive collection attribute."
+}
+foreach ($applicationParallelSafeClass in $applicationParallelSafeClasses) {
+    $attributeCount = 0
+    foreach ($sourcePath in $applicationClassSources[$applicationParallelSafeClass]) {
+        $attributeCount += [regex]::Matches((Get-Content -LiteralPath $sourcePath -Raw), [regex]::Escape($applicationSerialAttribute)).Count
+    }
+    Assert-True -Condition ($attributeCount -eq 0) -Message "Parallel-safe Application test class '$applicationParallelSafeClass' cannot join the serial-state collection."
 }
 Assert-Contains -Actual $startupRuntimeCollection -Expected '[CollectionDefinition(Name)]' -Message "Startup runtime wrappers must retain one shared serial xUnit collection."
 foreach ($startupRuntimeWrapper in @(

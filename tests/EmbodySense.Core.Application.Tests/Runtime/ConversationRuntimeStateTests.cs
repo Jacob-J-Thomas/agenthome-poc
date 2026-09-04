@@ -6,6 +6,7 @@ using EmbodySense.Core.Common.Inference.Models;
 
 namespace EmbodySense.Core.Application.Tests.Runtime;
 
+[Collection(Verification.ApplicationSerialStateCollection.Name)]
 public sealed class ConversationRuntimeStateTests
 {
     [Fact]

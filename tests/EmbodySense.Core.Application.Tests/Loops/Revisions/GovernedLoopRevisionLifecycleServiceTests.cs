@@ -11,6 +11,7 @@ using System.Text.Json;
 
 namespace EmbodySense.Core.Application.Tests.Loops.Revisions;
 
+[Collection(Verification.ApplicationSerialStateCollection.Name)]
 public sealed class GovernedLoopRevisionLifecycleServiceTests
 {
     private static readonly DateTimeOffset _now = DateTimeOffset.Parse("2026-08-10T12:00:00Z", CultureInfo.InvariantCulture);
