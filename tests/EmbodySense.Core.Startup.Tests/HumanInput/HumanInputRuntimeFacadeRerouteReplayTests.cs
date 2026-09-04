@@ -79,6 +79,26 @@ public sealed class HumanInputRuntimeFacadeRerouteReplayTests
         provider.ThrowDuringLifecycleTerms = false;
         provider.ReturnNullLifecycleTerms = true;
         var nullTerms = await runtime.HumanInput.SubmitLifecycleAsync(input with { CandidateKey = "candidate-null-terms" });
+        provider.ReturnNullLifecycleTerms = false;
+        provider.LifecycleTermsStatus = AgentRuntimeHumanInputAuthorityStatus.Denied;
+        var denied = await runtime.HumanInput.SubmitLifecycleAsync(input with { CandidateKey = "candidate-denied" });
+        provider.LifecycleTermsStatus = AgentRuntimeHumanInputAuthorityStatus.Ready;
+        var missingCandidate = await runtime.HumanInput.SubmitLifecycleAsync(input with { CandidateKey = "candidate-missing" });
+        provider.LifecycleGrantReference = null;
+        var missingGrant = await runtime.HumanInput.SubmitLifecycleAsync(input);
+        provider.LifecycleGrantReference = reroute.Operation.GrantReference;
+        provider.LifecycleTermsStatus = AgentRuntimeHumanInputAuthorityStatus.Unknown;
+        var unknownTerms = await runtime.HumanInput.SubmitLifecycleAsync(input);
+        provider.LifecycleTermsStatus = AgentRuntimeHumanInputAuthorityStatus.Ready;
+        provider.DelayLifecycleTermsUntilCancellation = true;
+        using var cancellation = new CancellationTokenSource();
+        provider.LifecycleTermsEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var pendingCancellation = runtime.HumanInput.SubmitLifecycleAsync(input, cancellation.Token);
+        await provider.LifecycleTermsEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pendingCancellation);
+        provider.DelayLifecycleTermsUntilCancellation = false;
+        provider.LifecycleTermsEntered = null;
         var posture = await runtime.HumanInput.ReadAsync(request.RequestId);
 
         Assert.Equal(HumanInputOperationStatus.Replayed, replayed.Status);
@@ -86,8 +106,12 @@ public sealed class HumanInputRuntimeFacadeRerouteReplayTests
         Assert.Equal(HumanInputOperationStatus.Replayed, replayedAfterRegistryLoss.Status);
         Assert.Equal(HumanInputOperationStatus.Unavailable, providerFailure.Status);
         Assert.Equal(HumanInputOperationStatus.Unavailable, nullTerms.Status);
+        Assert.Equal(HumanInputOperationStatus.Denied, denied.Status);
+        Assert.Equal(HumanInputOperationStatus.Unavailable, missingCandidate.Status);
+        Assert.Equal(HumanInputOperationStatus.Unavailable, missingGrant.Status);
+        Assert.Equal(HumanInputOperationStatus.Unavailable, unknownTerms.Status);
         Assert.Equal(selectedCandidate.RequestVersionId, posture.Request!.CurrentRequest.RequestVersionId);
-        Assert.Equal(5, provider.LifecycleTermsResolutions);
+        Assert.Equal(10, provider.LifecycleTermsResolutions);
         Assert.Equal(2, provider.LifecycleAuthorizations);
     }
 }

@@ -36,6 +36,8 @@ internal sealed class HumanInputRuntimeFacadeTestAuthorityProvider : IAgentRunti
 
     internal bool ReturnNullLifecycleTerms { get; set; }
 
+    internal TaskCompletionSource<bool>? LifecycleTermsEntered { get; set; }
+
     internal int LifecycleAuthorizations { get; private set; }
 
     internal int LifecycleTermsResolutions { get; private set; }
@@ -53,6 +55,7 @@ internal sealed class HumanInputRuntimeFacadeTestAuthorityProvider : IAgentRunti
         CancellationToken cancellationToken = default)
     {
         LifecycleTermsResolutions++;
+        LifecycleTermsEntered?.TrySetResult(true);
         if (ThrowDuringLifecycleTerms)
         {
             throw new InvalidOperationException("The test authority boundary is unavailable.");
