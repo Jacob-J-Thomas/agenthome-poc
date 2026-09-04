@@ -534,7 +534,7 @@ public sealed class HumanInputSupersedeCandidatePreparer : IHumanInputSupersedeC
             }
         }
 
-        var expectedHash = HumanInputRouteIntentSourceResult.ComputeIntentHash(request.RequestHash, ordered);
+        var expectedHash = HumanInputRouteIntentSourceResultFactory.ComputeIntentHash(request.RequestHash, ordered);
         if (!string.Equals(expectedHash, result.IntentHash, StringComparison.Ordinal))
         {
             return HumanInputSupersedePreparationStatus.Ambiguous;

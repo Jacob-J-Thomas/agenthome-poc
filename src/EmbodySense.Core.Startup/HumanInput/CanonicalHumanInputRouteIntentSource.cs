@@ -21,22 +21,22 @@ public sealed class CanonicalHumanInputRouteIntentSource : IHumanInputRouteInten
         {
             if (!HumanInputValidator.ValidateRequest(request).IsValid || request.EligibleRespondents is not { Length: > 0 and <= HumanInputLimits.MaxEligibleRespondents })
             {
-                return Task.FromResult(HumanInputRouteIntentSourceResult.Invalid());
+                return Task.FromResult(HumanInputRouteIntentSourceResultFactory.Invalid());
             }
 
             var intents = request.EligibleRespondents
                 .Select((respondent, index) => new HumanInputRouteExclusionIntent(index, RouteEntryHash(respondent)))
                 .ToArray();
-            var intentHash = HumanInputRouteIntentSourceResult.ComputeIntentHash(request.RequestHash, intents);
-            return Task.FromResult(HumanInputRouteIntentSourceResult.Ready(intents, intentHash));
+            var intentHash = HumanInputRouteIntentSourceResultFactory.ComputeIntentHash(request.RequestHash, intents);
+            return Task.FromResult(HumanInputRouteIntentSourceResultFactory.Ready(intents, intentHash));
         }
         catch (ArgumentException)
         {
-            return Task.FromResult(HumanInputRouteIntentSourceResult.Invalid());
+            return Task.FromResult(HumanInputRouteIntentSourceResultFactory.Invalid());
         }
         catch (Exception)
         {
-            return Task.FromResult(HumanInputRouteIntentSourceResult.Unavailable());
+            return Task.FromResult(HumanInputRouteIntentSourceResultFactory.Unavailable());
         }
     }
 

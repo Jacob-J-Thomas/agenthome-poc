@@ -432,9 +432,9 @@ public sealed class HumanInputLifecycleCandidatePreparationTests
     private static HumanInputRouteIntentSourceResult HumanInputRouteIntentSourceResultFor(HumanInputRouteIntentSourceStatus status)
         => status switch
         {
-            HumanInputRouteIntentSourceStatus.Invalid => HumanInputRouteIntentSourceResult.Invalid(),
-            HumanInputRouteIntentSourceStatus.Unavailable => HumanInputRouteIntentSourceResult.Unavailable(),
-            HumanInputRouteIntentSourceStatus.Ambiguous => HumanInputRouteIntentSourceResult.Ambiguous(),
+            HumanInputRouteIntentSourceStatus.Invalid => HumanInputRouteIntentSourceResultFactory.Invalid(),
+            HumanInputRouteIntentSourceStatus.Unavailable => HumanInputRouteIntentSourceResultFactory.Unavailable(),
+            HumanInputRouteIntentSourceStatus.Ambiguous => HumanInputRouteIntentSourceResultFactory.Ambiguous(),
             _ => new HumanInputRouteIntentSourceResult(HumanInputRouteIntentSourceStatus.Unknown, HumanInputRouteIntentContract.ContractId, HumanInputRouteIntentContract.Version, [], string.Empty)
         };
 
