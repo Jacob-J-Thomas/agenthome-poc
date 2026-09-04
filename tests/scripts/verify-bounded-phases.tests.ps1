@@ -11,6 +11,7 @@ $verifyScriptPath = Join-Path $repoRoot "scripts\verify.ps1"
 $watchdogScriptPath = Join-Path $repoRoot "scripts\verify-with-watchdog.ps1"
 $coverageScriptPath = Join-Path $repoRoot "scripts\verify-coverage.ps1"
 $coverageEvidenceScriptPath = Join-Path $repoRoot "scripts\verification-coverage-evidence.ps1"
+$qualificationPlanScriptPath = Join-Path $repoRoot "scripts\qualification-plan.ps1"
 $verifyWorkflowPath = Join-Path $repoRoot ".github\workflows\verify.yml"
 $qualificationWorkflowPath = Join-Path $repoRoot ".github\workflows\qualification.yml"
 $browserWorkflowPath = Join-Path $repoRoot ".github\workflows\browser-e2e.yml"
@@ -59,6 +60,9 @@ $startupFactoryHumanReviewTestPaths = @(
     "AgentRuntimeHumanReviewTests.Readiness.cs",
     "AgentRuntimeHumanReviewTests.RecoveryCoverage.cs"
 ) | ForEach-Object { Join-Path $repoRoot "tests\EmbodySense.Core.Startup.Tests\Runtime\$_" }
+$applicationTestRoot = Join-Path $repoRoot "tests\EmbodySense.Core.Application.Tests"
+$applicationIsolationMapPath = Join-Path $applicationTestRoot "Verification\ApplicationTestIsolationMap.cs"
+$applicationSerialCollectionPath = Join-Path $applicationTestRoot "Verification\ApplicationSerialStateCollection.cs"
 $powerShellExecutable = (Get-Process -Id $PID).Path
 $functionalChildTimeoutSeconds = 30
 $assertionCount = 0
@@ -72,6 +76,103 @@ function Assert-True {
 function Assert-Contains {
     param([string]$Actual, [string]$Expected, [string]$Message)
     Assert-True -Condition ($Actual.IndexOf($Expected, [StringComparison]::Ordinal) -ge 0) -Message "$Message Expected '$Expected'. Actual: $Actual"
+}
+
+function Get-ApplicationIsolationMapEntries {
+    param([string]$Content, [string]$MapName)
+
+    $pattern = '(?ms)^\s*internal const string ' + [regex]::Escape($MapName) + ' = """\r?\n(?<body>.*?)^\s*""";'
+    $match = [regex]::Match($Content, $pattern)
+    Assert-True -Condition $match.Success -Message "Application test isolation map '$MapName' must remain a statically inspectable raw string."
+    $entries = @($match.Groups["body"].Value -split '\r?\n' | ForEach-Object { $_.Trim() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    Assert-True -Condition ($entries.Count -gt 0) -Message "Application test isolation map '$MapName' cannot be empty."
+    Assert-True -Condition (@($entries | Group-Object -CaseSensitive | Where-Object Count -ne 1).Count -eq 0) -Message "Application test isolation map '$MapName' cannot contain duplicate classes."
+    Assert-True -Condition (($entries -join '|') -ceq ((@($entries | Sort-Object)) -join '|')) -Message "Application test isolation map '$MapName' must retain deterministic ordinal ordering."
+    foreach ($entry in $entries) {
+        Assert-True -Condition ($entry -cmatch '^EmbodySense\.Core\.Application\.Tests\.(?:[A-Za-z_][A-Za-z0-9_]*\.)*[A-Za-z_][A-Za-z0-9_]*Tests$') -Message "Application test isolation entry '$entry' is not one exact test-class identity."
+    }
+
+    return [string[]]$entries
+}
+
+function Get-ApplicationActiveCollectionAttributes {
+    param(
+        [Parameter(Mandatory = $true)] [string]$Path,
+        [Parameter(Mandatory = $true)] [string]$Content,
+        [Parameter(Mandatory = $true)] [string]$ClassIdentity
+    )
+
+    Initialize-QualificationCSharpParser
+    $syntaxTree = [Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree]::ParseText($Content)
+    $syntaxErrors = @($syntaxTree.GetDiagnostics() | Where-Object { $_.Severity -eq [Microsoft.CodeAnalysis.DiagnosticSeverity]::Error })
+    if ($syntaxErrors.Count -gt 0) {
+        throw "Application collection classification requires valid C# source in '$Path'."
+    }
+
+    $root = $syntaxTree.GetCompilationUnitRoot()
+    $namespaceDeclarations = @($root.Members | Where-Object { $_ -is [Microsoft.CodeAnalysis.CSharp.Syntax.BaseNamespaceDeclarationSyntax] })
+    if ($namespaceDeclarations.Count -ne 1) {
+        throw "Application collection classification requires exactly one top-level namespace in '$Path'."
+    }
+
+    $className = @($ClassIdentity -split '\.')[-1]
+    $expectedIdentity = "$($namespaceDeclarations[0].Name).$className"
+    if ($expectedIdentity -cne $ClassIdentity) {
+        throw "Application collection classification expected '$ClassIdentity' but '$Path' declares namespace '$($namespaceDeclarations[0].Name)'."
+    }
+
+    $classDeclarations = @(
+        $root.DescendantNodes() |
+            Where-Object {
+                $_ -is [Microsoft.CodeAnalysis.CSharp.Syntax.ClassDeclarationSyntax] -and
+                $_.Parent -is [Microsoft.CodeAnalysis.CSharp.Syntax.BaseNamespaceDeclarationSyntax] -and
+                $_.Identifier.ValueText -ceq $className
+            }
+    )
+    if ($classDeclarations.Count -ne 1) {
+        throw "Application collection classification requires exactly one top-level declaration for '$ClassIdentity' in '$Path'."
+    }
+
+    $attributes = [Collections.Generic.List[string]]::new()
+    foreach ($attributeList in @($classDeclarations[0].AttributeLists)) {
+        foreach ($attribute in @($attributeList.Attributes)) {
+            $simpleName = @($attribute.Name.ToString() -split '::|\.')[-1]
+            if ($simpleName -ceq "Collection" -or $simpleName -ceq "CollectionAttribute") {
+                $attributes.Add($attribute.ToString())
+            }
+        }
+    }
+
+    return [string[]]$attributes
+}
+
+function Assert-ApplicationTestCollectionClassification {
+    param(
+        [Parameter(Mandatory = $true)] [string[]]$Paths,
+        [Parameter(Mandatory = $true)] [string[]]$Contents,
+        [Parameter(Mandatory = $true)] [string]$ClassIdentity,
+        [Parameter(Mandatory = $true)] [bool]$RequiresSerialCollection
+    )
+
+    if ($Paths.Count -ne $Contents.Count) {
+        throw "Application collection classification requires one source path for each source document."
+    }
+
+    $expectedAttribute = 'Collection(Verification.ApplicationSerialStateCollection.Name)'
+    $activeAttributes = [Collections.Generic.List[string]]::new()
+    for ($sourceIndex = 0; $sourceIndex -lt $Paths.Count; $sourceIndex++) {
+        foreach ($activeAttribute in @(Get-ApplicationActiveCollectionAttributes -Path $Paths[$sourceIndex] -Content $Contents[$sourceIndex] -ClassIdentity $ClassIdentity)) {
+            $activeAttributes.Add($activeAttribute)
+        }
+    }
+
+    $actualAttributes = if ($activeAttributes.Count -eq 0) { "none" } else { $activeAttributes -join ", " }
+    if ($RequiresSerialCollection) {
+        Assert-True -Condition ($activeAttributes.Count -eq 1 -and $activeAttributes[0] -ceq $expectedAttribute) -Message "Serial-state Application test class '$ClassIdentity' must declare exactly one active exclusive collection attribute '$expectedAttribute'. Active collection attributes: $actualAttributes."
+        return
+    }
+
+    Assert-True -Condition ($activeAttributes.Count -eq 0) -Message "Parallel-safe Application test class '$ClassIdentity' cannot declare an active xUnit collection attribute. Active collection attributes: $actualAttributes."
 }
 
 function Invoke-ExpectedFailure {
@@ -96,6 +197,7 @@ Assert-True -Condition ($functionalChildTimeoutSeconds -eq 30) -Message "Functio
 . $phaseScriptPath
 . $tempScriptPath
 . $artifactScriptPath
+. $qualificationPlanScriptPath
 Reset-VerificationPhaseState
 
 $contextLine = Write-VerificationContext -RepositoryRoot $repoRoot -Configuration Debug -VerificationTier PullRequest
@@ -218,6 +320,8 @@ $startupFactoryTest = Get-Content -LiteralPath $startupFactoryTestPath -Raw
 $startupFactoryEffectReconciliationTest = Get-Content -LiteralPath $startupFactoryEffectReconciliationTestPath -Raw
 $startupFactoryEffectReconciliationCoverageTest = Get-Content -LiteralPath $startupFactoryEffectReconciliationCoverageTestPath -Raw
 $startupFactoryHumanReviewTests = @($startupFactoryHumanReviewTestPaths | ForEach-Object { Get-Content -LiteralPath $_ -Raw })
+$applicationIsolationMap = Get-Content -LiteralPath $applicationIsolationMapPath -Raw
+$applicationSerialCollection = Get-Content -LiteralPath $applicationSerialCollectionPath -Raw
 
 Assert-Contains -Actual $verifyScript -Expected '[ValidateSet("PullRequest", "Stress")]' -Message "The verifier must expose only the two owned tiers."
 Assert-Contains -Actual $verifyScript -Expected '[string]$Configuration = "Release"' -Message "The canonical verifier must default to Release."
@@ -315,6 +419,7 @@ Assert-Contains -Actual $verifyScript -Expected '"vstest", $Lane.AssemblyPath' -
 Assert-Contains -Actual $laneScript -Expected 'if ($TestProject.Name -eq "EmbodySense.Core.Startup.Tests.csproj") {' -Message "Only Startup may declare the approved two-lane partition."
 Assert-True -Condition ([regex]::Matches($laneScript, 'New-VerificationTestLane -Name "all"').Count -eq 1 -and [regex]::Matches($laneScript, 'New-VerificationTestLane -Name "remainder"').Count -eq 1 -and [regex]::Matches($laneScript, 'New-VerificationTestLane -Name "nested-process"').Count -eq 1) -Message "The verifier must retain one general lane declaration and exactly the approved two Startup lane declarations."
 foreach ($parallelAssemblyInfoPath in @(
+    "tests\EmbodySense.Core.Application.Tests\AssemblyInfo.cs",
     "tests\EmbodySense.Core.Persistence.Tests\AssemblyInfo.cs",
     "tests\EmbodySense.Core.Startup.Tests\AssemblyInfo.cs",
     "tests\EmbodySense.IntegrationTests\AssemblyInfo.cs",
@@ -322,6 +427,90 @@ foreach ($parallelAssemblyInfoPath in @(
 )) {
     $parallelAssemblyInfo = Get-Content -LiteralPath (Join-Path $repoRoot $parallelAssemblyInfoPath) -Raw
     Assert-Contains -Actual $parallelAssemblyInfo -Expected '[assembly: CollectionBehavior(MaxParallelThreads = 2)]' -Message "Assembly-wide lane '$parallelAssemblyInfoPath' must retain the explicit two-thread xUnit ceiling."
+}
+$applicationAssemblyInfo = Get-Content -LiteralPath (Join-Path $applicationTestRoot "AssemblyInfo.cs") -Raw
+Assert-True -Condition ($applicationAssemblyInfo.IndexOf("DisableTestParallelization", [StringComparison]::Ordinal) -lt 0) -Message "Application class-level parallelism cannot be silently disabled at assembly scope."
+Assert-Contains -Actual $applicationSerialCollection -Expected '[CollectionDefinition(Name, DisableParallelization = true)]' -Message "Application tests that touch shared state must remain exclusive of the parallel-safe class pool."
+Assert-Contains -Actual $applicationSerialCollection -Expected 'public const string Name = "Application serial state";' -Message "Application shared-state tests must retain one exact named serial collection."
+$applicationSerialClasses = @(Get-ApplicationIsolationMapEntries -Content $applicationIsolationMap -MapName "SerialStateTestClasses")
+$applicationParallelSafeClasses = @(Get-ApplicationIsolationMapEntries -Content $applicationIsolationMap -MapName "ParallelSafeTestClasses")
+$applicationMappedClasses = @($applicationSerialClasses + $applicationParallelSafeClasses)
+Assert-True -Condition (@($applicationMappedClasses | Group-Object -CaseSensitive | Where-Object Count -ne 1).Count -eq 0) -Message "Every Application test class must have exactly one serial-state or parallel-safe classification."
+Assert-True -Condition ($applicationParallelSafeClasses -ccontains "EmbodySense.Core.Application.Tests.Loops.Execution.Custom.CustomLoopOrderedRunnerTests") -Message "The long ordered-runner class must remain admitted to bounded class-level parallelism without changing its test identities."
+
+$applicationClassSources = @{}
+foreach ($applicationTestSource in @(Get-ChildItem -LiteralPath $applicationTestRoot -Recurse -Filter "*.cs" | Sort-Object FullName)) {
+    $applicationTestContent = Get-Content -LiteralPath $applicationTestSource.FullName -Raw
+    if (@(Get-QualificationDirectXunitTestTypeNames -Content $applicationTestContent).Count -eq 0) {
+        continue
+    }
+
+    $applicationTestRelativePath = [IO.Path]::GetRelativePath($repoRoot, $applicationTestSource.FullName).Replace('\', '/')
+    foreach ($applicationTestClass in @(Get-QualificationDirectXunitTestClasses -Path $applicationTestRelativePath -Content $applicationTestContent)) {
+        if (-not $applicationClassSources.ContainsKey($applicationTestClass)) {
+            $applicationClassSources[$applicationTestClass] = [Collections.Generic.List[string]]::new()
+        }
+        $applicationClassSources[$applicationTestClass].Add($applicationTestSource.FullName)
+    }
+}
+$applicationDiscoveredClasses = @($applicationClassSources.Keys | Sort-Object)
+Assert-True -Condition (($applicationDiscoveredClasses -join '|') -ceq ((@($applicationMappedClasses | Sort-Object)) -join '|')) -Message "The source-owned Application isolation map must classify every Roslyn-authenticated xUnit class and no stale class."
+foreach ($applicationSerialClass in $applicationSerialClasses) {
+    $sourcePaths = [string[]]@($applicationClassSources[$applicationSerialClass])
+    $sourceContents = [string[]]@($sourcePaths | ForEach-Object { Get-Content -LiteralPath $_ -Raw })
+    Assert-ApplicationTestCollectionClassification -Paths $sourcePaths -Contents $sourceContents -ClassIdentity $applicationSerialClass -RequiresSerialCollection $true
+}
+foreach ($applicationParallelSafeClass in $applicationParallelSafeClasses) {
+    $sourcePaths = [string[]]@($applicationClassSources[$applicationParallelSafeClass])
+    $sourceContents = [string[]]@($sourcePaths | ForEach-Object { Get-Content -LiteralPath $_ -Raw })
+    Assert-ApplicationTestCollectionClassification -Paths $sourcePaths -Contents $sourceContents -ClassIdentity $applicationParallelSafeClass -RequiresSerialCollection $false
+}
+$applicationCollectionMutationPath = "tests/EmbodySense.Core.Application.Tests/Verification/ApplicationCollectionMutationTests.cs"
+$applicationCollectionMutationClass = "EmbodySense.Core.Application.Tests.Verification.ApplicationCollectionMutationTests"
+$applicationCollectionAttribute = '[Collection(Verification.ApplicationSerialStateCollection.Name)]'
+$applicationCollectionMutationBase = @'
+namespace EmbodySense.Core.Application.Tests.Verification;
+
+[Collection(Verification.ApplicationSerialStateCollection.Name)]
+public sealed class ApplicationCollectionMutationTests
+{
+    [Fact]
+    public void Example()
+    {
+    }
+}
+'@
+Assert-ApplicationTestCollectionClassification -Paths $applicationCollectionMutationPath -Contents $applicationCollectionMutationBase -ClassIdentity $applicationCollectionMutationClass -RequiresSerialCollection $true
+$applicationCollectionStringSpoof = @'
+namespace EmbodySense.Core.Application.Tests.Verification;
+
+public sealed class ApplicationCollectionMutationTests
+{
+    private const string CollectionSpoof = "[Collection(Verification.ApplicationSerialStateCollection.Name)]";
+
+    [Fact]
+    public void Example()
+    {
+    }
+}
+'@
+foreach ($applicationCollectionSpoof in @(
+    $applicationCollectionMutationBase.Replace($applicationCollectionAttribute, "// $applicationCollectionAttribute"),
+    $applicationCollectionStringSpoof,
+    $applicationCollectionMutationBase.Replace($applicationCollectionAttribute, "#if false`n$applicationCollectionAttribute`n#endif")
+)) {
+    $null = Invoke-ExpectedFailure -ExpectedMessage "must declare exactly one active exclusive collection attribute" -Action {
+        Assert-ApplicationTestCollectionClassification -Paths $applicationCollectionMutationPath -Contents $applicationCollectionSpoof -ClassIdentity $applicationCollectionMutationClass -RequiresSerialCollection $true
+    }
+}
+foreach ($applicationCollectionMutation in @(
+    $applicationCollectionMutationBase.Replace($applicationCollectionAttribute, ""),
+    $applicationCollectionMutationBase.Replace($applicationCollectionAttribute, '[Collection(Verification.OtherCollection.Name)]'),
+    $applicationCollectionMutationBase.Replace($applicationCollectionAttribute, "$applicationCollectionAttribute`n$applicationCollectionAttribute")
+)) {
+    $null = Invoke-ExpectedFailure -ExpectedMessage "must declare exactly one active exclusive collection attribute" -Action {
+        Assert-ApplicationTestCollectionClassification -Paths $applicationCollectionMutationPath -Contents $applicationCollectionMutation -ClassIdentity $applicationCollectionMutationClass -RequiresSerialCollection $true
+    }
 }
 Assert-Contains -Actual $startupRuntimeCollection -Expected '[CollectionDefinition(Name)]' -Message "Startup runtime wrappers must retain one shared serial xUnit collection."
 foreach ($startupRuntimeWrapper in @(

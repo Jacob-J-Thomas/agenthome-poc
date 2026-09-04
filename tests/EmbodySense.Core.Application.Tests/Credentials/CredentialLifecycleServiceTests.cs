@@ -13,6 +13,7 @@ using EmbodySense.Core.Common.Governance.Audit;
 
 namespace EmbodySense.Core.Application.Tests.Credentials;
 
+[Collection(Verification.ApplicationSerialStateCollection.Name)]
 public sealed class CredentialLifecycleServiceTests
 {
     [Fact]

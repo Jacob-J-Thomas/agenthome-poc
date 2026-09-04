@@ -27,6 +27,7 @@ using EmbodySense.Core.Common.Workspace;
 
 namespace EmbodySense.Core.Application.Tests.Runtime;
 
+[Collection(Verification.ApplicationSerialStateCollection.Name)]
 public sealed class DefaultConversationLoopRunnerTests
 {
     [Fact]

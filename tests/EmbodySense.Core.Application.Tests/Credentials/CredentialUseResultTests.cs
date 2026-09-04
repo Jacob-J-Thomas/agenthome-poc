@@ -4,6 +4,7 @@ using EmbodySense.Core.Common.Credentials.Models;
 
 namespace EmbodySense.Core.Application.Tests.Credentials;
 
+[Collection(Verification.ApplicationSerialStateCollection.Name)]
 public sealed class CredentialUseResultTests
 {
     [Fact]
