@@ -1117,12 +1117,14 @@ internal static partial class GovernedLoopRuntimeTests
         var activation = await runtime.StartGovernedLoopLocalBackgroundWithStatusAsync();
         Assert.Equal(AgentRuntimeGovernedLoopBackgroundStartStatus.Started, activation.Status);
         ScheduleRunAdmissionEvidence? refreshed = null;
+        CustomLoopRunRecord? retriedRun = null;
         var retryDeadlineUtc = DateTimeOffset.UtcNow.AddSeconds(10);
         while (DateTimeOffset.UtcNow < retryDeadlineUtc)
         {
             refreshed = await runs.GetScheduleAdmissionAsync(second.CreateEnvelope().DeliveryId);
-            if (refreshed?.Attempts.Any(attempt => attempt.Disposition == ScheduleRunAdmissionDisposition.RunCreated) == true
-                && fixture.ProviderAttempts >= 2)
+            var retriedRunId = refreshed?.Attempts.LastOrDefault(attempt => attempt.Disposition == ScheduleRunAdmissionDisposition.RunCreated)?.CandidateRunId;
+            retriedRun = retriedRunId is null ? null : await runs.GetAsync(retriedRunId);
+            if (retriedRun?.IsTerminal == true)
             {
                 break;
             }
@@ -1130,6 +1132,7 @@ internal static partial class GovernedLoopRuntimeTests
             await Task.Delay(20);
         }
 
+        Assert.True(retriedRun?.IsTerminal == true, "The deferred schedule retry did not reach a terminal canonical run within the test deadline.");
         var stopped = await runtime.StopGovernedLoopLocalBackgroundAsync();
         Assert.Equal(AgentRuntimeGovernedLoopBackgroundStopStatus.Stopped, stopped.Status);
         refreshed ??= await runs.GetScheduleAdmissionAsync(second.CreateEnvelope().DeliveryId);
