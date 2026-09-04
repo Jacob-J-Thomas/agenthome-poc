@@ -149,10 +149,11 @@ public sealed partial class BrowserFlowTests
             Assert.Contains("Accepted", await browser.EvaluateStringAsync("document.getElementById('effectReconciliationPosture').textContent"), StringComparison.OrdinalIgnoreCase);
             await AssertEffectReconciliationAttemptUnchangedAsync(paths, seeded, effectArtifactsBefore, markerTimestampBefore);
             app.AssertHealthy();
+            var collectionPath = "/api/effect-reconciliation?maximumCount=50";
             var escapedCaseId = Uri.EscapeDataString(seeded.CaseId);
             var casePath = $"/api/effect-reconciliation/{escapedCaseId}?";
             var resolutionPath = $"/api/effect-reconciliation/{escapedCaseId}/resolution";
-            await browser.AssertHealthyAsync([(resolutionPath, 404)], [(casePath, 503), (resolutionPath, 503)]);
+            await browser.AssertHealthyAsync([(resolutionPath, 404)], [(collectionPath, 503), (casePath, 503), (resolutionPath, 503)]);
         }
         catch
         {
