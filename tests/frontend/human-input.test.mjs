@@ -995,6 +995,97 @@ test("Human Input preparation retries reuse exact operation and candidate expiry
   await runRetry("amend");
 });
 
+test("Human Input retains bounded reroute and amend commit envelopes after response loss", async () => {
+  const runResponseLoss = async (kind) => {
+    const fixture = createFixture();
+    const current = posture();
+    const calls = [];
+    const candidateExpiresAtUtc = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+    const requestExpiresAtUtc = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
+    let commitAttempts = 0;
+    const requestJson = async (url, options = {}) => {
+      calls.push({ url, options });
+      if (url === "/api/human-input?maximumCount=50")
+        return { status: "ready", requests: [current], nextCursor: null };
+      if (url === "/api/human-input/request-input-1") return current;
+      if (url.endsWith(`/${kind}/prepare`))
+        return kind === "reroute"
+          ? {
+              status: "ready",
+              requestId: "request-input-1",
+              expiresAtUtc: candidateExpiresAtUtc,
+              options: [
+                {
+                  candidateKey: "route-response-loss",
+                  label: "Alternative route",
+                  eligibleRespondentCount: 1,
+                  expiresAtUtc: candidateExpiresAtUtc,
+                },
+              ],
+            }
+          : {
+              status: "ready",
+              requestId: "request-input-1",
+              candidateKey: "amend-response-loss",
+              expiresAtUtc: candidateExpiresAtUtc,
+            };
+      if (url.endsWith(`/${kind}`)) {
+        commitAttempts++;
+        if (commitAttempts === 1) throw new Error("response lost after commit");
+        return { status: "replayed" };
+      }
+      throw new Error("unexpected request");
+    };
+    const surface = createHumanInputSurface({
+      document: fixture.document,
+      window: { crypto: { randomUUID: () => `${kind}-response-loss-operation` } },
+      requestJson,
+    });
+    await surface.activate();
+    if (kind === "reroute") {
+      fixture.elements.humanInputRerouteExpiresAt.value = localDateInputAfter(10);
+      await clickAndFlush(fixture.elements.humanInputRerouteButton);
+    } else {
+      fixture.elements.humanInputAmendPurpose.value = "Amended response-loss purpose";
+      fixture.elements.humanInputAmendPrompt.value = "Amended response-loss prompt";
+      fixture.elements.humanInputAmendPrivacyClass.value = "sensitive";
+      fixture.elements.humanInputAmendExpiresAt.value = requestExpiresAtUtc.slice(0, 16);
+      await clickAndFlush(fixture.elements.humanInputAmendButton);
+    }
+    await clickAndFlush(
+      kind === "reroute"
+        ? fixture.elements.humanInputRerouteButton
+        : fixture.elements.humanInputAmendButton,
+    );
+    assert.equal(commitAttempts, 1);
+    assert.match(
+      kind === "reroute"
+        ? fixture.elements.humanInputRerouteButton.textContent
+        : fixture.elements.humanInputAmendButton.textContent,
+      /Retry/i,
+    );
+    const firstCommit = calls.find((call) => call.url.endsWith(`/${kind}`));
+    await clickAndFlush(
+      kind === "reroute"
+        ? fixture.elements.humanInputRerouteButton
+        : fixture.elements.humanInputAmendButton,
+    );
+    assert.equal(commitAttempts, 2);
+    const commits = calls.filter((call) => call.url.endsWith(`/${kind}`));
+    assert.equal(commits.length, 2);
+    assert.deepEqual(
+      JSON.parse(commits[1].options.body),
+      JSON.parse(firstCommit.options.body),
+    );
+    assert.match(
+      fixture.elements.humanInputResponseStatus.textContent,
+      /already recorded/i,
+    );
+  };
+  await runResponseLoss("reroute");
+  await runResponseLoss("amend");
+});
+
 test("Human Input invalidates prepared candidates when their editable intent changes", async () => {
   const fixture = createFixture();
   const current = posture();

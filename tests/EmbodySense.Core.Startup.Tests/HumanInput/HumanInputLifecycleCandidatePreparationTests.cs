@@ -258,11 +258,47 @@ public sealed class HumanInputLifecycleCandidatePreparationTests
     }
 
     [Theory]
+    [InlineData(HumanInputRouteIntentSourceStatus.Invalid, HumanInputSupersedePreparationStatus.Invalid)]
+    [InlineData(HumanInputRouteIntentSourceStatus.Unavailable, HumanInputSupersedePreparationStatus.Unavailable)]
+    [InlineData(HumanInputRouteIntentSourceStatus.Ambiguous, HumanInputSupersedePreparationStatus.Ambiguous)]
+    [InlineData(HumanInputRouteIntentSourceStatus.Unknown, HumanInputSupersedePreparationStatus.Ambiguous)]
+    public async Task Reroute_route_source_dispositions_fail_closed_without_candidate_options(HumanInputRouteIntentSourceStatus sourceStatus, HumanInputSupersedePreparationStatus expectedStatus)
+    {
+        var fixture = CreateFixture(HumanInputResponsePolicyKind.FirstValid, routeIntentSource: new HumanInputRouteIntentSourceTestDouble(HumanInputRouteIntentSourceResultFor(sourceStatus)));
+
+        var result = await fixture.Preparer.PrepareRerouteAsync(RerouteInput(fixture.Request, fixture.Clock.GetUtcNow().AddMinutes(5)));
+
+        Assert.Equal(expectedStatus, result.Status);
+        Assert.Empty(result.Options);
+    }
+
+    [Fact]
+    public async Task Reroute_rejects_changed_route_intent_digest_before_registry_publication()
+    {
+        var fixture = CreateFixture(HumanInputResponsePolicyKind.FirstValid, routeIntentSource: new HumanInputRouteIntentSourceTestDouble(
+            new HumanInputRouteIntentSourceResult(
+                HumanInputRouteIntentSourceStatus.Ready,
+                HumanInputRouteIntentContract.ContractId,
+                HumanInputRouteIntentContract.Version,
+                [new HumanInputRouteExclusionIntent(0, new string('a', HumanInputLimits.Sha256HexCharacters))],
+                new string('b', HumanInputLimits.Sha256HexCharacters))));
+
+        var result = await fixture.Preparer.PrepareRerouteAsync(RerouteInput(fixture.Request, fixture.Clock.GetUtcNow().AddMinutes(5)));
+
+        Assert.Equal(HumanInputSupersedePreparationStatus.Invalid, result.Status);
+        Assert.Empty(result.Options);
+    }
+
+    [Theory]
     [InlineData(AuthorityGrantResolutionStatus.NotFound, HumanInputSupersedePreparationStatus.NotFound)]
     [InlineData(AuthorityGrantResolutionStatus.Invalid, HumanInputSupersedePreparationStatus.NotFound)]
     [InlineData(AuthorityGrantResolutionStatus.Revoked, HumanInputSupersedePreparationStatus.Denied)]
-    [InlineData(AuthorityGrantResolutionStatus.Unavailable, HumanInputSupersedePreparationStatus.Denied)]
-    [InlineData(AuthorityGrantResolutionStatus.Unknown, HumanInputSupersedePreparationStatus.Denied)]
+    [InlineData(AuthorityGrantResolutionStatus.ProfileUnavailable, HumanInputSupersedePreparationStatus.Unavailable)]
+    [InlineData(AuthorityGrantResolutionStatus.RoleUnavailable, HumanInputSupersedePreparationStatus.Unavailable)]
+    [InlineData(AuthorityGrantResolutionStatus.LoopUnavailable, HumanInputSupersedePreparationStatus.Unavailable)]
+    [InlineData(AuthorityGrantResolutionStatus.Unavailable, HumanInputSupersedePreparationStatus.Unavailable)]
+    [InlineData(AuthorityGrantResolutionStatus.Unknown, HumanInputSupersedePreparationStatus.Ambiguous)]
+    [InlineData(AuthorityGrantResolutionStatus.Ambiguous, HumanInputSupersedePreparationStatus.Ambiguous)]
     public async Task Reroute_maps_non_active_grants_without_exposing_resolution_details(AuthorityGrantResolutionStatus grantStatus, HumanInputSupersedePreparationStatus expectedStatus)
     {
         var fixture = CreateFixture(HumanInputResponsePolicyKind.FirstValid);
@@ -273,6 +309,23 @@ public sealed class HumanInputLifecycleCandidatePreparationTests
         Assert.Equal(expectedStatus, result.Status);
         Assert.Empty(result.Options);
         Assert.Null(result.ExpiresAtUtc);
+    }
+
+    [Fact]
+    public async Task Reroute_and_amend_map_an_active_grant_with_a_mismatched_reference_as_ambiguous()
+    {
+        var fixture = CreateFixture(HumanInputResponsePolicyKind.FirstValid);
+        var grant = fixture.Lifecycle.Operations[0].GrantReference!;
+        var mismatched = grant with { ContentHash = "sha256:" + new string('f', HumanInputLimits.Sha256HexCharacters) };
+        fixture.GrantResolver.Resolution = fixture.GrantResolver.Resolution with { RequestedReference = mismatched };
+
+        var reroute = await fixture.Preparer.PrepareRerouteAsync(RerouteInput(fixture.Request, fixture.Clock.GetUtcNow().AddMinutes(5)));
+        var amend = await fixture.Preparer.PrepareAmendAsync(AmendInput(fixture.Request, fixture.Clock.GetUtcNow().AddMinutes(5), fixture.Clock.GetUtcNow().AddMinutes(30)));
+
+        Assert.Equal(HumanInputSupersedePreparationStatus.Ambiguous, reroute.Status);
+        Assert.Empty(reroute.Options);
+        Assert.Equal(HumanInputSupersedePreparationStatus.Ambiguous, amend.Status);
+        Assert.Null(amend.CandidateKey);
     }
 
     [Fact]
@@ -346,7 +399,7 @@ public sealed class HumanInputLifecycleCandidatePreparationTests
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => fixture.Preparer.PrepareAmendAsync(input, cancellation.Token));
     }
 
-    private static Fixture CreateFixture(HumanInputResponsePolicyKind policyKind, long lifecycleVersion = 1, int respondentCount = 3, HumanInputPrivacyClass privacyClass = HumanInputPrivacyClass.Private)
+    private static Fixture CreateFixture(HumanInputResponsePolicyKind policyKind, long lifecycleVersion = 1, int respondentCount = 3, HumanInputPrivacyClass privacyClass = HumanInputPrivacyClass.Private, IHumanInputRouteIntentSource? routeIntentSource = null)
     {
         var policyName = policyKind.ToString().ToLowerInvariant();
         var baseMutation = HumanInputRequestStoreTestData.CreateMutation($"request-candidate-{policyName}", $"version-candidate-{policyName}", $"create-candidate-{policyName}");
@@ -372,9 +425,18 @@ public sealed class HumanInputLifecycleCandidatePreparationTests
         var grant = baseMutation.Operation.GrantReference!;
         var resolver = new HumanInputSupersedeCandidatePreparerTestGrantResolver(new AuthorityGrantResolution(AuthorityGrantResolutionStatus.Active, grant, null!, new AuthorityCeiling([], [], 0, CapabilitySideEffectClass.None, false, false, false), "grant-evidence", HumanInputRequestStoreTestData.Time));
         var registry = new HumanInputSupersedeCandidateRegistry(clock);
-        var preparer = new HumanInputSupersedeCandidatePreparer(catalog, resolver, registry, request.Binding.WorkspaceId, "user-one", clock);
+        var preparer = new HumanInputSupersedeCandidatePreparer(catalog, resolver, registry, request.Binding.WorkspaceId, "user-one", clock, routeIntentSource);
         return new Fixture(preparer, registry, request, clock, catalog, resolver, lifecycle);
     }
+
+    private static HumanInputRouteIntentSourceResult HumanInputRouteIntentSourceResultFor(HumanInputRouteIntentSourceStatus status)
+        => status switch
+        {
+            HumanInputRouteIntentSourceStatus.Invalid => HumanInputRouteIntentSourceResult.Invalid(),
+            HumanInputRouteIntentSourceStatus.Unavailable => HumanInputRouteIntentSourceResult.Unavailable(),
+            HumanInputRouteIntentSourceStatus.Ambiguous => HumanInputRouteIntentSourceResult.Ambiguous(),
+            _ => new HumanInputRouteIntentSourceResult(HumanInputRouteIntentSourceStatus.Unknown, HumanInputRouteIntentContract.ContractId, HumanInputRouteIntentContract.Version, [], string.Empty)
+        };
 
     private static HumanInputReroutePreparationInput RerouteInput(HumanInputRequest request, DateTimeOffset candidateExpiresAtUtc)
         => new("reroute-operation", request.RequestId, new HumanInputSurfaceRequestReference(request.RequestId, request.RequestVersionId, request.RequestHash), 1, HumanInputRequestLifecycleStatus.Pending.ToString(), candidateExpiresAtUtc);

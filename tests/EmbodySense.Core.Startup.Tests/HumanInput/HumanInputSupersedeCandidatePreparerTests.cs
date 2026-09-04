@@ -110,7 +110,8 @@ public sealed class HumanInputSupersedeCandidatePreparerTests
             (AuthorityGrantResolutionStatus.NotFound, HumanInputSupersedePreparationStatus.NotFound),
             (AuthorityGrantResolutionStatus.Invalid, HumanInputSupersedePreparationStatus.NotFound),
             (AuthorityGrantResolutionStatus.Revoked, HumanInputSupersedePreparationStatus.Denied),
-            (AuthorityGrantResolutionStatus.Unavailable, HumanInputSupersedePreparationStatus.Denied)
+            (AuthorityGrantResolutionStatus.Unavailable, HumanInputSupersedePreparationStatus.Unavailable),
+            (AuthorityGrantResolutionStatus.Unknown, HumanInputSupersedePreparationStatus.Ambiguous)
         })
         {
             resolver.Resolution = new AuthorityGrantResolution(grantStatus, grant, null!, EmptyCeiling(), string.Empty, mutation.Operation.RecordedAtUtc);

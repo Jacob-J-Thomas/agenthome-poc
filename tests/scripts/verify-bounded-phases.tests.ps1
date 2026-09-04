@@ -45,6 +45,10 @@ $startupNestedProcessTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Star
 $startupFactoryTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Startup.Tests\Runtime\AgentRuntimeFactoryTests.cs"
 $startupFactoryEffectReconciliationTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Startup.Tests\Runtime\AgentRuntimeReconciliationFactoryTests.cs"
 $startupFactoryEffectReconciliationCoverageTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Startup.Tests\Runtime\AgentRuntimeReconciliationFactoryTests.Coverage.cs"
+$startupFactoryHumanInputLifecycleTestPaths = @(
+    "AgentRuntimeHumanInputLifecycleTests.Coverage.cs",
+    "AgentRuntimeHumanInputLifecycleTests.SurfaceValidation.cs"
+) | ForEach-Object { Join-Path $repoRoot "tests\EmbodySense.Core.Startup.Tests\Runtime\$_" }
 $startupFactoryHumanReviewTestPaths = @(
     "AgentRuntimeHumanReviewTests.cs",
     "AgentRuntimeHumanReviewTests.Authority.cs",
@@ -217,6 +221,7 @@ $startupNestedProcessTest = Get-Content -LiteralPath $startupNestedProcessTestPa
 $startupFactoryTest = Get-Content -LiteralPath $startupFactoryTestPath -Raw
 $startupFactoryEffectReconciliationTest = Get-Content -LiteralPath $startupFactoryEffectReconciliationTestPath -Raw
 $startupFactoryEffectReconciliationCoverageTest = Get-Content -LiteralPath $startupFactoryEffectReconciliationCoverageTestPath -Raw
+$startupFactoryHumanInputLifecycleTests = @($startupFactoryHumanInputLifecycleTestPaths | ForEach-Object { Get-Content -LiteralPath $_ -Raw })
 $startupFactoryHumanReviewTests = @($startupFactoryHumanReviewTestPaths | ForEach-Object { Get-Content -LiteralPath $_ -Raw })
 
 Assert-Contains -Actual $verifyScript -Expected '[ValidateSet("PullRequest", "Stress")]' -Message "The verifier must expose only the two owned tiers."
@@ -345,6 +350,11 @@ Assert-True -Condition ($startupFactoryHumanReviewTests.Count -eq 12) -Message "
 foreach ($humanReviewFactoryTest in $startupFactoryHumanReviewTests) {
     Assert-Contains -Actual $humanReviewFactoryTest -Expected 'public sealed partial class AgentRuntimeHumanReviewTests' -Message "Human Review and recovery factory tests must remain a third independently schedulable xUnit class."
     Assert-True -Condition ($humanReviewFactoryTest.IndexOf('public sealed partial class AgentRuntimeFactoryTests', [StringComparison]::Ordinal) -lt 0) -Message "Human Review and recovery factory tests must not rejoin the serialized general factory class."
+}
+Assert-True -Condition ($startupFactoryHumanInputLifecycleTests.Count -eq 2) -Message "Human Input lifecycle factory tests must remain in the complete independently schedulable file group."
+foreach ($humanInputLifecycleFactoryTest in $startupFactoryHumanInputLifecycleTests) {
+    Assert-Contains -Actual $humanInputLifecycleFactoryTest -Expected 'public sealed partial class AgentRuntimeHumanInputLifecycleTests' -Message "Human Input lifecycle factory tests must remain independently schedulable."
+    Assert-True -Condition ($humanInputLifecycleFactoryTest.IndexOf('public sealed partial class AgentRuntimeFactoryTests', [StringComparison]::Ordinal) -lt 0) -Message "Human Input lifecycle factory tests must not rejoin the serialized general factory class."
 }
 Assert-Contains -Actual $persistenceEnvironmentCollection -Expected '[CollectionDefinition(Name, DisableParallelization = true)]' -Message "Persistence process-environment mutation must remain exclusive of all assembly tests."
 Assert-Contains -Actual $persistenceCapabilityCatalogTest -Expected '[Collection(Verification.ProcessEnvironmentCollection.Name)]' -Message "Capability-catalog trust-root mutation must retain process-environment serialization."

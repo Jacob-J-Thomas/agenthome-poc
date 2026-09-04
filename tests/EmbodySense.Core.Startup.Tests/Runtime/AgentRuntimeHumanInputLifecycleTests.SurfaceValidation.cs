@@ -8,14 +8,14 @@ using EmbodySense.Tests.Support;
 
 namespace EmbodySense.Core.Startup.Tests.Runtime;
 
-public sealed partial class AgentRuntimeFactoryTests
+public sealed partial class AgentRuntimeHumanInputLifecycleTests
 {
     [Fact]
     public async Task Human_input_surface_validates_lifecycle_and_response_dtos_before_authority_resolution()
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
-        await using var runtime = await CreateRuntimeAsync(workspace, AgentRuntimeSurface.Web);
+        await using var runtime = await AgentRuntimeFactoryTests.CreateRuntimeAsync(workspace, AgentRuntimeSurface.Web);
         var reference = new HumanInputSurfaceRequestReference("request-surface", "version-surface", HumanInputRequestStoreTestData.HashA);
 
         var nullLifecycle = await runtime.HumanInput.SubmitSurfaceLifecycleAsync(null);

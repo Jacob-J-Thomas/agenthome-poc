@@ -86,25 +86,57 @@ public sealed partial class BrowserFlowTests
             }
 
             await SelectHumanInputAsync(browser, RerouteId);
-            await SetValueAsync(browser, "#humanInputRerouteExpiresAt", DateTimeOffset.UtcNow.AddMinutes(10).ToLocalTime().ToString("yyyy-MM-ddTHH:mm"));
+            var rerouteExpiryInput = DateTimeOffset.UtcNow.AddMinutes(10).ToLocalTime().ToString("yyyy-MM-ddTHH:mm");
             var reroutePreparePath = $"/api/human-input/{Uri.EscapeDataString(RerouteId)}/reroute/prepare";
-            await browser.EvaluateWithUserGestureAsync(HumanInputBrowserTransportScripts.InstallPostCapture(reroutePreparePath));
-            await ClickAsync(browser, "[data-testid=\"human-input-reroute\"]");
-            await browser.WaitForExpressionAsync("window.__humanInputPostCapture?.statuses.length === 1 && window.__humanInputPostCapture.statuses[0] === 200 && document.getElementById('humanInputRerouteStatus').textContent.toLowerCase().includes('prepared') && document.querySelectorAll('#humanInputRerouteOptions option').length >= 1");
-            var reroutePreparation = await ReadHumanInputPayloadAsync(browser, "window.__humanInputPostCapture.payloads[0]");
-            Assert.Equal(RerouteId, reroutePreparation.GetProperty("expectedRequest").GetProperty("requestId").GetString());
-            Assert.Equal(1, reroutePreparation.GetProperty("expectedLifecycleVersion").GetInt64());
-            Assert.Equal("pending", reroutePreparation.GetProperty("expectedLifecycleStatus").GetString(), ignoreCase: true);
-            Assert.DoesNotContain(PrimaryRouteCanary, reroutePreparation.GetRawText(), StringComparison.Ordinal);
-            Assert.DoesNotContain(SecondaryRouteCanary, reroutePreparation.GetRawText(), StringComparison.Ordinal);
-            Assert.DoesNotContain("respondentId", reroutePreparation.GetRawText(), StringComparison.OrdinalIgnoreCase);
-            Assert.DoesNotContain("routingReference", reroutePreparation.GetRawText(), StringComparison.OrdinalIgnoreCase);
-            Assert.True(await browser.EvaluateBooleanAsync("document.getElementById('humanInputRerouteOptions').textContent.includes('Alternative route') && !document.getElementById('humanInputRerouteOptions').textContent.includes('reroute-private')"));
             var rerouteCommitPath = $"/api/human-input/{Uri.EscapeDataString(RerouteId)}/reroute";
-            await browser.EvaluateWithUserGestureAsync(HumanInputBrowserTransportScripts.InstallPostCapture(rerouteCommitPath));
-            await ClickAsync(browser, "[data-testid=\"human-input-reroute\"]");
-            await browser.WaitForExpressionAsync("window.__humanInputPostCapture?.statuses.length === 1 && window.__humanInputPostCapture.statuses[0] === 200 && document.getElementById('humanInputLifecycleStatus').textContent.toLowerCase().includes('pending')");
-            var rerouteCommit = await ReadHumanInputPayloadAsync(browser, "window.__humanInputPostCapture.payloads[0]");
+            JsonElement rerouteCommit;
+            await SetValueAsync(browser, "#humanInputRerouteExpiresAt", rerouteExpiryInput);
+            var fixedRerouteOperationSeed = Guid.NewGuid().ToString("N");
+            await browser.EvaluateWithUserGestureAsync(HumanInputLifecycleBrowserScripts.InstallFixedOperationIdentity(fixedRerouteOperationSeed));
+            await using (var competingTab = await browser.OpenTabAsync(app.BaseUrl))
+            {
+                await InitializeWorkspaceInTabAsync(competingTab);
+                await OpenHumanInputAsync(competingTab);
+                await SelectHumanInputAsync(competingTab, RerouteId);
+                await SetValueInTabAsync(competingTab, "#humanInputRerouteExpiresAt", rerouteExpiryInput);
+                await competingTab.EvaluateWithUserGestureAsync(HumanInputLifecycleBrowserScripts.InstallFixedOperationIdentity(fixedRerouteOperationSeed + "-secondary"));
+                await browser.EvaluateWithUserGestureAsync(HumanInputBrowserTransportScripts.InstallPostCapture(reroutePreparePath));
+                await competingTab.EvaluateWithUserGestureAsync(HumanInputBrowserTransportScripts.InstallPostCapture(reroutePreparePath));
+                await ClickAsync(browser, "[data-testid=\"human-input-reroute\"]");
+                await browser.WaitForExpressionAsync("window.__humanInputPostCapture?.statuses.length === 1 && window.__humanInputPostCapture.statuses[0] === 200 && document.getElementById('humanInputRerouteStatus').textContent.toLowerCase().includes('prepared') && document.querySelectorAll('#humanInputRerouteOptions option').length >= 1");
+                await competingTab.EvaluateWithUserGestureAsync("document.querySelector('[data-testid=\"human-input-reroute\"]')?.click()");
+                await competingTab.WaitForExpressionAsync("window.__humanInputPostCapture?.statuses.length === 1 && window.__humanInputPostCapture.statuses[0] === 200 && document.getElementById('humanInputRerouteStatus').textContent.toLowerCase().includes('prepared') && document.querySelectorAll('#humanInputRerouteOptions option').length >= 1");
+                var reroutePreparation = await ReadHumanInputPayloadAsync(browser, "window.__humanInputPostCapture.payloads[0]");
+                Assert.Equal(RerouteId, reroutePreparation.GetProperty("expectedRequest").GetProperty("requestId").GetString());
+                Assert.Equal(1, reroutePreparation.GetProperty("expectedLifecycleVersion").GetInt64());
+                Assert.Equal("pending", reroutePreparation.GetProperty("expectedLifecycleStatus").GetString(), ignoreCase: true);
+                Assert.DoesNotContain(PrimaryRouteCanary, reroutePreparation.GetRawText(), StringComparison.Ordinal);
+                Assert.DoesNotContain(SecondaryRouteCanary, reroutePreparation.GetRawText(), StringComparison.Ordinal);
+                Assert.DoesNotContain("respondentId", reroutePreparation.GetRawText(), StringComparison.OrdinalIgnoreCase);
+                Assert.DoesNotContain("routingReference", reroutePreparation.GetRawText(), StringComparison.OrdinalIgnoreCase);
+                Assert.True(await browser.EvaluateBooleanAsync("document.getElementById('humanInputRerouteOptions').textContent.includes('Alternative route') && !document.getElementById('humanInputRerouteOptions').textContent.includes('reroute-private')"));
+                await browser.EvaluateWithUserGestureAsync(HumanInputBrowserTransportScripts.InstallPostCommitResponseLoss(rerouteCommitPath));
+                await competingTab.EvaluateWithUserGestureAsync(HumanInputBrowserTransportScripts.InstallPostCapture(rerouteCommitPath));
+                await ClickAsync(browser, "[data-testid=\"human-input-reroute\"]");
+                await browser.WaitForExpressionAsync("window.__humanInputResponseLoss?.mode === 'post-commit-lost' && window.__humanInputResponseLoss.attempts === 1 && window.__humanInputResponseLoss.networkPosts === 1 && window.__humanInputResponseLoss.statuses[0] === 200");
+                await browser.WaitForExpressionAsync("document.getElementById('humanInputRerouteButton').textContent.toLowerCase().includes('retry')");
+                await competingTab.EvaluateWithUserGestureAsync("document.querySelector('[data-testid=\"human-input-reroute\"]')?.click()");
+                await competingTab.WaitForExpressionAsync("window.__humanInputPostCapture?.statuses.length === 1 && window.__humanInputPostCapture.statuses[0] === 409 && document.getElementById('humanInputResponseStatus').textContent.toLowerCase().includes('conflicted')");
+                await ClickAsync(browser, "[data-testid=\"human-input-reroute\"]");
+                await browser.WaitForExpressionAsync("window.__humanInputResponseLoss?.mode === 'off' && window.__humanInputResponseLoss.attempts === 2 && window.__humanInputResponseLoss.networkPosts === 2 && window.__humanInputResponseLoss.statuses[1] === 200 && document.getElementById('humanInputResponseStatus').textContent.toLowerCase().includes('already recorded')");
+                var lostReroutePayload = await ReadHumanInputPayloadAsync(browser, "window.__humanInputResponseLoss.payloads[0]");
+                var replayReroutePayload = await ReadHumanInputPayloadAsync(browser, "window.__humanInputResponseLoss.payloads[1]");
+                var conflictedReroutePayload = await ReadHumanInputPayloadAsync(competingTab, "window.__humanInputPostCapture.payloads[0]");
+                Assert.NotEqual(lostReroutePayload.GetProperty("operationId").GetString(), conflictedReroutePayload.GetProperty("operationId").GetString());
+                Assert.NotEqual(lostReroutePayload.GetProperty("candidateKey").GetString(), conflictedReroutePayload.GetProperty("candidateKey").GetString());
+                Assert.Equal(lostReroutePayload.GetRawText(), replayReroutePayload.GetRawText());
+                AssertNoForbiddenResponsePropertyNames(lostReroutePayload);
+                AssertNoForbiddenResponsePropertyNames(replayReroutePayload);
+                AssertNoForbiddenResponsePropertyNames(conflictedReroutePayload);
+                rerouteCommit = lostReroutePayload;
+                await browser.EvaluateWithUserGestureAsync(HumanInputLifecycleBrowserScripts.RestoreOperationIdentity());
+                await competingTab.EvaluateWithUserGestureAsync(HumanInputLifecycleBrowserScripts.RestoreOperationIdentity());
+            }
             Assert.Equal(RerouteId, rerouteCommit.GetProperty("expectedRequest").GetProperty("requestId").GetString());
             Assert.Equal("reroute", rerouteCommit.GetProperty("reason").GetString(), ignoreCase: true);
             Assert.False(string.IsNullOrWhiteSpace(rerouteCommit.GetProperty("candidateKey").GetString()));
@@ -137,25 +169,63 @@ public sealed partial class BrowserFlowTests
             Assert.False(await browser.EvaluateBooleanAsync("Object.keys(localStorage).some(key => key.toLowerCase().includes('human-input') || key.toLowerCase().includes('operation'))"));
 
             await SelectHumanInputAsync(browser, AmendId);
-            await SetValueAsync(browser, "#humanInputAmendPurpose", "Amended purpose through the visible control.");
-            await SetValueAsync(browser, "#humanInputAmendPrompt", "Amended prompt through the visible control.");
-            await SetValueAsync(browser, "#humanInputAmendPrivacyClass", "sensitive", "change");
-            await SetValueAsync(browser, "#humanInputAmendExpiresAt", DateTimeOffset.UtcNow.AddMinutes(20).ToLocalTime().ToString("yyyy-MM-ddTHH:mm"));
+            var amendPurpose = "Amended purpose through the visible control.";
+            var amendPrompt = "Amended prompt through the visible control.";
+            var amendPrivacyClass = "sensitive";
+            var amendExpiryInput = DateTimeOffset.UtcNow.AddMinutes(20).ToLocalTime().ToString("yyyy-MM-ddTHH:mm");
+            await SetValueAsync(browser, "#humanInputAmendPurpose", amendPurpose);
+            await SetValueAsync(browser, "#humanInputAmendPrompt", amendPrompt);
+            await SetValueAsync(browser, "#humanInputAmendPrivacyClass", amendPrivacyClass, "change");
+            await SetValueAsync(browser, "#humanInputAmendExpiresAt", amendExpiryInput);
             var amendPreparePath = $"/api/human-input/{Uri.EscapeDataString(AmendId)}/amend/prepare";
-            await browser.EvaluateWithUserGestureAsync(HumanInputBrowserTransportScripts.InstallPostCapture(amendPreparePath));
-            await ClickAsync(browser, "[data-testid=\"human-input-amend\"]");
-            await browser.WaitForExpressionAsync("window.__humanInputPostCapture?.statuses.length === 1 && window.__humanInputPostCapture.statuses[0] === 200 && document.getElementById('humanInputAmendStatus').textContent.toLowerCase().includes('prepared')");
-            var amendPreparation = await ReadHumanInputPayloadAsync(browser, "window.__humanInputPostCapture.payloads[0]");
-            Assert.Equal(AmendId, amendPreparation.GetProperty("expectedRequest").GetProperty("requestId").GetString());
-            Assert.Equal("sensitive", amendPreparation.GetProperty("privacyClass").GetString(), ignoreCase: true);
-            Assert.Equal("Amended purpose through the visible control.", amendPreparation.GetProperty("purpose").GetString());
-            Assert.Equal("Amended prompt through the visible control.", amendPreparation.GetProperty("prompt").GetString());
-            Assert.False(amendPreparation.TryGetProperty("candidateKey", out _));
             var amendCommitPath = $"/api/human-input/{Uri.EscapeDataString(AmendId)}/amend";
-            await browser.EvaluateWithUserGestureAsync(HumanInputBrowserTransportScripts.InstallPostCapture(amendCommitPath));
-            await ClickAsync(browser, "[data-testid=\"human-input-amend\"]");
-            await browser.WaitForExpressionAsync("window.__humanInputPostCapture?.statuses.length === 1 && document.getElementById('humanInputLifecycleStatus').textContent.toLowerCase().includes('pending')");
-            var amendCommit = await ReadHumanInputPayloadAsync(browser, "window.__humanInputPostCapture.payloads[0]");
+            JsonElement amendCommit;
+            var fixedAmendOperationSeed = Guid.NewGuid().ToString("N");
+            await browser.EvaluateWithUserGestureAsync(HumanInputLifecycleBrowserScripts.InstallFixedOperationIdentity(fixedAmendOperationSeed));
+            await using (var competingTab = await browser.OpenTabAsync(app.BaseUrl))
+            {
+                await InitializeWorkspaceInTabAsync(competingTab);
+                await OpenHumanInputAsync(competingTab);
+                await SelectHumanInputAsync(competingTab, AmendId);
+                await SetValueInTabAsync(competingTab, "#humanInputAmendPurpose", amendPurpose);
+                await SetValueInTabAsync(competingTab, "#humanInputAmendPrompt", amendPrompt);
+                await SetValueInTabAsync(competingTab, "#humanInputAmendPrivacyClass", amendPrivacyClass, "change");
+                await SetValueInTabAsync(competingTab, "#humanInputAmendExpiresAt", amendExpiryInput);
+                await competingTab.EvaluateWithUserGestureAsync(HumanInputLifecycleBrowserScripts.InstallFixedOperationIdentity(fixedAmendOperationSeed + "-secondary"));
+                await browser.EvaluateWithUserGestureAsync(HumanInputBrowserTransportScripts.InstallPostCapture(amendPreparePath));
+                await competingTab.EvaluateWithUserGestureAsync(HumanInputBrowserTransportScripts.InstallPostCapture(amendPreparePath));
+                await ClickAsync(browser, "[data-testid=\"human-input-amend\"]");
+                await browser.WaitForExpressionAsync("window.__humanInputPostCapture?.statuses.length === 1 && window.__humanInputPostCapture.statuses[0] === 200 && document.getElementById('humanInputAmendStatus').textContent.toLowerCase().includes('prepared')");
+                await competingTab.EvaluateWithUserGestureAsync("document.querySelector('[data-testid=\"human-input-amend\"]')?.click()");
+                await competingTab.WaitForExpressionAsync("window.__humanInputPostCapture?.statuses.length === 1 && window.__humanInputPostCapture.statuses[0] === 200 && document.getElementById('humanInputAmendStatus').textContent.toLowerCase().includes('prepared')");
+                var amendPreparation = await ReadHumanInputPayloadAsync(browser, "window.__humanInputPostCapture.payloads[0]");
+                Assert.Equal(AmendId, amendPreparation.GetProperty("expectedRequest").GetProperty("requestId").GetString());
+                Assert.Equal("sensitive", amendPreparation.GetProperty("privacyClass").GetString(), ignoreCase: true);
+                Assert.Equal(amendPurpose, amendPreparation.GetProperty("purpose").GetString());
+                Assert.Equal(amendPrompt, amendPreparation.GetProperty("prompt").GetString());
+                Assert.False(amendPreparation.TryGetProperty("candidateKey", out _));
+                await browser.EvaluateWithUserGestureAsync(HumanInputBrowserTransportScripts.InstallPostCommitResponseLoss(amendCommitPath));
+                await competingTab.EvaluateWithUserGestureAsync(HumanInputBrowserTransportScripts.InstallPostCapture(amendCommitPath));
+                await ClickAsync(browser, "[data-testid=\"human-input-amend\"]");
+                await browser.WaitForExpressionAsync("window.__humanInputResponseLoss?.mode === 'post-commit-lost' && window.__humanInputResponseLoss.attempts === 1 && window.__humanInputResponseLoss.networkPosts === 1 && window.__humanInputResponseLoss.statuses[0] === 200");
+                await browser.WaitForExpressionAsync("document.getElementById('humanInputAmendButton').textContent.toLowerCase().includes('retry')");
+                await competingTab.EvaluateWithUserGestureAsync("document.querySelector('[data-testid=\"human-input-amend\"]')?.click()");
+                await competingTab.WaitForExpressionAsync("window.__humanInputPostCapture?.statuses.length === 1 && window.__humanInputPostCapture.statuses[0] === 409 && document.getElementById('humanInputResponseStatus').textContent.toLowerCase().includes('conflicted')");
+                await ClickAsync(browser, "[data-testid=\"human-input-amend\"]");
+                await browser.WaitForExpressionAsync("window.__humanInputResponseLoss?.mode === 'off' && window.__humanInputResponseLoss.attempts === 2 && window.__humanInputResponseLoss.networkPosts === 2 && window.__humanInputResponseLoss.statuses[1] === 200 && document.getElementById('humanInputResponseStatus').textContent.toLowerCase().includes('already recorded')");
+                var lostAmendPayload = await ReadHumanInputPayloadAsync(browser, "window.__humanInputResponseLoss.payloads[0]");
+                var replayAmendPayload = await ReadHumanInputPayloadAsync(browser, "window.__humanInputResponseLoss.payloads[1]");
+                var conflictedAmendPayload = await ReadHumanInputPayloadAsync(competingTab, "window.__humanInputPostCapture.payloads[0]");
+                Assert.NotEqual(lostAmendPayload.GetProperty("operationId").GetString(), conflictedAmendPayload.GetProperty("operationId").GetString());
+                Assert.NotEqual(lostAmendPayload.GetProperty("candidateKey").GetString(), conflictedAmendPayload.GetProperty("candidateKey").GetString());
+                Assert.Equal(lostAmendPayload.GetRawText(), replayAmendPayload.GetRawText());
+                AssertNoForbiddenResponsePropertyNames(lostAmendPayload);
+                AssertNoForbiddenResponsePropertyNames(replayAmendPayload);
+                AssertNoForbiddenResponsePropertyNames(conflictedAmendPayload);
+                amendCommit = lostAmendPayload;
+                await browser.EvaluateWithUserGestureAsync(HumanInputLifecycleBrowserScripts.RestoreOperationIdentity());
+                await competingTab.EvaluateWithUserGestureAsync(HumanInputLifecycleBrowserScripts.RestoreOperationIdentity());
+            }
             Assert.Equal(AmendId, amendCommit.GetProperty("expectedRequest").GetProperty("requestId").GetString());
             Assert.Equal("amend", amendCommit.GetProperty("reason").GetString(), ignoreCase: true);
             Assert.False(string.IsNullOrWhiteSpace(amendCommit.GetProperty("candidateKey").GetString()));
@@ -209,6 +279,14 @@ public sealed partial class BrowserFlowTests
     {
         var read = await HumanInputBrowserFixture.ReadAsync(paths, capabilityTrustRoot, requestId);
         return read.PrimarySnapshot ?? throw new InvalidOperationException($"The canonical lifecycle snapshot was not available for {requestId}: {read.Status}.");
+    }
+
+    private static async Task SetValueInTabAsync(HeadlessBrowserTab tab, string selector, string value, string eventName = "input")
+    {
+        var jsonSelector = JsonSerializer.Serialize(selector);
+        var jsonValue = JsonSerializer.Serialize(value);
+        var jsonEventName = JsonSerializer.Serialize(eventName);
+        await tab.EvaluateWithUserGestureAsync("(() => { const element = document.querySelector(" + jsonSelector + "); if (!element) throw new Error('Element was not rendered: ' + " + jsonSelector + "); element.value = " + jsonValue + "; element.dispatchEvent(new Event(" + jsonEventName + ", { bubbles: true })); })()");
     }
 
     private static async Task<JsonElement> ReadHumanInputPayloadAsync(HeadlessBrowserTab tab, string expression)

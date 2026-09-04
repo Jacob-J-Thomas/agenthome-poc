@@ -228,7 +228,10 @@ public sealed class HumanInputRuntimeFacade
     /// <exception cref="OperationCanceledException">Thrown when cancellation is requested before durable intent begins.</exception>
     /// <remarks>When one exact same-target operation is already durable, the facade reconstructs its server-owned binding,
     /// candidate, grant, and reason from authenticated evidence instead of resolving mutable current terms. The lifecycle service
-    /// still reauthorizes the current actor before returning replay evidence.</remarks>
+    /// still reauthorizes the current actor before returning replay evidence. For Reroute and Amend, a committed operation is
+    /// replayed from durable operation evidence using its operation identifier and exact expected request state; the ephemeral
+    /// candidate key is intentionally not replay authority and may differ or be absent after a process restart. Before commit,
+    /// a candidate key must still resolve exactly and a mismatched key fails closed.</remarks>
     public async Task<HumanInputOperationResult> SubmitLifecycleAsync(
         HumanInputLifecycleOperationInput? input,
         CancellationToken cancellationToken = default)
@@ -728,11 +731,12 @@ public sealed class HumanInputRuntimeFacade
             var resolution = await _grantResolver.ResolveAsync(evidence[0].GrantReference, cancellationToken).ConfigureAwait(false);
             if (resolution is null || resolution.Status != AuthorityGrantResolutionStatus.Active || !Equals(resolution.RequestedReference, evidence[0].GrantReference))
             {
-                return resolution?.Status switch
+                var status = MapGrantFailureStatus(resolution, evidence[0].GrantReference);
+                return status switch
                 {
-                    AuthorityGrantResolutionStatus.NotFound or AuthorityGrantResolutionStatus.Invalid => (HumanInputOperationStatus.NotFound, null, new HumanInputOperationResult(HumanInputOperationStatus.NotFound, operationId, null, null, [])),
-                    AuthorityGrantResolutionStatus.Unavailable => (HumanInputOperationStatus.Unavailable, null, Unavailable(operationId)),
-                    AuthorityGrantResolutionStatus.Unknown => (HumanInputOperationStatus.Ambiguous, null, Ambiguous(operationId)),
+                    HumanInputOperationStatus.NotFound => (status, null, new HumanInputOperationResult(status, operationId, null, null, [])),
+                    HumanInputOperationStatus.Unavailable => (status, null, Unavailable(operationId)),
+                    HumanInputOperationStatus.Ambiguous => (status, null, Ambiguous(operationId)),
                     _ => (HumanInputOperationStatus.Denied, null, Denied(operationId))
                 };
             }
@@ -900,6 +904,17 @@ public sealed class HumanInputRuntimeFacade
             && string.Equals(request.RequestId, reference.RequestId, StringComparison.Ordinal)
             && string.Equals(request.RequestVersionId, reference.RequestVersionId, StringComparison.Ordinal)
             && string.Equals(request.RequestHash, reference.RequestHash, StringComparison.Ordinal);
+
+    private static HumanInputOperationStatus MapGrantFailureStatus(AuthorityGrantResolution? resolution, AuthorityGrantReference? expectedReference)
+        => resolution is null || expectedReference is null || !Equals(resolution.RequestedReference, expectedReference)
+            ? HumanInputOperationStatus.Ambiguous
+            : resolution.Status switch
+            {
+                AuthorityGrantResolutionStatus.NotFound or AuthorityGrantResolutionStatus.Invalid => HumanInputOperationStatus.NotFound,
+                AuthorityGrantResolutionStatus.Unavailable or AuthorityGrantResolutionStatus.ProfileUnavailable or AuthorityGrantResolutionStatus.RoleUnavailable or AuthorityGrantResolutionStatus.LoopUnavailable => HumanInputOperationStatus.Unavailable,
+                AuthorityGrantResolutionStatus.Unknown or AuthorityGrantResolutionStatus.Ambiguous => HumanInputOperationStatus.Ambiguous,
+                _ => HumanInputOperationStatus.Denied
+            };
 
     private static bool MatchesReplayIntent(
         HumanInputLifecycleOperationInput input,

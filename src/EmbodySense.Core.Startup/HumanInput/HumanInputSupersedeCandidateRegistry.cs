@@ -8,7 +8,10 @@ namespace EmbodySense.Core.Startup.HumanInput;
 
 /// <summary>Stores bounded, process-local, server-composed Human Input lifecycle candidates.</summary>
 /// <remarks>The registry is a short-lived proposal cache, not a lifecycle ledger or authority source. A process restart
-/// intentionally invalidates every key. Each lookup revalidates the complete candidate and every caller-supplied binding.</remarks>
+/// intentionally invalidates every key. Each lookup revalidates the complete candidate and every caller-supplied binding.
+/// Once a lifecycle operation is committed, the durable operation identifier, exact request reference, operation kind, and
+/// command evidence are authoritative for replay; a process-local candidate key is not. A pre-commit lookup still requires
+/// the exact opaque key and rejects a different key.</remarks>
 public sealed class HumanInputSupersedeCandidateRegistry : IHumanInputSupersedeCandidateRegistry
 {
     private const int MaximumEntries = 256;

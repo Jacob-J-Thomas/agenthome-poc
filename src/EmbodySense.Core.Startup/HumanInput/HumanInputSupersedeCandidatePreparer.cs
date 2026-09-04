@@ -26,6 +26,7 @@ public sealed class HumanInputSupersedeCandidatePreparer : IHumanInputSupersedeC
     private readonly string _workspaceId;
     private readonly string _actor;
     private readonly TimeProvider _timeProvider;
+    private readonly IHumanInputRouteIntentSource _routeIntentSource;
 
     /// <summary>Creates a preparer over one canonical request catalog, grant resolver, candidate registry, actor, and clock.</summary>
     /// <param name="catalog">The canonical request catalog.</param>
@@ -34,7 +35,8 @@ public sealed class HumanInputSupersedeCandidatePreparer : IHumanInputSupersedeC
     /// <param name="workspaceId">The server-owned workspace identity.</param>
     /// <param name="actor">The server-owned actor attribution.</param>
     /// <param name="timeProvider">The trusted preparation clock.</param>
-    public HumanInputSupersedeCandidatePreparer(IHumanInputRequestCatalog catalog, IAuthorityGrantResolver grantResolver, IHumanInputSupersedeCandidateRegistry registry, string workspaceId, string actor, TimeProvider timeProvider)
+    /// <param name="routeIntentSource">The deterministic server-owned route source, or the canonical default when omitted.</param>
+    public HumanInputSupersedeCandidatePreparer(IHumanInputRequestCatalog catalog, IAuthorityGrantResolver grantResolver, IHumanInputSupersedeCandidateRegistry registry, string workspaceId, string actor, TimeProvider timeProvider, IHumanInputRouteIntentSource? routeIntentSource = null)
     {
         _catalog = catalog ?? throw new ArgumentNullException(nameof(catalog));
         _grantResolver = grantResolver ?? throw new ArgumentNullException(nameof(grantResolver));
@@ -44,6 +46,7 @@ public sealed class HumanInputSupersedeCandidatePreparer : IHumanInputSupersedeC
         _workspaceId = workspaceId;
         _actor = actor;
         _timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
+        _routeIntentSource = routeIntentSource ?? new CanonicalHumanInputRouteIntentSource();
     }
 
     /// <inheritdoc />
@@ -161,9 +164,7 @@ public sealed class HumanInputSupersedeCandidatePreparer : IHumanInputSupersedeC
 
         if (grant is null || grant.Status != AuthorityGrantResolutionStatus.Active || !Equals(grant.RequestedReference, grantEvidence[0].GrantReference))
         {
-            return Result(proposal.RequestId, grant?.Status is AuthorityGrantResolutionStatus.NotFound or AuthorityGrantResolutionStatus.Invalid
-                ? HumanInputSupersedePreparationStatus.NotFound
-                : HumanInputSupersedePreparationStatus.Denied, "grant_inactive");
+            return Result(proposal.RequestId, MapGrantStatus(grant, grantEvidence[0].GrantReference), "grant_inactive");
         }
 
         if (!TryParseSuccessor(proposal, current[0], now, out var candidate, out var failure))
@@ -219,8 +220,31 @@ public sealed class HumanInputSupersedeCandidatePreparer : IHumanInputSupersedeC
             return RerouteResult(proposal.RequestId, HumanInputSupersedePreparationStatus.LimitExceeded, null, "lifecycle_version_limit");
         }
 
+        HumanInputRouteIntentSourceResult routeIntents;
+        try
+        {
+            routeIntents = await _routeIntentSource.ResolveAsync(context.Context.Request, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            return RerouteResult(proposal.RequestId, HumanInputSupersedePreparationStatus.Unavailable, null, "route_intent_source_unavailable");
+        }
+
+        var routeStatus = ValidateRouteIntents(context.Context.Request, routeIntents, out var exclusions);
+        if (routeStatus != HumanInputSupersedePreparationStatus.Ready)
+        {
+            return RerouteResult(proposal.RequestId, routeStatus, null, "route_intent_source_invalid");
+        }
+
         var preparationHash = HumanInputLifecycleCandidateIdentity.Digest(
             "reroute",
+            HumanInputRouteIntentContract.ContractId,
+            HumanInputRouteIntentContract.Version.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            routeIntents.IntentHash,
             proposal.OperationId,
             proposal.RequestId,
             proposal.ExpectedLifecycleVersion.ToString(System.Globalization.CultureInfo.InvariantCulture),
@@ -230,10 +254,10 @@ public sealed class HumanInputSupersedeCandidatePreparer : IHumanInputSupersedeC
             proposal.CandidateExpiresAtUtc.ToString("O", System.Globalization.CultureInfo.InvariantCulture));
 
         var options = new List<(HumanInputRerouteCandidateOption Option, HumanInputSupersedeCandidateRegistration Registration)>();
-        for (var removedIndex = 0; removedIndex < context.Context.Request.EligibleRespondents.Length && options.Count < HumanInputLifecycleCandidateLimits.MaxRerouteOptions; removedIndex++)
+        foreach (var exclusion in exclusions)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var candidate = CreateRerouteCandidate(context.Context.Request, proposal, removedIndex);
+            var candidate = CreateRerouteCandidate(context.Context.Request, proposal, exclusion.Ordinal);
             if (candidate is null || !IsValidTransition(proposal.OperationId, HumanInputRequestLifecycleOperationKind.Reroute, context.Context, candidate, now))
             {
                 continue;
@@ -402,7 +426,7 @@ public sealed class HumanInputSupersedeCandidatePreparer : IHumanInputSupersedeC
         }
         if (grant is null || grant.Status != AuthorityGrantResolutionStatus.Active || !Equals(grant.RequestedReference, grantEvidence[0].GrantReference))
         {
-            return (null, grant?.Status is AuthorityGrantResolutionStatus.NotFound or AuthorityGrantResolutionStatus.Invalid ? HumanInputSupersedePreparationStatus.NotFound : HumanInputSupersedePreparationStatus.Denied, "grant_inactive");
+            return (null, MapGrantStatus(grant, grantEvidence[0].GrantReference), "grant_inactive");
         }
         return (new HumanInputLifecycleCandidatePreparationContext(current[0], expectedReference, head, grantEvidence[0].GrantReference!), HumanInputSupersedePreparationStatus.Ready, string.Empty);
     }
@@ -459,6 +483,66 @@ public sealed class HumanInputSupersedeCandidatePreparer : IHumanInputSupersedeC
 
     private static bool IsCandidateExpiryValid(DateTimeOffset expiresAtUtc, DateTimeOffset now)
         => now != default && expiresAtUtc != default && expiresAtUtc.Offset == TimeSpan.Zero && expiresAtUtc > now && expiresAtUtc - now <= HumanInputLifecycleCandidateLimits.MaxCandidateLifetime;
+
+    private static HumanInputSupersedePreparationStatus MapGrantStatus(AuthorityGrantResolution? resolution, AuthorityGrantReference? expectedReference)
+        => resolution is null || expectedReference is null || !Equals(resolution.RequestedReference, expectedReference)
+            ? HumanInputSupersedePreparationStatus.Ambiguous
+            : resolution.Status switch
+            {
+                AuthorityGrantResolutionStatus.NotFound or AuthorityGrantResolutionStatus.Invalid => HumanInputSupersedePreparationStatus.NotFound,
+                AuthorityGrantResolutionStatus.Unavailable or AuthorityGrantResolutionStatus.ProfileUnavailable or AuthorityGrantResolutionStatus.RoleUnavailable or AuthorityGrantResolutionStatus.LoopUnavailable => HumanInputSupersedePreparationStatus.Unavailable,
+                AuthorityGrantResolutionStatus.Unknown or AuthorityGrantResolutionStatus.Ambiguous => HumanInputSupersedePreparationStatus.Ambiguous,
+                _ => HumanInputSupersedePreparationStatus.Denied
+            };
+
+    private static HumanInputSupersedePreparationStatus ValidateRouteIntents(HumanInputRequest request, HumanInputRouteIntentSourceResult? result, out IReadOnlyList<HumanInputRouteExclusionIntent> exclusions)
+    {
+        exclusions = [];
+        if (result is null)
+        {
+            return HumanInputSupersedePreparationStatus.Ambiguous;
+        }
+
+        if (result.Status != HumanInputRouteIntentSourceStatus.Ready)
+        {
+            return result.Status switch
+            {
+                HumanInputRouteIntentSourceStatus.Invalid => HumanInputSupersedePreparationStatus.Invalid,
+                HumanInputRouteIntentSourceStatus.Unavailable => HumanInputSupersedePreparationStatus.Unavailable,
+                _ => HumanInputSupersedePreparationStatus.Ambiguous
+            };
+        }
+
+        if (!string.Equals(result.ContractId, HumanInputRouteIntentContract.ContractId, StringComparison.Ordinal)
+            || result.ContractVersion != HumanInputRouteIntentContract.Version
+            || result.Intents is null
+            || result.Intents.Count != request.EligibleRespondents.Length
+            || result.Intents.Count is < 1 or > HumanInputLifecycleCandidateLimits.MaxRerouteOptions
+            || !IsSha256(result.IntentHash))
+        {
+            return HumanInputSupersedePreparationStatus.Invalid;
+        }
+
+        var ordered = result.Intents.ToArray();
+        for (var index = 0; index < ordered.Length; index++)
+        {
+            var intent = ordered[index];
+            if (intent is null || intent.Ordinal != index || !IsSha256(intent.RouteEntryHash)
+                || !string.Equals(intent.RouteEntryHash, CanonicalHumanInputRouteIntentSource.RouteEntryHash(request.EligibleRespondents[index]), StringComparison.Ordinal))
+            {
+                return HumanInputSupersedePreparationStatus.Invalid;
+            }
+        }
+
+        var expectedHash = HumanInputRouteIntentSourceResult.ComputeIntentHash(request.RequestHash, ordered);
+        if (!string.Equals(expectedHash, result.IntentHash, StringComparison.Ordinal))
+        {
+            return HumanInputSupersedePreparationStatus.Ambiguous;
+        }
+
+        exclusions = Array.AsReadOnly(ordered);
+        return HumanInputSupersedePreparationStatus.Ready;
+    }
 
     private static bool IsSha256(string? value)
         => value is { Length: HumanInputLimits.Sha256HexCharacters } && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
