@@ -92,6 +92,8 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version: "24"
+          cache: "npm"
+          cache-dependency-path: package-lock.json
           package-manager-cache: false
 
       - name: Verify static contracts

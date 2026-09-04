@@ -60,6 +60,6 @@ foreach ($staleLogName in @("npm-ci.log", "frontend-tests.log")) {
         Remove-Item -LiteralPath $staleLogPath -Force
     }
 }
-Invoke-NpmVerificationPhase -Name "npm-ci" -NpmArguments @("ci", "--include=dev") -TimeoutSeconds $InstallTimeoutSeconds
+Invoke-NpmVerificationPhase -Name "npm-ci" -NpmArguments @("ci", "--include=dev", "--no-audit", "--no-fund") -TimeoutSeconds $InstallTimeoutSeconds
 Invoke-NpmVerificationPhase -Name "frontend-tests" -NpmArguments @("test") -TimeoutSeconds $TestTimeoutSeconds
 Write-Output "VERIFY_FRONTEND_COMPLETE schema_version=1 status=passed install_log=$(Join-Path $logsPathRoot 'npm-ci.log') test_log=$(Join-Path $logsPathRoot 'frontend-tests.log')"
