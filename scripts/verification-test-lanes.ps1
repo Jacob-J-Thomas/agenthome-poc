@@ -25,7 +25,11 @@ function New-VerificationTestLane {
 }
 
 function Get-VerificationTestProjectLanes {
-    param([System.IO.FileInfo]$TestProject)
+    param(
+        [System.IO.FileInfo]$TestProject,
+        [switch]$NestedProcessOnly,
+        [switch]$SolutionCoreOnly
+    )
 
     if ($TestProject.Name -eq "EmbodySense.Core.Startup.Tests.csproj") {
         $nestedProcessFullyQualifiedNames = @(
@@ -36,6 +40,14 @@ function Get-VerificationTestProjectLanes {
             "EmbodySense.Core.Startup.Tests.Loops.Execution.GovernedLoopRuntimeTestsWait.Production_runtime_parks_and_wakes_a_canonical_wait_after_restart",
             "EmbodySense.Core.Startup.Tests.Loops.Execution.GovernedLoopRuntimeTestsWait.Explicit_background_request_activates_once_after_late_workspace_host_reacquisition"
         )
+
+        if ($NestedProcessOnly) {
+            return @((New-VerificationTestLane -Name "nested-process" -IncludeFullyQualifiedName $nestedProcessFullyQualifiedNames))
+        }
+
+        if ($SolutionCoreOnly) {
+            return @((New-VerificationTestLane -Name "remainder" -ExcludeFullyQualifiedName $nestedProcessFullyQualifiedNames))
+        }
 
         return @(
             (New-VerificationTestLane -Name "remainder" -ExcludeFullyQualifiedName $nestedProcessFullyQualifiedNames)

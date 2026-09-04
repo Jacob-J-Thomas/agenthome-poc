@@ -1011,6 +1011,8 @@ Assert-VerificationWatchdogDeadlineContract -Qualification $true -VerificationCo
 Assert-VerificationWatchdogDeadlineContract -Qualification $true -VerificationComponent "full" -DeadlineSeconds 1680
 Assert-VerificationWatchdogDeadlineContract -Qualification $false -VerificationComponent "StaticContracts" -DeadlineSeconds 600
 Assert-VerificationWatchdogDeadlineContract -Qualification $false -VerificationComponent "staticcontracts" -DeadlineSeconds 600
+Assert-VerificationWatchdogDeadlineContract -Qualification $false -VerificationComponent "NestedProcess" -DeadlineSeconds 600
+Assert-VerificationWatchdogDeadlineContract -Qualification $false -VerificationComponent "nestedprocess" -DeadlineSeconds 600
 Assert-VerificationWatchdogDeadlineContract -Qualification $false -VerificationComponent "Solution" -DeadlineSeconds 1500
 Assert-VerificationWatchdogDeadlineContract -Qualification $false -VerificationComponent "sOlUtIoN" -DeadlineSeconds 1500
 Assert-VerificationWatchdogDeadlineContract -Qualification $false -VerificationComponent "Full" -DeadlineSeconds 600
@@ -1018,6 +1020,7 @@ Assert-VerificationWatchdogDeadlineContract -Qualification $false -VerificationC
 foreach ($invalidDeadlineCase in @(
     [pscustomobject]@{ Qualification = $true; Component = "Full"; DeadlineSeconds = 1681; Expected = "Qualification requires the exact 1680-second watchdog deadline" }
     [pscustomobject]@{ Qualification = $false; Component = "StaticContracts"; DeadlineSeconds = 601; Expected = "Promotion component 'StaticContracts' requires the exact 600-second watchdog deadline" }
+    [pscustomobject]@{ Qualification = $false; Component = "NestedProcess"; DeadlineSeconds = 601; Expected = "Promotion component 'NestedProcess' requires the exact 600-second watchdog deadline" }
     [pscustomobject]@{ Qualification = $false; Component = "Solution"; DeadlineSeconds = 1501; Expected = "Promotion component 'Solution' requires the exact 1500-second watchdog deadline" }
     [pscustomobject]@{ Qualification = $false; Component = "Full"; DeadlineSeconds = 1201; Expected = "Full verification requires a watchdog deadline between 1 and 1200 seconds" }
     [pscustomobject]@{ Qualification = $false; Component = "Full"; DeadlineSeconds = 1500; Expected = "Full verification requires a watchdog deadline between 1 and 1200 seconds" }
@@ -1062,8 +1065,9 @@ Assert-True -Condition ($watchdogScript.IndexOf('[ValidateRange(1, 1680)]', [Str
 Assert-True -Condition ($watchdogScript.IndexOf('Assert-VerificationWatchdogDeadlineContract -Qualification $Qualification -VerificationComponent $VerificationComponent -DeadlineSeconds $DeadlineSeconds', [StringComparison]::Ordinal) -ge 0) -Message "The watchdog must bind its exact mode-specific deadline before starting a verifier process."
 Assert-True -Condition ($watchdogPolicyScript.IndexOf('$script:VerificationFullWatchdogMaximumDeadlineSeconds = 1200', [StringComparison]::Ordinal) -ge 0) -Message "Local Full verification must retain its prior 1200-second maximum while Solution owns the 1500-second budget."
 Assert-True -Condition ($watchdogScript.IndexOf('[switch]$Qualification', [StringComparison]::Ordinal) -ge 0) -Message "The watchdog must expose the bounded qualification child explicitly."
-Assert-True -Condition ($watchdogScript.IndexOf('[ValidateSet("Full", "Solution", "StaticContracts")]', [StringComparison]::Ordinal) -ge 0) -Message "The watchdog must expose explicit component modes for the hosted fan-out."
+Assert-True -Condition ($watchdogScript.IndexOf('[ValidateSet("Full", "Solution", "StaticContracts", "NestedProcess")]', [StringComparison]::Ordinal) -ge 0) -Message "The watchdog must expose explicit component modes for the hosted fan-out."
 Assert-True -Condition ($watchdogScript.IndexOf('"StaticContracts" { "static-contracts"; break }', [StringComparison]::Ordinal) -ge 0) -Message "The watchdog must map the static component to the exact hyphenated verifier marker identity."
+Assert-True -Condition ($watchdogScript.IndexOf('"NestedProcess" { "nested-process"; break }', [StringComparison]::Ordinal) -ge 0) -Message "The watchdog must map the nested component to the exact hyphenated verifier marker identity."
 Assert-True -Condition ($watchdogScript.IndexOf('"qualify.ps1"', [StringComparison]::Ordinal) -ge 0) -Message "Qualification must execute through its dedicated bounded orchestrator."
 Assert-True -Condition ($watchdogScript.IndexOf('Qualification requires exact -BaseCommit and -HeadCommit values.', [StringComparison]::Ordinal) -ge 0) -Message "Qualification must bind its exact comparison commits."
 Assert-True -Condition ($qualificationScript.IndexOf('git diff --no-renames --name-only --diff-filter=ACMRDTUXB "$mergeBase..$HeadCommit"', [StringComparison]::Ordinal) -ge 0) -Message "Qualification selection must derive both sides of renames from the exact merge-base-to-head diff."
@@ -1130,6 +1134,7 @@ Assert-True -Condition ($watchdogScript.IndexOf('Stop-VerificationProcessTree $p
 Assert-True -Condition ($verifyScript.IndexOf('VERIFY_COMPLETE schema_version=1 status=passed', [StringComparison]::Ordinal) -ge 0) -Message "The verifier must emit an exact terminal marker only after successful completion."
 Assert-True -Condition ($workflow.IndexOf('./scripts/verify-with-watchdog.ps1 -Configuration Release -DeadlineSeconds 1500 -VerificationComponent Solution', [StringComparison]::Ordinal) -ge 0) -Message "Solution promotion must invoke the external watchdog with its explicit twenty-five-minute certification bound."
 Assert-True -Condition ($workflow.IndexOf('./scripts/verify-with-watchdog.ps1 -Configuration Release -DeadlineSeconds 600 -VerificationComponent StaticContracts', [StringComparison]::Ordinal) -ge 0) -Message "Static promotion must invoke the external watchdog with its bounded ten-minute certification bound."
+Assert-True -Condition ($workflow.IndexOf('./scripts/verify-with-watchdog.ps1 -Configuration Release -DeadlineSeconds 600 -VerificationComponent NestedProcess', [StringComparison]::Ordinal) -ge 0) -Message "Nested-process promotion must invoke the external watchdog with its bounded ten-minute certification bound."
 Assert-True -Condition ($workflow.IndexOf('-SkipCoverage', [StringComparison]::Ordinal) -lt 0) -Message "Promotion verification must retain coverage collection and thresholds."
 Assert-True -Condition ($workflow.IndexOf("github.event.pull_request.draft == false", [StringComparison]::Ordinal) -ge 0) -Message "Promotion verification must run only for a merge-candidate pull request or main."
 Assert-True -Condition ($workflow.IndexOf('types: [opened, synchronize, reopened, ready_for_review, edited]', [StringComparison]::Ordinal) -ge 0) -Message "Every non-draft metadata edit must rerun substantive promotion verification."
