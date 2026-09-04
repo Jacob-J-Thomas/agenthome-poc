@@ -156,16 +156,22 @@ public sealed class HumanReviewOrderedReleasePersistenceTests
         var secondReadyPath = workspace.File("approved-release-race-second-ready");
         var firstResultPath = workspace.File("approved-release-race-first-result");
         var secondResultPath = workspace.File("approved-release-race-second-result");
-        using var first = CancellationHostProcess.Start("human-review-ordered-effect-race", workspace.RootPath, claimed.Id, markerPath, firstReadyPath, releasePath, firstResultPath);
-        using var second = CancellationHostProcess.Start("human-review-ordered-effect-race", workspace.RootPath, claimed.Id, markerPath, secondReadyPath, releasePath, secondResultPath);
-        var firstOutput = first.StandardOutput.ReadToEndAsync();
-        var firstError = first.StandardError.ReadToEndAsync();
-        var secondOutput = second.StandardOutput.ReadToEndAsync();
-        var secondError = second.StandardError.ReadToEndAsync();
+        using var first = CancellationHostProcess.StartAppHostOwned("human-review-ordered-effect-race", workspace.RootPath, claimed.Id, markerPath, firstReadyPath, releasePath, firstResultPath);
+        using var second = CancellationHostProcess.StartAppHostOwned("human-review-ordered-effect-race", workspace.RootPath, claimed.Id, markerPath, secondReadyPath, releasePath, secondResultPath);
+        using var firstEvidenceCancellation = new CancellationTokenSource();
+        using var secondEvidenceCancellation = new CancellationTokenSource();
+        var firstOutput = first.ReadStandardOutputToEndAsync(firstEvidenceCancellation.Token);
+        var firstError = first.ReadStandardErrorToEndAsync(firstEvidenceCancellation.Token);
+        var secondOutput = second.ReadStandardOutputToEndAsync(secondEvidenceCancellation.Token);
+        var secondError = second.ReadStandardErrorToEndAsync(secondEvidenceCancellation.Token);
+        var children = new[]
+        {
+            new CrossProcessReadinessChild("first", first, firstReadyPath, firstResultPath, firstOutput, firstError, firstEvidenceCancellation),
+            new CrossProcessReadinessChild("second", second, secondReadyPath, secondResultPath, secondOutput, secondError, secondEvidenceCancellation),
+        };
         try
         {
-            await WaitForFileAsync(firstReadyPath, TimeSpan.FromSeconds(30));
-            await WaitForFileAsync(secondReadyPath, TimeSpan.FromSeconds(30));
+            await CrossProcessReadinessDiagnostics.WaitForChildrenReadyAsync("human-review-ordered-effect-race", children, TimeSpan.FromSeconds(30));
             await File.WriteAllTextAsync(releasePath, "release");
             await Task.WhenAll(first.WaitForExitAsync(), second.WaitForExitAsync()).WaitAsync(TimeSpan.FromSeconds(30));
         }
@@ -629,6 +635,25 @@ public sealed class HumanReviewOrderedReleasePersistenceTests
         {
             process.Kill(entireProcessTree: true);
             await process.WaitForExitAsync();
+        }
+    }
+
+    private static async Task StopAsync(CrossProcessProcess process)
+    {
+        try
+        {
+            if (!process.HasExited) process.Ownership.TerminateProcessTree();
+        }
+        catch (InvalidOperationException) when (process.HasExited)
+        {
+        }
+
+        try
+        {
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        catch (TimeoutException)
+        {
         }
     }
 }
