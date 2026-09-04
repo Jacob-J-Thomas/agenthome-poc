@@ -7,10 +7,11 @@ using EmbodySense.Core.Startup.Loops.Execution.Reconciliation.Models;
 using EmbodySense.Core.Startup.Runtime;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Tests.Support;
+using static EmbodySense.Core.Startup.Tests.Runtime.AgentRuntimeFactoryTests;
 
 namespace EmbodySense.Core.Startup.Tests.Runtime;
 
-public sealed partial class AgentRuntimeFactoryTests
+public sealed partial class AgentRuntimeReconciliationFactoryTests
 {
     [Fact]
     public async Task Effect_reconciliation_factory_rejects_a_durable_candidate_when_its_current_effect_is_missing()

@@ -3851,7 +3851,7 @@ public sealed partial class AgentRuntimeFactoryTests
         return record;
     }
 
-    private static async Task<string> CreateFakeCodexExecutableAsync(
+    internal static async Task<string> CreateFakeCodexExecutableAsync(
         TestWorkspace workspace,
         string? turnFailureMessage = null,
         string? turnStartMarkerPath = null,
@@ -5129,7 +5129,7 @@ public sealed partial class AgentRuntimeFactoryTests
             AgentRuntimeSurface.Cli);
     }
 
-    private static CodexRuntimeStatus CreateCompatibleRuntimeStatus(string executablePath)
+    internal static CodexRuntimeStatus CreateCompatibleRuntimeStatus(string executablePath)
     {
         return new CodexRuntimeStatus(
             CodexRuntimeCompatibility.Compatible,
@@ -5173,7 +5173,7 @@ public sealed partial class AgentRuntimeFactoryTests
             string.Empty));
     }
 
-    private sealed class RejectingApprovalPrompt : IAgentToolApprovalPrompt
+    internal sealed class RejectingApprovalPrompt : IAgentToolApprovalPrompt
     {
         public Task<(bool Approved, string DecisionBy, string Detail)> RequestApprovalAsync(AgentToolApprovalRequest request, CancellationToken cancellationToken = default)
         {

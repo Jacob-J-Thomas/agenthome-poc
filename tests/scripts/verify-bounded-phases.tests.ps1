@@ -41,6 +41,9 @@ $persistenceEnvironmentCollectionPath = Join-Path $repoRoot "tests\EmbodySense.C
 $persistenceCapabilityCatalogTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Capabilities\FileCapabilityCatalogTrustProviderTests.cs"
 $startupRuntimeCollectionPath = Join-Path $repoRoot "tests\EmbodySense.Core.Startup.Tests\Loops\Execution\LoopRuntimeIntegrationCollection.cs"
 $startupNestedProcessTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Startup.Tests\Runtime\AgentRuntimeFactoryNestedProcessTests.cs"
+$startupFactoryTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Startup.Tests\Runtime\AgentRuntimeFactoryTests.cs"
+$startupFactoryEffectReconciliationTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Startup.Tests\Runtime\AgentRuntimeReconciliationFactoryTests.cs"
+$startupFactoryEffectReconciliationCoverageTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Startup.Tests\Runtime\AgentRuntimeReconciliationFactoryTests.Coverage.cs"
 $powerShellExecutable = (Get-Process -Id $PID).Path
 $functionalChildTimeoutSeconds = 30
 $assertionCount = 0
@@ -195,6 +198,9 @@ $persistenceEnvironmentCollection = Get-Content -LiteralPath $persistenceEnviron
 $persistenceCapabilityCatalogTest = Get-Content -LiteralPath $persistenceCapabilityCatalogTestPath -Raw
 $startupRuntimeCollection = Get-Content -LiteralPath $startupRuntimeCollectionPath -Raw
 $startupNestedProcessTest = Get-Content -LiteralPath $startupNestedProcessTestPath -Raw
+$startupFactoryTest = Get-Content -LiteralPath $startupFactoryTestPath -Raw
+$startupFactoryEffectReconciliationTest = Get-Content -LiteralPath $startupFactoryEffectReconciliationTestPath -Raw
+$startupFactoryEffectReconciliationCoverageTest = Get-Content -LiteralPath $startupFactoryEffectReconciliationCoverageTestPath -Raw
 
 Assert-Contains -Actual $verifyScript -Expected '[ValidateSet("PullRequest", "Stress")]' -Message "The verifier must expose only the two owned tiers."
 Assert-Contains -Actual $verifyScript -Expected '[string]$Configuration = "Release"' -Message "The canonical verifier must default to Release."
@@ -305,6 +311,11 @@ foreach ($startupRuntimeWrapper in @(
     Assert-Contains -Actual $startupRuntimeWrapperSource -Expected '[Collection(LoopRuntimeIntegrationCollection.Name)]' -Message "Startup runtime wrapper '$startupRuntimeWrapper' must serialize shared file-backed runtime state."
 }
 Assert-Contains -Actual $startupNestedProcessTest -Expected '[Collection(LoopRuntimeIntegrationCollection.Name)]' -Message "The held runtime-authoring nested-process test must serialize with the restart fixtures."
+Assert-Contains -Actual $startupFactoryTest -Expected 'public sealed partial class AgentRuntimeFactoryTests' -Message "The general AgentRuntime factory tests must remain one independently schedulable xUnit class."
+foreach ($effectReconciliationFactoryTest in @($startupFactoryEffectReconciliationTest, $startupFactoryEffectReconciliationCoverageTest)) {
+    Assert-Contains -Actual $effectReconciliationFactoryTest -Expected 'public sealed partial class AgentRuntimeReconciliationFactoryTests' -Message "Effect Reconciliation factory tests must remain a second independently schedulable xUnit class."
+    Assert-True -Condition ($effectReconciliationFactoryTest.IndexOf('public sealed partial class AgentRuntimeFactoryTests', [StringComparison]::Ordinal) -lt 0) -Message "Effect Reconciliation factory tests must not rejoin the serialized general factory class."
+}
 Assert-Contains -Actual $persistenceEnvironmentCollection -Expected '[CollectionDefinition(Name, DisableParallelization = true)]' -Message "Persistence process-environment mutation must remain exclusive of all assembly tests."
 Assert-Contains -Actual $persistenceCapabilityCatalogTest -Expected '[Collection(Verification.ProcessEnvironmentCollection.Name)]' -Message "Capability-catalog trust-root mutation must retain process-environment serialization."
 Assert-Contains -Actual $admissionStoreHostTest -Expected '[Collection(ProcessEnvironmentCollection.Name)]' -Message "Coverage child-directory mutation must retain process-environment serialization."
