@@ -315,7 +315,7 @@ function Get-FanInArtifactManifestEntry {
     $normalized = $RelativePath.Replace('\', '/')
     $matches = @($Entries | Where-Object {
         $candidate = ([string]$_.path).Replace('\', '/')
-        $candidate -ceq $normalized -or $candidate.EndsWith('/' + $normalized, [StringComparison]::OrdinalIgnoreCase)
+        $candidate -ceq $normalized
     })
     Assert-FanInCondition -Condition ($matches.Count -eq 1) -Message "$Description is not represented exactly once in the component artifact manifest: $RelativePath"
     return $matches[0]

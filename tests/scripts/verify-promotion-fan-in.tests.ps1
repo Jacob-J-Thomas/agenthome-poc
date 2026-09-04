@@ -220,6 +220,15 @@ try {
     Assert-Throws -Message "remapped coverage alias" -ExpectedMessage "cannot be mapped to its declared VerificationResults root" -Action { Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot }
     New-TestComponent -Root $nestedRoot -Component "nested-process"
 
+    $nestedResultsRoot = Join-Path $nestedRoot "VerificationResults"
+    $nestedCoverage = Get-ChildItem -LiteralPath $nestedResultsRoot -Recurse -Filter "*.cobertura.xml" -File | Select-Object -First 1
+    $remappedCoveragePath = Join-Path (Join-Path $nestedResultsRoot "remapped") ([IO.Path]::GetRelativePath($nestedResultsRoot, $nestedCoverage.FullName))
+    New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($remappedCoveragePath)) -Force | Out-Null
+    Move-Item -LiteralPath $nestedCoverage.FullName -Destination $remappedCoveragePath
+    Update-TestComponentAuth -Root $nestedRoot
+    Assert-Throws -Message "remapped artifact manifest entry" -ExpectedMessage "not represented exactly once in the component artifact manifest" -Action { Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot }
+    New-TestComponent -Root $nestedRoot -Component "nested-process"
+
     Assert-Throws -Message "failed nested child" -Action { Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot -NestedResult "failure" }
     Assert-Throws -Message "missing nested artifact root" -Action { Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot (Join-Path $fixtureRoot "missing") -StaticRoot $staticRoot }
     Assert-Throws -Message "head mismatch" -Action { Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot -ExpectedHead "wrong-head" }
