@@ -32,6 +32,7 @@ $cancellationHostProjectPath = Join-Path $repoRoot "tests\EmbodySense.Cancellati
 $cancellationHostProgramPath = Join-Path $repoRoot "tests\EmbodySense.CancellationHost\Program.cs"
 $scheduleStoreTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Triggers\Schedules\ScheduleStoreTests.cs"
 $scheduleStoreHostPath = Join-Path $repoRoot "tests\Shared\ScheduleStoreCrossProcessHost.cs"
+$humanReviewOrderedReleaseTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\HumanReview\HumanReviewOrderedReleasePersistenceTests.cs"
 $reconciliationProbeProcessTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Loops\Execution\Reconciliation\GovernedLoopEffectReconciliationProbeProcessTests.cs"
 $admissionStoreTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Loops\Admission\GovernedLoopAdmissionStoreTests.cs"
 $admissionStoreFixturePath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Loops\Admission\GovernedLoopAdmissionStoreTestFixture.cs"
@@ -203,6 +204,7 @@ $cancellationHostProject = Get-Content -LiteralPath $cancellationHostProjectPath
 $cancellationHostProgram = Get-Content -LiteralPath $cancellationHostProgramPath -Raw
 $scheduleStoreTest = Get-Content -LiteralPath $scheduleStoreTestPath -Raw
 $scheduleStoreHost = Get-Content -LiteralPath $scheduleStoreHostPath -Raw
+$humanReviewOrderedReleaseTest = Get-Content -LiteralPath $humanReviewOrderedReleaseTestPath -Raw
 $reconciliationProbeProcessTest = Get-Content -LiteralPath $reconciliationProbeProcessTestPath -Raw
 $admissionStoreTest = Get-Content -LiteralPath $admissionStoreTestPath -Raw
 $admissionStoreFixture = Get-Content -LiteralPath $admissionStoreFixturePath -Raw
@@ -278,6 +280,14 @@ Assert-Contains -Actual $cancellationHostProgram -Expected '["schedule-store", v
 Assert-Contains -Actual $cancellationHostProject -Expected '..\Shared\ScheduleStoreCrossProcessHost.cs' -Message "The cancellation host must compile the shared schedule worker."
 Assert-Contains -Actual $persistenceTestProject -Expected '..\Shared\ScheduleStoreCrossProcessHost.cs' -Message "Persistence tests must compile the same shared schedule worker."
 Assert-Contains -Actual $cancellationHostProcess -Expected 'internal static CrossProcessProcess StartAppHostOwned' -Message "Direct schedule workers must be job-owned for bounded cleanup."
+Assert-True -Condition ([regex]::Matches($humanReviewOrderedReleaseTest, 'CancellationHostProcess\.StartAppHostOwned\("human-review-ordered-effect-race"').Count -eq 2) -Message "The approved Human Review effect race must use exactly two owned apphost workers."
+Assert-True -Condition ($humanReviewOrderedReleaseTest.IndexOf('CancellationHostProcess.Start("human-review-ordered-effect-race"', [StringComparison]::Ordinal) -lt 0) -Message "The approved Human Review effect race must not use the unowned dotnet-exec route."
+Assert-Contains -Actual $humanReviewOrderedReleaseTest -Expected 'new CrossProcessReadinessChild("first"' -Message "The Human Review effect race must expose the first child through bounded readiness diagnostics."
+Assert-Contains -Actual $humanReviewOrderedReleaseTest -Expected 'CrossProcessReadinessDiagnostics.WaitForChildrenReadyAsync("human-review-ordered-effect-race"' -Message "The Human Review effect race must wait for both children through shared readiness diagnostics."
+Assert-Contains -Actual $humanReviewOrderedReleaseTest -Expected 'await Task.WhenAll(first.WaitForExitAsync(), second.WaitForExitAsync()).WaitAsync(TimeSpan.FromSeconds(30));' -Message "The Human Review effect race must preserve its bounded release/completion wait."
+Assert-Contains -Actual $humanReviewOrderedReleaseTest -Expected 'await AssertExpectedHostLossAsync(' -Message "Crash-boundary Human Review workers must retain their existing process-loss assertion helper."
+Assert-Contains -Actual $humanReviewOrderedReleaseTest -Expected '"human-review-ordered-effect-process-loss"' -Message "Crash-boundary Human Review workers must retain their existing process-loss mode."
+Assert-Contains -Actual $humanReviewOrderedReleaseTest -Expected 'using var process = CancellationHostProcess.Start([command, .. arguments]);' -Message "Unchanged Human Review crash/restart helpers must retain the existing raw cancellation-host route."
 Assert-Contains -Actual $reconciliationProbeProcessTest -Expected 'public async Task Cross_process_probe_worker()' -Message "The reconciliation probe worker Fact must remain discoverable in the Persistence inventory."
 Assert-Contains -Actual $reconciliationProbeProcessTest -Expected 'CoverageChildProcessAssembly.AddExpectedTerminationVstestArguments(startInfo, assemblyPath, testName);' -Message "Reconciliation probe crash workers must retain the exact expected-termination VSTest route."
 Assert-Contains -Actual $reconciliationProbeProcessTest -Expected 'CoverageChildProcessAssembly.AddCoordinationOnlyVstestArguments(startInfo, assemblyPath, testName);' -Message "Successful reconciliation probe workers must remain report-free coordination children whose production paths are covered by the parent lane."
