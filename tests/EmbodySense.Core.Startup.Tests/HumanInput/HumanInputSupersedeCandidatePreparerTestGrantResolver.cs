@@ -9,14 +9,24 @@ internal sealed class HumanInputSupersedeCandidatePreparerTestGrantResolver(Auth
     internal AuthorityGrantResolution Resolution { get; set; } = resolution;
     internal Exception? ResolveException { get; set; }
 
-    public Task<AuthorityGrantResolution> ResolveAsync(AuthorityGrantReference? reference, CancellationToken cancellationToken = default)
+    internal bool DelayResolveUntilCancellation { get; set; }
+
+    internal TaskCompletionSource<bool>? ResolveEntered { get; set; }
+
+    public async Task<AuthorityGrantResolution> ResolveAsync(AuthorityGrantReference? reference, CancellationToken cancellationToken = default)
     {
+        ResolveEntered?.TrySetResult(true);
         cancellationToken.ThrowIfCancellationRequested();
+        if (DelayResolveUntilCancellation)
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+        }
+
         if (ResolveException is not null)
         {
             throw ResolveException;
         }
 
-        return Task.FromResult(Resolution);
+        return Resolution;
     }
 }

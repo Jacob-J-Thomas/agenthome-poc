@@ -100,6 +100,28 @@ public sealed class HumanInputRuntimeFacadeRerouteReplayTests
         provider.DelayLifecycleTermsUntilCancellation = false;
         provider.LifecycleTermsEntered = null;
         var posture = await runtime.HumanInput.ReadAsync(request.RequestId);
+        var currentPosture = Assert.IsType<HumanInputRequestPosture>(posture.Request);
+        var nonPersistedInput = new HumanInputLifecycleOperationInput(
+            "cancel-non-persisted-terms-resolution",
+            HumanInputRequestLifecycleOperationKind.Cancel,
+            currentPosture.RequestId,
+            currentPosture.LifecycleVersion,
+            currentPosture.Status,
+            currentPosture.CurrentRequest,
+            null,
+            "Cancel while resolving current lifecycle terms.");
+        provider.DelayLifecycleTermsUntilCancellation = true;
+        provider.LifecycleTermsEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using (var nonPersistedCancellation = new CancellationTokenSource())
+        {
+            var pendingNonPersistedCancellation = runtime.HumanInput.SubmitLifecycleAsync(nonPersistedInput, nonPersistedCancellation.Token);
+            await provider.LifecycleTermsEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            nonPersistedCancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pendingNonPersistedCancellation);
+        }
+
+        provider.DelayLifecycleTermsUntilCancellation = false;
+        provider.LifecycleTermsEntered = null;
 
         Assert.Equal(HumanInputOperationStatus.Replayed, replayed.Status);
         Assert.Equal(HumanInputOperationStatus.Conflict, conflict.Status);
@@ -111,7 +133,7 @@ public sealed class HumanInputRuntimeFacadeRerouteReplayTests
         Assert.Equal(HumanInputOperationStatus.Unavailable, missingGrant.Status);
         Assert.Equal(HumanInputOperationStatus.Unavailable, unknownTerms.Status);
         Assert.Equal(selectedCandidate.RequestVersionId, posture.Request!.CurrentRequest.RequestVersionId);
-        Assert.Equal(10, provider.LifecycleTermsResolutions);
+        Assert.Equal(11, provider.LifecycleTermsResolutions);
         Assert.Equal(2, provider.LifecycleAuthorizations);
     }
 }

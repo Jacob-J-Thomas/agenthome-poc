@@ -349,6 +349,63 @@ public sealed class HumanInputLifecycleCandidatePreparationTests
     }
 
     [Fact]
+    public async Task Candidate_preparation_fails_closed_for_midflight_dependencies_and_propagates_cancellation()
+    {
+        var catalogFailure = CreateFixture(HumanInputResponsePolicyKind.FirstValid);
+        catalogFailure.Catalog.ReadException = new InvalidOperationException("catalog unavailable");
+        var unavailableCatalog = await catalogFailure.Preparer.PrepareAmendAsync(AmendInput(catalogFailure.Request, catalogFailure.Clock.GetUtcNow().AddMinutes(5), catalogFailure.Clock.GetUtcNow().AddMinutes(30)));
+
+        Assert.Equal(HumanInputSupersedePreparationStatus.Unavailable, unavailableCatalog.Status);
+        Assert.Null(unavailableCatalog.CandidateKey);
+
+        var catalogCancellation = CreateFixture(HumanInputResponsePolicyKind.FirstValid);
+        catalogCancellation.Catalog.DelayReadUntilCancellation = true;
+        catalogCancellation.Catalog.ReadEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using (var cancellation = new CancellationTokenSource())
+        {
+            var pending = catalogCancellation.Preparer.PrepareAmendAsync(AmendInput(catalogCancellation.Request, catalogCancellation.Clock.GetUtcNow().AddMinutes(5), catalogCancellation.Clock.GetUtcNow().AddMinutes(30)), cancellation.Token);
+            await catalogCancellation.Catalog.ReadEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            cancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pending);
+        }
+
+        var routeFailureSource = new HumanInputRouteIntentSourceTestDouble(HumanInputRouteIntentSourceResultFor(HumanInputRouteIntentSourceStatus.Unavailable))
+        {
+            ResolveException = new InvalidOperationException("route source unavailable")
+        };
+        var routeFailure = CreateFixture(HumanInputResponsePolicyKind.FirstValid, routeIntentSource: routeFailureSource);
+        var unavailableRoute = await routeFailure.Preparer.PrepareRerouteAsync(RerouteInput(routeFailure.Request, routeFailure.Clock.GetUtcNow().AddMinutes(5)));
+
+        Assert.Equal(HumanInputSupersedePreparationStatus.Unavailable, unavailableRoute.Status);
+        Assert.Empty(unavailableRoute.Options);
+
+        var routeCancellationSource = new HumanInputRouteIntentSourceTestDouble(HumanInputRouteIntentSourceResultFor(HumanInputRouteIntentSourceStatus.Unavailable))
+        {
+            DelayResolveUntilCancellation = true,
+            ResolveEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously)
+        };
+        var routeCancellation = CreateFixture(HumanInputResponsePolicyKind.FirstValid, routeIntentSource: routeCancellationSource);
+        using (var cancellation = new CancellationTokenSource())
+        {
+            var pending = routeCancellation.Preparer.PrepareRerouteAsync(RerouteInput(routeCancellation.Request, routeCancellation.Clock.GetUtcNow().AddMinutes(5)), cancellation.Token);
+            await routeCancellationSource.ResolveEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            cancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pending);
+        }
+
+        var grantCancellation = CreateFixture(HumanInputResponsePolicyKind.FirstValid);
+        grantCancellation.GrantResolver.DelayResolveUntilCancellation = true;
+        grantCancellation.GrantResolver.ResolveEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using (var cancellation = new CancellationTokenSource())
+        {
+            var pending = grantCancellation.Preparer.PrepareAmendAsync(AmendInput(grantCancellation.Request, grantCancellation.Clock.GetUtcNow().AddMinutes(5), grantCancellation.Clock.GetUtcNow().AddMinutes(30)), cancellation.Token);
+            await grantCancellation.GrantResolver.ResolveEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            cancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pending);
+        }
+    }
+
+    [Fact]
     public async Task Reroute_rejects_malformed_shape_and_cancellation_before_catalog_access()
     {
         var fixture = CreateFixture(HumanInputResponsePolicyKind.FirstValid);

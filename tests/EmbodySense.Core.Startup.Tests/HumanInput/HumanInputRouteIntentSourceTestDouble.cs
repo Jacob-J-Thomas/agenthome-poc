@@ -8,10 +8,27 @@ internal sealed class HumanInputRouteIntentSourceTestDouble(HumanInputRouteInten
 {
     internal HumanInputRequest? Request { get; private set; }
 
-    public Task<HumanInputRouteIntentSourceResult> ResolveAsync(HumanInputRequest request, CancellationToken cancellationToken = default)
+    internal Exception? ResolveException { get; set; }
+
+    internal bool DelayResolveUntilCancellation { get; set; }
+
+    internal TaskCompletionSource<bool>? ResolveEntered { get; set; }
+
+    public async Task<HumanInputRouteIntentSourceResult> ResolveAsync(HumanInputRequest request, CancellationToken cancellationToken = default)
     {
         Request = request;
+        ResolveEntered?.TrySetResult(true);
         cancellationToken.ThrowIfCancellationRequested();
-        return Task.FromResult(result);
+        if (DelayResolveUntilCancellation)
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+        }
+
+        if (ResolveException is not null)
+        {
+            throw ResolveException;
+        }
+
+        return result;
     }
 }
