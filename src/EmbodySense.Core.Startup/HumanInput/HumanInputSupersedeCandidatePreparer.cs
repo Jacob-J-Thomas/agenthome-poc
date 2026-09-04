@@ -4,15 +4,17 @@ using EmbodySense.Core.Application.Governance.Authority.Grants;
 using EmbodySense.Core.Application.Governance.Authority.Grants.Models;
 using EmbodySense.Core.Application.HumanInput.Catalog;
 using EmbodySense.Core.Application.HumanInput.Catalog.Models;
+using EmbodySense.Core.Common.Authority;
 using EmbodySense.Core.Common.Authority.Grants.Models;
 using EmbodySense.Core.Common.HumanInput;
+using EmbodySense.Core.Common.HumanInput.Lifecycle;
 using EmbodySense.Core.Common.HumanInput.Lifecycle.Models;
 using EmbodySense.Core.Common.HumanInput.Models;
 using EmbodySense.Core.Startup.HumanInput.Models;
 
 namespace EmbodySense.Core.Startup.HumanInput;
 
-/// <summary>Builds exact Human Input supersede candidates from canonical state and active grant evidence.</summary>
+/// <summary>Builds exact Human Input lifecycle candidates from canonical state and active grant evidence.</summary>
 /// <remarks>Surface proposals provide only successor data. The current binding, eligible respondents, continuation, and
 /// grant reference are copied from the canonical aggregate and never reconstructed from browser input.</remarks>
 public sealed class HumanInputSupersedeCandidatePreparer : IHumanInputSupersedeCandidatePreparer
@@ -24,6 +26,7 @@ public sealed class HumanInputSupersedeCandidatePreparer : IHumanInputSupersedeC
     private readonly string _workspaceId;
     private readonly string _actor;
     private readonly TimeProvider _timeProvider;
+    private readonly IHumanInputRouteIntentSource _routeIntentSource;
 
     /// <summary>Creates a preparer over one canonical request catalog, grant resolver, candidate registry, actor, and clock.</summary>
     /// <param name="catalog">The canonical request catalog.</param>
@@ -32,7 +35,8 @@ public sealed class HumanInputSupersedeCandidatePreparer : IHumanInputSupersedeC
     /// <param name="workspaceId">The server-owned workspace identity.</param>
     /// <param name="actor">The server-owned actor attribution.</param>
     /// <param name="timeProvider">The trusted preparation clock.</param>
-    public HumanInputSupersedeCandidatePreparer(IHumanInputRequestCatalog catalog, IAuthorityGrantResolver grantResolver, IHumanInputSupersedeCandidateRegistry registry, string workspaceId, string actor, TimeProvider timeProvider)
+    /// <param name="routeIntentSource">The deterministic server-owned route source, or the canonical default when omitted.</param>
+    public HumanInputSupersedeCandidatePreparer(IHumanInputRequestCatalog catalog, IAuthorityGrantResolver grantResolver, IHumanInputSupersedeCandidateRegistry registry, string workspaceId, string actor, TimeProvider timeProvider, IHumanInputRouteIntentSource? routeIntentSource = null)
     {
         _catalog = catalog ?? throw new ArgumentNullException(nameof(catalog));
         _grantResolver = grantResolver ?? throw new ArgumentNullException(nameof(grantResolver));
@@ -42,6 +46,7 @@ public sealed class HumanInputSupersedeCandidatePreparer : IHumanInputSupersedeC
         _workspaceId = workspaceId;
         _actor = actor;
         _timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
+        _routeIntentSource = routeIntentSource ?? new CanonicalHumanInputRouteIntentSource();
     }
 
     /// <inheritdoc />
@@ -54,7 +59,10 @@ public sealed class HumanInputSupersedeCandidatePreparer : IHumanInputSupersedeC
 
         var proposal = input!;
         cancellationToken.ThrowIfCancellationRequested();
-        var now = _timeProvider.GetUtcNow();
+        if (!TryGetUtcNow(out var now))
+        {
+            return Result(proposal.RequestId, HumanInputSupersedePreparationStatus.Unavailable, "clock_unavailable");
+        }
         if (now == default || proposal.ExpiresAtUtc <= now || proposal.ExpiresAtUtc - now > HumanInputLimits.MaxResponseWindow)
         {
             return Result(proposal.RequestId, HumanInputSupersedePreparationStatus.Invalid, "invalid_expiry");
@@ -156,9 +164,7 @@ public sealed class HumanInputSupersedeCandidatePreparer : IHumanInputSupersedeC
 
         if (grant is null || grant.Status != AuthorityGrantResolutionStatus.Active || !Equals(grant.RequestedReference, grantEvidence[0].GrantReference))
         {
-            return Result(proposal.RequestId, grant?.Status is AuthorityGrantResolutionStatus.NotFound or AuthorityGrantResolutionStatus.Invalid
-                ? HumanInputSupersedePreparationStatus.NotFound
-                : HumanInputSupersedePreparationStatus.Denied, "grant_inactive");
+            return Result(proposal.RequestId, MapGrantStatus(grant, grantEvidence[0].GrantReference), "grant_inactive");
         }
 
         if (!TryParseSuccessor(proposal, current[0], now, out var candidate, out var failure))
@@ -184,6 +190,362 @@ public sealed class HumanInputSupersedeCandidatePreparer : IHumanInputSupersedeC
 
         return new HumanInputSupersedePreparationResult(HumanInputSupersedePreparationStatus.Ready, proposal.RequestId, candidateKey, proposal.ExpiresAtUtc, null);
     }
+
+    /// <inheritdoc />
+    public async Task<HumanInputReroutePreparationResult> PrepareRerouteAsync(HumanInputReroutePreparationInput? input, CancellationToken cancellationToken = default)
+    {
+        if (!IsRerouteShapeValid(input))
+        {
+            return RerouteResult(input?.RequestId, HumanInputSupersedePreparationStatus.Invalid, null, "invalid_input");
+        }
+
+        var proposal = input!;
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!TryGetUtcNow(out var now))
+        {
+            return RerouteResult(proposal.RequestId, HumanInputSupersedePreparationStatus.Unavailable, null, "clock_unavailable");
+        }
+        if (!IsCandidateExpiryValid(proposal.CandidateExpiresAtUtc, now))
+        {
+            return RerouteResult(proposal.RequestId, HumanInputSupersedePreparationStatus.Invalid, null, "invalid_candidate_expiry");
+        }
+
+        var context = await ReadCandidateContextAsync(proposal.OperationId, proposal.RequestId, ToReference(proposal.ExpectedRequest), proposal.ExpectedLifecycleVersion, proposal.ExpectedLifecycleStatus, cancellationToken).ConfigureAwait(false);
+        if (context.Context is null)
+        {
+            return RerouteResult(proposal.RequestId, context.Status, null, context.Error);
+        }
+        if (context.Context.Head.LifecycleVersion >= HumanInputRequestLifecycleContractLimits.MaxLifecycleVersion)
+        {
+            return RerouteResult(proposal.RequestId, HumanInputSupersedePreparationStatus.LimitExceeded, null, "lifecycle_version_limit");
+        }
+
+        HumanInputRouteIntentSourceResult routeIntents;
+        try
+        {
+            routeIntents = await _routeIntentSource.ResolveAsync(context.Context.Request, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            return RerouteResult(proposal.RequestId, HumanInputSupersedePreparationStatus.Unavailable, null, "route_intent_source_unavailable");
+        }
+
+        var routeStatus = ValidateRouteIntents(context.Context.Request, routeIntents, out var exclusions);
+        if (routeStatus != HumanInputSupersedePreparationStatus.Ready)
+        {
+            return RerouteResult(proposal.RequestId, routeStatus, null, "route_intent_source_invalid");
+        }
+
+        var preparationHash = HumanInputLifecycleCandidateIdentity.Digest(
+            "reroute",
+            HumanInputRouteIntentContract.ContractId,
+            HumanInputRouteIntentContract.Version.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            routeIntents.IntentHash,
+            proposal.OperationId,
+            proposal.RequestId,
+            proposal.ExpectedLifecycleVersion.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            proposal.ExpectedRequest!.RequestVersionId,
+            proposal.ExpectedRequest.RequestHash,
+            proposal.ExpectedLifecycleStatus,
+            proposal.CandidateExpiresAtUtc.ToString("O", System.Globalization.CultureInfo.InvariantCulture));
+
+        var options = new List<(HumanInputRerouteCandidateOption Option, HumanInputSupersedeCandidateRegistration Registration)>();
+        foreach (var exclusion in exclusions)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var candidate = CreateRerouteCandidate(context.Context.Request, proposal, exclusion.Ordinal);
+            if (candidate is null || !IsValidTransition(proposal.OperationId, HumanInputRequestLifecycleOperationKind.Reroute, context.Context, candidate, now))
+            {
+                continue;
+            }
+
+            var registration = Registration(proposal.OperationId, proposal.RequestId, context.Context, candidate, proposal.CandidateExpiresAtUtc, HumanInputRequestLifecycleOperationKind.Reroute, preparationHash);
+            options.Add((new HumanInputRerouteCandidateOption(string.Empty, $"Alternative route {options.Count + 1}", candidate.EligibleRespondents.Length, proposal.CandidateExpiresAtUtc), registration));
+        }
+
+        if (options.Count == 0)
+        {
+            return RerouteResult(proposal.RequestId, HumanInputSupersedePreparationStatus.Conflict, null, "no_valid_reroute_option");
+        }
+
+        if (!_registry.TryRegisterGroup(options.Select(item => item.Registration).ToArray(), out var candidateKeys, out var registrationStatus))
+        {
+            return RerouteResult(proposal.RequestId, registrationStatus, null, registrationStatus == HumanInputSupersedePreparationStatus.Conflict ? "candidate_registry_conflict" : "candidate_registry_limit");
+        }
+
+        var preparedOptions = options.Select((item, index) => item.Option with { CandidateKey = candidateKeys[index] }).ToArray();
+        return preparedOptions.Length == 0
+            ? RerouteResult(proposal.RequestId, HumanInputSupersedePreparationStatus.Conflict, null, "no_valid_reroute_option")
+            : new HumanInputReroutePreparationResult(HumanInputSupersedePreparationStatus.Ready, proposal.RequestId, Array.AsReadOnly(preparedOptions), proposal.CandidateExpiresAtUtc, null);
+    }
+
+    /// <inheritdoc />
+    public async Task<HumanInputAmendPreparationResult> PrepareAmendAsync(HumanInputAmendPreparationInput? input, CancellationToken cancellationToken = default)
+    {
+        if (!IsAmendShapeValid(input))
+        {
+            return AmendResult(input?.RequestId, HumanInputSupersedePreparationStatus.Invalid, "invalid_input");
+        }
+
+        var proposal = input!;
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!TryGetUtcNow(out var now))
+        {
+            return AmendResult(proposal.RequestId, HumanInputSupersedePreparationStatus.Unavailable, "clock_unavailable");
+        }
+        if (!IsCandidateExpiryValid(proposal.CandidateExpiresAtUtc, now) || proposal.RequestExpiresAtUtc <= now)
+        {
+            return AmendResult(proposal.RequestId, HumanInputSupersedePreparationStatus.Invalid, "invalid_expiry");
+        }
+
+        var context = await ReadCandidateContextAsync(proposal.OperationId, proposal.RequestId, ToReference(proposal.ExpectedRequest), proposal.ExpectedLifecycleVersion, proposal.ExpectedLifecycleStatus, cancellationToken).ConfigureAwait(false);
+        if (context.Context is null)
+        {
+            return AmendResult(proposal.RequestId, context.Status, context.Error);
+        }
+        if (context.Context.Head.LifecycleVersion >= HumanInputRequestLifecycleContractLimits.MaxLifecycleVersion)
+        {
+            return AmendResult(proposal.RequestId, HumanInputSupersedePreparationStatus.LimitExceeded, "lifecycle_version_limit");
+        }
+        if (proposal.RequestExpiresAtUtc < context.Context.Request.Timing.RequestedAtUtc || proposal.RequestExpiresAtUtc - context.Context.Request.Timing.RequestedAtUtc > HumanInputLimits.MaxResponseWindow)
+        {
+            return AmendResult(proposal.RequestId, HumanInputSupersedePreparationStatus.Invalid, "invalid_request_expiry");
+        }
+        if (!TryParsePrivacy(proposal.PrivacyClass, out var privacy))
+        {
+            return AmendResult(proposal.RequestId, HumanInputSupersedePreparationStatus.Invalid, "invalid_privacy_class");
+        }
+
+        var intent = string.Join("\u001f", proposal.Purpose, proposal.Prompt, privacy, proposal.RequestExpiresAtUtc.ToString("O", System.Globalization.CultureInfo.InvariantCulture), proposal.CandidateExpiresAtUtc.ToString("O", System.Globalization.CultureInfo.InvariantCulture));
+        var preparationHash = HumanInputLifecycleCandidateIdentity.Digest(
+            "amend",
+            proposal.OperationId,
+            proposal.RequestId,
+            proposal.ExpectedLifecycleVersion.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            proposal.ExpectedRequest!.RequestVersionId,
+            proposal.ExpectedRequest.RequestHash,
+            proposal.ExpectedLifecycleStatus,
+            intent);
+        var candidate = CreateAmendCandidate(context.Context.Request, proposal, privacy, intent);
+        if (candidate is null || !IsValidTransition(proposal.OperationId, HumanInputRequestLifecycleOperationKind.Amend, context.Context, candidate, now))
+        {
+            return AmendResult(proposal.RequestId, HumanInputSupersedePreparationStatus.Invalid, "invalid_amendment");
+        }
+
+        var registration = Registration(proposal.OperationId, proposal.RequestId, context.Context, candidate, proposal.CandidateExpiresAtUtc, HumanInputRequestLifecycleOperationKind.Amend, preparationHash);
+        if (!_registry.TryRegister(registration, out var candidateKey, out var registrationStatus))
+        {
+            return AmendResult(proposal.RequestId, registrationStatus, registrationStatus == HumanInputSupersedePreparationStatus.Conflict ? "candidate_registry_conflict" : "candidate_registry_limit");
+        }
+        return new HumanInputAmendPreparationResult(HumanInputSupersedePreparationStatus.Ready, proposal.RequestId, candidateKey, proposal.CandidateExpiresAtUtc, null);
+    }
+
+    private HumanInputSupersedeCandidateRegistration Registration(string operationId, string requestId, HumanInputLifecycleCandidatePreparationContext context, HumanInputRequest candidate, DateTimeOffset expiresAtUtc, HumanInputRequestLifecycleOperationKind kind, string? preparationHash = null)
+        => new(_workspaceId, _actor, operationId, requestId, context.Head.LifecycleVersion, context.ExpectedRequest, candidate, context.GrantReference, expiresAtUtc, kind, preparationHash);
+
+    private async Task<(HumanInputLifecycleCandidatePreparationContext? Context, HumanInputSupersedePreparationStatus Status, string Error)> ReadCandidateContextAsync(string operationId, string requestId, HumanInputRequestReference? expectedReference, long expectedLifecycleVersion, string expectedLifecycleStatus, CancellationToken cancellationToken)
+    {
+        if (expectedReference is null || !string.Equals(expectedReference.RequestId, requestId, StringComparison.Ordinal) || expectedLifecycleVersion < 1 || !string.Equals(expectedLifecycleStatus, HumanInputRequestLifecycleStatus.Pending.ToString(), StringComparison.OrdinalIgnoreCase))
+        {
+            return (null, HumanInputSupersedePreparationStatus.Invalid, "invalid_expected_state");
+        }
+
+        HumanInputRequestCatalogReadResult read;
+        try
+        {
+            read = await _catalog.ReadAsync(requestId, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            return (null, HumanInputSupersedePreparationStatus.Unavailable, "catalog_unavailable");
+        }
+        if (read is null || read.Status == HumanInputRequestCatalogReadStatus.NotFound)
+        {
+            return (null, HumanInputSupersedePreparationStatus.NotFound, "request_not_found");
+        }
+        if (read.Status != HumanInputRequestCatalogReadStatus.Ready || read.Entry is null)
+        {
+            return (null, MapReadStatus(read.Status), "request_unavailable");
+        }
+
+        var head = read.Entry.Lifecycle.Head;
+        if (head is null || head.Status != HumanInputRequestLifecycleStatus.Pending || head.LifecycleVersion != expectedLifecycleVersion || !Equals(head.CurrentRequest, expectedReference) || !HumanInputRequestLifecycleValidator.ValidateHead(head).IsValid)
+        {
+            return (null, HumanInputSupersedePreparationStatus.Conflict, "request_state_conflict");
+        }
+        if (read.Entry.Lifecycle.RequestVersions.Count >= HumanInputRequestLifecycleContractLimits.MaxRequestVersionsPerRequest)
+        {
+            return (null, HumanInputSupersedePreparationStatus.LimitExceeded, "request_version_limit");
+        }
+        HumanInputRequest[] current;
+        try
+        {
+            current = read.Entry.Lifecycle.RequestVersions.Where(request => request is not null && Matches(request, expectedReference)).Take(2).ToArray();
+        }
+        catch (Exception)
+        {
+            return (null, HumanInputSupersedePreparationStatus.Ambiguous, "request_evidence_ambiguous");
+        }
+        if (current.Length != 1 || !HumanInputValidator.ValidateRequest(current[0]).IsValid || !HumanInputRequestHash.Matches(current[0]))
+        {
+            return (null, HumanInputSupersedePreparationStatus.Ambiguous, "request_evidence_ambiguous");
+        }
+        HumanInputRequestLifecycleOperationEvidence[] grantEvidence;
+        try
+        {
+            grantEvidence = read.Entry.Lifecycle.Operations.Where(operation => operation is not null && operation.Outcome == HumanInputRequestLifecycleOperationOutcome.Committed && operation.GrantReference is not null && Equals(operation.ResultHead, head)).OrderByDescending(operation => operation.RecordedAtUtc).ThenByDescending(operation => operation.OperationId, StringComparer.Ordinal).Take(2).ToArray();
+        }
+        catch (Exception)
+        {
+            return (null, HumanInputSupersedePreparationStatus.Ambiguous, "grant_evidence_ambiguous");
+        }
+        if (grantEvidence.Length != 1 || grantEvidence[0].GrantReference is null)
+        {
+            return (null, HumanInputSupersedePreparationStatus.Ambiguous, "grant_evidence_ambiguous");
+        }
+        AuthorityGrantResolution grant;
+        try
+        {
+            grant = await _grantResolver.ResolveAsync(grantEvidence[0].GrantReference, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            return (null, HumanInputSupersedePreparationStatus.Unavailable, "grant_unavailable");
+        }
+        if (grant is null || grant.Status != AuthorityGrantResolutionStatus.Active || !Equals(grant.RequestedReference, grantEvidence[0].GrantReference))
+        {
+            return (null, MapGrantStatus(grant, grantEvidence[0].GrantReference), "grant_inactive");
+        }
+        return (new HumanInputLifecycleCandidatePreparationContext(current[0], expectedReference, head, grantEvidence[0].GrantReference!), HumanInputSupersedePreparationStatus.Ready, string.Empty);
+    }
+
+    private HumanInputRequest? CreateRerouteCandidate(HumanInputRequest current, HumanInputReroutePreparationInput proposal, int removedIndex)
+    {
+        if (current.EligibleRespondents.Length <= 1)
+        {
+            return null;
+        }
+        var respondents = current.EligibleRespondents.Where((_, index) => index != removedIndex).ToArray();
+        var intent = $"remove-{removedIndex.ToString(System.Globalization.CultureInfo.InvariantCulture)}\u001f{proposal.CandidateExpiresAtUtc.ToString("O", System.Globalization.CultureInfo.InvariantCulture)}";
+        var versionId = HumanInputLifecycleCandidateIdentity.RequestVersion("reroute", proposal.OperationId, current.RequestId, current.RequestHash, intent);
+        try
+        {
+            return HumanInputRequestHash.Apply(current with { RequestVersionId = versionId, EligibleRespondents = respondents, RequestHash = string.Empty });
+        }
+        catch (ArgumentException)
+        {
+            return null;
+        }
+    }
+
+    private HumanInputRequest? CreateAmendCandidate(HumanInputRequest current, HumanInputAmendPreparationInput proposal, HumanInputPrivacyClass privacy, string intent)
+    {
+        var versionId = HumanInputLifecycleCandidateIdentity.RequestVersion("amend", proposal.OperationId, current.RequestId, current.RequestHash, intent);
+        try
+        {
+            return HumanInputRequestHash.Apply(current with { RequestVersionId = versionId, Purpose = proposal.Purpose, Prompt = proposal.Prompt, PrivacyClass = privacy, Timing = new HumanInputTiming(current.Timing.RequestedAtUtc, proposal.RequestExpiresAtUtc), RequestHash = string.Empty });
+        }
+        catch (ArgumentException)
+        {
+            return null;
+        }
+    }
+
+    private bool IsValidTransition(string operationId, HumanInputRequestLifecycleOperationKind kind, HumanInputLifecycleCandidatePreparationContext context, HumanInputRequest candidate, DateTimeOffset now)
+    {
+        if (!HumanInputRequestSnapshot.TryCapture(candidate, out var captured, out _) || captured is null || !HumanInputValidator.ValidateRequest(captured).IsValid || !HumanInputRequestHash.Matches(captured) || !AuthorityActorId.TryParse(_actor, out var actor, out _) || !AuthorityPurpose.TryParse("human-input.lifecycle", out var purpose, out _) || actor is null || purpose is null || !HumanInputRequestReference.TryCreate(captured, out var candidateReference, out _) || candidateReference is null || context.Head.LifecycleVersion >= HumanInputRequestLifecycleContractLimits.MaxLifecycleVersion)
+        {
+            return false;
+        }
+        var resultHead = context.Head with { LifecycleVersion = context.Head.LifecycleVersion + 1, CurrentRequest = candidateReference, LastOperationId = operationId, UpdatedAtUtc = now };
+        var authorityHash = HumanInputLifecycleCandidateIdentity.Digest("human-input-candidate-authority", _workspaceId, _actor, operationId, captured.RequestHash);
+        var evidence = new HumanInputRequestLifecycleOperationEvidence(1, operationId, captured.RequestHash, kind, HumanInputRequestLifecycleOperationOutcome.Committed, HumanInputRequestLifecycleOperationFailureCode.None, context.Request.RequestId, context.Head.LifecycleVersion, HumanInputRequestLifecycleStatus.Pending, context.ExpectedRequest, context.Request.Binding, context.Head, resultHead, null, null, null, candidateReference, actor, purpose, context.GrantReference, authorityHash, context.GrantReference.ContentHash?.Length == 71 ? context.GrantReference.ContentHash[7..] : authorityHash, now);
+        return HumanInputRequestLifecycleValidator.ValidateCommittedTransition(evidence, context.Request, captured).IsValid;
+    }
+
+    private static bool IsRerouteShapeValid(HumanInputReroutePreparationInput? input)
+        => input is not null && HumanInputIdentifier.IsValid(input.OperationId) && HumanInputIdentifier.IsValid(input.RequestId) && input.ExpectedRequest is not null && string.Equals(input.ExpectedRequest.RequestId, input.RequestId, StringComparison.Ordinal) && HumanInputIdentifier.IsValid(input.ExpectedRequest.RequestVersionId) && IsSha256(input.ExpectedRequest.RequestHash) && input.ExpectedLifecycleVersion >= 1 && !string.IsNullOrWhiteSpace(input.ExpectedLifecycleStatus) && input.CandidateExpiresAtUtc != default && input.CandidateExpiresAtUtc.Offset == TimeSpan.Zero;
+
+    private static bool IsAmendShapeValid(HumanInputAmendPreparationInput? input)
+        => input is not null && HumanInputIdentifier.IsValid(input.OperationId) && HumanInputIdentifier.IsValid(input.RequestId) && input.ExpectedRequest is not null && string.Equals(input.ExpectedRequest.RequestId, input.RequestId, StringComparison.Ordinal) && HumanInputIdentifier.IsValid(input.ExpectedRequest.RequestVersionId) && IsSha256(input.ExpectedRequest.RequestHash) && input.ExpectedLifecycleVersion >= 1 && !string.IsNullOrWhiteSpace(input.ExpectedLifecycleStatus) && HumanInputText.IsValid(input.Purpose, HumanInputLimits.MaxPurposeCharacters, true) && HumanInputText.IsValid(input.Prompt, HumanInputLimits.MaxPromptCharacters, true) && !string.IsNullOrWhiteSpace(input.PrivacyClass) && input.RequestExpiresAtUtc != default && input.RequestExpiresAtUtc.Offset == TimeSpan.Zero && input.CandidateExpiresAtUtc != default && input.CandidateExpiresAtUtc.Offset == TimeSpan.Zero;
+
+    private static bool IsCandidateExpiryValid(DateTimeOffset expiresAtUtc, DateTimeOffset now)
+        => now != default && expiresAtUtc != default && expiresAtUtc.Offset == TimeSpan.Zero && expiresAtUtc > now && expiresAtUtc - now <= HumanInputLifecycleCandidateLimits.MaxCandidateLifetime;
+
+    private static HumanInputSupersedePreparationStatus MapGrantStatus(AuthorityGrantResolution? resolution, AuthorityGrantReference? expectedReference)
+        => resolution is null || expectedReference is null || !Equals(resolution.RequestedReference, expectedReference)
+            ? HumanInputSupersedePreparationStatus.Ambiguous
+            : resolution.Status switch
+            {
+                AuthorityGrantResolutionStatus.NotFound or AuthorityGrantResolutionStatus.Invalid => HumanInputSupersedePreparationStatus.NotFound,
+                AuthorityGrantResolutionStatus.Unavailable or AuthorityGrantResolutionStatus.ProfileUnavailable or AuthorityGrantResolutionStatus.RoleUnavailable or AuthorityGrantResolutionStatus.LoopUnavailable => HumanInputSupersedePreparationStatus.Unavailable,
+                AuthorityGrantResolutionStatus.Unknown or AuthorityGrantResolutionStatus.Ambiguous => HumanInputSupersedePreparationStatus.Ambiguous,
+                _ => HumanInputSupersedePreparationStatus.Denied
+            };
+
+    private static HumanInputSupersedePreparationStatus ValidateRouteIntents(HumanInputRequest request, HumanInputRouteIntentSourceResult? result, out IReadOnlyList<HumanInputRouteExclusionIntent> exclusions)
+    {
+        exclusions = [];
+        if (result is null)
+        {
+            return HumanInputSupersedePreparationStatus.Ambiguous;
+        }
+
+        if (result.Status != HumanInputRouteIntentSourceStatus.Ready)
+        {
+            return result.Status switch
+            {
+                HumanInputRouteIntentSourceStatus.Invalid => HumanInputSupersedePreparationStatus.Invalid,
+                HumanInputRouteIntentSourceStatus.Unavailable => HumanInputSupersedePreparationStatus.Unavailable,
+                _ => HumanInputSupersedePreparationStatus.Ambiguous
+            };
+        }
+
+        if (!string.Equals(result.ContractId, HumanInputRouteIntentContract.ContractId, StringComparison.Ordinal)
+            || result.ContractVersion != HumanInputRouteIntentContract.Version
+            || result.Intents is null
+            || result.Intents.Count != request.EligibleRespondents.Length
+            || result.Intents.Count is < 1 or > HumanInputLifecycleCandidateLimits.MaxRerouteOptions
+            || !IsSha256(result.IntentHash))
+        {
+            return HumanInputSupersedePreparationStatus.Invalid;
+        }
+
+        var ordered = result.Intents.ToArray();
+        for (var index = 0; index < ordered.Length; index++)
+        {
+            var intent = ordered[index];
+            if (intent is null || intent.Ordinal != index || !IsSha256(intent.RouteEntryHash)
+                || !string.Equals(intent.RouteEntryHash, CanonicalHumanInputRouteIntentSource.RouteEntryHash(request.EligibleRespondents[index]), StringComparison.Ordinal))
+            {
+                return HumanInputSupersedePreparationStatus.Invalid;
+            }
+        }
+
+        var expectedHash = HumanInputRouteIntentSourceResultFactory.ComputeIntentHash(request.RequestHash, ordered);
+        if (!string.Equals(expectedHash, result.IntentHash, StringComparison.Ordinal))
+        {
+            return HumanInputSupersedePreparationStatus.Ambiguous;
+        }
+
+        exclusions = Array.AsReadOnly(ordered);
+        return HumanInputSupersedePreparationStatus.Ready;
+    }
+
+    private static bool IsSha256(string? value)
+        => value is { Length: HumanInputLimits.Sha256HexCharacters } && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
 
     private bool TryParseSuccessor(HumanInputSupersedePreparationInput input, HumanInputRequest current, DateTimeOffset now, out HumanInputRequest? candidate, out string failure)
     {
@@ -300,4 +662,24 @@ public sealed class HumanInputSupersedeCandidatePreparer : IHumanInputSupersedeC
 
     private static HumanInputSupersedePreparationResult Result(string? requestId, HumanInputSupersedePreparationStatus status, string error)
         => new(status, requestId ?? string.Empty, null, null, error);
+
+    private static HumanInputReroutePreparationResult RerouteResult(string? requestId, HumanInputSupersedePreparationStatus status, IReadOnlyList<HumanInputRerouteCandidateOption>? options, string error)
+        => new(status, requestId ?? string.Empty, options ?? [], null, error);
+
+    private static HumanInputAmendPreparationResult AmendResult(string? requestId, HumanInputSupersedePreparationStatus status, string error)
+        => new(status, requestId ?? string.Empty, null, null, error);
+
+    private bool TryGetUtcNow(out DateTimeOffset now)
+    {
+        try
+        {
+            now = _timeProvider.GetUtcNow();
+            return now != default;
+        }
+        catch (Exception)
+        {
+            now = default;
+            return false;
+        }
+    }
 }

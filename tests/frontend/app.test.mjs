@@ -43,6 +43,11 @@ test("the shared shell owns primary navigation while Builder and Runs stay local
   assert.match(loopsRedirectSource, /\?view=loops/);
 });
 
+test("the shared shell refreshes Human Input after canonical change notifications", () => {
+  assert.match(appSource, /connection\.on\("HumanInputChanged"/);
+  assert.match(appSource, /embodySenseHumanInput\?\.notifyChanged/);
+});
+
 test("shared-shell navigation switches views and keeps the refresh route aligned", async () => {
   const app = await loadApp();
   const loopsTab = app.appTabs.find((tab) => tab.dataset.appView === "loops");

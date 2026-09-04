@@ -293,7 +293,7 @@ public sealed partial class BrowserFlowTests
             await SetValueAsync(browser, "#humanInputResponseEditor textarea", "late answer");
             await Task.Delay(TimeSpan.FromSeconds(2));
             await ClickAsync(browser, "[data-testid=\"human-input-response-submit\"]");
-            await browser.WaitForExpressionAsync("document.getElementById('humanInputResponseStatus').textContent === 'The request changed or the operation conflicted. Reread canonical state.'");
+            await browser.WaitForExpressionAsync("document.getElementById('humanInputResponseStatus').textContent === 'The response window closed before this operation was accepted.'");
             await WaitForHumanInputLifecycleAsync(browser, "pending");
             var expiry = await HumanInputBrowserFixture.ReadAsync(paths, capabilityTrustRoot, ExpiryId);
             Assert.Equal(HumanInputRequestLifecycleStatus.Pending, expiry.PrimarySnapshot?.Head.Status);

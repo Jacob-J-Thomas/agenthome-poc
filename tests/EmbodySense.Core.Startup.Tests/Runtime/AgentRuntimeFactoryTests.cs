@@ -4413,7 +4413,7 @@ public sealed partial class AgentRuntimeFactoryTests
     private static GovernedLoopGraphCatalogNodeSnapshot HumanInputDescriptor(GovernedLoopGraphCatalogResponse catalog)
         => Assert.Single(catalog.NodeDescriptors, item => item.Descriptor.Kind == GovernedLoopNodeKind.HumanInput);
 
-    private static HumanInputRequestLifecycleStoreMutation CreateFreshHumanInputMutation(
+    internal static HumanInputRequestLifecycleStoreMutation CreateFreshHumanInputMutation(
         string workspacePath,
         string requestId,
         string requestVersionId,
@@ -4464,7 +4464,7 @@ public sealed partial class AgentRuntimeFactoryTests
         return new HumanInputRequestLifecycleStoreMutation(generation, evidence, request, head, null);
     }
 
-    private static HumanInputRequestLifecycleStoreMutation CreateDurableLifecycleReplayMutation(
+    internal static HumanInputRequestLifecycleStoreMutation CreateDurableLifecycleReplayMutation(
         HumanInputRequestLifecycleOperationKind kind,
         HumanInputRequest previousRequest,
         HumanInputRequestLifecycleHead previousHead,

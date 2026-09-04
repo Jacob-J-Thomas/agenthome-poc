@@ -1587,6 +1587,127 @@
                   </section>
 
                   <section
+                    id="humanInputRerouteSection"
+                    class="human-input-section human-input-reroute"
+                    aria-labelledby="humanInputRerouteTitle"
+                    hidden
+                  >
+                    <div class="human-input-section-heading">
+                      <div>
+                        <h3 id="humanInputRerouteTitle">Reroute request</h3>
+                        <p>
+                          Choose a server-owned route option. Respondent and
+                          routing details remain opaque.
+                        </p>
+                      </div>
+                      <span class="human-input-redaction-note"
+                        >Opaque options</span
+                      >
+                    </div>
+                    <label>
+                      <span>Candidate expiry</span>
+                      <input
+                        id="humanInputRerouteExpiresAt"
+                        type="datetime-local"
+                        autocomplete="off"
+                        aria-describedby="humanInputRerouteStatus"
+                      />
+                    </label>
+                    <label>
+                      <span>Server-owned route option</span>
+                      <select
+                        id="humanInputRerouteOptions"
+                        autocomplete="off"
+                        aria-describedby="humanInputRerouteStatus"
+                        disabled
+                      ></select>
+                    </label>
+                    <p
+                      id="humanInputRerouteStatus"
+                      class="human-input-response-status"
+                      role="status"
+                      aria-live="polite"
+                    ></p>
+                    <button
+                      id="humanInputRerouteButton"
+                      class="secondary-button"
+                      type="button"
+                      data-testid="human-input-reroute"
+                    >
+                      Prepare reroute
+                    </button>
+                  </section>
+
+                  <section
+                    id="humanInputAmendSection"
+                    class="human-input-section human-input-amend"
+                    aria-labelledby="humanInputAmendTitle"
+                    hidden
+                  >
+                    <div class="human-input-section-heading">
+                      <div>
+                        <h3 id="humanInputAmendTitle">Amend request</h3>
+                        <p>
+                          Change only bounded content, privacy, or expiry. The
+                          binding, routing, policy, and continuation remain
+                          server-owned.
+                        </p>
+                      </div>
+                      <span class="human-input-redaction-note"
+                        >No authority fields</span
+                      >
+                    </div>
+                    <label>
+                      <span>Purpose</span>
+                      <input
+                        id="humanInputAmendPurpose"
+                        autocomplete="off"
+                        maxlength="240"
+                      />
+                    </label>
+                    <label>
+                      <span>Prompt</span>
+                      <textarea
+                        id="humanInputAmendPrompt"
+                        autocomplete="off"
+                        maxlength="4000"
+                        rows="3"
+                      ></textarea>
+                    </label>
+                    <label>
+                      <span>Privacy class</span>
+                      <select
+                        id="humanInputAmendPrivacyClass"
+                        autocomplete="off"
+                        aria-describedby="humanInputAmendStatus"
+                      ></select>
+                    </label>
+                    <label>
+                      <span>Expiry</span>
+                      <input
+                        id="humanInputAmendExpiresAt"
+                        type="datetime-local"
+                        autocomplete="off"
+                        aria-describedby="humanInputAmendStatus"
+                      />
+                    </label>
+                    <p
+                      id="humanInputAmendStatus"
+                      class="human-input-response-status"
+                      role="status"
+                      aria-live="polite"
+                    ></p>
+                    <button
+                      id="humanInputAmendButton"
+                      class="secondary-button"
+                      type="button"
+                      data-testid="human-input-amend"
+                    >
+                      Prepare amendment
+                    </button>
+                  </section>
+
+                  <section
                     class="human-input-actions-section"
                     aria-labelledby="humanInputActionsTitle"
                   >
@@ -1597,6 +1718,15 @@
                       </div>
                     </div>
                     <div class="human-input-actions">
+                      <button
+                        id="humanInputRemindButton"
+                        class="secondary-button"
+                        type="button"
+                        data-human-input-action="remind"
+                        data-testid="human-input-remind"
+                      >
+                        Record reminder opportunity
+                      </button>
                       <button
                         id="humanInputRejectButton"
                         class="danger-button"

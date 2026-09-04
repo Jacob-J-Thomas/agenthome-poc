@@ -627,7 +627,8 @@ public sealed class AgentRuntimeFactory
                 humanInputCandidateRegistry,
                 workspaceId,
                 actor,
-                operationalClock);
+                operationalClock,
+                new CanonicalHumanInputRouteIntentSource());
             var humanInputCancellationConvergence = new CustomLoopHumanInputCancellationConvergenceService(
                 customRunStore,
                 customControlOperations,

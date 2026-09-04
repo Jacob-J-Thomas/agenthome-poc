@@ -261,13 +261,17 @@
 }
 
 .human-input-response-editor,
-.human-input-supersede {
+.human-input-supersede,
+.human-input-reroute,
+.human-input-amend {
   display: grid;
   gap: 9px;
 }
 
 .human-input-field,
 .human-input-supersede label,
+.human-input-reroute label,
+.human-input-amend label,
 .human-input-explanation-field {
   display: grid;
   gap: 5px;
@@ -278,6 +282,11 @@
 
 .human-input-field textarea,
 .human-input-supersede textarea,
+.human-input-reroute input,
+.human-input-reroute select,
+.human-input-amend textarea,
+.human-input-amend input,
+.human-input-amend select,
 .human-input-explanation-field textarea,
 .human-input-supersede input,
 .human-input-field input,
@@ -294,6 +303,7 @@
 
 .human-input-field textarea,
 .human-input-supersede textarea,
+.human-input-amend textarea,
 .human-input-explanation-field textarea {
   min-height: 70px;
   resize: vertical;

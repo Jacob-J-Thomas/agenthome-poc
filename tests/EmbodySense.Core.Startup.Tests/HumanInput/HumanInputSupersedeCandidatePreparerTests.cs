@@ -110,7 +110,8 @@ public sealed class HumanInputSupersedeCandidatePreparerTests
             (AuthorityGrantResolutionStatus.NotFound, HumanInputSupersedePreparationStatus.NotFound),
             (AuthorityGrantResolutionStatus.Invalid, HumanInputSupersedePreparationStatus.NotFound),
             (AuthorityGrantResolutionStatus.Revoked, HumanInputSupersedePreparationStatus.Denied),
-            (AuthorityGrantResolutionStatus.Unavailable, HumanInputSupersedePreparationStatus.Denied)
+            (AuthorityGrantResolutionStatus.Unavailable, HumanInputSupersedePreparationStatus.Unavailable),
+            (AuthorityGrantResolutionStatus.Unknown, HumanInputSupersedePreparationStatus.Ambiguous)
         })
         {
             resolver.Resolution = new AuthorityGrantResolution(grantStatus, grant, null!, EmptyCeiling(), string.Empty, mutation.Operation.RecordedAtUtc);
@@ -184,13 +185,12 @@ public sealed class HumanInputSupersedeCandidatePreparerTests
     {
         var policyName = policyKind.ToString().ToLowerInvariant();
         var baseMutation = HumanInputRequestStoreTestData.CreateMutation($"request-policy-{policyName}", $"version-policy-{policyName}", $"create-policy-{policyName}");
-        var respondents = policyKind == HumanInputResponsePolicyKind.FirstValid
-            ? [new HumanInputEligibleRespondent("user-one", "role-one", "route-one")]
-            : new[]
-            {
-                new HumanInputEligibleRespondent("user-one", "role-one", "route-one"),
-                new HumanInputEligibleRespondent("user-two", "role-two", "route-two")
-            };
+        var respondents = new[]
+        {
+            new HumanInputEligibleRespondent("user-one", "role-one", "route-one"),
+            new HumanInputEligibleRespondent("user-two", "role-two", "route-two"),
+            new HumanInputEligibleRespondent("user-three", "role-three", "route-three")
+        };
         var policy = policyKind switch
         {
             HumanInputResponsePolicyKind.FirstValid => new HumanInputResponsePolicy(policyKind, null, null),

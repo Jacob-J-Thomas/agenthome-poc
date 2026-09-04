@@ -1,6 +1,6 @@
 namespace EmbodySense.Core.Startup.HumanInput.Models;
 
-/// <summary>Identifies one bounded supersede-candidate preparation outcome.</summary>
+/// <summary>Identifies one bounded Human Input lifecycle-candidate preparation outcome.</summary>
 public enum HumanInputSupersedePreparationStatus
 {
     /// <summary>No supported outcome was supplied.</summary>
@@ -18,5 +18,7 @@ public enum HumanInputSupersedePreparationStatus
     /// <summary>The canonical dependency or registry was unavailable.</summary>
     Unavailable = 6,
     /// <summary>Available evidence could not establish one candidate.</summary>
-    Ambiguous = 7
+    Ambiguous = 7,
+    /// <summary>A finite candidate or lifecycle limit was reached.</summary>
+    LimitExceeded = 8
 }

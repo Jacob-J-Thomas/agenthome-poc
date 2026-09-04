@@ -982,6 +982,36 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         }
     }
 
+    /// <summary>Prepares bounded opaque Human Input reroute candidates through the retained Startup facade.</summary>
+    internal async Task<HumanInputReroutePreparationResult> PrepareHumanInputRerouteAsync(HumanInputReroutePreparationInput input, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        var runtime = await BeginCustomRuntimeOperationAsync(cancellationToken);
+        try
+        {
+            return await runtime.HumanInput.PrepareRerouteAsync(input, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            await EndCustomRuntimeOperationAsync().ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>Prepares one opaque Human Input amend candidate through the retained Startup facade.</summary>
+    internal async Task<HumanInputAmendPreparationResult> PrepareHumanInputAmendAsync(HumanInputAmendPreparationInput input, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        var runtime = await BeginCustomRuntimeOperationAsync(cancellationToken);
+        try
+        {
+            return await runtime.HumanInput.PrepareAmendAsync(input, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            await EndCustomRuntimeOperationAsync().ConfigureAwait(false);
+        }
+    }
+
     /// <summary>Refreshes graph-authoring capability evidence after an applied capability lifecycle mutation.</summary>
     /// <remarks>
     /// The pinned runtime owns one graph catalog whose executable projection re-reads the shared capability lifecycle

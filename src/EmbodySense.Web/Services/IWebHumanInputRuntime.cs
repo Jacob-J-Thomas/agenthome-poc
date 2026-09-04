@@ -21,4 +21,10 @@ public interface IWebHumanInputRuntime
 
     /// <summary>Prepares one opaque supersede candidate in Startup.</summary>
     Task<HumanInputSupersedePreparationResult> PrepareSupersedeAsync(HumanInputSupersedePreparationInput input, CancellationToken cancellationToken = default);
+
+    /// <summary>Prepares bounded opaque server-generated reroute candidates in Startup.</summary>
+    Task<HumanInputReroutePreparationResult> PrepareRerouteAsync(HumanInputReroutePreparationInput input, CancellationToken cancellationToken = default);
+
+    /// <summary>Prepares one opaque server-generated amend candidate in Startup.</summary>
+    Task<HumanInputAmendPreparationResult> PrepareAmendAsync(HumanInputAmendPreparationInput input, CancellationToken cancellationToken = default);
 }
