@@ -986,8 +986,14 @@ Assert-Equal -Actual (Get-VerificationCompletionMarkerCount -StandardOutput "pre
 Assert-Equal -Actual (Get-VerificationCompletionMarkerCount -StandardOutput ($lfMarker + $crlfMarker)) -Expected 2 -Message "Duplicate exact completion markers must remain visible to fail-closed disposition."
 $solutionMarker = "VERIFY_COMPLETE schema_version=1 component=solution status=passed elapsed_seconds=1.25`n"
 $staticMarker = "VERIFY_COMPLETE schema_version=1 component=static-contracts status=passed elapsed_seconds=2`n"
+$nestedMarker = "VERIFY_COMPLETE schema_version=1 component=nested-process status=passed elapsed_seconds=234.005`r`n"
 Assert-Equal -Actual (Get-VerificationCompletionMarkerCount -StandardOutput $solutionMarker -ExpectedComponent "solution") -Expected 1 -Message "The solution child must emit one identity-bearing terminal marker."
 Assert-Equal -Actual (Get-VerificationCompletionMarkerCount -StandardOutput $staticMarker -ExpectedComponent "static-contracts") -Expected 1 -Message "The static child must emit one identity-bearing terminal marker."
+Assert-Equal -Actual (Get-VerificationCompletionMarkerCount -StandardOutput $nestedMarker -ExpectedComponent "nested-process") -Expected 1 -Message "The nested child must accept its exact Windows terminal marker."
+Assert-Equal -Actual (Get-VerificationCompletionMarkerCount -StandardOutput ($nestedMarker + $nestedMarker) -ExpectedComponent "nested-process") -Expected 2 -Message "Duplicate nested terminal markers must remain visible to fail-closed disposition."
+Assert-Equal -Actual (Get-VerificationCompletionMarkerCount -StandardOutput $solutionMarker -ExpectedComponent "nested-process") -Expected 0 -Message "A solution terminal marker cannot certify the nested component."
+Assert-Equal -Actual (Get-VerificationCompletionMarkerCount -StandardOutput $nestedMarker -ExpectedComponent "solution") -Expected 0 -Message "A nested terminal marker cannot certify the solution component."
+Assert-Equal -Actual (Get-VerificationCompletionMarkerCount -StandardOutput "VERIFY_COMPLETE schema_version=1 component=nested-process status=passed`r`n" -ExpectedComponent "nested-process") -Expected 0 -Message "A partial nested terminal marker must fail closed."
 Assert-Equal -Actual (Get-VerificationCompletionMarkerCount -StandardOutput $solutionMarker -ExpectedComponent "static-contracts") -Expected 0 -Message "A component marker for the wrong child must fail closed."
 
 $deadlineTicks = [TimeSpan]::FromSeconds(600).Ticks
