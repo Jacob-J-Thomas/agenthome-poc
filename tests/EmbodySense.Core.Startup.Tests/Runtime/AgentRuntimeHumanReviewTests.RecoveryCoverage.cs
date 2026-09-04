@@ -14,9 +14,11 @@ using EmbodySense.Core.Startup.Tests.Loops.Execution.Sleep;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Tests.Support;
 
+using static EmbodySense.Core.Startup.Tests.Runtime.AgentRuntimeFactoryTests;
+
 namespace EmbodySense.Core.Startup.Tests.Runtime;
 
-public sealed partial class AgentRuntimeFactoryTests
+public sealed partial class AgentRuntimeHumanReviewTests
 {
     [Fact]
     public async Task Human_review_readiness_accepts_a_valid_persisted_graph_snapshot()

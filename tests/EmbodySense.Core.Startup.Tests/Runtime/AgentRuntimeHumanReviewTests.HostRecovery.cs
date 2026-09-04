@@ -17,9 +17,11 @@ using EmbodySense.Tests.Support;
 using CommonCustomLoopRunStatus = EmbodySense.Core.Common.Loops.Models.Custom.Execution.CustomLoopRunStatus;
 using CommonGovernedLoopFrontierStatus = EmbodySense.Core.Common.Loops.Execution.Models.GovernedLoopFrontierStatus;
 
+using static EmbodySense.Core.Startup.Tests.Runtime.AgentRuntimeFactoryTests;
+
 namespace EmbodySense.Core.Startup.Tests.Runtime;
 
-public sealed partial class AgentRuntimeFactoryTests
+public sealed partial class AgentRuntimeHumanReviewTests
 {
     [Fact]
     public async Task Start_background_publishes_human_review_recovery_before_the_first_coordinator_review_attempt()
