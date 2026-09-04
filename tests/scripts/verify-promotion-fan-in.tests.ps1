@@ -57,8 +57,10 @@ function Write-TestCoverageReport {
 }
 
 function Write-TestTrx {
-    param([string]$Path, [string]$TestId, [string]$ExecutionId)
-    $xml = "<?xml version=`"1.0`" encoding=`"utf-8`"?><TestRun xmlns=`"http://microsoft.com/schemas/VisualStudio/TeamTest/2010`"><Results><UnitTestResult testId=`"$TestId`" executionId=`"$ExecutionId`" outcome=`"Passed`" /></Results></TestRun>"
+    param([string]$Path, [string[]]$TestId, [string[]]$ExecutionId)
+    if ($TestId.Count -ne $ExecutionId.Count) { throw "TRX fixture test and execution identities must match." }
+    $results = @(for ($index = 0; $index -lt $TestId.Count; $index++) { "<UnitTestResult testId=`"$($TestId[$index])`" executionId=`"$($ExecutionId[$index])`" outcome=`"Passed`" />" })
+    $xml = "<?xml version=`"1.0`" encoding=`"utf-8`"?><TestRun xmlns=`"http://microsoft.com/schemas/VisualStudio/TeamTest/2010`"><Results>$($results -join '')</Results></TestRun>"
     [IO.File]::WriteAllText($Path, $xml, [Text.UTF8Encoding]::new($false))
 }
 
@@ -95,7 +97,7 @@ function Update-TestCoverageAuth {
 }
 
 function New-TestComponent {
-    param([string]$Root, [ValidateSet("solution", "nested-process", "static-contracts")] [string]$Component)
+    param([string]$Root, [ValidateSet("solution", "nested-process", "static-contracts")] [string]$Component, [int]$NestedTestCount = 5)
 
     if (Test-Path -LiteralPath $Root) { Remove-Item -LiteralPath $Root -Recurse -Force }
     $resultsRoot = Join-Path $Root "VerificationResults"
@@ -117,28 +119,29 @@ function New-TestComponent {
     else {
         $laneEntries = @(Get-FanInSourceOwnedLaneDefinitions -Component $(if ($Component -ceq "nested-process") { "NestedProcess" } else { "Solution" }) | ForEach-Object { [ordered]@{ name = $_.name; projectName = $_.projectName; filter = $_.filter } })
         $tests = @($laneEntries | ForEach-Object -Begin { $index = if ($Component -ceq "nested-process") { 10 } else { 1 } } -Process {
-            $testId = ([Guid]::Parse("00000000-0000-0000-0000-$($index.ToString('000000000000'))")).ToString("D")
-            $executionId = ([Guid]::Parse("10000000-0000-0000-0000-$($index.ToString('000000000000'))")).ToString("D")
+            $testCount = if ($Component -ceq "nested-process") { $NestedTestCount } else { 1 }
+            $testIds = @(for ($offset = 0; $offset -lt $testCount; $offset++) { "00000000-0000-0000-0000-$(($index + $offset).ToString('000000000000'))" })
+            $executionIds = @(for ($offset = 0; $offset -lt $testCount; $offset++) { "10000000-0000-0000-0000-$(($index + $offset).ToString('000000000000'))" })
             $laneRoot = Join-Path $resultsRoot ("StandardTests/" + $_.name)
             New-Item -ItemType Directory -Path $laneRoot -Force | Out-Null
             $trxPath = Join-Path $laneRoot ($_.name + ".trx")
             $coveragePath = Join-Path $laneRoot "coverage.cobertura.xml"
-            Write-TestTrx -Path $trxPath -TestId $testId -ExecutionId $executionId
+            Write-TestTrx -Path $trxPath -TestId $testIds -ExecutionId $executionIds
             Write-TestCoverageReport -Path $coveragePath
-            $current = [pscustomobject]@{ Lane = $_; TestId = $testId; ExecutionId = $executionId; TrxPath = $trxPath; CoveragePath = $coveragePath }
+            $current = [pscustomobject]@{ Lane = $_; TestIds = $testIds; ExecutionIds = $executionIds; TrxPath = $trxPath; CoveragePath = $coveragePath }
             $index++
             $current
         })
         Write-TestJson -Path (Join-Path $resultsRoot "required-test-lanes.json") -Value ([ordered]@{ schemaVersion = 1; lanes = @($laneEntries) })
-        $expectedTests = @($tests | ForEach-Object { [ordered]@{ id = $_.TestId; lane = $_.Lane.name; xunitTestCaseUniqueId = "fixture-$($_.TestId)" } })
+        $expectedTests = @($tests | ForEach-Object { $test = $_; foreach ($testId in $test.TestIds) { [ordered]@{ id = $testId; lane = $test.Lane.name; xunitTestCaseUniqueId = "fixture-$testId" } } })
         $expectedCount = $expectedTests.Count
         Write-TestJson -Path (Join-Path $resultsRoot "required-test-partition.json") -Value ([ordered]@{ schemaVersion = 1; canonicalInventoryCount = if ($Component -ceq "nested-process") { 1 } else { 9 }; laneDefinitionCount = if ($Component -ceq "nested-process") { 1 } else { 9 }; canonicalTestCount = $expectedCount; laneTestCount = $expectedCount; emptyLanes = @(); missing = @(); unexpected = @(); overlap = @(); duplicateCanonical = @(); duplicateExecutionIds = @() })
         Write-TestJson -Path (Join-Path $resultsRoot "required-execution-tests.json") -Value ([ordered]@{ schemaVersion = 1; totalTests = $expectedCount; tests = @($expectedTests) })
         Write-TestJson -Path (Join-Path $resultsRoot "required-test-report.json") -Value ([ordered]@{ schemaVersion = 1; expectedCount = $expectedCount; executedCount = $expectedCount; uniqueExecutedCount = $expectedCount; missing = @(); unexpected = @(); crossReportOverlap = @(); duplicateExecutionId = @(); nonPassing = @() })
         $reportEntries = @($tests | ForEach-Object { $file = Get-Item -LiteralPath $_.CoveragePath; [ordered]@{ kind = "lane"; laneName = $_.Lane.name; laneResultsRoot = [IO.Path]::GetDirectoryName($_.CoveragePath); trxPath = $_.TrxPath; deploymentRoot = "Deployment"; path = $_.CoveragePath; length = $file.Length; sha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant() } })
-        Write-TestJson -Path (Join-Path $resultsRoot "coverage-manifest.json") -Value ([ordered]@{ schemaVersion = 1; resultsRoot = $resultsRoot; minimumWriteTimeUtc = "2026-01-01T00:00:00.0000000Z"; laneReportCount = $expectedCount; childReportCount = 0; aliasReportCount = 0; reports = @($reportEntries); aliases = @() })
+        Write-TestJson -Path (Join-Path $resultsRoot "coverage-manifest.json") -Value ([ordered]@{ schemaVersion = 1; resultsRoot = $resultsRoot; minimumWriteTimeUtc = "2026-01-01T00:00:00.0000000Z"; laneReportCount = $tests.Count; childReportCount = 0; aliasReportCount = 0; reports = @($reportEntries); aliases = @() })
         Write-TestJson -Path (Join-Path $resultsRoot "coverage-summary.json") -Value ([ordered]@{ schemaVersion = 1; threshold = 0.9; reports = @($reportEntries | ForEach-Object { [ordered]@{ path = $_.path } }); packages = @(Get-TestPackages | ForEach-Object { [ordered]@{ package = $_; lineRate = 1 } }); failures = @() })
-        $laneCount = $expectedCount
+        $laneCount = $tests.Count
         $inventoryComplete = $true
         $coverageComplete = $true
     }
@@ -227,6 +230,12 @@ try {
     Move-Item -LiteralPath $nestedCoverage.FullName -Destination $remappedCoveragePath
     Update-TestComponentAuth -Root $nestedRoot
     Assert-Throws -Message "remapped artifact manifest entry" -ExpectedMessage "not represented exactly once in the component artifact manifest" -Action { Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot }
+    New-TestComponent -Root $nestedRoot -Component "nested-process"
+
+    foreach ($nestedCount in @(4, 6)) {
+        New-TestComponent -Root $nestedRoot -Component "nested-process" -NestedTestCount $nestedCount
+        Assert-Throws -Message "nested fixture count $nestedCount" -ExpectedMessage "Nested-process partition reconciliation is incomplete or non-clean" -Action { Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot }
+    }
     New-TestComponent -Root $nestedRoot -Component "nested-process"
 
     Assert-Throws -Message "failed nested child" -Action { Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot -NestedResult "failure" }
