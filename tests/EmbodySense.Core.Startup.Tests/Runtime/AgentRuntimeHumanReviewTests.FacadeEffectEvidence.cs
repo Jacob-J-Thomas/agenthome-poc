@@ -25,9 +25,11 @@ using CommonHumanReviewPurpose = EmbodySense.Core.Common.HumanReview.Models.Huma
 using CommonHumanReviewTiming = EmbodySense.Core.Common.HumanReview.Models.HumanReviewTiming;
 using StartupEffectCertainty = EmbodySense.Core.Startup.HumanReview.Models.HumanReviewEffectCertainty;
 
+using static EmbodySense.Core.Startup.Tests.Runtime.AgentRuntimeFactoryTests;
+
 namespace EmbodySense.Core.Startup.Tests.Runtime;
 
-public sealed partial class AgentRuntimeFactoryTests
+public sealed partial class AgentRuntimeHumanReviewTests
 {
     [Fact]
     public async Task Public_human_review_facade_projects_each_canonical_effect_certainty_posture()

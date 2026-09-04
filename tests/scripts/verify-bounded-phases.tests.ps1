@@ -44,6 +44,20 @@ $startupNestedProcessTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Star
 $startupFactoryTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Startup.Tests\Runtime\AgentRuntimeFactoryTests.cs"
 $startupFactoryEffectReconciliationTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Startup.Tests\Runtime\AgentRuntimeReconciliationFactoryTests.cs"
 $startupFactoryEffectReconciliationCoverageTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Startup.Tests\Runtime\AgentRuntimeReconciliationFactoryTests.Coverage.cs"
+$startupFactoryHumanReviewTestPaths = @(
+    "AgentRuntimeHumanReviewTests.cs",
+    "AgentRuntimeHumanReviewTests.Authority.cs",
+    "AgentRuntimeHumanReviewTests.AuthorityEdges.cs",
+    "AgentRuntimeHumanReviewTests.FacadeCoverage.cs",
+    "AgentRuntimeHumanReviewTests.FacadeDeletionEquivalence.cs",
+    "AgentRuntimeHumanReviewTests.FacadeEffectEvidence.cs",
+    "AgentRuntimeHumanReviewTests.FacadePublicCoverage.cs",
+    "AgentRuntimeHumanReviewTests.HostRecovery.cs",
+    "AgentRuntimeHumanReviewTests.HostRecoveryCoverage.cs",
+    "AgentRuntimeHumanReviewTests.PublicRecoveryEquivalence.cs",
+    "AgentRuntimeHumanReviewTests.Readiness.cs",
+    "AgentRuntimeHumanReviewTests.RecoveryCoverage.cs"
+) | ForEach-Object { Join-Path $repoRoot "tests\EmbodySense.Core.Startup.Tests\Runtime\$_" }
 $powerShellExecutable = (Get-Process -Id $PID).Path
 $functionalChildTimeoutSeconds = 30
 $assertionCount = 0
@@ -201,6 +215,7 @@ $startupNestedProcessTest = Get-Content -LiteralPath $startupNestedProcessTestPa
 $startupFactoryTest = Get-Content -LiteralPath $startupFactoryTestPath -Raw
 $startupFactoryEffectReconciliationTest = Get-Content -LiteralPath $startupFactoryEffectReconciliationTestPath -Raw
 $startupFactoryEffectReconciliationCoverageTest = Get-Content -LiteralPath $startupFactoryEffectReconciliationCoverageTestPath -Raw
+$startupFactoryHumanReviewTests = @($startupFactoryHumanReviewTestPaths | ForEach-Object { Get-Content -LiteralPath $_ -Raw })
 
 Assert-Contains -Actual $verifyScript -Expected '[ValidateSet("PullRequest", "Stress")]' -Message "The verifier must expose only the two owned tiers."
 Assert-Contains -Actual $verifyScript -Expected '[string]$Configuration = "Release"' -Message "The canonical verifier must default to Release."
@@ -315,6 +330,11 @@ Assert-Contains -Actual $startupFactoryTest -Expected 'public sealed partial cla
 foreach ($effectReconciliationFactoryTest in @($startupFactoryEffectReconciliationTest, $startupFactoryEffectReconciliationCoverageTest)) {
     Assert-Contains -Actual $effectReconciliationFactoryTest -Expected 'public sealed partial class AgentRuntimeReconciliationFactoryTests' -Message "Effect Reconciliation factory tests must remain a second independently schedulable xUnit class."
     Assert-True -Condition ($effectReconciliationFactoryTest.IndexOf('public sealed partial class AgentRuntimeFactoryTests', [StringComparison]::Ordinal) -lt 0) -Message "Effect Reconciliation factory tests must not rejoin the serialized general factory class."
+}
+Assert-True -Condition ($startupFactoryHumanReviewTests.Count -eq 12) -Message "Human Review and recovery factory tests must remain in the complete independently schedulable file group."
+foreach ($humanReviewFactoryTest in $startupFactoryHumanReviewTests) {
+    Assert-Contains -Actual $humanReviewFactoryTest -Expected 'public sealed partial class AgentRuntimeHumanReviewTests' -Message "Human Review and recovery factory tests must remain a third independently schedulable xUnit class."
+    Assert-True -Condition ($humanReviewFactoryTest.IndexOf('public sealed partial class AgentRuntimeFactoryTests', [StringComparison]::Ordinal) -lt 0) -Message "Human Review and recovery factory tests must not rejoin the serialized general factory class."
 }
 Assert-Contains -Actual $persistenceEnvironmentCollection -Expected '[CollectionDefinition(Name, DisableParallelization = true)]' -Message "Persistence process-environment mutation must remain exclusive of all assembly tests."
 Assert-Contains -Actual $persistenceCapabilityCatalogTest -Expected '[Collection(Verification.ProcessEnvironmentCollection.Name)]' -Message "Capability-catalog trust-root mutation must retain process-environment serialization."

@@ -24,9 +24,11 @@ using EmbodySense.Tests.Support;
 using CommonCustomLoopRunStatus = EmbodySense.Core.Common.Loops.Models.Custom.Execution.CustomLoopRunStatus;
 using CommonGovernedLoopFrontierStatus = EmbodySense.Core.Common.Loops.Execution.Models.GovernedLoopFrontierStatus;
 
+using static EmbodySense.Core.Startup.Tests.Runtime.AgentRuntimeFactoryTests;
+
 namespace EmbodySense.Core.Startup.Tests.Runtime;
 
-public sealed partial class AgentRuntimeFactoryTests
+public sealed partial class AgentRuntimeHumanReviewTests
 {
     [Fact]
     public async Task Background_recovery_advances_across_public_bounded_pages_without_duplicate_release_after_restart()

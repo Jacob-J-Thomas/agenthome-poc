@@ -8,9 +8,11 @@ using EmbodySense.Core.Startup.Tests.Loops.Execution.Sleep;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Tests.Support;
 
+using static EmbodySense.Core.Startup.Tests.Runtime.AgentRuntimeFactoryTests;
+
 namespace EmbodySense.Core.Startup.Tests.Runtime;
 
-public sealed partial class AgentRuntimeFactoryTests
+public sealed partial class AgentRuntimeHumanReviewTests
 {
     [Fact]
     public async Task Public_human_review_facade_propagates_cancellation_at_each_read_and_decision_boundary()

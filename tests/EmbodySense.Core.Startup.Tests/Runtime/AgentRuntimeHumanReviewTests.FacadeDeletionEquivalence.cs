@@ -12,9 +12,11 @@ using EmbodySense.Core.Startup.Tests.HumanReview;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Tests.Support;
 
+using static EmbodySense.Core.Startup.Tests.Runtime.AgentRuntimeFactoryTests;
+
 namespace EmbodySense.Core.Startup.Tests.Runtime;
 
-public sealed partial class AgentRuntimeFactoryTests
+public sealed partial class AgentRuntimeHumanReviewTests
 {
     [Fact]
     public async Task Public_human_review_facade_preserves_opaque_cursor_and_skips_tombstones()

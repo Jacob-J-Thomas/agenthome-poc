@@ -6,9 +6,11 @@ using EmbodySense.Core.Startup.Tests.Loops.Execution.Sleep;
 using EmbodySense.Core.Startup.Workspace;
 using EmbodySense.Tests.Support;
 
+using static EmbodySense.Core.Startup.Tests.Runtime.AgentRuntimeFactoryTests;
+
 namespace EmbodySense.Core.Startup.Tests.Runtime;
 
-public sealed partial class AgentRuntimeFactoryTests
+public sealed partial class AgentRuntimeHumanReviewTests
 {
     [Fact]
     public async Task Background_start_projects_human_review_recovery_unavailable_when_discovery_index_cannot_be_read()

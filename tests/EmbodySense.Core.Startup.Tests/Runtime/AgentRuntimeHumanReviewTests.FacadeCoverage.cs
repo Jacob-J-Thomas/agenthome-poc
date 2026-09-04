@@ -28,9 +28,11 @@ using CommonApprovalScopeKind = EmbodySense.Core.Common.HumanReview.Models.Human
 using CommonHumanReviewRequest = EmbodySense.Core.Common.HumanReview.Models.HumanReviewRequest;
 using CommonHumanReviewPurpose = EmbodySense.Core.Common.HumanReview.Models.HumanReviewPurpose;
 
+using static EmbodySense.Core.Startup.Tests.Runtime.AgentRuntimeFactoryTests;
+
 namespace EmbodySense.Core.Startup.Tests.Runtime;
 
-public sealed partial class AgentRuntimeFactoryTests
+public sealed partial class AgentRuntimeHumanReviewTests
 {
     [Fact]
     public async Task Public_human_review_facade_projects_persisted_request_detail_evidence_and_posture()

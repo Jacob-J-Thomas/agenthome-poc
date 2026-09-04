@@ -4392,7 +4392,7 @@ public sealed partial class AgentRuntimeFactoryTests
         Assert.DoesNotContain(PrivateValue, committed.Output, StringComparison.Ordinal);
     }
 
-    private static async Task<AgentRuntimeGovernedLoopBackgroundStatus> WaitForBackgroundReadinessAsync(
+    internal static async Task<AgentRuntimeGovernedLoopBackgroundStatus> WaitForBackgroundReadinessAsync(
         AgentRuntime runtime,
         AgentRuntimeGovernedLoopBackgroundReadiness readiness)
     {
@@ -4601,7 +4601,7 @@ public sealed partial class AgentRuntimeFactoryTests
         return new HumanInputRequestLifecycleStoreMutation(generation, evidence, null, resultHead, null);
     }
 
-    private static async Task<AgentRuntime> CreateRuntimeAsync(
+    internal static async Task<AgentRuntime> CreateRuntimeAsync(
         TestWorkspace workspace,
         AgentRuntimeSurface? runtimeSurface = null,
         string? codexPath = null,
@@ -4642,7 +4642,7 @@ public sealed partial class AgentRuntimeFactoryTests
             runtimeSurface ?? AgentRuntimeSurface.Cli);
     }
 
-    private static GovernedLoopCoordinatorAcquisitionRequest ExpiredPeerAcquisition()
+    internal static GovernedLoopCoordinatorAcquisitionRequest ExpiredPeerAcquisition()
     {
         var observedAtUtc = DateTimeOffset.UtcNow.AddMinutes(-2).ToUniversalTime();
         var ownership = GovernedLoopSleepContractHash.Apply(new GovernedLoopCoordinatorOwnership(
@@ -4739,7 +4739,7 @@ public sealed partial class AgentRuntimeFactoryTests
         }
     }
 
-    private static GovernedLoopGraphCandidate BrowserGraphCandidate(ContextualRoleRevisionPin role)
+    internal static GovernedLoopGraphCandidate BrowserGraphCandidate(ContextualRoleRevisionPin role)
     {
         const string ConversationTurnCapability = "org.embodysense/conversation-turn";
         var trigger = new GovernedLoopNodeDefinition(
