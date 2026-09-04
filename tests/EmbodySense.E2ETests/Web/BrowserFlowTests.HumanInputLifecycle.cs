@@ -45,6 +45,8 @@ public sealed partial class BrowserFlowTests
             await InitializeWorkspaceAsyncIfNeededAsync(browser);
             await OpenHumanInputAsync(browser);
             await SelectHumanInputAsync(browser, RemindId);
+            var remindLabel = await browser.EvaluateStringAsync("document.querySelector('[data-testid=\"human-input-remind\"]')?.textContent.trim()");
+            Assert.Equal("Record reminder opportunity", remindLabel);
 
             await using (var competingTab = await browser.OpenTabAsync(app.BaseUrl))
             {

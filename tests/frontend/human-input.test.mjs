@@ -36,6 +36,8 @@ test("Human Input is a distinct shell surface with bounded semantic controls", (
     "human-input-supersede",
   ])
     assert.match(indexSource, new RegExp(`data-testid="${testId}"`));
+  assert.match(indexSource, /Record reminder opportunity/);
+  assert.doesNotMatch(indexSource, /Remind respondent/);
   assert.match(indexSource, /human-input\.css/);
   assert.match(indexSource, /human-input\.js/);
 });

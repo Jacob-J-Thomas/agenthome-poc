@@ -666,7 +666,9 @@ public sealed class HumanInputRuntimeFacade
 
         if (terms.Status == AgentRuntimeHumanInputAuthorityStatus.Unavailable)
         {
-            return null;
+            return string.IsNullOrWhiteSpace(input.CandidateKey)
+                ? null
+                : Conflict(input.OperationId);
         }
 
         if (terms.Status != AgentRuntimeHumanInputAuthorityStatus.Ready

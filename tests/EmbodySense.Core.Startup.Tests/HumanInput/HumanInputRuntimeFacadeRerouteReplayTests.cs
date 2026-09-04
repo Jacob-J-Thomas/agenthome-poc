@@ -73,6 +73,7 @@ public sealed class HumanInputRuntimeFacadeRerouteReplayTests
         var conflict = await runtime.HumanInput.SubmitLifecycleAsync(input with { CandidateKey = "candidate-other" });
         provider.LifecycleTermsStatus = AgentRuntimeHumanInputAuthorityStatus.Unavailable;
         var replayedAfterRegistryLoss = await runtime.HumanInput.SubmitLifecycleAsync(input with { CandidateKey = null });
+        var unknownCandidateAfterRegistryLoss = await runtime.HumanInput.SubmitLifecycleAsync(input with { CandidateKey = "candidate-unrelated" });
         provider.LifecycleTermsStatus = AgentRuntimeHumanInputAuthorityStatus.Ready;
         provider.ThrowDuringLifecycleTerms = true;
         var providerFailure = await runtime.HumanInput.SubmitLifecycleAsync(input with { CandidateKey = "candidate-provider-failure" });
@@ -126,6 +127,7 @@ public sealed class HumanInputRuntimeFacadeRerouteReplayTests
         Assert.Equal(HumanInputOperationStatus.Replayed, replayed.Status);
         Assert.Equal(HumanInputOperationStatus.Conflict, conflict.Status);
         Assert.Equal(HumanInputOperationStatus.Replayed, replayedAfterRegistryLoss.Status);
+        Assert.Equal(HumanInputOperationStatus.Conflict, unknownCandidateAfterRegistryLoss.Status);
         Assert.Equal(HumanInputOperationStatus.Unavailable, providerFailure.Status);
         Assert.Equal(HumanInputOperationStatus.Unavailable, nullTerms.Status);
         Assert.Equal(HumanInputOperationStatus.Denied, denied.Status);
@@ -133,7 +135,7 @@ public sealed class HumanInputRuntimeFacadeRerouteReplayTests
         Assert.Equal(HumanInputOperationStatus.Unavailable, missingGrant.Status);
         Assert.Equal(HumanInputOperationStatus.Unavailable, unknownTerms.Status);
         Assert.Equal(selectedCandidate.RequestVersionId, posture.Request!.CurrentRequest.RequestVersionId);
-        Assert.Equal(11, provider.LifecycleTermsResolutions);
+        Assert.Equal(12, provider.LifecycleTermsResolutions);
         Assert.Equal(2, provider.LifecycleAuthorizations);
     }
 }
