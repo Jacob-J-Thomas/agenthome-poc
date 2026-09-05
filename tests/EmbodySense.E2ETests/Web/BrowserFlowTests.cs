@@ -108,6 +108,20 @@ public sealed partial class BrowserFlowTests
     }
 
     [Fact]
+    public void Effect_reconciliation_catalog_recovery_requires_the_exact_visible_settled_refresh_state()
+    {
+        const string Unavailable = EffectReconciliationCatalogRecoveryContract.TemporaryUnavailableMessage;
+
+        Assert.True(EffectReconciliationCatalogRecoveryContract.CanRefresh(true, "false", Unavailable, true, false));
+        Assert.False(EffectReconciliationCatalogRecoveryContract.CanRefresh(false, "false", Unavailable, true, false));
+        Assert.False(EffectReconciliationCatalogRecoveryContract.CanRefresh(true, "true", Unavailable, true, false));
+        Assert.False(EffectReconciliationCatalogRecoveryContract.CanRefresh(true, "false", "Effect Reconciliation canonical state", true, false));
+        Assert.False(EffectReconciliationCatalogRecoveryContract.CanRefresh(true, "false", Unavailable + " Retry again.", true, false));
+        Assert.False(EffectReconciliationCatalogRecoveryContract.CanRefresh(true, "false", Unavailable, false, false));
+        Assert.False(EffectReconciliationCatalogRecoveryContract.CanRefresh(true, "false", Unavailable, true, true));
+    }
+
+    [Fact]
     public void Restart_diagnostic_classifier_accepts_connection_reset_only_for_expected_target_traffic()
     {
         const string TargetAuthority = "127.0.0.1:5001";
