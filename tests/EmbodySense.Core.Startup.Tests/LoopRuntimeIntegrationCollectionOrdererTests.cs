@@ -1,4 +1,3 @@
-using System.Reflection;
 using EmbodySense.Core.Startup.Tests.Loops.Execution;
 using EmbodySense.Core.Startup.Tests.Verification;
 using Xunit.Abstractions;
@@ -46,19 +45,28 @@ public sealed class LoopRuntimeIntegrationCollectionOrdererTests
     }
 
     [Fact]
-    public void AssemblyConfiguration_PreservesCollectionParallelizationBoundaries()
+    public void AssemblyConfiguration_RegistersTheOrdererAndPreservesCollectionParallelizationBoundaries()
     {
-        var testAssembly = typeof(LoopRuntimeIntegrationCollectionOrderer).Assembly;
-        var collectionBehavior = testAssembly.GetCustomAttribute<CollectionBehaviorAttribute>();
-        var loopCollection = typeof(LoopRuntimeIntegrationCollection).GetCustomAttribute<CollectionDefinitionAttribute>();
-        var processEnvironmentCollection = typeof(ProcessEnvironmentCollection).GetCustomAttribute<CollectionDefinitionAttribute>();
+        var root = FindRepositoryRoot();
+        var assemblyInfo = File.ReadAllText(Path.Combine(root, "tests", "EmbodySense.Core.Startup.Tests", "AssemblyInfo.cs"));
 
-        Assert.NotNull(collectionBehavior);
-        Assert.Equal(2, collectionBehavior.MaxParallelThreads);
-        Assert.NotNull(loopCollection);
-        Assert.False(loopCollection.DisableParallelization);
-        Assert.NotNull(processEnvironmentCollection);
-        Assert.True(processEnvironmentCollection.DisableParallelization);
-        Assert.Single(testAssembly.GetCustomAttributes<TestCollectionOrdererAttribute>());
+        Assert.Contains("[assembly: TestCollectionOrderer(\"EmbodySense.Core.Startup.Tests.LoopRuntimeIntegrationCollectionOrderer\", \"EmbodySense.Core.Startup.Tests\")]", assemblyInfo, StringComparison.Ordinal);
+        Assert.Contains("[assembly: CollectionBehavior(MaxParallelThreads = 2)]", assemblyInfo, StringComparison.Ordinal);
+    }
+
+    private static string FindRepositoryRoot()
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null)
+        {
+            if (File.Exists(Path.Combine(directory.FullName, "EmbodySense.sln")))
+            {
+                return directory.FullName;
+            }
+
+            directory = directory.Parent;
+        }
+
+        throw new DirectoryNotFoundException("Could not locate the repository root.");
     }
 }

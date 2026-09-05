@@ -24,11 +24,13 @@ internal sealed class TestCollectionStub : LongLivedMarshalByRefObject, ITestCol
 
     public Guid UniqueID { get; }
 
-    public void Deserialize(IXunitSerializationInfo _)
+    public void Deserialize(IXunitSerializationInfo serializationInfo)
     {
+        ArgumentNullException.ThrowIfNull(serializationInfo);
     }
 
-    public void Serialize(IXunitSerializationInfo _)
+    public void Serialize(IXunitSerializationInfo serializationInfo)
     {
+        ArgumentNullException.ThrowIfNull(serializationInfo);
     }
 }
