@@ -1205,7 +1205,17 @@ public sealed class AgentRuntimeFactory
                 registration => executableCommandActions.Contains(registration.Template.ContentHash),
                 graphCapabilityCatalog,
                 governedCommandActionNativeHost,
-                isHumanInputExecutable: () => humanInputReadiness.IsExecutable,
+                isHumanInputExecutable: async cancellationToken =>
+                {
+                    if (!humanInputReadiness.IsExecutable)
+                    {
+                        return false;
+                    }
+
+                    var status = await governedBackgroundRuntimeHost.ReadStatusAsync(cancellationToken).ConfigureAwait(false);
+                    return status.Readiness == AgentRuntimeGovernedLoopBackgroundReadiness.Ready
+                        && status.Ownership == AgentRuntimeGovernedLoopBackgroundOwnership.Local;
+                },
                 isHumanReviewExecutable: () => _humanReviewDecisionAuthorizationProvider is not null
                     && humanReviewRecoveryReadiness.IsExecutable
                     && IsHealthyTrustedUtcClock(operationalClock));
@@ -1338,7 +1348,7 @@ public sealed class AgentRuntimeFactory
                     TimeSpan.FromMinutes(2)),
                 humanReviewRecoveryReadiness);
             var coordinatorRepairDependencies = new GovernedLoopCoordinatorRepairDependencyProbe(humanReviewBackgroundWork, operationalClock);
-            governedBackgroundRuntimeHost.BindBackgroundWork(humanReviewBackgroundWork, coordinatorRepairDependencies, workspaceId);
+            governedBackgroundRuntimeHost.BindBackgroundWork(humanReviewBackgroundWork, coordinatorRepairDependencies, workspaceId, humanInputReadiness.Invalidate);
             var coordinatorRepair = new GovernedLoopCoordinatorRepairFacade(
                 new GovernedLoopCoordinatorRepairService(
                     workspaceId,
