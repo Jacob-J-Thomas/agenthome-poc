@@ -1,5 +1,4 @@
 using EmbodySense.Core.Startup.Tests.Loops.Execution;
-using EmbodySense.Core.Startup.Tests.Verification;
 using Xunit.Abstractions;
 using Xunit.Sdk;
 
@@ -48,10 +47,19 @@ public sealed class LoopRuntimeIntegrationCollectionOrdererTests
     public void AssemblyConfiguration_RegistersTheOrdererAndPreservesCollectionParallelizationBoundaries()
     {
         var root = FindRepositoryRoot();
-        var assemblyInfo = File.ReadAllText(Path.Combine(root, "tests", "EmbodySense.Core.Startup.Tests", "AssemblyInfo.cs"));
+        var startupTestsRoot = Path.Combine(root, "tests", "EmbodySense.Core.Startup.Tests");
+        var assemblyInfo = File.ReadAllText(Path.Combine(startupTestsRoot, "AssemblyInfo.cs"));
+        var loopCollection = File.ReadAllText(Path.Combine(
+            startupTestsRoot,
+            "Loops",
+            "Execution",
+            "LoopRuntimeIntegrationCollection.cs"));
+        var processEnvironmentCollection = File.ReadAllText(Path.Combine(startupTestsRoot, "Verification", "ProcessEnvironmentCollection.cs"));
 
         Assert.Contains("[assembly: TestCollectionOrderer(\"EmbodySense.Core.Startup.Tests.LoopRuntimeIntegrationCollectionOrderer\", \"EmbodySense.Core.Startup.Tests\")]", assemblyInfo, StringComparison.Ordinal);
         Assert.Contains("[assembly: CollectionBehavior(MaxParallelThreads = 2)]", assemblyInfo, StringComparison.Ordinal);
+        Assert.Contains("[CollectionDefinition(Name)]", loopCollection, StringComparison.Ordinal);
+        Assert.Contains("[CollectionDefinition(Name, DisableParallelization = true)]", processEnvironmentCollection, StringComparison.Ordinal);
     }
 
     private static string FindRepositoryRoot()
