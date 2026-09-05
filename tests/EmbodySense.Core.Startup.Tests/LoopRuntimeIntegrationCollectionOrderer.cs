@@ -1,10 +1,11 @@
 using Xunit;
 using Xunit.Abstractions;
+using Xunit.Sdk;
 
 namespace EmbodySense.Core.Startup.Tests;
 
 /// <summary>
-/// Submits the Loop runtime integration collection before the assembly's remaining test collections.
+/// Applies xUnit's default collection order before submitting the Loop runtime integration collection first.
 /// </summary>
 /// <remarks>
 /// xUnit uses this sequence as a submission hint. Parallel collection admission remains governed by the runner's
@@ -17,7 +18,7 @@ public sealed class LoopRuntimeIntegrationCollectionOrderer : ITestCollectionOrd
     {
         ArgumentNullException.ThrowIfNull(testCollections);
 
-        var collections = testCollections.ToList();
+        var collections = new DefaultTestCollectionOrderer().OrderTestCollections(testCollections).ToList();
         var loopCollectionIndex = collections.FindIndex(collection => collection.DisplayName == Loops.Execution.LoopRuntimeIntegrationCollection.Name);
 
         if (loopCollectionIndex <= 0)
