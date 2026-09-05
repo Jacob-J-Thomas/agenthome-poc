@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Text.Json;
 using EmbodySense.Core.Application.Governance.Tools;
@@ -80,6 +81,56 @@ public sealed partial class BrowserFlowTests
     }
 
     [InstalledBrowserFact]
+    public async Task Effect_reconciliation_browser_recovers_one_visible_collection_failure_through_one_refresh()
+    {
+        using var workspace = new TestWorkspace();
+        var trustRoot = Path.Combine(workspace.ServerStatePath, "capability-catalog");
+        var codexExecutable = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(trustRoot).InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        await SeedHumanReviewReadinessAuthorityAsync(paths, trustRoot);
+        var seeded = await HumanReviewBrowserFixture.SeedEffectReconciliationAsync(paths, "browser-effect-reconciliation-catalog-recovery", "recover the canonical catalog", trustRoot);
+        var effectArtifactsBefore = EffectAttemptArtifactInventory(paths);
+        var markerTimestampBefore = File.GetLastWriteTimeUtc(seeded.MarkerPath);
+        var environment = new Dictionary<string, string>
+        {
+            [FileCapabilityCatalogTrustProvider.DefaultRootEnvironmentVariable] = trustRoot,
+        };
+        ExternalWebApplicationProcess? app = await ExternalWebApplicationProcess.StartAsync(workspace.RootPath, GetFreePort(), codexExecutable, "gpt-test", environment);
+        HeadlessBrowserSession? browser = await HeadlessBrowserSession.StartAsync(app.BaseUrl);
+
+        try
+        {
+            await InitializeWorkspaceAsyncIfNeededAsync(browser);
+            var collectionPath = "/api/effect-reconciliation?maximumCount=50";
+            await browser.EvaluateAsync(EffectReconciliationBrowserTransportScripts.InstallOneCollectionUnavailable(collectionPath));
+            await OpenEffectReconciliationAsync(browser, seeded.CaseId, recoverOneUnavailableCollection: true);
+            var recovery = await browser.EvaluateStringAsync("JSON.stringify(window.__effectReconciliationCollectionRecovery)");
+            Assert.True(await browser.EvaluateBooleanAsync("window.__effectReconciliationCollectionRecovery?.exactGets === 2 && window.__effectReconciliationCollectionRecovery?.injectedFailures === 1 && window.__effectReconciliationCollectionRecovery?.forwardedGets === 1 && window.__effectReconciliationCollectionRecovery?.refreshClicks === 1 && window.__effectReconciliationCollectionRecovery?.statuses?.length === 2 && window.__effectReconciliationCollectionRecovery.statuses[0] === 503 && window.__effectReconciliationCollectionRecovery.statuses[1] === 200"), $"The exact one-Refresh collection recovery proof was not retained: {recovery}");
+            await AssertEffectReconciliationAttemptUnchangedAsync(paths, seeded, effectArtifactsBefore, markerTimestampBefore);
+            app.AssertHealthy();
+            var resolutionPath = $"/api/effect-reconciliation/{Uri.EscapeDataString(seeded.CaseId)}/resolution";
+            await browser.AssertHealthyAsync([(resolutionPath, 404)], []);
+        }
+        catch
+        {
+            await WriteFailureDiagnosticsAsync(nameof(Effect_reconciliation_browser_recovers_one_visible_collection_failure_through_one_refresh), browser, app);
+            throw;
+        }
+        finally
+        {
+            if (browser is not null)
+            {
+                await browser.DisposeAsync();
+            }
+            if (app is not null)
+            {
+                await app.DisposeAsync();
+            }
+        }
+    }
+
+    [InstalledBrowserFact]
     public async Task Effect_reconciliation_browser_converges_response_loss_replay_conflict_reload_and_restart_without_redispatch()
     {
         using var workspace = new TestWorkspace();
@@ -144,7 +195,7 @@ public sealed partial class BrowserFlowTests
             await browser.WaitForExpressionAsync("document.getElementById('clientStatus').textContent === 'Web primary'");
             await browser.ReloadAsync();
             await InitializeWorkspaceAsyncIfNeededAsync(browser);
-            await OpenEffectReconciliationAsync(browser, seeded.CaseId);
+            await OpenEffectReconciliationAsync(browser, seeded.CaseId, recoverOneUnavailableCollection: true);
             await browser.EndExpectedServerRestartAsync();
             Assert.Contains("Accepted", await browser.EvaluateStringAsync("document.getElementById('effectReconciliationPosture').textContent"), StringComparison.OrdinalIgnoreCase);
             await AssertEffectReconciliationAttemptUnchangedAsync(paths, seeded, effectArtifactsBefore, markerTimestampBefore);
@@ -237,13 +288,35 @@ public sealed partial class BrowserFlowTests
         }
     }
 
-    private static async Task OpenEffectReconciliationAsync(HeadlessBrowserSession browser, string caseId)
+    private static Task OpenEffectReconciliationAsync(HeadlessBrowserSession browser, string caseId)
+        => OpenEffectReconciliationAsync(browser, caseId, recoverOneUnavailableCollection: false);
+
+    private static async Task OpenEffectReconciliationAsync(HeadlessBrowserSession browser, string caseId, bool recoverOneUnavailableCollection)
     {
         await browser.WaitForExpressionAsync("!document.getElementById('effectReconciliationNav').disabled");
+        var listConvergenceStartedAt = recoverOneUnavailableCollection ? Stopwatch.GetTimestamp() : (long?)null;
         await ClickAsync(browser, "#effectReconciliationNav");
+
         var caseIdJson = JsonSerializer.Serialize(caseId);
-        await browser.WaitForExpressionAsync("!document.getElementById('effectReconciliationView').hidden && document.getElementById('effectReconciliationList').getAttribute('aria-busy') === 'false' && document.getElementById('effectReconciliationListStatus').textContent.includes('canonical state')");
-        await browser.WaitForExpressionAsync($"document.getElementById('effectReconciliationList').textContent.includes({caseIdJson})");
+        const string CanonicalList = "!document.getElementById('effectReconciliationView').hidden && document.getElementById('effectReconciliationList').getAttribute('aria-busy') === 'false' && document.getElementById('effectReconciliationListStatus').textContent.includes('canonical state')";
+        if (recoverOneUnavailableCollection)
+        {
+            var unavailableJson = JsonSerializer.Serialize(EffectReconciliationCatalogRecoveryContract.TemporaryUnavailableMessage);
+            await WaitForEffectReconciliationExpressionAsync(browser, $"(() => {{ const view = document.getElementById('effectReconciliationView'); const list = document.getElementById('effectReconciliationList'); const status = document.getElementById('effectReconciliationListStatus'); return !view.hidden && list.getAttribute('aria-busy') === 'false' && (status.textContent.includes('canonical state') || status.textContent === {unavailableJson}); }})()", listConvergenceStartedAt);
+            if (await browser.EvaluateBooleanAsync($"document.getElementById('effectReconciliationListStatus').textContent === {unavailableJson}"))
+            {
+                using var state = JsonDocument.Parse(await browser.EvaluateStringAsync("JSON.stringify({ viewVisible: !document.getElementById('effectReconciliationView').hidden, listBusy: document.getElementById('effectReconciliationList').getAttribute('aria-busy'), listStatus: document.getElementById('effectReconciliationListStatus').textContent, refreshVisible: !document.getElementById('effectReconciliationRefreshButton').hidden && document.getElementById('effectReconciliationRefreshButton').getClientRects().length > 0, refreshDisabled: document.getElementById('effectReconciliationRefreshButton').disabled })"));
+                var root = state.RootElement;
+                var canRefresh = EffectReconciliationCatalogRecoveryContract.CanRefresh(root.GetProperty("viewVisible").GetBoolean(), root.GetProperty("listBusy").GetString(), root.GetProperty("listStatus").GetString(), root.GetProperty("refreshVisible").GetBoolean(), root.GetProperty("refreshDisabled").GetBoolean());
+                Assert.True(canRefresh, $"The opt-in Effect Reconciliation recovery did not settle on the exact visible temporary-unavailable Refresh state: {state.RootElement.GetRawText()}");
+                EnsureEffectReconciliationListBudgetRemaining(listConvergenceStartedAt ?? throw new InvalidOperationException("The opt-in Effect Reconciliation recovery budget was not started."));
+                await ClickAsync(browser, "#effectReconciliationRefreshButton");
+            }
+        }
+
+        await WaitForEffectReconciliationExpressionAsync(browser, CanonicalList, listConvergenceStartedAt);
+        await WaitForEffectReconciliationExpressionAsync(browser, $"document.getElementById('effectReconciliationList').textContent.includes({caseIdJson})", listConvergenceStartedAt);
+
         for (var attempt = 1; attempt <= 3; attempt++)
         {
             await browser.EvaluateWithUserGestureAsync($"(() => {{ const item = [...document.querySelectorAll('#effectReconciliationList button')].find((candidate) => candidate.textContent.includes({caseIdJson})); if (!item) throw new Error('Effect Reconciliation case was not rendered.'); item.click(); }})()");
@@ -258,6 +331,27 @@ public sealed partial class BrowserFlowTests
         }
 
         Assert.Fail($"Effect Reconciliation case {caseId} did not become readable after three visible refresh attempts.");
+    }
+
+    private static Task WaitForEffectReconciliationExpressionAsync(HeadlessBrowserSession browser, string expression, long? listConvergenceStartedAt)
+    {
+        if (listConvergenceStartedAt is null)
+        {
+            return browser.WaitForExpressionAsync(expression);
+        }
+
+        var remaining = TimeSpan.FromSeconds(30) - Stopwatch.GetElapsedTime(listConvergenceStartedAt.Value);
+        return remaining > TimeSpan.Zero
+            ? browser.WaitForExpressionAsync(expression, remaining)
+            : Task.FromException(new TimeoutException("Effect Reconciliation did not recover within the original 30-second list-convergence budget."));
+    }
+
+    private static void EnsureEffectReconciliationListBudgetRemaining(long listConvergenceStartedAt)
+    {
+        if (Stopwatch.GetElapsedTime(listConvergenceStartedAt) >= TimeSpan.FromSeconds(30))
+        {
+            throw new TimeoutException("Effect Reconciliation did not reach the visible Refresh gesture within the original 30-second list-convergence budget.");
+        }
     }
 
     private static Task WaitForEffectReconciliationListPostureAsync(HeadlessBrowserSession browser, string caseId, string posture)
