@@ -36,6 +36,10 @@ $coverageManifestPath = Join-Path $verificationResultsPath "coverage-manifest.js
 $coverageSummaryPath = Join-Path $verificationResultsPath "coverage-summary.json"
 $powerShellExecutable = (Get-Process -Id $PID).Path
 $runningOnWindows = [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)
+$startupRemainderDiagnosticsEnvironmentVariable = "EMBODYSENSE_SAMPLE3_STARTUP_DIAGNOSTIC"
+$startupRemainderDiagnosticLaneName = "EmbodySense.Core.Startup.Tests-remainder"
+$startupRemainderDiagnosticsValue = [Environment]::GetEnvironmentVariable($startupRemainderDiagnosticsEnvironmentVariable)
+$startupRemainderDiagnosticsEnabled = $startupRemainderDiagnosticsValue -ceq "1"
 $maximumArtifactStressTest = "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopRunArtifactMaximumShapeTests.Adversarial_maximum_transition_reservations_and_canonical_order_checks_remain_bounded"
 $deletionCapacityStressTest = "EmbodySense.Core.Persistence.Tests.Loops.CustomLoopTraceRetentionStoreTests.Rejected_operation_capacity_preserves_reserved_tombstone_deletions_and_remains_visible"
 # https://github.com/Jacob-J-Thomas/agenthome-poc/issues/610 owns the measured per-lane budgets. A required gate cannot select an unprofiled
@@ -81,6 +85,14 @@ if (($VerificationComponent -eq "StaticContracts" -or $VerificationComponent -eq
 
 if ($VerificationTier -eq "Stress" -and ($RunBrowserE2E -or $BrowserE2EOnly)) {
     throw "The Stress verification tier cannot be combined with browser E2E switches."
+}
+
+if (-not [string]::IsNullOrWhiteSpace($startupRemainderDiagnosticsValue) -and -not $startupRemainderDiagnosticsEnabled) {
+    throw "$startupRemainderDiagnosticsEnvironmentVariable accepts only the explicit value '1'."
+}
+
+if ($startupRemainderDiagnosticsEnabled -and (-not $runningOnWindows -or $VerificationComponent -ne "Solution" -or $VerificationTier -ne "PullRequest" -or $Configuration -ne "Release" -or $SkipCoverage)) {
+    throw "$startupRemainderDiagnosticsEnvironmentVariable is diagnostic-only and requires the Windows Release PullRequest Solution component with coverage enabled."
 }
 
 function Invoke-CheckedNativePhase {
@@ -257,15 +269,26 @@ function Add-TestExecutionPhase {
     param([object]$Isolation, [object]$Lane)
 
     $trxName = "$($Lane.Name).trx"
+    $isStartupRemainderDiagnosticLane = $startupRemainderDiagnosticsEnabled -and $Lane.Name -ceq $startupRemainderDiagnosticLaneName
+    $consoleVerbosity = if ($isStartupRemainderDiagnosticLane) { "detailed" } else { "minimal" }
     $arguments = @(
         "vstest", $Lane.AssemblyPath,
         "--Settings:$(if ($SkipCoverage) { $stressRunSettingsPath } else { $Isolation.RunSettingsPath })",
         "--TestAdapterPath:$($Isolation.CollectorDirectory)",
         "--TestCaseFilter:$($Lane.Filter)",
         "--Logger:trx;LogFileName=$trxName",
-        "--Logger:console;verbosity=minimal",
+        "--Logger:console;verbosity=$consoleVerbosity",
         "--ResultsDirectory:$($Lane.ResultsPath)"
     )
+    if ($isStartupRemainderDiagnosticLane) {
+        $diagnosticsPath = Join-Path $Lane.ResultsPath "Diagnostics"
+        $hangDumpsPath = Join-Path $diagnosticsPath "HangDumps"
+        New-Item -ItemType Directory -Path $hangDumpsPath -Force | Out-Null
+        $Lane.Environment.VSTEST_DUMP_PATH = $hangDumpsPath
+        $arguments += "--Diag:$(Join-Path $diagnosticsPath 'vstest.diag.log');tracelevel=verbose"
+        $arguments += "/Blame:CollectHangDump;TestTimeout=90s;HangDumpType=mini"
+        Write-Output "VERIFY_STARTUP_REMAINDER_DIAGNOSTICS enabled=true authority=diagnostic-only inactivity_timeout_seconds=90 diagnostics_path=$diagnosticsPath hang_dumps_path=$hangDumpsPath dump_best_effort=true"
+    }
     if (-not $SkipCoverage) {
         $arguments += "--Collect:XPlat Code Coverage"
     }

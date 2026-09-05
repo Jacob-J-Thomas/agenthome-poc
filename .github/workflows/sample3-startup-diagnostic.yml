@@ -1,0 +1,64 @@
+name: Sample 3 Startup Diagnostic Only
+
+on:
+  push:
+    branches:
+      - codex/diagnose-sample3-startup-20260905
+
+permissions:
+  contents: read
+
+jobs:
+  startup-diagnostic:
+    name: diagnostic-only-startup-progress
+    if: github.repository == 'Jacob-J-Thomas/agenthome-poc' && github.actor == 'Jacob-J-Thomas'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out immutable diagnostic source
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Record diagnostic identity and environment
+        shell: pwsh
+        env:
+          DIAGNOSTIC_SHA: ${{ github.sha }}
+        run: |
+          if ((git rev-parse HEAD) -cne $env:DIAGNOSTIC_SHA) { throw 'Diagnostic checkout does not match triggering SHA.' }
+          git merge-base --is-ancestor ebf457d4afaad9b93293101e846baefcffc5dae1 HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Diagnostic source must descend from the exact failed sample head.' }
+          Write-Output "DIAGNOSTIC_ONLY head=$env:DIAGNOSTIC_SHA failed_sample_head=ebf457d4afaad9b93293101e846baefcffc5dae1 run=$env:GITHUB_RUN_ID attempt=$env:GITHUB_RUN_ATTEMPT"
+          Write-Output 'One instrumented Solution execution. No p95 sample, PR qualification, aggregate promotion, or acceptance receipt publication.'
+          Write-Output "OS=$([Environment]::OSVersion) processors=$([Environment]::ProcessorCount) image=$env:ImageOS image_version=$env:ImageVersion"
+
+      - name: Install repository-selected .NET SDK
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+
+      - name: Observe exact Startup lane under retained scheduler and upper bounds
+        shell: pwsh
+        env:
+          EMBODYSENSE_SAMPLE3_STARTUP_DIAGNOSTIC: "1"
+        run: ./scripts/verify-with-watchdog.ps1 -Configuration Release -DeadlineSeconds 1500 -VerificationComponent Solution
+
+      - name: Retain diagnostic evidence without publishing a promotion artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: sample3-startup-diagnostic-only-${{ github.run_attempt }}
+          path: |
+            tests/VerificationResults/Logs/**
+            tests/VerificationResults/watchdog.log
+            tests/VerificationResults/*-evidence.json
+            tests/VerificationResults/required-*.json
+            tests/VerificationResults/**/Diagnostics/**
+            tests/VerificationResults/**/Sequence*.xml
+            tests/VerificationResults/**/*.trx
+            tests/**/TestResults/**/Diagnostics/**
+            tests/**/TestResults/**/Sequence*.xml
+          if-no-files-found: error
+          retention-days: 14
