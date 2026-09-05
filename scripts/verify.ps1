@@ -257,13 +257,15 @@ function Add-TestExecutionPhase {
     param([object]$Isolation, [object]$Lane)
 
     $trxName = "$($Lane.Name).trx"
+    # #773: retain completed-case evidence when the bounded Startup child exits before it can finalize its TRX.
+    $consoleVerbosity = if ($Lane.Name -ceq "EmbodySense.Core.Startup.Tests-remainder") { "detailed" } else { "minimal" }
     $arguments = @(
         "vstest", $Lane.AssemblyPath,
         "--Settings:$(if ($SkipCoverage) { $stressRunSettingsPath } else { $Isolation.RunSettingsPath })",
         "--TestAdapterPath:$($Isolation.CollectorDirectory)",
         "--TestCaseFilter:$($Lane.Filter)",
         "--Logger:trx;LogFileName=$trxName",
-        "--Logger:console;verbosity=minimal",
+        "--Logger:console;verbosity=$consoleVerbosity",
         "--ResultsDirectory:$($Lane.ResultsPath)"
     )
     if (-not $SkipCoverage) {
