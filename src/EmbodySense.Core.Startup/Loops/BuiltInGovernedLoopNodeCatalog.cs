@@ -43,7 +43,7 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
     private readonly ICapabilityCatalogStore? _capabilityCatalog;
     private readonly ICommandActionNativeHost? _commandActionNativeHost;
     private readonly Func<CancellationToken, Task<bool>>? _isHumanInputExecutable;
-    private readonly Func<bool>? _isHumanReviewExecutable;
+    private readonly Func<CancellationToken, Task<bool>>? _isHumanReviewExecutable;
 
     internal BuiltInGovernedLoopNodeCatalog() : this(Array.Empty<CommandActionRegistration>())
     {
@@ -55,7 +55,7 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
         ICapabilityCatalogStore? capabilityCatalog = null,
         ICommandActionNativeHost? commandActionNativeHost = null,
         Func<CancellationToken, Task<bool>>? isHumanInputExecutable = null,
-        Func<bool>? isHumanReviewExecutable = null)
+        Func<CancellationToken, Task<bool>>? isHumanReviewExecutable = null)
     {
         ArgumentNullException.ThrowIfNull(commandActions);
         var registrations = commandActions.Take(257).ToArray();
@@ -69,7 +69,7 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
         _commandActionNativeHost = commandActionNativeHost;
         _isHumanInputExecutable = isHumanInputExecutable;
         _isHumanReviewExecutable = isHumanReviewExecutable;
-        _initialSnapshot = CreateSnapshot(registrations, isCommandActionExecutable, isHumanReviewExecutable: IsHumanReviewExecutable);
+        _initialSnapshot = CreateSnapshot(registrations, isCommandActionExecutable);
     }
 
     /// <inheritdoc />
@@ -84,11 +84,12 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
             }
 
             var humanInputExecutable = await IsHumanInputExecutableAsync(cancellationToken).ConfigureAwait(false);
+            var humanReviewExecutable = await IsHumanReviewExecutableAsync(cancellationToken).ConfigureAwait(false);
             return CreateSnapshot(
                 _commandActions,
                 _isCommandActionExecutable,
                 isHumanInputExecutable: () => humanInputExecutable,
-                isHumanReviewExecutable: IsHumanReviewExecutable);
+                isHumanReviewExecutable: () => humanReviewExecutable);
         }
 
         try
@@ -148,12 +149,13 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
             }
 
             var humanInputExecutable = await IsHumanInputExecutableAsync(cancellationToken).ConfigureAwait(false);
+            var humanReviewExecutable = await IsHumanReviewExecutableAsync(cancellationToken).ConfigureAwait(false);
             return CreateSnapshot(
                 _commandActions,
                 registration => executableCommandActions.Contains(registration.Template.ContentHash),
                 capabilityId => HasCurrentExecutableCapabilities(capabilityId, current),
                 () => humanInputExecutable,
-                IsHumanReviewExecutable);
+                () => humanReviewExecutable);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -257,8 +259,22 @@ internal sealed class BuiltInGovernedLoopNodeCatalog : IGovernedLoopNodeCatalog
         }
     }
 
-    private bool IsHumanReviewExecutable()
-        => IsHumanReviewExecutable(_isHumanReviewExecutable);
+    private async Task<bool> IsHumanReviewExecutableAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            return _isHumanReviewExecutable is not null
+                && await _isHumanReviewExecutable(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return false;
+        }
+    }
 
     private static bool IsHumanReviewExecutable(Func<bool>? probe)
     {

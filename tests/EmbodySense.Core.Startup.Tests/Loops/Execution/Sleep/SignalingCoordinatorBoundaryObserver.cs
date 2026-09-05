@@ -9,10 +9,16 @@ internal sealed class SignalingCoordinatorBoundaryObserver : IGovernedLoopLocalC
     private readonly TaskCompletionSource _foreignSessionMutationSuppressed = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource _humanInputWorkAttempted = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource _ownershipLost = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private TaskCompletionSource? _heartbeatRelease;
+    private TaskCompletionSource? _heldHeartbeatDue;
     private TaskCompletionSource? _heldHumanInputWorkAttempted;
     private TaskCompletionSource? _humanInputWorkRelease;
 
     internal Task HeartbeatDue => _heartbeatDue.Task;
+
+    internal Task HeldHeartbeatDue
+        => Volatile.Read(ref _heldHeartbeatDue)?.Task
+            ?? throw new InvalidOperationException("Heartbeat is not held.");
 
     internal Task ForeignSessionMutationSuppressed => _foreignSessionMutationSuppressed.Task;
 
@@ -28,6 +34,15 @@ internal sealed class SignalingCoordinatorBoundaryObserver : IGovernedLoopLocalC
 
     internal bool ThrowOnForeignSessionMutationSuppressed { get; set; }
 
+    internal void HoldHeartbeat()
+    {
+        Volatile.Write(ref _heldHeartbeatDue, new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously));
+        Volatile.Write(ref _heartbeatRelease, new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously));
+    }
+
+    internal void ReleaseHeartbeat()
+        => Interlocked.Exchange(ref _heartbeatRelease, null)?.TrySetResult();
+
     internal void HoldHumanInputWork()
     {
         Volatile.Write(ref _heldHumanInputWorkAttempted, new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously));
@@ -37,7 +52,16 @@ internal sealed class SignalingCoordinatorBoundaryObserver : IGovernedLoopLocalC
     internal void ReleaseHumanInputWork()
         => Interlocked.Exchange(ref _humanInputWorkRelease, null)?.TrySetResult();
 
-    public void OnHeartbeatDue() => _heartbeatDue.TrySetResult();
+    public void OnHeartbeatDue()
+    {
+        _heartbeatDue.TrySetResult();
+        var release = Volatile.Read(ref _heartbeatRelease);
+        if (release is not null)
+        {
+            Volatile.Read(ref _heldHeartbeatDue)?.TrySetResult();
+            release.Task.GetAwaiter().GetResult();
+        }
+    }
 
     public void OnWorkFamilyAttempted(GovernedLoopLocalWorkFamily family)
     {
