@@ -76,6 +76,7 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     private int _activeAuthoringOperations;
     private bool _discardRuntimeWhenCustomOperationsComplete;
     private bool _governedLoopBackgroundRuntimePinned;
+    private bool _hostShutdownSignaled;
     private bool _loopRecoveryCompleted;
     private bool _loopRecoveryRetainedStoppedRuntime;
     private bool _preserveCurrentConversationOnNextRuntimeCreation = true;
@@ -237,7 +238,13 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
 
     internal void SetGovernedLoopBackgroundPosture(WebGovernedLoopBackgroundPosture posture)
     {
-        Volatile.Write(ref _governedLoopBackgroundPosture, (int)posture);
+        lock (_backgroundStopGate)
+        {
+            var projectedPosture = posture == WebGovernedLoopBackgroundPosture.Ready && _hostShutdownSignaled
+                ? WebGovernedLoopBackgroundPosture.Draining
+                : posture;
+            Volatile.Write(ref _governedLoopBackgroundPosture, (int)projectedPosture);
+        }
     }
 
     /// <summary>
@@ -249,13 +256,23 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
     /// </remarks>
     internal void SignalHostShutdown()
     {
-        try
+        lock (_backgroundStopGate)
         {
-            _hostLifetimeCancellation.Cancel();
-        }
-        catch (ObjectDisposedException) when (Volatile.Read(ref _disposed) != 0)
-        {
-            // A concurrent or prior host disposal already delivered the shutdown signal.
+            if (_hostShutdownSignaled)
+            {
+                return;
+            }
+
+            _hostShutdownSignaled = true;
+            Volatile.Write(ref _governedLoopBackgroundPosture, (int)WebGovernedLoopBackgroundPosture.Draining);
+            try
+            {
+                _hostLifetimeCancellation.Cancel();
+            }
+            catch (ObjectDisposedException) when (Volatile.Read(ref _disposed) != 0)
+            {
+                // A concurrent or prior host disposal already delivered the shutdown signal.
+            }
         }
     }
 

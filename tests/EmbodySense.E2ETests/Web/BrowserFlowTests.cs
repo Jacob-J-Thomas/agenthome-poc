@@ -69,33 +69,56 @@ public sealed partial class BrowserFlowTests
     [Fact]
     public void Browser_health_optional_failure_filter_is_empty_safe_allowlisted_and_exact()
     {
+        const string CollectionRoute = "/api/effect-reconciliation?maximumCount=50";
         const string CaseRoute = "/api/effect-reconciliation/case?";
         const string ResolutionRoute = "/api/effect-reconciliation/case/resolution";
         var mandatory = (UrlFragment: ResolutionRoute, StatusCode: 404);
         var optional = new[]
         {
+            (UrlFragment: CollectionRoute, StatusCode: 503),
             (UrlFragment: CaseRoute, StatusCode: 503),
             (UrlFragment: ResolutionRoute, StatusCode: 503),
         };
         var diagnostics = new List<string>
         {
             "HTTP error response: {\"url\":\"https://example.test/api/effect-reconciliation/case/resolution\",\"status\":404}",
-            "HTTP error response: {\"url\":\"https://example.test/api/effect-reconciliation/case?\",\"status\":503}",
+            $"HTTP error response: {{\"url\":\"https://example.test{CollectionRoute}\",\"status\":503}}",
+            $"browser error for {CollectionRoute} with status of 503 (Service Unavailable)",
+            "HTTP error response: {\"url\":\"https://example.test/api/effect-reconciliation/case?expectedGeneration=1\",\"status\":503}",
             "browser error for /api/effect-reconciliation/case/resolution with status of 503 (Service Unavailable)",
         };
 
         Assert.Equal(0, HeadlessBrowserSession.RemoveMatchingExpectedHttpFailureDiagnostics(diagnostics, []));
         Assert.Equal(1, HeadlessBrowserSession.RemoveMatchingExpectedHttpFailureDiagnostics(diagnostics, [mandatory]));
-        Assert.Equal(2, HeadlessBrowserSession.RemoveMatchingExpectedHttpFailureDiagnostics(diagnostics, optional));
+        Assert.Equal(4, HeadlessBrowserSession.RemoveMatchingExpectedHttpFailureDiagnostics(diagnostics, optional));
         Assert.Empty(diagnostics);
 
         var unexpected = new List<string>
         {
-            "HTTP error response: {\"url\":\"https://example.test/api/effect-reconciliation/other?\",\"status\":503}",
-            "HTTP error response: {\"url\":\"https://example.test/api/effect-reconciliation/case?\",\"status\":500}",
+            "HTTP error response: {\"url\":\"https://example.test/api/effect-reconciliation?maximumCount=49\",\"status\":503}",
+            "HTTP error response: {\"url\":\"https://example.test/api/effect-reconciliation?maximumCount=500\",\"status\":503}",
+            "HTTP error response: {\"url\":\"https://example.test/api/effect-reconciliation?maximumCount=50&cursor=next\",\"status\":503}",
+            "HTTP error response: {\"url\":\"https://example.test/api/effect-reconciliation?maximumCount=50#page\",\"status\":503}",
+            "browser error for /api/effect-reconciliation?maximumCount=50/details with status of 503 (Service Unavailable)",
+            "HTTP error response: {\"url\":\"https://example.test/api/effect-reconciliation/probes?maximumCount=50\",\"status\":503}",
+            "HTTP error response: {\"url\":\"https://example.test/api/effect-reconciliation?maximumCount=50\",\"status\":500}",
         };
         Assert.Equal(0, HeadlessBrowserSession.RemoveMatchingExpectedHttpFailureDiagnostics(unexpected, optional));
-        Assert.Equal(2, unexpected.Count);
+        Assert.Equal(7, unexpected.Count);
+    }
+
+    [Fact]
+    public void Effect_reconciliation_catalog_recovery_requires_the_exact_visible_settled_refresh_state()
+    {
+        const string Unavailable = EffectReconciliationCatalogRecoveryContract.TemporaryUnavailableMessage;
+
+        Assert.True(EffectReconciliationCatalogRecoveryContract.CanRefresh(true, "false", Unavailable, true, false));
+        Assert.False(EffectReconciliationCatalogRecoveryContract.CanRefresh(false, "false", Unavailable, true, false));
+        Assert.False(EffectReconciliationCatalogRecoveryContract.CanRefresh(true, "true", Unavailable, true, false));
+        Assert.False(EffectReconciliationCatalogRecoveryContract.CanRefresh(true, "false", "Effect Reconciliation canonical state", true, false));
+        Assert.False(EffectReconciliationCatalogRecoveryContract.CanRefresh(true, "false", Unavailable + " Retry again.", true, false));
+        Assert.False(EffectReconciliationCatalogRecoveryContract.CanRefresh(true, "false", Unavailable, false, false));
+        Assert.False(EffectReconciliationCatalogRecoveryContract.CanRefresh(true, "false", Unavailable, true, true));
     }
 
     [Fact]
@@ -2513,9 +2536,40 @@ public sealed partial class BrowserFlowTests
         }
 
         internal static bool MatchesExpectedHttpFailure(string diagnostic, (string UrlFragment, int StatusCode) expected)
-            => diagnostic.Contains(expected.UrlFragment, StringComparison.Ordinal)
+            => ContainsExpectedUrlFragment(diagnostic, expected.UrlFragment)
                 && (diagnostic.Contains($"\"status\":{expected.StatusCode}", StringComparison.Ordinal)
                     || diagnostic.Contains($"status of {expected.StatusCode} (", StringComparison.Ordinal));
+
+        private static bool ContainsExpectedUrlFragment(string diagnostic, string urlFragment)
+        {
+            var queryIndex = urlFragment.IndexOf('?', StringComparison.Ordinal);
+            if (queryIndex < 0 || queryIndex == urlFragment.Length - 1)
+            {
+                return diagnostic.Contains(urlFragment, StringComparison.Ordinal);
+            }
+
+            var searchIndex = 0;
+            while (searchIndex <= diagnostic.Length - urlFragment.Length)
+            {
+                var matchIndex = diagnostic.IndexOf(urlFragment, searchIndex, StringComparison.Ordinal);
+                if (matchIndex < 0)
+                {
+                    return false;
+                }
+
+                var boundaryIndex = matchIndex + urlFragment.Length;
+                if (boundaryIndex == diagnostic.Length || IsRequestTargetBoundary(diagnostic[boundaryIndex]))
+                {
+                    return true;
+                }
+
+                searchIndex = matchIndex + 1;
+            }
+
+            return false;
+        }
+
+        private static bool IsRequestTargetBoundary(char value) => value == '\"' || char.IsWhiteSpace(value);
 
         public async Task WriteDiagnosticsAsync(string directory)
         {

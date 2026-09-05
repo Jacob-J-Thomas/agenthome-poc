@@ -43,6 +43,7 @@ internal sealed class GovernedLoopBackgroundRuntimeHost : ICustomLoopExecutionAc
     private AgentRuntimeGovernedLoopBackgroundStopResult? _completedStopResult;
     private AgentRuntimeGovernedLoopBackgroundStartResult? _lastActivation;
     private string? _ownerId;
+    private Action? _invalidateBackgroundWorkReadiness;
     private int _activationRequested;
     private int _backgroundWorkBound;
     private int _disposed;
@@ -66,7 +67,8 @@ internal sealed class GovernedLoopBackgroundRuntimeHost : ICustomLoopExecutionAc
     internal void BindBackgroundWork(
         IGovernedLoopLocalWorkRunner work,
         IGovernedLoopCoordinatorRepairDependencyPort? repairDependencies = null,
-        string? workspaceId = null)
+        string? workspaceId = null,
+        Action? invalidateBackgroundWorkReadiness = null)
     {
         ArgumentNullException.ThrowIfNull(work);
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
@@ -76,6 +78,7 @@ internal sealed class GovernedLoopBackgroundRuntimeHost : ICustomLoopExecutionAc
         }
 
         _humanReviewRecoveryRunner = work as IHumanReviewRecoveryRunner;
+        _invalidateBackgroundWorkReadiness = invalidateBackgroundWorkReadiness;
         var instanceId = Guid.NewGuid().ToString("N");
         _ownerId = "agent-runtime-" + instanceId;
         _coordinator = new GovernedLoopLocalCoordinator(
@@ -301,6 +304,11 @@ internal sealed class GovernedLoopBackgroundRuntimeHost : ICustomLoopExecutionAc
                         "governed_local_background_failed: the prior coordinator session durably terminated fail closed and requires explicit repair before restart."));
                 }
 
+                if (current.Readiness != AgentRuntimeGovernedLoopBackgroundReadiness.Ready
+                    || current.Ownership != AgentRuntimeGovernedLoopBackgroundOwnership.Local)
+                {
+                    InvalidateBackgroundWorkReadiness();
+                }
                 var recoveryFailure = await RecoverAsync(cancellationToken).ConfigureAwait(false);
                 if (recoveryFailure is not null)
                 {
@@ -381,6 +389,17 @@ internal sealed class GovernedLoopBackgroundRuntimeHost : ICustomLoopExecutionAc
         Volatile.Write(ref _lastActivation, result);
         Interlocked.Increment(ref _activationSequence);
         return result;
+    }
+
+    private void InvalidateBackgroundWorkReadiness()
+    {
+        try
+        {
+            _invalidateBackgroundWorkReadiness?.Invoke();
+        }
+        catch
+        {
+        }
     }
 
     private async Task<AgentRuntimeGovernedLoopBackgroundStartResult?> RecoverAsync(

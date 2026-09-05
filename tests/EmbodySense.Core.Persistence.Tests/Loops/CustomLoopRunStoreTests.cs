@@ -1458,51 +1458,34 @@ public sealed class CustomLoopRunStoreTests
 
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        using var store = new CustomLoopRunStore(paths);
+        var timeProvider = new CustomLoopRunCanonicalPublisherTestTimeProvider(_timestamp);
+        using var store = new CustomLoopRunStore(paths, timeProvider);
         var admitted = CreateRun();
         await store.CreateAsync(admitted);
         var artifactPath = Path.Combine(paths.CustomLoopRunsPath, admitted.LoopId, admitted.Id + ".json");
-        var artifactDirectory = Path.GetDirectoryName(artifactPath)!;
-        var stagingPattern = $".{Path.GetFileName(artifactPath)}.*.tmp";
+        var oldSnapshot = await File.ReadAllBytesAsync(artifactPath);
         var running = Advance(admitted, CustomLoopRunStatus.Running);
-        Task<CustomLoopRunStoreResult>? updateTask = null;
+        Task<CustomLoopRunStoreResult> updateTask;
 
-        try
+        using (var externalReader = WindowsFileLock.OpenRestrictiveReader(artifactPath, workspace.RootPath))
         {
-            using (var externalReader = new FileStream(artifactPath, FileMode.Open, FileAccess.Read, FileShare.Read))
-            {
-                var oldSnapshot = new byte[checked((int)externalReader.Length)];
-                await externalReader.ReadExactlyAsync(oldSnapshot);
-                Assert.Equal(CustomLoopRunStatus.Admitted, CustomLoopRunArtifactSerializer.Deserialize(oldSnapshot).Status);
+            updateTask = store.UpdateAsync(running, admitted.LifecycleVersion);
+            var firstTimer = timeProvider.WaitForTimerCountAsync(1);
+            Assert.Same(firstTimer, await Task.WhenAny(firstTimer, updateTask));
+            Assert.Equal(TimeSpan.FromMilliseconds(50), timeProvider.GetRequestedDelay(1));
 
-                updateTask = store.UpdateAsync(running, admitted.LifecycleVersion);
-                var wait = Stopwatch.StartNew();
-                while (!Directory.EnumerateFiles(artifactDirectory, stagingPattern).Any())
-                {
-                    Assert.False(updateTask.IsCompleted, "The atomic update did not reach its staged replacement boundary within the bounded wait.");
-                    Assert.True(wait.Elapsed < TimeSpan.FromSeconds(10), "The atomic update did not reach its staged replacement boundary within the bounded wait.");
-                    await Task.Delay(TimeSpan.FromMilliseconds(15));
-                }
-
-                await Task.Delay(TimeSpan.FromMilliseconds(2_250));
-                Assert.False(updateTask.IsCompleted, "The atomic update did not retain its retry ownership beyond the legacy two-second window.");
-            }
-
-            var result = await updateTask.WaitAsync(TimeSpan.FromSeconds(10));
-            Assert.Equal(CustomLoopRunStoreStatus.Updated, result.Status);
-        }
-        finally
-        {
-            if (updateTask is not null && !updateTask.IsCompleted)
-            {
-                await updateTask.WaitAsync(TimeSpan.FromSeconds(10));
-            }
-            else if (updateTask?.IsFaulted == true)
-            {
-                _ = updateTask.Exception;
-            }
+            timeProvider.Advance(TimeSpan.FromMilliseconds(2_250));
+            var secondTimer = timeProvider.WaitForTimerCountAsync(2);
+            Assert.Same(secondTimer, await Task.WhenAny(secondTimer, updateTask));
+            Assert.False(updateTask.IsCompleted, "The atomic update did not retain its retry ownership beyond the legacy two-second window.");
+            Assert.Equal(TimeSpan.FromMilliseconds(50), timeProvider.GetRequestedDelay(2));
+            Assert.Equal(oldSnapshot, await File.ReadAllBytesAsync(artifactPath));
+            Assert.Equal(CustomLoopRunStatus.Admitted, CustomLoopRunArtifactSerializer.Deserialize(oldSnapshot).Status);
         }
 
+        timeProvider.Advance(TimeSpan.FromMilliseconds(50));
+        var result = await updateTask;
+        Assert.Equal(CustomLoopRunStoreStatus.Updated, result.Status);
         Assert.Equal(CustomLoopRunStatus.Running, (await store.GetAsync(admitted.Id))!.Status);
     }
 
@@ -1517,7 +1500,8 @@ public sealed class CustomLoopRunStoreTests
 
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        using var store = new CustomLoopRunStore(paths);
+        var timeProvider = new CustomLoopRunCanonicalPublisherTestTimeProvider(_timestamp);
+        using var store = new CustomLoopRunStore(paths, timeProvider);
         var admitted = CreateRun();
         await store.CreateAsync(admitted);
         var artifactPath = Path.Combine(paths.CustomLoopRunsPath, admitted.LoopId, admitted.Id + ".json");
@@ -1525,27 +1509,35 @@ public sealed class CustomLoopRunStoreTests
         var stagingPattern = $".{Path.GetFileName(artifactPath)}.*.tmp";
         var oldSnapshot = await File.ReadAllBytesAsync(artifactPath);
         var running = Advance(admitted, CustomLoopRunStatus.Running);
+        Task<CustomLoopRunStoreResult> updateTask;
 
-        using var externalReader = new FileStream(artifactPath, FileMode.Open, FileAccess.Read, FileShare.Read);
-        var updateTask = store.UpdateAsync(running, admitted.LifecycleVersion);
-        var wait = Stopwatch.StartNew();
-        while (!Directory.EnumerateFiles(artifactDirectory, stagingPattern).Any())
+        using (var externalReader = WindowsFileLock.OpenRestrictiveReader(artifactPath, workspace.RootPath))
         {
-            Assert.False(updateTask.IsCompleted, "The atomic update did not reach its staged replacement boundary within the bounded wait.");
-            Assert.True(wait.Elapsed < TimeSpan.FromSeconds(10), "The atomic update did not reach its staged replacement boundary within the bounded wait.");
-            await Task.Delay(TimeSpan.FromMilliseconds(15));
+            updateTask = store.UpdateAsync(running, admitted.LifecycleVersion);
+            var firstTimer = timeProvider.WaitForTimerCountAsync(1);
+            Assert.Same(firstTimer, await Task.WhenAny(firstTimer, updateTask));
+            Assert.Equal(TimeSpan.FromMilliseconds(50), timeProvider.GetRequestedDelay(1));
+
+            timeProvider.Advance(TimeSpan.FromMilliseconds(5_999));
+            var finalTimer = timeProvider.WaitForTimerCountAsync(2);
+            Assert.Same(finalTimer, await Task.WhenAny(finalTimer, updateTask));
+            Assert.False(updateTask.IsCompleted, "The atomic update crossed its semantic deadline before exactly six seconds.");
+            Assert.Equal(TimeSpan.FromMilliseconds(1), timeProvider.GetRequestedDelay(2));
         }
 
-        var replacementWindow = Stopwatch.StartNew();
-        var exception = await Assert.ThrowsAnyAsync<IOException>(async () => await updateTask.WaitAsync(TimeSpan.FromSeconds(9)));
+        timeProvider.Advance(TimeSpan.FromMilliseconds(1));
+        var exception = await Assert.ThrowsAnyAsync<IOException>(async () => await updateTask);
         var diagnostic = Assert.IsType<CustomLoopRunPersistenceDiagnostic>(CustomLoopRunPersistenceDiagnostic.Find(exception));
 
-        Assert.InRange(replacementWindow.Elapsed, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(8));
+        Assert.Equal(2, timeProvider.TimerCount);
         Assert.Equal(CustomLoopRunPersistenceDiagnosticStage.CanonicalReplace, diagnostic.Stage);
         Assert.Equal(CustomLoopRunPersistenceNativeErrorKind.Win32, diagnostic.NativeErrorKind);
         Assert.True(diagnostic.NativeErrorCode is 5 or 32 or 33 or 1175);
+        Assert.DoesNotContain(workspace.RootPath, exception.ToString(), StringComparison.Ordinal);
         Assert.Equal(oldSnapshot, await File.ReadAllBytesAsync(artifactPath));
-        Assert.Equal(CustomLoopRunStatus.Admitted, (await store.GetAsync(admitted.Id))!.Status);
+        Assert.Empty(Directory.EnumerateFiles(artifactDirectory, stagingPattern));
+        using var restarted = new CustomLoopRunStore(paths);
+        Assert.Equal(CustomLoopRunStatus.Admitted, (await restarted.GetAsync(admitted.Id))!.Status);
     }
 
     [Fact]
@@ -1559,7 +1551,8 @@ public sealed class CustomLoopRunStoreTests
 
         using var workspace = new TestWorkspace();
         var paths = new WorkspacePaths(workspace.RootPath);
-        using var store = new CustomLoopRunStore(paths);
+        var timeProvider = new CustomLoopRunCanonicalPublisherTestTimeProvider(_timestamp);
+        using var store = new CustomLoopRunStore(paths, timeProvider);
         var admitted = CreateRun();
         await store.CreateAsync(admitted);
         var artifactPath = Path.Combine(paths.CustomLoopRunsPath, admitted.LoopId, admitted.Id + ".json");
@@ -1568,38 +1561,22 @@ public sealed class CustomLoopRunStoreTests
         var oldSnapshot = await File.ReadAllBytesAsync(artifactPath);
         var running = Advance(admitted, CustomLoopRunStatus.Running);
         using var cancellation = new CancellationTokenSource();
-        Task<CustomLoopRunStoreResult>? updateTask = null;
 
-        try
+        using (var externalReader = WindowsFileLock.OpenRestrictiveReader(artifactPath, workspace.RootPath))
         {
-            using (var externalReader = new FileStream(artifactPath, FileMode.Open, FileAccess.Read, FileShare.Read))
-            {
-                updateTask = store.UpdateAsync(running, admitted.LifecycleVersion, cancellation.Token);
-                var wait = Stopwatch.StartNew();
-                while (!Directory.EnumerateFiles(artifactDirectory, stagingPattern).Any())
-                {
-                    Assert.False(updateTask.IsCompleted, "The atomic update did not reach its staged replacement boundary within the bounded wait.");
-                    Assert.True(wait.Elapsed < TimeSpan.FromSeconds(10), "The atomic update did not reach its staged replacement boundary within the bounded wait.");
-                    await Task.Delay(TimeSpan.FromMilliseconds(15));
-                }
+            var updateTask = store.UpdateAsync(running, admitted.LifecycleVersion, cancellation.Token);
+            var firstTimer = timeProvider.WaitForTimerCountAsync(1);
+            Assert.Same(firstTimer, await Task.WhenAny(firstTimer, updateTask));
+            Assert.Equal(TimeSpan.FromMilliseconds(50), timeProvider.GetRequestedDelay(1));
 
-                cancellation.Cancel();
-                await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await updateTask.WaitAsync(TimeSpan.FromSeconds(2)));
-            }
-        }
-        finally
-        {
-            if (updateTask is not null && !updateTask.IsCompleted)
-            {
-                await updateTask.WaitAsync(TimeSpan.FromSeconds(10));
-            }
-            else if (updateTask?.IsFaulted == true)
-            {
-                _ = updateTask.Exception;
-            }
+            cancellation.Cancel();
+            var exception = await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await updateTask);
+            Assert.Equal(cancellation.Token, exception.CancellationToken);
+            Assert.Equal(1, timeProvider.TimerCount);
         }
 
         Assert.Equal(oldSnapshot, await File.ReadAllBytesAsync(artifactPath));
+        Assert.Empty(Directory.EnumerateFiles(artifactDirectory, stagingPattern));
         Assert.Equal(CustomLoopRunStatus.Admitted, (await store.GetAsync(admitted.Id))!.Status);
     }
 

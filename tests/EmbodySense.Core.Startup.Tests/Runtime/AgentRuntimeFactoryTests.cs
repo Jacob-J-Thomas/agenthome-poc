@@ -641,6 +641,94 @@ public sealed partial class AgentRuntimeFactoryTests
     }
 
     [Fact]
+    public async Task Factory_revokes_human_input_execution_when_a_stopped_canonical_host_restarts_into_repair_required()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var executablePath = await CreateFakeCodexExecutableAsync(workspace);
+        var observer = new SignalingCoordinatorBoundaryObserver();
+        var factory = AgentRuntimeFactory.ForFileCapabilityTrustRoot(
+                new RejectingApprovalPrompt(),
+                workspace.ServerStatePath,
+                CreateCompatibleRuntimeStatus(executablePath))
+            .WithGovernedLoopLocalCoordinatorBoundaryObserver(observer);
+        await using var runtime = await factory.CreateAsync(
+            "test-model",
+            workspace.RootPath,
+            executablePath,
+            "read-only",
+            AgentRuntimeSurface.Cli);
+
+        var started = await runtime.StartGovernedLoopLocalBackgroundWithStatusAsync();
+        await observer.HumanInputWorkAttempted.WaitAsync(TimeSpan.FromSeconds(5));
+        var readyCatalog = await WaitForHumanInputExecutableAsync(runtime);
+        var stopped = await runtime.StopGovernedLoopLocalBackgroundAsync();
+        Directory.CreateDirectory(paths.CustomLoopRunsPath);
+        var indexPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.json");
+        await File.WriteAllTextAsync(indexPath, "{\"schemaVersion\":2,\"revision\":1,\"entries\":[]}");
+        var repair = await runtime.StartGovernedLoopLocalBackgroundWithStatusAsync();
+        var repairCatalog = await runtime.GovernedLoopGraphAuthoring.ReadCatalogAsync();
+
+        Assert.Equal(AgentRuntimeGovernedLoopBackgroundStartStatus.Started, started.Status);
+        Assert.True(HumanInputDescriptor(readyCatalog).IsExecutable);
+        Assert.Equal(AgentRuntimeGovernedLoopBackgroundStopStatus.Stopped, stopped.Status);
+        Assert.Equal(AgentRuntimeGovernedLoopBackgroundStartStatus.RepairRequired, repair.Status);
+        Assert.False(repair.RetryAllowed);
+        Assert.False(HumanInputDescriptor(repairCatalog).IsExecutable);
+    }
+
+    [Fact]
+    public async Task Factory_requires_a_current_human_input_probe_after_a_healthy_canonical_host_restart()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var executablePath = await CreateFakeCodexExecutableAsync(workspace);
+        var observer = new SignalingCoordinatorBoundaryObserver();
+        var factory = AgentRuntimeFactory.ForFileCapabilityTrustRoot(
+                new RejectingApprovalPrompt(),
+                workspace.ServerStatePath,
+                CreateCompatibleRuntimeStatus(executablePath))
+            .WithGovernedLoopLocalCoordinatorBoundaryObserver(observer);
+        await using var runtime = await factory.CreateAsync(
+            "test-model",
+            workspace.RootPath,
+            executablePath,
+            "read-only",
+            AgentRuntimeSurface.Cli);
+
+        var initialStart = await runtime.StartGovernedLoopLocalBackgroundWithStatusAsync();
+        var initialCatalog = await WaitForHumanInputExecutableAsync(runtime);
+        var repeatedStart = await runtime.StartGovernedLoopLocalBackgroundWithStatusAsync();
+        var repeatedCatalog = await runtime.GovernedLoopGraphAuthoring.ReadCatalogAsync();
+        var stopped = await runtime.StopGovernedLoopLocalBackgroundAsync();
+        var stoppedCatalog = await runtime.GovernedLoopGraphAuthoring.ReadCatalogAsync();
+        observer.HoldHumanInputWork();
+        try
+        {
+            var restarted = await runtime.StartGovernedLoopLocalBackgroundWithStatusAsync();
+            await observer.HeldHumanInputWorkAttempted.WaitAsync(TimeSpan.FromSeconds(5));
+            var heldCatalog = await runtime.GovernedLoopGraphAuthoring.ReadCatalogAsync();
+
+            Assert.Equal(AgentRuntimeGovernedLoopBackgroundStartStatus.Started, initialStart.Status);
+            Assert.True(HumanInputDescriptor(initialCatalog).IsExecutable);
+            Assert.Equal(AgentRuntimeGovernedLoopBackgroundStartStatus.AlreadyRunning, repeatedStart.Status);
+            Assert.True(HumanInputDescriptor(repeatedCatalog).IsExecutable);
+            Assert.Equal(AgentRuntimeGovernedLoopBackgroundStopStatus.Stopped, stopped.Status);
+            Assert.False(HumanInputDescriptor(stoppedCatalog).IsExecutable);
+            Assert.Equal(AgentRuntimeGovernedLoopBackgroundStartStatus.Started, restarted.Status);
+            Assert.False(HumanInputDescriptor(heldCatalog).IsExecutable);
+        }
+        finally
+        {
+            observer.ReleaseHumanInputWork();
+        }
+
+        var reprobedCatalog = await WaitForHumanInputExecutableAsync(runtime);
+        Assert.True(HumanInputDescriptor(reprobedCatalog).IsExecutable);
+    }
+
+    [Fact]
     public async Task Factory_keeps_human_input_non_executable_when_the_canonical_policy_source_is_corrupt_and_projects_actionable_repair()
     {
         using var workspace = new TestWorkspace();

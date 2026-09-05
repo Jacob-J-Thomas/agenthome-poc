@@ -1205,10 +1205,22 @@ public sealed class AgentRuntimeFactory
                 registration => executableCommandActions.Contains(registration.Template.ContentHash),
                 graphCapabilityCatalog,
                 governedCommandActionNativeHost,
-                isHumanInputExecutable: () => humanInputReadiness.IsExecutable,
-                isHumanReviewExecutable: () => _humanReviewDecisionAuthorizationProvider is not null
-                    && humanReviewRecoveryReadiness.IsExecutable
-                    && IsHealthyTrustedUtcClock(operationalClock));
+                isHumanInputExecutable: async cancellationToken =>
+                {
+                    var status = await governedBackgroundRuntimeHost.ReadStatusAsync(cancellationToken).ConfigureAwait(false);
+                    return status.Readiness == AgentRuntimeGovernedLoopBackgroundReadiness.Ready
+                        && status.Ownership == AgentRuntimeGovernedLoopBackgroundOwnership.Local
+                        && humanInputReadiness.IsExecutable;
+                },
+                isHumanReviewExecutable: async cancellationToken =>
+                {
+                    var status = await governedBackgroundRuntimeHost.ReadStatusAsync(cancellationToken).ConfigureAwait(false);
+                    return status.Readiness == AgentRuntimeGovernedLoopBackgroundReadiness.Ready
+                        && status.Ownership == AgentRuntimeGovernedLoopBackgroundOwnership.Local
+                        && _humanReviewDecisionAuthorizationProvider is not null
+                        && IsHealthyTrustedUtcClock(operationalClock)
+                        && humanReviewRecoveryReadiness.IsExecutable;
+                });
             var graphAuthority = new GovernedLoopAuthoritySnapshotProvider(governedRoleSource);
             var graphAuthoringFacade = new GovernedLoopGraphAuthoringFacade(
                 workspaceId,
@@ -1338,7 +1350,15 @@ public sealed class AgentRuntimeFactory
                     TimeSpan.FromMinutes(2)),
                 humanReviewRecoveryReadiness);
             var coordinatorRepairDependencies = new GovernedLoopCoordinatorRepairDependencyProbe(humanReviewBackgroundWork, operationalClock);
-            governedBackgroundRuntimeHost.BindBackgroundWork(humanReviewBackgroundWork, coordinatorRepairDependencies, workspaceId);
+            governedBackgroundRuntimeHost.BindBackgroundWork(
+                humanReviewBackgroundWork,
+                coordinatorRepairDependencies,
+                workspaceId,
+                () =>
+                {
+                    humanInputReadiness.Invalidate();
+                    humanReviewRecoveryReadiness.Invalidate();
+                });
             var coordinatorRepair = new GovernedLoopCoordinatorRepairFacade(
                 new GovernedLoopCoordinatorRepairService(
                     workspaceId,

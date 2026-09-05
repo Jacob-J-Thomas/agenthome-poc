@@ -171,7 +171,7 @@ public sealed class CustomLoopRunStore :
         _timeProvider = timeProvider ?? TimeProvider.System;
         _monitorWatcherFactory = monitorWatcherFactory;
         _artifactReadObserver = artifactReadObserver;
-        _canonicalPublisher = new CustomLoopRunCanonicalPublisher(publicationBoundaryObserver);
+        _canonicalPublisher = new CustomLoopRunCanonicalPublisher(_timeProvider, publicationBoundaryObserver);
         _monitorArtifactChangeVersions = new Dictionary<string, long>(PathComparer);
         _monitorArtifactPaths = new HashSet<string>(PathComparer);
     }

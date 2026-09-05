@@ -3,7 +3,8 @@ param(
     [string]$ResultsRoot,
     [string]$ManifestPath,
     [string]$ReportPath,
-    [ValidateRange(1, 2)] [int]$MaximumCoverageWorkers = 2
+    [ValidateRange(1, 2)] [int]$MaximumCoverageWorkers = 2,
+    [switch]$CollectOnly
 )
 
 Set-StrictMode -Version Latest
@@ -280,7 +281,9 @@ foreach ($line in $coverageReductionLines) {
 
 foreach ($expectedPackage in $expectedPackages) {
     if (-not $packageFileLines.ContainsKey($expectedPackage)) {
-        $failures += "Coverage output did not include expected production package {0}" -f $expectedPackage
+        if (-not $CollectOnly) {
+            $failures += "Coverage output did not include expected production package {0}" -f $expectedPackage
+        }
         continue
     }
 
@@ -340,7 +343,9 @@ foreach ($expectedPackage in $expectedPackages) {
                 Write-Output ("COVERAGE_GAP package={0} uncovered={1} total={2} file={3} lines={4}" -f $expectedPackage, $_.Uncovered, $_.Total, $_.File, ($_.UncoveredLines -join ","))
             }
 
-        $failures += "{0} line coverage {1}% is below {2}%" -f $expectedPackage, $percent, ($threshold * 100)
+        if (-not $CollectOnly) {
+            $failures += "{0} line coverage {1}% is below {2}%" -f $expectedPackage, $percent, ($threshold * 100)
+        }
     }
 }
 

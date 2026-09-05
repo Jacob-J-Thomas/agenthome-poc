@@ -1,5 +1,6 @@
 using EmbodySense.Core.Application.HumanReview;
 using EmbodySense.Core.Application.HumanReview.Models;
+using EmbodySense.Core.Application.Loops;
 using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Loops.Execution.Custom.Models;
 using EmbodySense.Core.Application.Loops.Sequential.Models;
@@ -112,8 +113,9 @@ internal static class HumanReviewOrderedReleaseProcessHost
         var attempts = new GovernedLoopEffectAttemptStore(paths);
         var (current, intent) = await CreateEffectIntentWithRetryAsync(store, attempts, runId);
         if (current is null || intent is null) return 2;
+        var releaseStore = new HumanReviewOrderedReleaseRaceGateStore(store, readyPath, releasePath);
 
-        return await ReleaseEffectAsync(paths, store, attempts, current, intent, markerPath, resultPath, crashAfterMarker: false, authorityReadyPath: readyPath, authorityReleasePath: releasePath);
+        return await ReleaseEffectAsync(paths, store, attempts, current, intent, markerPath, resultPath, crashAfterMarker: false, releaseStore: releaseStore);
     }
 
     internal static async Task<int> RunEffectOwnerBarrierAsync(string workspaceRoot, string runId, string markerPath, string ownerReadyPath, string ownerReleasePath, string resultPath)
@@ -150,18 +152,17 @@ internal static class HumanReviewOrderedReleaseProcessHost
         bool crashAfterMarker,
         string? ownerReadyPath = null,
         string? ownerReleasePath = null,
-        string? authorityReadyPath = null,
-        string? authorityReleasePath = null)
+        ICustomLoopRunStore? releaseStore = null)
     {
         var timeProvider = new HumanReviewOrderedReleaseProcessTimeProvider(intent.ReleaseAtUtc);
         var runtime = HumanReviewOrderedReleaseProcessRuntimeFactory.Create(store, paths, markerPath, timeProvider, crashAfterMarker, ownerReadyPath, ownerReleasePath);
         var evidence = new CanonicalHumanReviewEffectEvidenceSource(store, attempts);
         var result = await new HumanReviewOrderedReleaseService(
-            store,
+            releaseStore ?? store,
             new HumanReviewOrderedReleaseProcessContextResolver(),
             runtime,
             timeProvider,
-            new HumanReviewOrderedReleaseProcessAuthority(authorityReadyPath, authorityReleasePath),
+            new HumanReviewOrderedReleaseProcessAuthority(),
             evidence,
             evidence).ReleaseAsync(intent.Action, intent.Completion);
         if (resultPath is not null)

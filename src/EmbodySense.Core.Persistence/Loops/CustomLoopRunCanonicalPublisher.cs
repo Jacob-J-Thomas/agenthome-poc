@@ -9,10 +9,12 @@ namespace EmbodySense.Core.Persistence.Loops;
 /// <summary>Publishes one canonical run artifact through a retained parent directory and proves the exact target afterwards.</summary>
 internal sealed class CustomLoopRunCanonicalPublisher
 {
+    private readonly TimeProvider _timeProvider;
     private readonly Func<CustomLoopRunPublicationBoundary, CancellationToken, ValueTask>? _boundaryObserver;
 
-    public CustomLoopRunCanonicalPublisher(Func<CustomLoopRunPublicationBoundary, CancellationToken, ValueTask>? boundaryObserver = null)
+    public CustomLoopRunCanonicalPublisher(TimeProvider timeProvider, Func<CustomLoopRunPublicationBoundary, CancellationToken, ValueTask>? boundaryObserver = null)
     {
+        _timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
         _boundaryObserver = boundaryObserver;
     }
 
@@ -90,12 +92,16 @@ internal sealed class CustomLoopRunCanonicalPublisher
         TimeSpan retryDelay,
         CancellationToken cancellationToken)
     {
-        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        deadline.CancelAfter(contentionTimeout);
+        var startedAt = _timeProvider.GetTimestamp();
         Exception? lastTransient = null;
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (lastTransient is not null && _timeProvider.GetElapsedTime(startedAt) >= contentionTimeout)
+            {
+                throw lastTransient;
+            }
+
             try
             {
                 CustomLoopRunNativeFileSystem.RenameWithinParent(staged, parent, stagingName, destinationName, overwrite);
@@ -104,14 +110,15 @@ internal sealed class CustomLoopRunCanonicalPublisher
             catch (Exception exception) when (CustomLoopRunNativeFileSystem.IsTransientWindowsContention(exception))
             {
                 lastTransient = exception;
-                try
-                {
-                    await Task.Delay(retryDelay, deadline.Token).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                var elapsed = _timeProvider.GetElapsedTime(startedAt);
+                if (elapsed >= contentionTimeout)
                 {
                     throw lastTransient;
                 }
+
+                var remaining = contentionTimeout - elapsed;
+                var delay = retryDelay <= remaining ? retryDelay : remaining;
+                await Task.Delay(delay, _timeProvider, cancellationToken).ConfigureAwait(false);
             }
         }
     }
