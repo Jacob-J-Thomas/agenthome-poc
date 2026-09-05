@@ -1207,14 +1207,10 @@ public sealed class AgentRuntimeFactory
                 governedCommandActionNativeHost,
                 isHumanInputExecutable: async cancellationToken =>
                 {
-                    if (!humanInputReadiness.IsExecutable)
-                    {
-                        return false;
-                    }
-
                     var status = await governedBackgroundRuntimeHost.ReadStatusAsync(cancellationToken).ConfigureAwait(false);
                     return status.Readiness == AgentRuntimeGovernedLoopBackgroundReadiness.Ready
-                        && status.Ownership == AgentRuntimeGovernedLoopBackgroundOwnership.Local;
+                        && status.Ownership == AgentRuntimeGovernedLoopBackgroundOwnership.Local
+                        && humanInputReadiness.IsExecutable;
                 },
                 isHumanReviewExecutable: () => _humanReviewDecisionAuthorizationProvider is not null
                     && humanReviewRecoveryReadiness.IsExecutable
