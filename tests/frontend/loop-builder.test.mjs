@@ -38,6 +38,64 @@ test("the static governed graph affordance starts disabled before script hydrati
   );
 });
 
+test("builder operation cancellation observes superseded failures without replaying them", async () => {
+  const app = await loadLoopBuilder();
+  const unhandledRejections = [];
+  const captureUnhandledRejection = (reason) => {
+    unhandledRejections.push(reason);
+  };
+  process.on("unhandledRejection", captureUnhandledRejection);
+  try {
+    const alreadyCancelled = new AbortController();
+    const recoveryReason = new Error("The browser session is being recovered.");
+    const alreadyCreatedOperation = createDeferred();
+    alreadyCancelled.abort(recoveryReason);
+
+    await assert.rejects(
+      app.context.waitForLoopBuilderOperation(
+        alreadyCreatedOperation.promise,
+        alreadyCancelled.signal,
+      ),
+      (error) => error === recoveryReason,
+    );
+    alreadyCreatedOperation.reject(recoveryReason);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const successfulOperation = await app.context.waitForLoopBuilderOperation(
+      Promise.resolve("completed"),
+      new AbortController().signal,
+    );
+    assert.equal(successfulOperation, "completed");
+
+    const operationFailure = new Error("The operation failed.");
+    await assert.rejects(
+      app.context.waitForLoopBuilderOperation(
+        Promise.reject(operationFailure),
+        new AbortController().signal,
+      ),
+      (error) => error === operationFailure,
+    );
+
+    const midflightCancellation = new AbortController();
+    const pendingOperation = createDeferred();
+    const midflightReason = new Error(
+      "The browser session is being recovered.",
+    );
+    const cancellation = app.context.waitForLoopBuilderOperation(
+      pendingOperation.promise,
+      midflightCancellation.signal,
+    );
+    midflightCancellation.abort(midflightReason);
+    await assert.rejects(cancellation, (error) => error === midflightReason);
+    pendingOperation.reject(midflightReason);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.deepEqual(unhandledRejections, []);
+  } finally {
+    process.off("unhandledRejection", captureUnhandledRejection);
+  }
+});
+
 test("catalog loading is authenticated and projects the system loop as read-only", async () => {
   const app = await loadLoopBuilder();
 
