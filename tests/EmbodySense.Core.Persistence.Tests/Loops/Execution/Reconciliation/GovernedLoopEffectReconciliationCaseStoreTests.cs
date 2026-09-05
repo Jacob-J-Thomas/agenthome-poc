@@ -1133,18 +1133,27 @@ public sealed class GovernedLoopEffectReconciliationCaseStoreTests
     [Fact]
     public async Task Malformed_pending_journal_is_corrupt_for_read_and_not_silently_replayed()
     {
+        using var diagnostic = Verification.Sample3PersistenceDiagnosticCapture.StartFromEnvironment();
+        diagnostic.Record("test-start", "fixture=malformed-pending-journal");
         using var workspace = new TestWorkspace();
         var scenario = await CreateScenarioAsync(workspace);
         var store = new GovernedLoopEffectReconciliationCaseStore(scenario.EffectStore);
         Assert.Equal(GovernedLoopEffectReconciliationCaseMutationStatus.Applied, (await store.CompareExchangeAsync(Mutation(scenario.Open, null, null, "open", "operation-open"))).Status);
         var assessed = Assessed(scenario.Open, "assessment-pending", 'a');
         var request = Mutation(assessed, scenario.Open.CaseVersion, scenario.Open.ContentHash, "assess", "operation-pending");
-        var crash = await RunExternalCrashAsync(workspace.RootPath, GovernedLoopEffectReconciliationPersistenceBoundary.JournalPublished, request);
+        var crash = await RunExternalCrashAsync(workspace.RootPath, GovernedLoopEffectReconciliationPersistenceBoundary.JournalPublished, request, diagnostic);
         Assert.NotEqual(0, crash.ExitCode);
         var journal = Directory.EnumerateFiles(scenario.Paths.GovernedLoopEffectAttemptsPath, "reconciliation-journal.*.json").Single();
         await File.WriteAllTextAsync(journal, "{}");
+        diagnostic.Record("journal-rewrite-complete", $"file={Path.GetFileName(journal)};length={new FileInfo(journal).Length}");
+        diagnostic.ProbeExclusiveReadLock(Path.Combine(scenario.Paths.GovernedLoopEffectAttemptsPath, ".custom-loop-mutations.lock"));
+        await diagnostic.ProbeJournalReadAsync(journal);
 
+        diagnostic.Record("list-start", "maximum-count=10");
+        diagnostic.BeginExceptionCapture();
         var page = await store.ListAsync(new GovernedLoopEffectReconciliationCaseListRequest(10));
+        diagnostic.EndExceptionCapture();
+        diagnostic.Record("list-complete", $"status={page.Status}");
 
         Assert.Equal(GovernedLoopEffectReconciliationCaseListStatus.Corrupt, page.Status);
         Assert.False(await store.ProbeStorageAvailabilityAsync());
@@ -1153,7 +1162,8 @@ public sealed class GovernedLoopEffectReconciliationCaseStoreTests
     private static async Task<ExternalCrashResult> RunExternalCrashAsync(
         string workspace,
         GovernedLoopEffectReconciliationPersistenceBoundary boundary,
-        GovernedLoopEffectReconciliationCaseMutationRequest request)
+        GovernedLoopEffectReconciliationCaseMutationRequest request,
+        Verification.Sample3PersistenceDiagnosticCapture? diagnostic = null)
     {
         var root = new DirectoryInfo(workspace);
         var gate = Path.Combine(root.FullName, "reconciliation-process-gate");
@@ -1179,7 +1189,16 @@ public sealed class GovernedLoopEffectReconciliationCaseStoreTests
             boundary.ToString());
         await WaitForPathAsync(ready);
         await File.WriteAllTextAsync(gate, "go");
-        await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
+        diagnostic?.Record("child-wait-start", $"mode={diagnostic.Mode};process-id={process.Id}");
+        if (diagnostic?.UseTerminalSignal == true)
+        {
+            await process.WaitForTerminalSignalAsync().WaitAsync(TimeSpan.FromSeconds(30));
+        }
+        else
+        {
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
+        }
+        diagnostic?.Record("child-wait-complete", $"mode={diagnostic.Mode};exit-code={process.ExitCode};{process.GetTerminalSignalSnapshot()}");
         return new(process.ExitCode, output);
     }
 

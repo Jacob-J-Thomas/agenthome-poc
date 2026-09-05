@@ -20,6 +20,9 @@ internal sealed class CrossProcessProcessOwnership : IDisposable
     private const uint StandardErrorHandle = unchecked((uint)-12);
     private const uint Infinite = 0xFFFFFFFF;
     private const uint StillActive = 259;
+    private const uint WaitObject0 = 0;
+    private const uint WaitTimeout = 258;
+    private const uint WaitFailed = 0xFFFFFFFF;
 
     private readonly Process _process;
     private readonly SafeFileHandle? _nativeProcessHandle;
@@ -113,6 +116,74 @@ internal sealed class CrossProcessProcessOwnership : IDisposable
             {
                 await Task.Delay(10, cancellationToken);
             }
+        }
+        finally
+        {
+            if (nativeHandleReferenceAdded)
+            {
+                nativeProcessHandle.DangerousRelease();
+            }
+        }
+    }
+
+    internal async Task WaitForTerminalSignalAsync(CancellationToken cancellationToken = default)
+    {
+        var nativeProcessHandle = _nativeProcessHandle;
+        if (nativeProcessHandle is null)
+        {
+            await _process.WaitForExitAsync(cancellationToken);
+            return;
+        }
+
+        var nativeHandleReferenceAdded = false;
+        try
+        {
+            nativeProcessHandle.DangerousAddRef(ref nativeHandleReferenceAdded);
+            var nativeHandle = nativeProcessHandle.DangerousGetHandle();
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var wait = WaitForSingleObject(nativeHandle, 0);
+                if (wait == WaitObject0)
+                {
+                    return;
+                }
+                if (wait == WaitFailed)
+                {
+                    throw LastWin32Exception("The cross-process child terminal signal could not be observed.");
+                }
+                if (wait != WaitTimeout)
+                {
+                    throw new InvalidOperationException($"The cross-process child returned unsupported wait status {wait}.");
+                }
+                await Task.Delay(10, cancellationToken);
+            }
+        }
+        finally
+        {
+            if (nativeHandleReferenceAdded)
+            {
+                nativeProcessHandle.DangerousRelease();
+            }
+        }
+    }
+
+    internal string GetTerminalSignalSnapshot()
+    {
+        var nativeProcessHandle = _nativeProcessHandle;
+        if (nativeProcessHandle is null)
+        {
+            return $"source=managed-process;signaled={_process.HasExited.ToString().ToLowerInvariant()};wait_status=managed;hresult=0x00000000;native_error=0";
+        }
+
+        var nativeHandleReferenceAdded = false;
+        try
+        {
+            nativeProcessHandle.DangerousAddRef(ref nativeHandleReferenceAdded);
+            var wait = WaitForSingleObject(nativeProcessHandle.DangerousGetHandle(), 0);
+            var nativeError = wait == WaitFailed ? Marshal.GetLastWin32Error() : 0;
+            var hresult = wait == WaitFailed ? Marshal.GetHRForLastWin32Error() : 0;
+            return $"source=native-process-handle;signaled={(wait == WaitObject0).ToString().ToLowerInvariant()};wait_status={wait};hresult=0x{hresult:X8};native_error={nativeError}";
         }
         finally
         {
@@ -612,6 +683,9 @@ internal sealed class CrossProcessProcessOwnership : IDisposable
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetExitCodeProcess(IntPtr process, out uint exitCode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern uint GetProcessId(IntPtr process);

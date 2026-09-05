@@ -31,6 +31,10 @@ internal sealed class CrossProcessProcess : IDisposable
 
     internal Task WaitForExitAsync(CancellationToken cancellationToken = default) => _ownership.WaitForExitAsync(cancellationToken);
 
+    internal Task WaitForTerminalSignalAsync(CancellationToken cancellationToken = default) => _ownership.WaitForTerminalSignalAsync(cancellationToken);
+
+    internal string GetTerminalSignalSnapshot() => _ownership.GetTerminalSignalSnapshot();
+
     internal Task<string> ReadStandardOutputToEndAsync(CancellationToken cancellationToken)
         => _ownership.ReadStandardOutputToEndAsync(cancellationToken);
 

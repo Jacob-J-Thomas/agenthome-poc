@@ -1,0 +1,59 @@
+name: Sample 3 Persistence Diagnostic Only
+
+on:
+  push:
+    branches:
+      - codex/diagnose-sample3-persistence-20260905
+
+permissions:
+  contents: read
+
+jobs:
+  persistence-diagnostic:
+    name: diagnostic-only-persistence-crash-boundary
+    if: github.repository == 'Jacob-J-Thomas/agenthome-poc' && github.actor == 'Jacob-J-Thomas'
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out immutable diagnostic source
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Record diagnostic identity and environment
+        shell: pwsh
+        env:
+          DIAGNOSTIC_SHA: ${{ github.sha }}
+        run: |
+          if ((git rev-parse HEAD) -cne $env:DIAGNOSTIC_SHA) { throw 'Diagnostic checkout does not match triggering SHA.' }
+          git merge-base --is-ancestor ebf457d4afaad9b93293101e846baefcffc5dae1 HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Diagnostic source must descend from the exact failed sample head.' }
+          Write-Output "DIAGNOSTIC_ONLY head=$env:DIAGNOSTIC_SHA failed_sample_head=ebf457d4afaad9b93293101e846baefcffc5dae1 run=$env:GITHUB_RUN_ID attempt=$env:GITHUB_RUN_ATTEMPT"
+          Write-Output "OS=$([Environment]::OSVersion) processors=$([Environment]::ProcessorCount) image=$env:ImageOS image_version=$env:ImageVersion"
+
+      - name: Install repository-selected .NET SDK
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+
+      - name: Build only the owned diagnostic test project and references
+        shell: pwsh
+        run: |
+          dotnet --info
+          dotnet build tests/EmbodySense.Core.Persistence.Tests/EmbodySense.Core.Persistence.Tests.csproj -c Release --disable-build-servers -m:1 -nr:false -p:UseSharedCompilation=false --tl:off
+          if ($LASTEXITCODE -ne 0) { throw 'Diagnostic build failed.' }
+
+      - name: Run one bounded diagnostic A/B
+        shell: pwsh
+        run: ./scripts/diagnose-sample3-persistence.ps1 -MaximumExecutions 10 -TotalTimeoutSeconds 120 -Configuration Release -OutputDirectory tests/DiagnosticResults/Sample3Persistence
+
+      - name: Retain diagnostic evidence without an acceptance receipt
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: sample3-persistence-diagnostic-only-${{ github.run_attempt }}
+          path: tests/DiagnosticResults/Sample3Persistence/**
+          if-no-files-found: warn
+          retention-days: 14
