@@ -22,12 +22,19 @@ internal sealed class WorkspaceHost : IDisposable
     /// <param name="ownership">The ownership.</param>
     /// <param name="retireAfterBrokerFault">The callback that retires this host after a terminal broker fault.</param>
     /// <param name="brokerLifecycleObserver">The optional in-process observer for bounded broker lifecycle transitions.</param>
-    public WorkspaceHost(WorkspacePaths paths, string workspaceKey, FileStream ownership, Action<string, WorkspaceHost> retireAfterBrokerFault, ICustomLoopCancellationBrokerLifecycleObserver? brokerLifecycleObserver)
+    /// <param name="acknowledgementTimeProvider">The monotonic timer source for cancellation acknowledgement deadlines.</param>
+    public WorkspaceHost(
+        WorkspacePaths paths,
+        string workspaceKey,
+        FileStream ownership,
+        Action<string, WorkspaceHost> retireAfterBrokerFault,
+        ICustomLoopCancellationBrokerLifecycleObserver? brokerLifecycleObserver,
+        TimeProvider acknowledgementTimeProvider)
     {
         _workspaceKey = workspaceKey;
         _retireAfterBrokerFault = retireAfterBrokerFault;
         Ownership = ownership;
-        CancellationHost = new CustomLoopAttemptCancellationHost(paths, workspaceKey, HandleBrokerFault, brokerLifecycleObserver);
+        CancellationHost = new CustomLoopAttemptCancellationHost(paths, workspaceKey, HandleBrokerFault, brokerLifecycleObserver, acknowledgementTimeProvider);
     }
 
     /// <summary>

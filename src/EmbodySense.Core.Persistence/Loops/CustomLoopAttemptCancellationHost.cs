@@ -40,6 +40,7 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
     private readonly string _pipeName;
     private readonly Action? _brokerFaulted;
     private readonly ICustomLoopCancellationBrokerLifecycleObserver? _brokerLifecycleObserver;
+    private readonly TimeProvider _acknowledgementTimeProvider;
     private readonly CancellationTokenSource _shutdown = new();
     private readonly TaskCompletionSource<bool> _brokerReady = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly object _descriptorGate = new();
@@ -58,7 +59,13 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
     /// <param name="workspaceKey">The workspace key.</param>
     /// <param name="brokerFaulted">The callback invoked after a terminal broker failure withdraws the descriptor.</param>
     /// <param name="brokerLifecycleObserver">The optional in-process observer for bounded broker lifecycle transitions.</param>
-    public CustomLoopAttemptCancellationHost(WorkspacePaths paths, string workspaceKey, Action? brokerFaulted = null, ICustomLoopCancellationBrokerLifecycleObserver? brokerLifecycleObserver = null)
+    /// <param name="acknowledgementTimeProvider">The monotonic timer source for the local acknowledgement deadline.</param>
+    public CustomLoopAttemptCancellationHost(
+        WorkspacePaths paths,
+        string workspaceKey,
+        Action? brokerFaulted = null,
+        ICustomLoopCancellationBrokerLifecycleObserver? brokerLifecycleObserver = null,
+        TimeProvider? acknowledgementTimeProvider = null)
     {
         _paths = paths;
         _ownerId = "owner-" + Guid.NewGuid().ToString("N");
@@ -67,6 +74,7 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
         _pipeName = "es-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(workspaceKey + "\n" + _ownerId))).ToLowerInvariant()[..16];
         _brokerFaulted = brokerFaulted;
         _brokerLifecycleObserver = brokerLifecycleObserver;
+        _acknowledgementTimeProvider = acknowledgementTimeProvider ?? TimeProvider.System;
         var server = RunServerAsync();
         Volatile.Write(ref _server, server);
         if (Volatile.Read(ref _serverResourceReleaseRequested) != 0)
@@ -147,7 +155,7 @@ internal sealed class CustomLoopAttemptCancellationHost : IDisposable
 
         try
         {
-            var result = await attempt.Completion.Task.WaitAsync(_acknowledgementTimeout, cancellationToken);
+            var result = await attempt.Completion.Task.WaitAsync(_acknowledgementTimeout, _acknowledgementTimeProvider, cancellationToken);
             return result with { OwnerId = _ownerId, OwnerProcessId = Environment.ProcessId };
         }
         catch (TimeoutException)
