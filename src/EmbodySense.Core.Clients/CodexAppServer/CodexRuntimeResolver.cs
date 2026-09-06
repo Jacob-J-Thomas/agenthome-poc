@@ -20,6 +20,7 @@ public sealed class CodexRuntimeResolver
     private const int MaxDiagnosticCharacters = 2_000;
     private static readonly TimeSpan _defaultProbeTimeout = TimeSpan.FromSeconds(15);
     private readonly TimeSpan _probeTimeout;
+    private readonly TimeProvider _timeProvider;
 
     /// <summary>Creates a resolver with the fixed production probe deadline.</summary>
     public CodexRuntimeResolver() : this(_defaultProbeTimeout)
@@ -29,14 +30,25 @@ public sealed class CodexRuntimeResolver
     /// <summary>Creates a resolver with a positive probe deadline no greater than the production default.</summary>
     /// <param name="probeTimeout">The shared deadline across version and app-server probe stages.</param>
     /// <exception cref="ArgumentOutOfRangeException">Thrown when the deadline is nonpositive or exceeds <see cref="DefaultProbeTimeout"/>.</exception>
-    public CodexRuntimeResolver(TimeSpan probeTimeout)
+    public CodexRuntimeResolver(TimeSpan probeTimeout) : this(probeTimeout, TimeProvider.System)
     {
+    }
+
+    /// <summary>Creates a resolver with a bounded deadline and an explicit monotonic time source.</summary>
+    /// <param name="probeTimeout">The shared deadline across version and app-server probe stages.</param>
+    /// <param name="timeProvider">The monotonic time source used to enforce the shared elapsed-time deadline.</param>
+    /// <exception cref="ArgumentNullException">Thrown when <paramref name="timeProvider"/> is <see langword="null"/>.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">Thrown when the deadline is nonpositive or exceeds <see cref="DefaultProbeTimeout"/>.</exception>
+    public CodexRuntimeResolver(TimeSpan probeTimeout, TimeProvider timeProvider)
+    {
+        ArgumentNullException.ThrowIfNull(timeProvider);
         if (probeTimeout <= TimeSpan.Zero || probeTimeout > _defaultProbeTimeout)
         {
             throw new ArgumentOutOfRangeException(nameof(probeTimeout));
         }
 
         _probeTimeout = probeTimeout;
+        _timeProvider = timeProvider;
     }
 
     /// <summary>Gets the maximum and default shared runtime-probe deadline.</summary>
@@ -226,7 +238,7 @@ public sealed class CodexRuntimeResolver
 
     private async Task<CodexRuntimeProbeResult> ProbeAsync(string executablePath, string? configuredModel, CancellationToken cancellationToken)
     {
-        // Follow-up: https://github.com/Jacob-J-Thomas/agenthome-poc/issues/469 tracks an elapsed-time fence so a late successful response cannot win a delayed cancellation timer.
+        var probeStartedAt = _timeProvider.GetTimestamp();
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(_probeTimeout);
         var probeCancellationToken = deadline.Token;
@@ -234,6 +246,7 @@ public sealed class CodexRuntimeResolver
         try
         {
             version = await ReadVersionAsync(executablePath, probeCancellationToken);
+            ThrowIfProbeUnavailable(probeStartedAt, cancellationToken, probeCancellationToken);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
@@ -246,7 +259,8 @@ public sealed class CodexRuntimeResolver
 
         try
         {
-            var advertisedModels = await ReadAdvertisedModelsAsync(executablePath, configuredModel, probeCancellationToken);
+            var advertisedModels = await ReadAdvertisedModelsAsync(executablePath, configuredModel, probeStartedAt, cancellationToken, probeCancellationToken);
+            ThrowIfProbeUnavailable(probeStartedAt, cancellationToken, probeCancellationToken);
             if (string.IsNullOrWhiteSpace(configuredModel))
             {
                 return new CodexRuntimeProbeResult(true, version, "Codex app-server started successfully; model selection is externally configured.");
@@ -271,6 +285,17 @@ public sealed class CodexRuntimeResolver
 
     private string FormatProbeTimeout()
         => _probeTimeout.TotalSeconds.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+
+    private void ThrowIfProbeUnavailable(long probeStartedAt, CancellationToken cancellationToken, CancellationToken probeCancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var elapsed = _timeProvider.GetElapsedTime(probeStartedAt);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (elapsed >= _probeTimeout)
+        {
+            throw new OperationCanceledException(probeCancellationToken);
+        }
+    }
 
     private static async Task<string?> ReadVersionAsync(string executablePath, CancellationToken cancellationToken)
     {
@@ -305,7 +330,12 @@ public sealed class CodexRuntimeResolver
         }
     }
 
-    private static async Task<IReadOnlyList<string>> ReadAdvertisedModelsAsync(string executablePath, string? configuredModel, CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<string>> ReadAdvertisedModelsAsync(
+        string executablePath,
+        string? configuredModel,
+        long probeStartedAt,
+        CancellationToken cancellationToken,
+        CancellationToken probeCancellationToken)
     {
         var workingDirectory = Path.Combine(Path.GetTempPath(), "embodysense-codex-probe", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(workingDirectory);
@@ -334,13 +364,14 @@ public sealed class CodexRuntimeResolver
                         ["experimentalApi"] = true
                     }
                 }
-            }.ToJsonString(), cancellationToken);
-            _ = await ReadResponseAsync(transport, 1, cancellationToken);
+            }.ToJsonString(), probeCancellationToken);
+            _ = await ReadResponseAsync(transport, 1, probeCancellationToken);
+            ThrowIfProbeUnavailable(probeStartedAt, cancellationToken, probeCancellationToken);
             await transport.WriteLineAsync(new JsonObject
             {
                 ["method"] = "initialized",
                 ["params"] = new JsonObject()
-            }.ToJsonString(), cancellationToken);
+            }.ToJsonString(), probeCancellationToken);
             var models = new HashSet<string>(StringComparer.Ordinal);
             var seenCursors = new HashSet<string>(StringComparer.Ordinal);
             string? cursor = null;
@@ -362,12 +393,13 @@ public sealed class CodexRuntimeResolver
                     ["id"] = requestId,
                     ["method"] = "model/list",
                     ["params"] = parameters
-                }.ToJsonString(), cancellationToken);
-                var response = await ReadResponseAsync(transport, requestId, cancellationToken);
+                }.ToJsonString(), probeCancellationToken);
+                var response = await ReadResponseAsync(transport, requestId, probeCancellationToken);
+                ThrowIfProbeUnavailable(probeStartedAt, cancellationToken, probeCancellationToken);
                 cursor = AddAdvertisedModels(response, models);
                 if (string.IsNullOrWhiteSpace(configuredModel) || models.Contains(configuredModel))
                 {
-                    await VerifyThreadStartContractAsync(transport, checked(requestId + 1), workingDirectory, configuredModel, cancellationToken);
+                    await VerifyThreadStartContractAsync(transport, checked(requestId + 1), workingDirectory, configuredModel, probeStartedAt, cancellationToken, probeCancellationToken);
                     return models.ToArray();
                 }
 
@@ -380,7 +412,7 @@ public sealed class CodexRuntimeResolver
             }
             while (cursor is not null);
 
-            await VerifyThreadStartContractAsync(transport, checked(requestId + 1), workingDirectory, configuredModel, cancellationToken);
+            await VerifyThreadStartContractAsync(transport, checked(requestId + 1), workingDirectory, configuredModel, probeStartedAt, cancellationToken, probeCancellationToken);
             return models.ToArray();
         }
         finally
@@ -395,7 +427,14 @@ public sealed class CodexRuntimeResolver
         }
     }
 
-    private static async Task VerifyThreadStartContractAsync(ICodexAppServerTransport transport, int requestId, string workingDirectory, string? configuredModel, CancellationToken cancellationToken)
+    private async Task VerifyThreadStartContractAsync(
+        ICodexAppServerTransport transport,
+        int requestId,
+        string workingDirectory,
+        string? configuredModel,
+        long probeStartedAt,
+        CancellationToken cancellationToken,
+        CancellationToken probeCancellationToken)
     {
         var parameters = new JsonObject
         {
@@ -435,8 +474,9 @@ public sealed class CodexRuntimeResolver
             ["id"] = requestId,
             ["method"] = "thread/start",
             ["params"] = parameters
-        }.ToJsonString(), cancellationToken);
-        var response = await ReadResponseAsync(transport, requestId, cancellationToken);
+        }.ToJsonString(), probeCancellationToken);
+        var response = await ReadResponseAsync(transport, requestId, probeCancellationToken);
+        ThrowIfProbeUnavailable(probeStartedAt, cancellationToken, probeCancellationToken);
         var threadId = TryReadRequiredString(response, "result", "thread", "id");
         var model = TryReadRequiredString(response, "result", "model");
         var modelProvider = TryReadRequiredString(response, "result", "modelProvider");

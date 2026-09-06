@@ -16,6 +16,7 @@ public sealed class CodexRuntimeResolverTests
         Assert.Throws<ArgumentOutOfRangeException>(() => new CodexRuntimeResolver(TimeSpan.Zero));
         Assert.Throws<ArgumentOutOfRangeException>(() => new CodexRuntimeResolver(TimeSpan.FromTicks(-1)));
         Assert.Throws<ArgumentOutOfRangeException>(() => new CodexRuntimeResolver(CodexRuntimeResolver.DefaultProbeTimeout + TimeSpan.FromTicks(1)));
+        Assert.Throws<ArgumentNullException>(() => new CodexRuntimeResolver(TimeSpan.FromSeconds(1), null!));
     }
 
     [Fact]
@@ -346,6 +347,74 @@ public sealed class CodexRuntimeResolverTests
 
         Assert.Equal(CodexRuntimeResolutionStatus.Compatible, result.Status);
         Assert.Equal("codex-cli server-request-test", result.Version);
+    }
+
+    [Fact]
+    public async Task Response_before_monotonic_deadline_can_publish_compatible()
+    {
+        using var workspace = new TestWorkspace();
+        var executable = await CreateFakeExecutableAsync(workspace, "before-deadline", "codex-cli before-deadline-test", advertisedModels: ["gpt-test"]);
+        var beforeDeadline = TimeSpan.FromSeconds(5) - TimeSpan.FromTicks(1);
+        var timeProvider = new CodexRuntimeProbeTimeProvider([TimeSpan.Zero, beforeDeadline, beforeDeadline, beforeDeadline]);
+
+        var result = await new CodexRuntimeResolver(TimeSpan.FromSeconds(5), timeProvider).ResolveAsync(executable, "gpt-test");
+
+        Assert.Equal(CodexRuntimeResolutionStatus.Compatible, result.Status);
+        Assert.Equal("codex-cli before-deadline-test", result.Version);
+    }
+
+    [Fact]
+    public async Task Response_at_monotonic_deadline_is_rejected_before_catalog_parsing()
+    {
+        using var workspace = new TestWorkspace();
+        var executable = await CreateFakeExecutableAsync(workspace, "at-deadline", "codex-cli at-deadline-test", omitModelCatalog: true, advertisedModels: ["gpt-test"]);
+        var beforeDeadline = TimeSpan.FromSeconds(5) - TimeSpan.FromTicks(1);
+        var timeProvider = new CodexRuntimeProbeTimeProvider([TimeSpan.Zero, beforeDeadline, beforeDeadline, TimeSpan.FromSeconds(5)]);
+
+        var result = await new CodexRuntimeResolver(TimeSpan.FromSeconds(5), timeProvider).ResolveAsync(executable, "gpt-test");
+
+        Assert.Equal(CodexRuntimeResolutionStatus.ProbeFailed, result.Status);
+        Assert.Equal("codex-cli at-deadline-test", result.Version);
+        Assert.Contains("timed out after 5 seconds", result.Detail, StringComparison.Ordinal);
+        Assert.DoesNotContain("did not contain a model catalog", result.Detail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Response_after_monotonic_deadline_is_rejected()
+    {
+        using var workspace = new TestWorkspace();
+        var executable = await CreateFakeExecutableAsync(workspace, "after-deadline", "codex-cli after-deadline-test", advertisedModels: ["gpt-test"]);
+        var beforeDeadline = TimeSpan.FromSeconds(5) - TimeSpan.FromTicks(1);
+        var timeProvider = new CodexRuntimeProbeTimeProvider([TimeSpan.Zero, beforeDeadline, beforeDeadline, TimeSpan.FromSeconds(5) + TimeSpan.FromTicks(1)]);
+
+        var result = await new CodexRuntimeResolver(TimeSpan.FromSeconds(5), timeProvider).ResolveAsync(executable, "gpt-test");
+
+        Assert.Equal(CodexRuntimeResolutionStatus.ProbeFailed, result.Status);
+        Assert.Equal("codex-cli after-deadline-test", result.Version);
+        Assert.Contains("timed out after 5 seconds", result.Detail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Caller_cancellation_wins_when_observed_with_elapsed_deadline()
+    {
+        using var workspace = new TestWorkspace();
+        using var cancellation = new CancellationTokenSource();
+        var executable = await CreateFakeExecutableAsync(workspace, "caller-cancellation", "codex-cli caller-cancellation-test", advertisedModels: ["gpt-test"]);
+        var beforeDeadline = TimeSpan.FromSeconds(5) - TimeSpan.FromTicks(1);
+        var timeProvider = new CodexRuntimeProbeTimeProvider(
+            [TimeSpan.Zero, beforeDeadline, beforeDeadline, TimeSpan.FromSeconds(5)],
+            timestampRead =>
+            {
+                if (timestampRead == 4)
+                {
+                    cancellation.Cancel();
+                }
+            });
+
+        var exception = await Assert.ThrowsAsync<OperationCanceledException>(
+            () => new CodexRuntimeResolver(TimeSpan.FromSeconds(5), timeProvider).ResolveAsync(executable, "gpt-test", cancellation.Token));
+
+        Assert.Equal(cancellation.Token, exception.CancellationToken);
     }
 
     [Fact]
