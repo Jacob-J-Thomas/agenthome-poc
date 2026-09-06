@@ -373,6 +373,89 @@ public sealed partial class BrowserFlowTests
         Assert.False(tracker.IsExpectedServerRestartLogEntry("redirected", "network", "fetch failed: net::ERR_CONNECTION_RESET", ExternalUrl));
     }
 
+    [Fact]
+    public void Restart_request_tracking_allows_declared_read_only_refusals_in_both_event_orders_and_records_bounded_provenance()
+    {
+        const string TargetAuthority = "127.0.0.1:5001";
+        const string Target = "/api/loop-runs?maximumCount=50";
+        const string RequestUrl = "https://127.0.0.1:5001/api/loop-runs?maximumCount=50";
+        var tracker = new ExpectedServerRestartRequestTracker(TargetAuthority);
+        tracker.DeclareReadOnlyGetTargets([Target]);
+        tracker.Track("failure-before-log", RequestUrl, "GET");
+        tracker.BeginExpectedServerRestart();
+
+        Assert.True(tracker.ProcessLoadingFailed("failure-before-log", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+        tracker.EndExpectedServerRestart();
+        Assert.True(tracker.IsExpectedServerRestartLogEntry("failure-before-log", "network", "fetch failed: net::ERR_CONNECTION_REFUSED", null));
+
+        tracker.BeginExpectedServerRestart();
+        tracker.Track("log-before-failure", RequestUrl, "GET");
+        Assert.True(tracker.IsExpectedServerRestartLogEntry("log-before-failure", "network", "fetch failed: net::ERR_CONNECTION_REFUSED", RequestUrl));
+        Assert.True(tracker.ProcessLoadingFailed("log-before-failure", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+
+        Assert.All(tracker.ReadQualifiedReadOnlyRefusalEvidence(), evidence => Assert.Contains("generation=2; method=GET; target=/api/loop-runs?maximumCount=50", evidence, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Restart_request_tracking_keeps_refusals_visible_without_exact_declared_get_provenance()
+    {
+        const string TargetAuthority = "127.0.0.1:5001";
+        const string Target = "/api/loop-runs?maximumCount=50";
+        const string RequestUrl = "https://127.0.0.1:5001/api/loop-runs?maximumCount=50";
+        var tracker = new ExpectedServerRestartRequestTracker(TargetAuthority);
+        tracker.Track("undeclared", RequestUrl, "GET");
+        tracker.BeginExpectedServerRestart();
+        Assert.False(tracker.ProcessLoadingFailed("undeclared", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+
+        tracker.DeclareReadOnlyGetTargets([Target]);
+        tracker.Track("missing-method", RequestUrl);
+        tracker.Track("post", RequestUrl, "POST");
+        tracker.Track("altered-query", RequestUrl + "&other=value", "GET");
+        tracker.Track("different-port", "https://127.0.0.1:5002/api/loop-runs?maximumCount=50", "GET");
+        tracker.Track("embedded-authority", "https://example.test/127.0.0.1:5001/api/loop-runs?maximumCount=50", "GET");
+        Assert.False(tracker.ProcessLoadingFailed("missing-method", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+        Assert.False(tracker.ProcessLoadingFailed("post", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+        Assert.False(tracker.ProcessLoadingFailed("altered-query", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+        Assert.False(tracker.ProcessLoadingFailed("different-port", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+        Assert.False(tracker.ProcessLoadingFailed("embedded-authority", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+
+        tracker.MarkExpectedReplacementServerStarting();
+        tracker.Track("after-replacement", RequestUrl, "GET");
+        Assert.False(tracker.ProcessLoadingFailed("after-replacement", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+        Assert.False(tracker.IsExpectedServerRestartLogEntry("after-replacement", "console", "fetch failed: net::ERR_CONNECTION_REFUSED", RequestUrl));
+        Assert.False(tracker.IsExpectedServerRestartLogEntry("unknown", "network", "fetch failed: net::ERR_CONNECTION_REFUSED", RequestUrl));
+        Assert.False(tracker.ProcessLoadingFailed("unknown", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+
+        var errorTracker = new ExpectedServerRestartRequestTracker(TargetAuthority);
+        errorTracker.DeclareReadOnlyGetTargets([Target]);
+        errorTracker.BeginExpectedServerRestart();
+        foreach (var error in new[] { "fetch failed", "401 (Unauthorized)", "403 (Forbidden)", "409 (Conflict)", "500 (Internal Server Error)", "503 (Service Unavailable)" })
+        {
+            errorTracker.Track(error, RequestUrl, "GET");
+            Assert.False(errorTracker.ProcessLoadingFailed(error, canceled: false, error));
+        }
+    }
+
+    [Fact]
+    public void Restart_request_tracking_clears_declared_refusal_correlation_across_abort_and_generation_changes()
+    {
+        const string Target = "/api/loop-runs?maximumCount=50";
+        const string RequestUrl = "https://127.0.0.1:5001/api/loop-runs?maximumCount=50";
+        var tracker = new ExpectedServerRestartRequestTracker("127.0.0.1:5001");
+        tracker.DeclareReadOnlyGetTargets([Target]);
+        tracker.Track("aborted", RequestUrl, "GET");
+        tracker.BeginExpectedServerRestart();
+        tracker.AbortExpectedServerRestart();
+        Assert.False(tracker.ProcessLoadingFailed("aborted", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+
+        tracker.Track("generation", RequestUrl, "GET");
+        tracker.BeginExpectedServerRestart();
+        Assert.True(tracker.ProcessLoadingFailed("generation", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+        tracker.BeginExpectedServerRestart();
+        Assert.False(tracker.IsExpectedServerRestartLogEntry("generation", "network", "fetch failed: net::ERR_CONNECTION_REFUSED", null));
+        Assert.Empty(tracker.ReadQualifiedReadOnlyRefusalEvidence());
+    }
+
     [InstalledBrowserFact]
     public async Task Default_chat_recovers_in_place_after_process_restart_and_preserves_unsaved_draft()
     {
@@ -402,6 +485,7 @@ public sealed partial class BrowserFlowTests
             await ClickAsync(browser, "#chatNav");
 
             app.AssertHealthy();
+            browser.DeclareReadOnlyGetTargets(["/api/loop-runs?maximumCount=50", "/api/loop-runs?maximumCount=50&loopId=default-conversation", "/api/loop-runs/quota", "/api/loop-operations/posture?maximumQueueEntries=50&maximumSchedules=50&maximumWakes=50&maximumRuns=50"]);
             await browser.BeginExpectedServerRestartAsync();
             await app.DisposeAsync();
             app = null;
@@ -2546,6 +2630,11 @@ public sealed partial class BrowserFlowTests
             }
         }
 
+        public void DeclareReadOnlyGetTargets(IEnumerable<string> pathAndQueries)
+        {
+            _requestTracker.DeclareReadOnlyGetTargets(pathAndQueries);
+        }
+
         public void MarkExpectedReplacementServerStarting()
         {
             _requestTracker.MarkExpectedReplacementServerStarting();
@@ -2667,6 +2756,7 @@ public sealed partial class BrowserFlowTests
             }
 
             await File.WriteAllLinesAsync(Path.Combine(directory, "browser-events.txt"), GetDiagnosticsSnapshot());
+            await File.WriteAllLinesAsync(Path.Combine(directory, "expected-restart-qualified-refusals.txt"), _requestTracker.ReadQualifiedReadOnlyRefusalEvidence());
         }
 
         public async ValueTask DisposeAsync()
@@ -3080,7 +3170,10 @@ public sealed partial class BrowserFlowTests
                 && request.TryGetProperty("url", out var requestUrl)
                 && requestUrl.ValueKind == JsonValueKind.String)
             {
-                _requestTracker.Track(requestId, requestUrl.GetString()!);
+                var requestMethod = request.TryGetProperty("method", out var methodValue) && methodValue.ValueKind == JsonValueKind.String
+                    ? methodValue.GetString()
+                    : null;
+                _requestTracker.Track(requestId, requestUrl.GetString()!, requestMethod);
                 return;
             }
 

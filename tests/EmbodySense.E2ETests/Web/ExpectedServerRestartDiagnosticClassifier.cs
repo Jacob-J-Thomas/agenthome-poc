@@ -10,12 +10,18 @@ internal static class ExpectedServerRestartDiagnosticClassifier
         string? requestUrl,
         string? errorText,
         string targetAuthority,
-        bool capturedAtRestart = false)
+        bool capturedAtRestart = false,
+        bool qualifiedReadOnlyRefusal = false)
     {
         if ((!expectedServerRestart && !beganDuringOutage && !capturedAtRestart)
             || !IsTargetAuthority(requestUrl, targetAuthority))
         {
             return false;
+        }
+
+        if (qualifiedReadOnlyRefusal && IsExactConnectionRefused(errorText))
+        {
+            return true;
         }
 
         if (capturedAtRestart)
@@ -24,8 +30,7 @@ internal static class ExpectedServerRestartDiagnosticClassifier
         }
 
         return IsExpectedServerRestartUrl(requestUrl, targetAuthority)
-            && (errorText?.Contains("ERR_CONNECTION_REFUSED", StringComparison.OrdinalIgnoreCase) == true
-            || errorText?.Contains("ERR_CONNECTION_RESET", StringComparison.OrdinalIgnoreCase) == true
+            && (errorText?.Contains("ERR_CONNECTION_RESET", StringComparison.OrdinalIgnoreCase) == true
             || errorText?.Contains("failed", StringComparison.OrdinalIgnoreCase) == true);
     }
 
@@ -37,7 +42,8 @@ internal static class ExpectedServerRestartDiagnosticClassifier
         string? url,
         string? correlatedRequestUrl,
         string targetAuthority,
-        bool capturedAtRestart = false)
+        bool capturedAtRestart = false,
+        bool qualifiedReadOnlyRefusal = false)
     {
         if ((!expectedServerRestart && !beganDuringOutage && !capturedAtRestart)
             || !string.Equals(source, "network", StringComparison.Ordinal)
@@ -46,6 +52,11 @@ internal static class ExpectedServerRestartDiagnosticClassifier
                 && !ContainsTargetAuthority(correlatedRequestUrl, targetAuthority))
         {
             return false;
+        }
+
+        if (qualifiedReadOnlyRefusal && ContainsExactConnectionRefused(text))
+        {
+            return true;
         }
 
         var isConnectionReset = text?.Contains("ERR_CONNECTION_RESET", StringComparison.OrdinalIgnoreCase) == true;
@@ -62,7 +73,6 @@ internal static class ExpectedServerRestartDiagnosticClassifier
         var expected = text?.Contains("401 (Unauthorized)", StringComparison.OrdinalIgnoreCase) == true
             || (text?.Contains("WebSocket", StringComparison.OrdinalIgnoreCase) == true || expectedRoute)
             && (text?.Contains("failed", StringComparison.OrdinalIgnoreCase) == true
-                || text?.Contains("ERR_CONNECTION_REFUSED", StringComparison.OrdinalIgnoreCase) == true
                 || isConnectionReset);
 
         return expected && (!isConnectionReset || expectedRoute);
@@ -103,6 +113,16 @@ internal static class ExpectedServerRestartDiagnosticClassifier
     private static bool ContainsTargetAuthority(string? value, string targetAuthority)
     {
         return value?.Contains(targetAuthority, StringComparison.OrdinalIgnoreCase) == true;
+    }
+
+    private static bool ContainsExactConnectionRefused(string? value)
+    {
+        return value?.Contains("net::ERR_CONNECTION_REFUSED", StringComparison.Ordinal) == true;
+    }
+
+    private static bool IsExactConnectionRefused(string? value)
+    {
+        return string.Equals(value, "net::ERR_CONNECTION_REFUSED", StringComparison.Ordinal);
     }
 
     private static bool IsTargetAuthority(string? value, string targetAuthority)
