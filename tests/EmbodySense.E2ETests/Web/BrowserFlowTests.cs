@@ -180,6 +180,21 @@ public sealed partial class BrowserFlowTests
     }
 
     [Fact]
+    public void Restart_refusal_qualification_does_not_suppress_non_401_http_responses_or_wrong_authority()
+    {
+        const string TargetAuthority = "127.0.0.1:5001";
+        const string TargetUrl = "https://127.0.0.1:5001/api/loop-runs?maximumCount=50";
+
+        Assert.True(HeadlessBrowserSession.IsExpectedServerRestartHttpResponseForTest(true, 401, TargetUrl, TargetAuthority));
+        Assert.False(HeadlessBrowserSession.IsExpectedServerRestartHttpResponseForTest(true, 403, TargetUrl, TargetAuthority));
+        Assert.False(HeadlessBrowserSession.IsExpectedServerRestartHttpResponseForTest(true, 409, TargetUrl, TargetAuthority));
+        Assert.False(HeadlessBrowserSession.IsExpectedServerRestartHttpResponseForTest(true, 500, TargetUrl, TargetAuthority));
+        Assert.False(HeadlessBrowserSession.IsExpectedServerRestartHttpResponseForTest(true, 503, TargetUrl, TargetAuthority));
+        Assert.False(HeadlessBrowserSession.IsExpectedServerRestartHttpResponseForTest(true, 401, "https://example.test/api/loop-runs?maximumCount=50", TargetAuthority));
+        Assert.False(HeadlessBrowserSession.IsExpectedServerRestartHttpResponseForTest(false, 401, TargetUrl, TargetAuthority));
+    }
+
+    [Fact]
     public void Restart_page_exception_classifier_accepts_only_the_exact_active_recovery_abort()
     {
         const string TargetAuthority = "127.0.0.1:5001";
@@ -463,6 +478,13 @@ public sealed partial class BrowserFlowTests
         tracker.AbortExpectedServerRestart();
         Assert.False(tracker.ProcessLoadingFailed("aborted", canceled: false, "net::ERR_CONNECTION_REFUSED"));
 
+        tracker.Track("evidence-aborted", RequestUrl, "GET");
+        tracker.BeginExpectedServerRestart();
+        Assert.True(tracker.ProcessLoadingFailed("evidence-aborted", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+        Assert.Single(tracker.ReadQualifiedReadOnlyRefusalEvidence());
+        tracker.AbortExpectedServerRestart();
+        Assert.Empty(tracker.ReadQualifiedReadOnlyRefusalEvidence());
+
         tracker.Track("generation", RequestUrl, "GET");
         tracker.BeginExpectedServerRestart();
         Assert.True(tracker.ProcessLoadingFailed("generation", canceled: false, "net::ERR_CONNECTION_REFUSED"));
@@ -540,9 +562,13 @@ public sealed partial class BrowserFlowTests
             await browser.WaitForExpressionAsync("document.getElementById('workspaceStatus').textContent.includes('Initialized')");
             Assert.True(await browser.EvaluateBooleanAsync("Array.from({ length: sessionStorage.length }, (_, index) => sessionStorage.getItem(sessionStorage.key(index))).some(value => value && value.includes('unsaved restart draft'))"), "The unsaved draft storage was cleared during host recovery.");
             await browser.EndExpectedServerRestartAsync();
-            var restartProvenance = await browser.WriteExpectedRestartProvenanceAsync(Path.Combine(workspace.RootPath, "expected-restart-qualified-refusals.txt"));
+            var restartProvenanceDirectory = GetBrowserE2EArtifactDirectory(nameof(Default_chat_recovers_in_place_after_process_restart_and_preserves_unsaved_draft));
+            Directory.CreateDirectory(restartProvenanceDirectory);
+            var restartProvenancePath = Path.Combine(restartProvenanceDirectory, "expected-restart-qualified-refusals.txt");
+            var restartProvenance = await browser.WriteExpectedRestartProvenanceAsync(restartProvenancePath);
             Assert.Equal("declaredReadOnlyGetTargets=4", restartProvenance[0]);
             Assert.All(restartProvenance.Skip(1), evidence => Assert.Contains("; method=GET; target=/api/", evidence, StringComparison.Ordinal));
+            Assert.Equal(restartProvenance, await File.ReadAllLinesAsync(restartProvenancePath));
             await browser.WaitForExpressionAsync("document.getElementById('transcript').textContent.includes('browser-first-turn') && document.getElementById('transcript').textContent.includes('browser response: browser-first-turn')");
             Assert.Equal(1, await browser.EvaluateInt32Async("Array.from(document.querySelectorAll('#transcript .message.user')).filter(message => message.textContent.includes('browser-first-turn')).length"));
             Assert.Equal(1, await browser.EvaluateInt32Async("Array.from(document.querySelectorAll('#transcript .message.agent')).filter(message => message.textContent.includes('browser response: browser-first-turn')).length"));
@@ -2371,11 +2397,7 @@ public sealed partial class BrowserFlowTests
 
     private static async Task WriteFailureDiagnosticsAsync(string scenario, HeadlessBrowserSession? browser, ExternalWebApplicationProcess? app, string? retiredServerOutput = null, string? profileMutationLifecycle = null)
     {
-        var configuredRoot = Environment.GetEnvironmentVariable("EMBODYSENSE_BROWSER_E2E_ARTIFACTS");
-        var root = string.IsNullOrWhiteSpace(configuredRoot)
-            ? Path.GetFullPath(Path.Combine("tests", "EmbodySense.E2ETests", "TestResults", "BrowserE2E"))
-            : Path.GetFullPath(configuredRoot);
-        var directory = Path.Combine(root, scenario);
+        var directory = GetBrowserE2EArtifactDirectory(scenario);
         Directory.CreateDirectory(directory);
         if (browser is not null)
         {
@@ -2396,6 +2418,15 @@ public sealed partial class BrowserFlowTests
         {
             await File.WriteAllTextAsync(Path.Combine(directory, "profile-mutation-lifecycle.json"), profileMutationLifecycle);
         }
+    }
+
+    private static string GetBrowserE2EArtifactDirectory(string scenario)
+    {
+        var configuredRoot = Environment.GetEnvironmentVariable("EMBODYSENSE_BROWSER_E2E_ARTIFACTS");
+        var root = string.IsNullOrWhiteSpace(configuredRoot)
+            ? Path.GetFullPath(Path.Combine("tests", "EmbodySense.E2ETests", "TestResults", "BrowserE2E"))
+            : Path.GetFullPath(configuredRoot);
+        return Path.Combine(root, scenario);
     }
 
     private sealed class BrowserCapabilityArtifactVerifier : ICapabilityArtifactTrustVerifier
@@ -3255,16 +3286,17 @@ public sealed partial class BrowserFlowTests
 
         private bool IsExpectedServerRestartHttpResponse(JsonElement response, double statusCode)
         {
-            return statusCode == 401
-                && _requestTracker.IsExpectedServerRestart()
-                && response.TryGetProperty("url", out var url)
-                && url.ValueKind == JsonValueKind.String
-                && ContainsTargetAuthority(url.GetString());
+            var url = response.TryGetProperty("url", out var urlValue) && urlValue.ValueKind == JsonValueKind.String
+                ? urlValue.GetString()
+                : null;
+            return IsExpectedServerRestartHttpResponseForTest(_requestTracker.IsExpectedServerRestart(), statusCode, url, _requestTracker.TargetAuthority);
         }
 
-        private bool ContainsTargetAuthority(string? value)
+        internal static bool IsExpectedServerRestartHttpResponseForTest(bool expectedServerRestart, double statusCode, string? url, string targetAuthority)
         {
-            return value?.Contains(_requestTracker.TargetAuthority, StringComparison.OrdinalIgnoreCase) == true;
+            return statusCode == 401
+                && expectedServerRestart
+                && url?.Contains(targetAuthority, StringComparison.OrdinalIgnoreCase) == true;
         }
 
         private async Task AcceptJavaScriptDialogAsync()

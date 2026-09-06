@@ -102,6 +102,8 @@ internal sealed class ExpectedServerRestartRequestTracker
                 _capturedExpectedServerRestartRequests.Clear();
                 _requestProvenance.Clear();
                 _terminalCorrelations.Clear();
+                _qualifiedReadOnlyRefusalEvidence.Clear();
+                _qualifiedReadOnlyRefusalEvidenceKeys.Clear();
                 Interlocked.Exchange(ref _expectedServerRestart, Idle);
             }
         }
