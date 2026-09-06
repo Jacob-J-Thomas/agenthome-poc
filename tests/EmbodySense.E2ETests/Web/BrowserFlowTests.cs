@@ -1228,6 +1228,15 @@ public sealed partial class BrowserFlowTests
         }
         catch
         {
+            try
+            {
+                profileMutationLifecycle = await CaptureProfileMutationLifecycleAsync(browser, staleBrowser);
+            }
+            catch
+            {
+                // The causal probe is supplemental; preserve the original scenario failure.
+            }
+
             await WriteFailureDiagnosticsAsync(nameof(Browser_preserves_server_owned_profile_fallback_order_override_conflicts_and_safe_text), browser, app, profileMutationLifecycle: profileMutationLifecycle);
             throw;
         }
@@ -2192,6 +2201,37 @@ public sealed partial class BrowserFlowTests
     {
         var snapshot = await new ConversationMemoryStore(new WorkspacePaths(workspace.RootPath)).LoadConversationHistorySnapshotAsync(50, 400, 4_000_000);
         return string.Join(Environment.NewLine, snapshot.Transcripts.SelectMany(transcript => transcript.Lines));
+    }
+
+    private static async Task<string> CaptureProfileMutationLifecycleAsync(HeadlessBrowserSession browser, HeadlessBrowserSession? staleBrowser)
+    {
+        using var captureTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        var current = await CaptureProfileMutationAsync(browser, "JSON.stringify(window.__profileCurrentMutation ?? null)", captureTimeout.Token);
+        var stale = await CaptureProfileMutationAsync(staleBrowser, "JSON.stringify(window.__profileConflictMutation ?? null)", captureTimeout.Token);
+        return JsonSerializer.Serialize(new { schemaVersion = 1, captureStatus = new { current = current.Status, stale = stale.Status }, currentMutation = current.Mutation, staleMutation = stale.Mutation }, _jsonOptions);
+    }
+
+    private static async Task<(string Status, JsonElement? Mutation)> CaptureProfileMutationAsync(HeadlessBrowserSession? browser, string expression, CancellationToken cancellationToken)
+    {
+        if (browser is null)
+        {
+            return ("tab-unavailable", null);
+        }
+
+        try
+        {
+            var serializedMutation = await browser.EvaluateStringAsync(expression, cancellationToken);
+            using var mutation = JsonDocument.Parse(serializedMutation);
+            return mutation.RootElement.ValueKind == JsonValueKind.Null ? ("not-recorded", null) : ("captured", mutation.RootElement.Clone());
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return ("capture-timed-out", null);
+        }
+        catch
+        {
+            return ("capture-failed", null);
+        }
     }
 
     private static async Task WriteFailureDiagnosticsAsync(string scenario, HeadlessBrowserSession? browser, ExternalWebApplicationProcess? app, string? retiredServerOutput = null, string? profileMutationLifecycle = null)
