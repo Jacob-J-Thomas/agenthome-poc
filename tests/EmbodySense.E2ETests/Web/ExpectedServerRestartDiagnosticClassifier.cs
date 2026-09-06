@@ -30,7 +30,8 @@ internal static class ExpectedServerRestartDiagnosticClassifier
         }
 
         return IsExpectedServerRestartUrl(requestUrl, targetAuthority)
-            && (errorText?.Contains("ERR_CONNECTION_RESET", StringComparison.OrdinalIgnoreCase) == true
+            && (errorText?.Contains("ERR_CONNECTION_REFUSED", StringComparison.OrdinalIgnoreCase) == true
+            || errorText?.Contains("ERR_CONNECTION_RESET", StringComparison.OrdinalIgnoreCase) == true
             || errorText?.Contains("failed", StringComparison.OrdinalIgnoreCase) == true);
     }
 
@@ -54,7 +55,7 @@ internal static class ExpectedServerRestartDiagnosticClassifier
             return false;
         }
 
-        if (qualifiedReadOnlyRefusal && ContainsExactConnectionRefused(text))
+        if (qualifiedReadOnlyRefusal && IsQualifiedConnectionRefusedLog(text))
         {
             return true;
         }
@@ -73,6 +74,7 @@ internal static class ExpectedServerRestartDiagnosticClassifier
         var expected = text?.Contains("401 (Unauthorized)", StringComparison.OrdinalIgnoreCase) == true
             || (text?.Contains("WebSocket", StringComparison.OrdinalIgnoreCase) == true || expectedRoute)
             && (text?.Contains("failed", StringComparison.OrdinalIgnoreCase) == true
+                || text?.Contains("ERR_CONNECTION_REFUSED", StringComparison.OrdinalIgnoreCase) == true
                 || isConnectionReset);
 
         return expected && (!isConnectionReset || expectedRoute);
@@ -115,9 +117,10 @@ internal static class ExpectedServerRestartDiagnosticClassifier
         return value?.Contains(targetAuthority, StringComparison.OrdinalIgnoreCase) == true;
     }
 
-    private static bool ContainsExactConnectionRefused(string? value)
+    private static bool IsQualifiedConnectionRefusedLog(string? value)
     {
-        return value?.Contains("net::ERR_CONNECTION_REFUSED", StringComparison.Ordinal) == true;
+        return string.Equals(value, "Failed to load resource: net::ERR_CONNECTION_REFUSED", StringComparison.Ordinal)
+            || string.Equals(value?.Trim(), "net::ERR_CONNECTION_REFUSED", StringComparison.Ordinal);
     }
 
     private static bool IsExactConnectionRefused(string? value)

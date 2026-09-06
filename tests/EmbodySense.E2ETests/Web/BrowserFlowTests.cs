@@ -128,6 +128,8 @@ public sealed partial class BrowserFlowTests
 
         Assert.True(ExpectedServerRestartDiagnosticClassifier.IsExpectedNetworkFailure(true, false, "ws://127.0.0.1:5001/hubs/session", "net::ERR_CONNECTION_RESET", TargetAuthority));
         Assert.True(ExpectedServerRestartDiagnosticClassifier.IsExpectedNetworkFailure(true, false, "https://127.0.0.1:5001/api/session", "net::ERR_CONNECTION_RESET", TargetAuthority));
+        Assert.True(ExpectedServerRestartDiagnosticClassifier.IsExpectedNetworkFailure(true, false, "ws://127.0.0.1:5001/hubs/session", "net::ERR_CONNECTION_REFUSED", TargetAuthority));
+        Assert.True(ExpectedServerRestartDiagnosticClassifier.IsExpectedNetworkFailure(true, false, "https://127.0.0.1:5001/api/session", "net::ERR_CONNECTION_REFUSED", TargetAuthority));
         Assert.True(ExpectedServerRestartDiagnosticClassifier.IsExpectedNetworkFailure(false, true, "wss://127.0.0.1:5001/hubs/session", "net::ERR_CONNECTION_RESET", TargetAuthority));
         Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedNetworkFailure(false, false, "ws://127.0.0.1:5001/hubs/session", "net::ERR_CONNECTION_RESET", TargetAuthority));
         Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedNetworkFailure(true, false, "https://127.0.0.1:5001/", "net::ERR_CONNECTION_RESET", TargetAuthority));
@@ -154,6 +156,7 @@ public sealed partial class BrowserFlowTests
 
         Assert.True(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "WebSocket failed: net::ERR_CONNECTION_RESET", "ws://127.0.0.1:5001/hubs/session", null, TargetAuthority));
         Assert.True(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "fetch failed: net::ERR_CONNECTION_RESET", "https://127.0.0.1:5001/api/session", null, TargetAuthority));
+        Assert.True(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "fetch failed: net::ERR_CONNECTION_REFUSED", "https://127.0.0.1:5001/api/session", null, TargetAuthority));
         Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "fetch failed: net::ERR_CONNECTION_RESET", "https://127.0.0.1:5001/", null, TargetAuthority));
         Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "WebSocket failed: net::ERR_CONNECTION_RESET", "ws://example.test/hubs/session", null, TargetAuthority));
         Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "console", "WebSocket failed: net::ERR_CONNECTION_RESET", "ws://127.0.0.1:5001/hubs/session", null, TargetAuthority));
@@ -386,14 +389,19 @@ public sealed partial class BrowserFlowTests
 
         Assert.True(tracker.ProcessLoadingFailed("failure-before-log", canceled: false, "net::ERR_CONNECTION_REFUSED"));
         tracker.EndExpectedServerRestart();
-        Assert.True(tracker.IsExpectedServerRestartLogEntry("failure-before-log", "network", "fetch failed: net::ERR_CONNECTION_REFUSED", null));
+        Assert.True(tracker.IsExpectedServerRestartLogEntry("failure-before-log", "network", "Failed to load resource: net::ERR_CONNECTION_REFUSED", null));
 
         tracker.BeginExpectedServerRestart();
         tracker.Track("log-before-failure", RequestUrl, "GET");
-        Assert.True(tracker.IsExpectedServerRestartLogEntry("log-before-failure", "network", "fetch failed: net::ERR_CONNECTION_REFUSED", RequestUrl));
+        Assert.True(tracker.IsExpectedServerRestartLogEntry("log-before-failure", "network", "Failed to load resource: net::ERR_CONNECTION_REFUSED", RequestUrl));
         Assert.True(tracker.ProcessLoadingFailed("log-before-failure", canceled: false, "net::ERR_CONNECTION_REFUSED"));
 
-        Assert.All(tracker.ReadQualifiedReadOnlyRefusalEvidence(), evidence => Assert.Contains("generation=2; method=GET; target=/api/loop-runs?maximumCount=50", evidence, StringComparison.Ordinal));
+        var evidence = tracker.ReadQualifiedReadOnlyRefusalEvidence();
+        var summary = tracker.ReadQualifiedReadOnlyRefusalEvidenceSummary();
+        Assert.Single(evidence);
+        Assert.Contains("generation=2; method=GET; target=/api/loop-runs?maximumCount=50", evidence[0], StringComparison.Ordinal);
+        Assert.Equal("declaredReadOnlyGetTargets=1", summary[0]);
+        Assert.Equal(evidence[0], summary[1]);
     }
 
     [Fact]
@@ -426,6 +434,13 @@ public sealed partial class BrowserFlowTests
         Assert.False(tracker.IsExpectedServerRestartLogEntry("unknown", "network", "fetch failed: net::ERR_CONNECTION_REFUSED", RequestUrl));
         Assert.False(tracker.ProcessLoadingFailed("unknown", canceled: false, "net::ERR_CONNECTION_REFUSED"));
 
+        var logTracker = new ExpectedServerRestartRequestTracker(TargetAuthority);
+        logTracker.DeclareReadOnlyGetTargets([Target]);
+        logTracker.BeginExpectedServerRestart();
+        logTracker.Track("wrong-route", RequestUrl, "GET");
+        Assert.False(logTracker.IsExpectedServerRestartLogEntry("wrong-route", "network", "Failed to load resource: net::ERR_CONNECTION_REFUSED", "https://127.0.0.1:5001/api/loop-runs/quota"));
+        Assert.False(logTracker.IsExpectedServerRestartLogEntry("wrong-route", "network", "Failed to load resource: net::ERR_CONNECTION_REFUSED extra", RequestUrl));
+
         var errorTracker = new ExpectedServerRestartRequestTracker(TargetAuthority);
         errorTracker.DeclareReadOnlyGetTargets([Target]);
         errorTracker.BeginExpectedServerRestart();
@@ -454,6 +469,32 @@ public sealed partial class BrowserFlowTests
         tracker.BeginExpectedServerRestart();
         Assert.False(tracker.IsExpectedServerRestartLogEntry("generation", "network", "fetch failed: net::ERR_CONNECTION_REFUSED", null));
         Assert.Empty(tracker.ReadQualifiedReadOnlyRefusalEvidence());
+    }
+
+    [Fact]
+    public void Restart_request_tracking_rejects_invalid_declarations_and_deduplicates_exact_targets()
+    {
+        const string Target = "/api/loop-runs?maximumCount=50";
+        const string RequestUrl = "https://127.0.0.1:5001/api/loop-runs?maximumCount=50";
+        var tracker = new ExpectedServerRestartRequestTracker("127.0.0.1:5001");
+        tracker.DeclareReadOnlyGetTargets([null!, "", "//127.0.0.1:5001/api/loop-runs?maximumCount=50", Target, Target]);
+        Assert.Equal("declaredReadOnlyGetTargets=1", tracker.ReadQualifiedReadOnlyRefusalEvidenceSummary()[0]);
+        tracker.Track("duplicate", RequestUrl, "GET");
+        tracker.BeginExpectedServerRestart();
+        Assert.True(tracker.ProcessLoadingFailed("duplicate", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+        Assert.True(tracker.IsExpectedServerRestartLogEntry("duplicate", "network", "Failed to load resource: net::ERR_CONNECTION_REFUSED", null));
+        Assert.Single(tracker.ReadQualifiedReadOnlyRefusalEvidence());
+
+        var emptyTracker = new ExpectedServerRestartRequestTracker("127.0.0.1:5001");
+        emptyTracker.DeclareReadOnlyGetTargets([]);
+        Assert.Equal("declaredReadOnlyGetTargets=0", emptyTracker.ReadQualifiedReadOnlyRefusalEvidenceSummary()[0]);
+        emptyTracker.Track("empty", RequestUrl, "GET");
+        emptyTracker.BeginExpectedServerRestart();
+        Assert.False(emptyTracker.ProcessLoadingFailed("empty", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+
+        var cappedTracker = new ExpectedServerRestartRequestTracker("127.0.0.1:5001");
+        cappedTracker.DeclareReadOnlyGetTargets(Enumerable.Range(0, 17).Select(index => "/api/test?index=" + index));
+        Assert.Equal("declaredReadOnlyGetTargets=16", cappedTracker.ReadQualifiedReadOnlyRefusalEvidenceSummary()[0]);
     }
 
     [InstalledBrowserFact]
@@ -499,6 +540,9 @@ public sealed partial class BrowserFlowTests
             await browser.WaitForExpressionAsync("document.getElementById('workspaceStatus').textContent.includes('Initialized')");
             Assert.True(await browser.EvaluateBooleanAsync("Array.from({ length: sessionStorage.length }, (_, index) => sessionStorage.getItem(sessionStorage.key(index))).some(value => value && value.includes('unsaved restart draft'))"), "The unsaved draft storage was cleared during host recovery.");
             await browser.EndExpectedServerRestartAsync();
+            var restartProvenance = await browser.WriteExpectedRestartProvenanceAsync(Path.Combine(workspace.RootPath, "expected-restart-qualified-refusals.txt"));
+            Assert.Equal("declaredReadOnlyGetTargets=4", restartProvenance[0]);
+            Assert.All(restartProvenance.Skip(1), evidence => Assert.Contains("; method=GET; target=/api/", evidence, StringComparison.Ordinal));
             await browser.WaitForExpressionAsync("document.getElementById('transcript').textContent.includes('browser-first-turn') && document.getElementById('transcript').textContent.includes('browser response: browser-first-turn')");
             Assert.Equal(1, await browser.EvaluateInt32Async("Array.from(document.querySelectorAll('#transcript .message.user')).filter(message => message.textContent.includes('browser-first-turn')).length"));
             Assert.Equal(1, await browser.EvaluateInt32Async("Array.from(document.querySelectorAll('#transcript .message.agent')).filter(message => message.textContent.includes('browser response: browser-first-turn')).length"));
@@ -2756,7 +2800,14 @@ public sealed partial class BrowserFlowTests
             }
 
             await File.WriteAllLinesAsync(Path.Combine(directory, "browser-events.txt"), GetDiagnosticsSnapshot());
-            await File.WriteAllLinesAsync(Path.Combine(directory, "expected-restart-qualified-refusals.txt"), _requestTracker.ReadQualifiedReadOnlyRefusalEvidence());
+            await File.WriteAllLinesAsync(Path.Combine(directory, "expected-restart-qualified-refusals.txt"), _requestTracker.ReadQualifiedReadOnlyRefusalEvidenceSummary());
+        }
+
+        public async Task<IReadOnlyList<string>> WriteExpectedRestartProvenanceAsync(string filePath)
+        {
+            var evidence = _requestTracker.ReadQualifiedReadOnlyRefusalEvidenceSummary();
+            await File.WriteAllLinesAsync(filePath, evidence);
+            return evidence;
         }
 
         public async ValueTask DisposeAsync()

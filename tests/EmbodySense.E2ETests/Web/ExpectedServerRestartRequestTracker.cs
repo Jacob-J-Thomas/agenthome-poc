@@ -5,6 +5,7 @@ namespace EmbodySense.E2ETests.Web;
 internal sealed class ExpectedServerRestartRequestTracker
 {
     private const int MaxTrackedSameAuthorityRequests = 1024;
+    private const int MaxDeclaredReadOnlyGetTargets = 16;
     private const int Idle = 0;
     private const int Preparing = 1;
     private const int Active = 2;
@@ -17,6 +18,7 @@ internal sealed class ExpectedServerRestartRequestTracker
     private readonly HashSet<string> _declaredReadOnlyGetTargets = new(StringComparer.Ordinal);
     private readonly Dictionary<string, RestartRequestCorrelation> _terminalCorrelations = new(StringComparer.Ordinal);
     private readonly List<string> _qualifiedReadOnlyRefusalEvidence = [];
+    private readonly HashSet<string> _qualifiedReadOnlyRefusalEvidenceKeys = new(StringComparer.Ordinal);
     private readonly object _gate = new();
     private int _expectedServerRestart;
     private long _restartGeneration;
@@ -39,6 +41,11 @@ internal sealed class ExpectedServerRestartRequestTracker
             {
                 if (TryGetExactPathAndQuery(pathAndQuery, out var exactPathAndQuery))
                 {
+                    if (_declaredReadOnlyGetTargets.Count == MaxDeclaredReadOnlyGetTargets)
+                    {
+                        break;
+                    }
+
                     _declaredReadOnlyGetTargets.Add(exactPathAndQuery);
                 }
             }
@@ -54,6 +61,7 @@ internal sealed class ExpectedServerRestartRequestTracker
             _capturedExpectedServerRestartRequests.Clear();
             _terminalCorrelations.Clear();
             _qualifiedReadOnlyRefusalEvidence.Clear();
+            _qualifiedReadOnlyRefusalEvidenceKeys.Clear();
             Interlocked.Exchange(ref _expectedServerRestart, Preparing);
         }
     }
@@ -303,6 +311,11 @@ internal sealed class ExpectedServerRestartRequestTracker
                 return false;
             }
 
+            if (qualifiedReadOnlyRefusal && !IsExactQualifiedReadOnlyGetRoute(url, correlatedRequestUrl))
+            {
+                return false;
+            }
+
             var expected = ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(
                 expectedServerRestart,
                 beganDuringOutage,
@@ -350,7 +363,7 @@ internal sealed class ExpectedServerRestartRequestTracker
             if (expected)
             {
                 _expectedServerRestartRequests.TryRemove(requestId, out _);
-                if (qualifiedReadOnlyRefusal && ContainsExactConnectionRefused(text))
+                if (qualifiedReadOnlyRefusal && IsQualifiedConnectionRefusedLog(text))
                 {
                     RecordQualifiedReadOnlyRefusalEvidence(requestId, new RestartRequestCorrelation(
                         correlatedRequestUrl!,
@@ -382,6 +395,14 @@ internal sealed class ExpectedServerRestartRequestTracker
         lock (_gate)
         {
             return _qualifiedReadOnlyRefusalEvidence.ToArray();
+        }
+    }
+
+    public IReadOnlyList<string> ReadQualifiedReadOnlyRefusalEvidenceSummary()
+    {
+        lock (_gate)
+        {
+            return ["declaredReadOnlyGetTargets=" + _declaredReadOnlyGetTargets.Count, .. _qualifiedReadOnlyRefusalEvidence];
         }
     }
 
@@ -420,6 +441,21 @@ internal sealed class ExpectedServerRestartRequestTracker
             && (provenance.LiveAtSuccessfulFreeze || provenance.BeganDuringActiveOutage);
     }
 
+    private bool IsExactQualifiedReadOnlyGetRoute(string? suppliedUrl, string? correlatedRequestUrl)
+    {
+        if (!Uri.TryCreate(correlatedRequestUrl, UriKind.Absolute, out var correlatedUri)
+            || !string.Equals(correlatedUri.Authority, _targetAuthority, StringComparison.OrdinalIgnoreCase)
+            || !_declaredReadOnlyGetTargets.Contains(correlatedUri.PathAndQuery))
+        {
+            return false;
+        }
+
+        return suppliedUrl is null
+            || Uri.TryCreate(suppliedUrl, UriKind.Absolute, out var suppliedUri)
+                && string.Equals(suppliedUri.Authority, correlatedUri.Authority, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(suppliedUri.PathAndQuery, correlatedUri.PathAndQuery, StringComparison.Ordinal);
+    }
+
     private static bool TryGetExactPathAndQuery(string? value, out string exactPathAndQuery)
     {
         exactPathAndQuery = string.Empty;
@@ -437,9 +473,10 @@ internal sealed class ExpectedServerRestartRequestTracker
         return Uri.TryCreate(requestUrl, UriKind.Absolute, out var uri) ? uri.PathAndQuery : string.Empty;
     }
 
-    private static bool ContainsExactConnectionRefused(string? value)
+    private static bool IsQualifiedConnectionRefusedLog(string? value)
     {
-        return value?.Contains("net::ERR_CONNECTION_REFUSED", StringComparison.Ordinal) == true;
+        return string.Equals(value, "Failed to load resource: net::ERR_CONNECTION_REFUSED", StringComparison.Ordinal)
+            || string.Equals(value?.Trim(), "net::ERR_CONNECTION_REFUSED", StringComparison.Ordinal);
     }
 
     private static bool IsExactConnectionRefused(string? value)
@@ -449,7 +486,9 @@ internal sealed class ExpectedServerRestartRequestTracker
 
     private void RecordQualifiedReadOnlyRefusalEvidence(string requestId, RestartRequestCorrelation correlation)
     {
-        if (_qualifiedReadOnlyRefusalEvidence.Count < MaxTrackedSameAuthorityRequests)
+        var key = requestId + "\n" + correlation.Generation;
+        if (_qualifiedReadOnlyRefusalEvidence.Count < MaxTrackedSameAuthorityRequests
+            && _qualifiedReadOnlyRefusalEvidenceKeys.Add(key))
         {
             _qualifiedReadOnlyRefusalEvidence.Add($"requestId={requestId}; generation={correlation.Generation}; method={correlation.RequestMethod}; target={correlation.PathAndQuery}");
         }
