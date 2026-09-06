@@ -234,6 +234,9 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
         const string Prompt = "must never dispatch";
         var prepared = await PrepareInterruptedAdmissionAsync(paths, workspace.ServerStatePath, definitionSnapshot, OperationId, Prompt);
         var receiptPath = Path.Combine(paths.CustomLoopInvocationOperationsPath, OperationId + ".json");
+        var receiptBytes = await File.ReadAllBytesAsync(receiptPath);
+        var replacementProbePath = workspace.File("receipt-replacement-probe.tmp");
+        await File.WriteAllBytesAsync(replacementProbePath, receiptBytes);
         var receiptAttributes = File.GetAttributes(receiptPath);
         UnixFileMode? receiptDirectoryMode = null;
         if (OperatingSystem.IsWindows())
@@ -254,6 +257,12 @@ public sealed class CustomLoopRuntimeReceiptRecoveryTests
         LoopRunInvocationResponse response;
         try
         {
+            var replacementFailure = Record.Exception(() => File.Move(replacementProbePath, receiptPath, true));
+            Assert.True(replacementFailure is UnauthorizedAccessException or IOException, "The fixture must deny atomic replacement before runtime invocation.");
+            Assert.Equal(receiptBytes, await File.ReadAllBytesAsync(receiptPath));
+            Assert.True(File.Exists(replacementProbePath));
+            File.Delete(replacementProbePath);
+
             response = await runtime.InvokeCustomLoopAsync(new LoopRunInvocationInput(definitionSnapshot.Id, definitionSnapshot.DefinitionVersion, definitionSnapshot.ContentHash, OperationId, Prompt));
         }
         finally
