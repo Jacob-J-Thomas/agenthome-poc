@@ -176,7 +176,7 @@ public sealed class CrossProcessExclusiveFileLock : IDisposable
         }
     }
 
-    private static int UnixNoFollowFlag => OperatingSystem.IsMacOS() ? 0x100 : 0x20000;
+    private static int UnixNoFollowFlag => OperatingSystem.IsMacOS() ? 0x100 : RuntimeInformation.ProcessArchitecture == Architecture.Arm64 ? 0x8000 : 0x20000;
 
     private static int UnixCloseOnExecFlag => OperatingSystem.IsMacOS() ? 0x1000000 : 0x80000;
 
