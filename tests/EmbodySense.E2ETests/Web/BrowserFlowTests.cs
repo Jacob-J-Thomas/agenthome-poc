@@ -420,6 +420,58 @@ public sealed partial class BrowserFlowTests
     }
 
     [Fact]
+    public void Restart_request_tracking_recomputes_declared_get_eligibility_at_the_successful_freeze()
+    {
+        const string Target = "/api/loop-runs?maximumCount=50";
+        const string RequestUrl = "https://127.0.0.1:5001/api/loop-runs?maximumCount=50";
+        var tracker = new ExpectedServerRestartRequestTracker("127.0.0.1:5001");
+        tracker.PrepareExpectedServerRestart();
+        tracker.Track("failure-before-log", RequestUrl, "GET");
+        tracker.DeclareReadOnlyGetTargets([Target]);
+        tracker.FreezeExpectedServerRestart();
+        Assert.True(tracker.ProcessLoadingFailed("failure-before-log", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+        tracker.EndExpectedServerRestart();
+        Assert.True(tracker.IsExpectedServerRestartLogEntry("failure-before-log", "network", "Failed to load resource: net::ERR_CONNECTION_REFUSED", null));
+
+        tracker.PrepareExpectedServerRestart();
+        tracker.Track("log-before-failure", RequestUrl, "GET");
+        tracker.DeclareReadOnlyGetTargets([Target]);
+        tracker.FreezeExpectedServerRestart();
+        Assert.True(tracker.IsExpectedServerRestartLogEntry("log-before-failure", "network", "Failed to load resource: net::ERR_CONNECTION_REFUSED", RequestUrl));
+        Assert.True(tracker.ProcessLoadingFailed("log-before-failure", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+        Assert.Contains(tracker.ReadQualifiedReadOnlyRefusalEvidenceSummary(), entry => entry.Contains("frozenSnapshot=True", StringComparison.Ordinal) && entry.Contains("rejectionReason=accepted-at-freeze", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Restart_request_tracking_rejects_completed_post_freeze_declared_and_replacement_requests()
+    {
+        const string Target = "/api/loop-runs?maximumCount=50";
+        const string RequestUrl = "https://127.0.0.1:5001/api/loop-runs?maximumCount=50";
+        var completedTracker = new ExpectedServerRestartRequestTracker("127.0.0.1:5001");
+        completedTracker.PrepareExpectedServerRestart();
+        completedTracker.Track("completed", RequestUrl, "GET");
+        completedTracker.Complete("completed");
+        completedTracker.DeclareReadOnlyGetTargets([Target]);
+        completedTracker.FreezeExpectedServerRestart();
+        Assert.False(completedTracker.ProcessLoadingFailed("completed", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+
+        var postFreezeDeclarationTracker = new ExpectedServerRestartRequestTracker("127.0.0.1:5001");
+        postFreezeDeclarationTracker.PrepareExpectedServerRestart();
+        postFreezeDeclarationTracker.Track("post-freeze-declaration", RequestUrl, "GET");
+        postFreezeDeclarationTracker.FreezeExpectedServerRestart();
+        postFreezeDeclarationTracker.DeclareReadOnlyGetTargets([Target]);
+        Assert.False(postFreezeDeclarationTracker.ProcessLoadingFailed("post-freeze-declaration", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+
+        var replacementTracker = new ExpectedServerRestartRequestTracker("127.0.0.1:5001");
+        replacementTracker.DeclareReadOnlyGetTargets([Target]);
+        replacementTracker.BeginExpectedServerRestart();
+        replacementTracker.MarkExpectedReplacementServerStarting();
+        replacementTracker.Track("replacement", RequestUrl, "GET");
+        Assert.False(replacementTracker.ProcessLoadingFailed("replacement", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+        Assert.Contains(replacementTracker.ReadQualifiedReadOnlyRefusalEvidenceSummary(), entry => entry.Contains("rejectionReason=replacement-start", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Restart_request_tracking_keeps_refusals_visible_without_exact_declared_get_provenance()
     {
         const string TargetAuthority = "127.0.0.1:5001";
