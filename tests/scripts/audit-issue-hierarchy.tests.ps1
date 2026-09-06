@@ -341,3 +341,6 @@ try {
 finally {
     Remove-Item -LiteralPath $fixtureRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
+
+# Expected-failure fixtures must not become the successful suite's exit code in the GitHub PowerShell wrapper.
+$global:LASTEXITCODE = 0
