@@ -2,7 +2,6 @@ using EmbodySense.Core.Common.Loops.Custom.Execution;
 using EmbodySense.Core.Common.Loops.Custom;
 using EmbodySense.Core.Application.Loops.Execution.Custom.Models;
 using System.Buffers.Binary;
-using System.Diagnostics;
 using System.IO.Pipes;
 using System.Text;
 using System.Text.Json.Nodes;
@@ -204,14 +203,105 @@ public sealed class CustomLoopWorkspaceExecutionGateTests
         await using var gate = new CustomLoopWorkspaceExecutionGate(paths);
         using var cancellation = new CancellationTokenSource();
         using var registration = gate.RegisterActiveAttempt("run-signal-timeout", cancellation);
-        var startedAt = Stopwatch.GetTimestamp();
 
-        var result = await gate.RequestCancellationAsync("run-signal-timeout", "cancel-signal-timeout");
-        var elapsed = Stopwatch.GetElapsedTime(startedAt);
+        var result = await gate.RequestCancellationAsync("run-signal-timeout", "cancel-signal-timeout").WaitAsync(TimeSpan.FromSeconds(10));
 
         Assert.True(cancellation.IsCancellationRequested);
         Assert.Equal(CustomLoopAttemptCancellationStatus.SignalDelivered, result.Status);
-        Assert.InRange(elapsed, TimeSpan.FromSeconds(1.5), TimeSpan.FromSeconds(8));
+    }
+
+    [Fact]
+    public async Task Unresponsive_attempt_returns_signal_delivery_at_the_semantic_deadline()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var timeProvider = new CancellationAcknowledgementTestTimeProvider();
+        await using var gate = new CustomLoopWorkspaceExecutionGate(paths, null, timeProvider);
+        using var cancellation = new CancellationTokenSource();
+        using var registration = gate.RegisterActiveAttempt("run-semantic-signal-timeout", cancellation);
+
+        var request = gate.RequestCancellationAsync("run-semantic-signal-timeout", "cancel-semantic-signal-timeout");
+
+        Assert.True(cancellation.IsCancellationRequested);
+        Assert.False(request.IsCompleted);
+        timeProvider.Advance(TimeSpan.FromSeconds(2) - TimeSpan.FromTicks(1));
+        Assert.False(request.IsCompleted);
+        timeProvider.Advance(TimeSpan.FromTicks(1));
+        var result = await request.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal(CustomLoopAttemptCancellationStatus.SignalDelivered, result.Status);
+    }
+
+    [Fact]
+    public async Task Blocking_cancellation_callback_cannot_stall_the_semantic_deadline_or_a_second_request()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var timeProvider = new CancellationAcknowledgementTestTimeProvider();
+        await using var gate = new CustomLoopWorkspaceExecutionGate(paths, null, timeProvider);
+        using var firstCancellation = new CancellationTokenSource();
+        using var secondCancellation = new CancellationTokenSource();
+        using var callbackEntered = new ManualResetEventSlim();
+        using var callbackRelease = new ManualResetEventSlim();
+        using var callbackCompleted = new ManualResetEventSlim();
+        using var callback = firstCancellation.Token.Register(() =>
+        {
+            callbackEntered.Set();
+            try
+            {
+                callbackRelease.Wait();
+            }
+            finally
+            {
+                callbackCompleted.Set();
+            }
+        });
+        using var firstRegistration = gate.RegisterActiveAttempt("run-first-blocking-callback", firstCancellation);
+        using var secondRegistration = gate.RegisterActiveAttempt("run-second-blocking-callback", secondCancellation);
+
+        try
+        {
+            var firstRequest = gate.RequestCancellationAsync("run-first-blocking-callback", "cancel-first-blocking-callback");
+            Assert.True(firstCancellation.IsCancellationRequested);
+            Assert.True(callbackEntered.Wait(TimeSpan.FromSeconds(10)), "The first cancellation callback did not reach the deterministic barrier.");
+
+            var secondRequest = gate.RequestCancellationAsync("run-second-blocking-callback", "cancel-second-blocking-callback");
+            Assert.True(secondCancellation.IsCancellationRequested);
+            Assert.False(firstRequest.IsCompleted);
+            Assert.False(secondRequest.IsCompleted);
+            timeProvider.Advance(TimeSpan.FromSeconds(2));
+            var firstResult = await firstRequest.WaitAsync(TimeSpan.FromSeconds(10));
+            var secondResult = await secondRequest.WaitAsync(TimeSpan.FromSeconds(10));
+
+            Assert.Equal(CustomLoopAttemptCancellationStatus.SignalDelivered, firstResult.Status);
+            Assert.Equal(CustomLoopAttemptCancellationStatus.SignalDelivered, secondResult.Status);
+            Assert.False(callbackCompleted.IsSet);
+        }
+        finally
+        {
+            callbackRelease.Set();
+        }
+
+        Assert.True(callbackCompleted.Wait(TimeSpan.FromSeconds(10)), "The first cancellation callback did not exit after its barrier was released.");
+    }
+
+    [Fact]
+    public async Task Throwing_cancellation_callback_does_not_change_unconfirmed_signal_delivery()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var timeProvider = new CancellationAcknowledgementTestTimeProvider();
+        await using var gate = new CustomLoopWorkspaceExecutionGate(paths, null, timeProvider);
+        using var cancellation = new CancellationTokenSource();
+        using var callback = cancellation.Token.Register(() => throw new InvalidOperationException("simulated cancellation callback failure"));
+        using var registration = gate.RegisterActiveAttempt("run-throwing-callback", cancellation);
+
+        var request = gate.RequestCancellationAsync("run-throwing-callback", "cancel-throwing-callback");
+        timeProvider.Advance(TimeSpan.FromSeconds(2));
+        var result = await request.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.True(cancellation.IsCancellationRequested);
+        Assert.Equal(CustomLoopAttemptCancellationStatus.SignalDelivered, result.Status);
     }
 
     [Fact]
