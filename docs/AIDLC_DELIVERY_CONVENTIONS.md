@@ -84,6 +84,30 @@ The implementation loop ends as `READY`, `QUEUED`, `BLOCKED`, or `FAILED`. `BLOC
 - Record exact base/head SHAs and executable verification. A restack without a changed effective patch does not consume another review pass.
 - Never merge without explicit user authority and a current green head.
 
+## Current-intent handoff
+
+Long-running delivery work may keep one schema-1 handoff at `.aidlc/local/delivery-handoff.json`. The directory is repository-local and ignored. It records the current objective and work item, exact base/head and intended write set, provenance, protected worktree observations, the next action, and retained attempt, gate, and review counters.
+
+Use the repository script to write, read, or check it:
+
+```powershell
+./scripts/delivery-handoff.ps1 -Operation Write -InputPath ./handoff-input.json -ExpectedDocumentSha256 absent
+./scripts/delivery-handoff.ps1 -Operation Read
+./scripts/delivery-handoff.ps1 -Operation Check -ApprovedProtectedWorktreePath /exact/authorized/worktree
+```
+
+Every update is a byte-hash compare-and-swap. Use the SHA-256 returned by Read or Check as `-ExpectedDocumentSha256`; a stale writer receives `cas_conflict` and cannot restore superseded instructions. The writer serializes bounded canonical JSON and replaces the file under an exclusive local lock. It does not claim universal power-loss durability on every filesystem.
+
+All operations reject symlink or reparse-point escapes through `.aidlc`, `.aidlc/local`, the handoff, or its lock before reading or writing fixed local state. Document reads check file length before allocation and stop after a bounded 256 KiB plus one-byte growth probe. Check gives each Git query one two-second execution-and-drain deadline and caps each redirected stream at 64 KiB; a timeout, descendant-held pipe, or output overflow becomes unavailable local evidence and never returns captured output.
+
+Before resuming work, run Check and revalidate its provenance against current user/session authority. `current` means only that the document agrees with the local repository, counters, recorded validity condition, and explicitly approved protected paths. The document always says `isAuthorityGrant: false` and `requiresIndependentRevalidation: true`; neither the file nor the script authenticates a user, grants permission, renews a budget, or executes the recorded next action.
+
+Authority validity may use an explicit UTC expiry or last until the named goal is completed or the authority is revoked. Goal completion and revocation require an atomic handoff update with referenced evidence; they never arise from an invented calendar deadline. Ordinary review capacity is one full review and one targeted review. A third review for a newly introduced credible P0/P1 and a clinical recovery extension are separate inactive records that require their own operative decision and eligibility evidence.
+
+Protected worktrees may belong to another clone. Check never scans directories or assumes they appear in the active clone's worktree list. It reads an external worktree only when the caller supplies that exact stored path through `-ApprovedProtectedWorktreePath`, then compares repository identity, HEAD, and a content-free status hash without modifying it.
+
+The schema excludes environment maps, transcripts, tool-output blobs, commands, and credential fields. The writer redacts documented authorization headers, credential assignments, and recognized token shapes, but this is a bounded defense: regular expressions cannot identify every secret. Supply short metadata references only and never put secrets in a handoff. The script creates no issue, PR, task, scheduler, service, network request, or external side effect.
+
 ## Read-only audit
 
 Run the hierarchy audit from an authenticated checkout:

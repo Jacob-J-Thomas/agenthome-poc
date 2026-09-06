@@ -1,0 +1,228 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/Jacob-J-Thomas/agenthome-poc/blob/main/scripts/delivery-handoff.schema.json",
+  "title": "EmbodySense delivery handoff schema 1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "documentRevision", "updatedAtUtc", "objective", "activeWork", "repository", "authorityRecord", "protectedWorktrees", "nextAction", "budgets", "lastEvidenceAtUtc", "evidence", "operativeDecisions", "supersededInstructions"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "documentRevision": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
+    "updatedAtUtc": { "$ref": "#/definitions/utcTimestamp" },
+    "objective": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["summary", "sourceDecisionId"],
+      "properties": {
+        "summary": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "sourceDecisionId": { "$ref": "#/definitions/id" }
+      }
+    },
+    "activeWork": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["campaign", "phase", "unitOfWork", "bolt", "sourceDecisionId"],
+      "properties": {
+        "campaign": { "$ref": "#/definitions/issueNumber" },
+        "phase": { "$ref": "#/definitions/issueNumber" },
+        "unitOfWork": { "$ref": "#/definitions/issueNumber" },
+        "bolt": { "$ref": "#/definitions/issueNumber" },
+        "sourceDecisionId": { "$ref": "#/definitions/id" }
+      }
+    },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identity", "worktreePath", "worktreePathEvidenceId", "branch", "baseSha", "headSha", "intendedWriteSet"],
+      "properties": {
+        "identity": { "$ref": "#/definitions/repositoryIdentity" },
+        "worktreePath": { "$ref": "#/definitions/path" },
+        "worktreePathEvidenceId": { "$ref": "#/definitions/id" },
+        "branch": { "type": "string", "minLength": 1, "maxLength": 255, "pattern": "^[^\\u0000-\\u001f~^:?*\\\\]+$" },
+        "baseSha": { "$ref": "#/definitions/gitSha" },
+        "headSha": { "$ref": "#/definitions/gitSha" },
+        "intendedWriteSet": { "type": "array", "minItems": 1, "maxItems": 128, "uniqueItems": true, "items": { "$ref": "#/definitions/repositoryRelativePath" } }
+      }
+    },
+    "authorityRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceDecisionIds", "recordedCapabilities", "expiry", "isAuthorityGrant", "requiresIndependentRevalidation"],
+      "properties": {
+        "sourceDecisionIds": { "$ref": "#/definitions/idSet" },
+        "recordedCapabilities": { "type": "array", "minItems": 1, "maxItems": 32, "uniqueItems": true, "items": { "$ref": "#/definitions/id" } },
+        "expiry": { "$ref": "#/definitions/authorityExpiry" },
+        "isAuthorityGrant": { "const": false },
+        "requiresIndependentRevalidation": { "const": true }
+      }
+    },
+    "protectedWorktrees": { "type": "array", "maxItems": 32, "items": { "$ref": "#/definitions/protectedWorktree" } },
+    "nextAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "description", "sourceDecisionId", "requiredCapabilities", "requiredBudgetKeys"],
+      "properties": {
+        "kind": { "enum": ["implement", "run-gate", "review", "publish-pr", "merge", "revalidate", "stop"] },
+        "description": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "sourceDecisionId": { "$ref": "#/definitions/id" },
+        "requiredCapabilities": { "type": "array", "maxItems": 32, "uniqueItems": true, "items": { "$ref": "#/definitions/id" } },
+        "requiredBudgetKeys": { "type": "array", "maxItems": 6, "uniqueItems": true, "items": { "enum": ["implementationAttempts", "gateRuns", "fullReviews", "targetedReviews", "thirdReviewForNewP0P1", "clinicalRecoveryExtension"] } }
+      }
+    },
+    "budgets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["implementationAttempts", "gateRuns", "fullReviews", "targetedReviews", "thirdReviewForNewP0P1", "clinicalRecoveryExtension"],
+      "properties": {
+        "implementationAttempts": { "$ref": "#/definitions/ordinaryBudget" },
+        "gateRuns": { "$ref": "#/definitions/ordinaryBudget" },
+        "fullReviews": { "$ref": "#/definitions/oneOrdinaryBudget" },
+        "targetedReviews": { "$ref": "#/definitions/oneOrdinaryBudget" },
+        "thirdReviewForNewP0P1": { "$ref": "#/definitions/exceptionalBudget" },
+        "clinicalRecoveryExtension": { "$ref": "#/definitions/exceptionalBudget" }
+      }
+    },
+    "lastEvidenceAtUtc": { "$ref": "#/definitions/utcTimestamp" },
+    "evidence": { "type": "array", "minItems": 1, "maxItems": 128, "items": { "$ref": "#/definitions/evidence" } },
+    "operativeDecisions": { "type": "array", "minItems": 1, "maxItems": 64, "items": { "$ref": "#/definitions/operativeDecision" } },
+    "supersededInstructions": { "type": "array", "maxItems": 64, "items": { "$ref": "#/definitions/supersededInstruction" } }
+  },
+  "definitions": {
+    "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
+    "idSet": { "type": "array", "minItems": 1, "maxItems": 64, "uniqueItems": true, "items": { "$ref": "#/definitions/id" } },
+    "issueNumber": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
+    "gitSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "path": { "type": "string", "minLength": 1, "maxLength": 1024, "pattern": "^[^\\u0000-\\u001f]+$" },
+    "repositoryRelativePath": { "type": "string", "minLength": 1, "maxLength": 1024, "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(?:^|/)\\.{1,2}(?:/|$))[^\\u0000-\\u001f\\\\]+$" },
+    "utcTimestamp": { "type": "string", "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\\.[0-9]{1,7})?Z$" },
+    "repositoryIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "host", "owner", "name", "sourceEvidenceId"],
+      "properties": {
+        "provider": { "const": "github" },
+        "host": { "type": "string", "minLength": 1, "maxLength": 253, "pattern": "^[A-Za-z0-9.-]+$" },
+        "owner": { "type": "string", "minLength": 1, "maxLength": 255, "pattern": "^[A-Za-z0-9_.-]+$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 255, "pattern": "^[A-Za-z0-9_.-]+$" },
+        "sourceEvidenceId": { "$ref": "#/definitions/id" }
+      }
+    },
+    "authorityExpiry": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "expiresAtUtc", "status", "terminalEvidenceIds"],
+          "properties": {
+            "kind": { "const": "utc" },
+            "expiresAtUtc": { "$ref": "#/definitions/utcTimestamp" },
+            "status": { "enum": ["active", "completed", "revoked"] },
+            "terminalEvidenceIds": { "type": "array", "maxItems": 16, "uniqueItems": true, "items": { "$ref": "#/definitions/id" } }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "goalReference", "status", "terminalEvidenceIds"],
+          "properties": {
+            "kind": { "const": "until-goal-completion-or-revocation" },
+            "goalReference": { "type": "string", "minLength": 1, "maxLength": 1024 },
+            "status": { "enum": ["active", "completed", "revoked"] },
+            "terminalEvidenceIds": { "type": "array", "maxItems": 16, "uniqueItems": true, "items": { "$ref": "#/definitions/id" } }
+          }
+        }
+      ]
+    },
+    "ordinaryBudget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["limit", "consumedAtLeast", "historyComplete"],
+      "properties": {
+        "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "consumedAtLeast": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "historyComplete": { "type": "boolean" }
+      }
+    },
+    "oneOrdinaryBudget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["limit", "consumedAtLeast", "historyComplete"],
+      "properties": {
+        "limit": { "const": 1 },
+        "consumedAtLeast": { "type": "integer", "minimum": 0, "maximum": 1 },
+        "historyComplete": { "type": "boolean" }
+      }
+    },
+    "exceptionalBudget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["limit", "consumedAtLeast", "historyComplete", "activated", "activationDecisionIds", "eligibilityEvidenceIds"],
+      "properties": {
+        "limit": { "const": 1 },
+        "consumedAtLeast": { "type": "integer", "minimum": 0, "maximum": 1 },
+        "historyComplete": { "type": "boolean" },
+        "activated": { "type": "boolean" },
+        "activationDecisionIds": { "type": "array", "maxItems": 16, "uniqueItems": true, "items": { "$ref": "#/definitions/id" } },
+        "eligibilityEvidenceIds": { "type": "array", "maxItems": 16, "uniqueItems": true, "items": { "$ref": "#/definitions/id" } }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "reference", "observedAtUtc"],
+      "properties": {
+        "kind": { "enum": ["user-instruction", "issue", "plan", "repository", "review-receipt", "gate-receipt", "historical-instruction"] },
+        "reference": { "type": "string", "minLength": 1, "maxLength": 1024 },
+        "observedAtUtc": { "$ref": "#/definitions/utcTimestamp" }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "reference", "observedAtUtc"],
+      "properties": {
+        "id": { "$ref": "#/definitions/id" },
+        "kind": { "enum": ["repository", "local-path", "user-instruction", "issue", "plan", "review-receipt", "gate-receipt"] },
+        "reference": { "type": "string", "minLength": 1, "maxLength": 1024 },
+        "observedAtUtc": { "$ref": "#/definitions/utcTimestamp" },
+        "sha256": { "$ref": "#/definitions/digest" }
+      }
+    },
+    "operativeDecision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "statement", "source"],
+      "properties": {
+        "id": { "$ref": "#/definitions/id" },
+        "statement": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "source": { "$ref": "#/definitions/source" }
+      }
+    },
+    "supersededInstruction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "summary", "source", "supersededByDecisionId"],
+      "properties": {
+        "id": { "$ref": "#/definitions/id" },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "source": { "$ref": "#/definitions/source" },
+        "supersededByDecisionId": { "$ref": "#/definitions/id" }
+      }
+    },
+    "protectedWorktree": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "pathEvidenceId", "repositoryIdentity", "headSha", "statusSha256", "observedAtUtc", "reason"],
+      "properties": {
+        "path": { "$ref": "#/definitions/path" },
+        "pathEvidenceId": { "$ref": "#/definitions/id" },
+        "repositoryIdentity": { "$ref": "#/definitions/repositoryIdentity" },
+        "headSha": { "$ref": "#/definitions/gitSha" },
+        "statusSha256": { "$ref": "#/definitions/digest" },
+        "observedAtUtc": { "$ref": "#/definitions/utcTimestamp" },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 1024 }
+      }
+    }
+  }
+}

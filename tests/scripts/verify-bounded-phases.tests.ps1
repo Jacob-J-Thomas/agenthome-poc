@@ -583,7 +583,7 @@ Assert-Contains -Actual $verifyWorkflow -Expected 'name: verification-contract-r
 foreach ($solutionReceiptPath in @("verification-component-evidence.json", "verification-component-manifest.json", "verification-watchdog-evidence.json", "watchdog.log", "required-test-lanes.json", "required-test-partition.json", "required-execution-tests.json", "required-test-report.json", "coverage-manifest.json", "coverage-summary.json", "**/*.trx")) {
     Assert-Contains -Actual $verifyWorkflow -Expected "tests/VerificationResults/$solutionReceiptPath" -Message "The solution receipt must transport '$solutionReceiptPath'."
 }
-foreach ($staticReceiptPath in @("verify-sdk-diagnostics.tests.ps1.log", "verify-preflight-overlap.tests.ps1.log", "verify-coverage.tests.ps1.log", "verify-bounded-phases.tests.ps1.log", "verify-parallel.tests.ps1.log", "verify-test-inventory.tests.ps1.log", "verify-watchdog.tests.ps1.log", "verify-promotion-fan-in.tests.ps1.log", "frontend-preflight.log", "restore-static.log", "format-whitespace.log", "format-naming-style.log", "git-diff-check.log")) {
+foreach ($staticReceiptPath in @("verify-sdk-diagnostics.tests.ps1.log", "verify-preflight-overlap.tests.ps1.log", "verify-coverage.tests.ps1.log", "verify-bounded-phases.tests.ps1.log", "delivery-handoff.tests.ps1.log", "verify-parallel.tests.ps1.log", "verify-test-inventory.tests.ps1.log", "verify-watchdog.tests.ps1.log", "verify-promotion-fan-in.tests.ps1.log", "frontend-preflight.log", "restore-static.log", "format-whitespace.log", "format-naming-style.log", "git-diff-check.log")) {
     Assert-Contains -Actual $verifyWorkflow -Expected "tests/VerificationResults/Logs/$staticReceiptPath" -Message "The static receipt must transport '$staticReceiptPath'."
 }
 Assert-Contains -Actual $verifyWorkflow -Expected "scripts/verify-promotion-fan-in.ps1" -Message "The protected fan-in must delegate evidence authentication to the repository verifier contract."
@@ -645,7 +645,7 @@ Assert-Contains -Actual $verifyWorkflow -Expected "run: ./scripts/verify-with-wa
 Assert-Contains -Actual $verifyWorkflow -Expected "timeout-minutes: 30" -Message "Workflow setup and diagnostic upload must retain bounded margin outside the measured 1500-second promotion child."
 Assert-Contains -Actual $verifyWorkflow -Expected "timeout-minutes: 15" -Message "The static child job must leave bounded setup and receipt-upload margin around its 600-second verifier."
 Assert-True -Condition ($verifyWorkflow.IndexOf("run: ./tests/scripts/", [StringComparison]::Ordinal) -lt 0) -Message "Repository script tests must execute inside the measured verifier child."
-foreach ($contractScript in @("verify-sdk-diagnostics.tests.ps1", "verify-preflight-overlap.tests.ps1", "verify-coverage.tests.ps1", "verify-bounded-phases.tests.ps1", "verify-parallel.tests.ps1", "verify-test-inventory.tests.ps1", "verify-watchdog.tests.ps1", "verify-promotion-fan-in.tests.ps1")) {
+foreach ($contractScript in @("verify-sdk-diagnostics.tests.ps1", "verify-preflight-overlap.tests.ps1", "verify-coverage.tests.ps1", "verify-bounded-phases.tests.ps1", "delivery-handoff.tests.ps1", "verify-parallel.tests.ps1", "verify-test-inventory.tests.ps1", "verify-watchdog.tests.ps1", "verify-promotion-fan-in.tests.ps1")) {
     Assert-Contains -Actual $verifyScript -Expected $contractScript -Message "The measured verifier must own '$contractScript'."
 }
 Assert-Contains -Actual $stressWorkflow -Expected "./tests/scripts/verify-coverage.tests.ps1" -Message "Scheduled stress verification must retain coverage merger contracts."

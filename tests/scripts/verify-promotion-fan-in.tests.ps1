@@ -35,7 +35,7 @@ function New-TestComponent {
     $resultsRoot = Join-Path $Root "VerificationResults"
     $logsRoot = Join-Path $resultsRoot "Logs"
     New-Item -ItemType Directory -Path $logsRoot -Force | Out-Null
-    $phaseNames = if ($Component -ceq "static-contracts") { @("contract-verify-sdk-diagnostics.tests", "contract-verify-preflight-overlap.tests", "contract-verify-coverage.tests", "contract-verify-bounded-phases.tests", "contract-verify-parallel.tests", "contract-verify-test-inventory.tests", "contract-verify-watchdog.tests", "contract-verify-promotion-fan-in.tests", "frontend-preflight", "restore-static", "format-whitespace", "format-naming-style", "git-diff-check") } else { @() }
+    $phaseNames = if ($Component -ceq "static-contracts") { @("contract-verify-sdk-diagnostics.tests", "contract-verify-preflight-overlap.tests", "contract-verify-coverage.tests", "contract-verify-bounded-phases.tests", "contract-delivery-handoff.tests", "contract-verify-parallel.tests", "contract-verify-test-inventory.tests", "contract-verify-watchdog.tests", "contract-verify-promotion-fan-in.tests", "frontend-preflight", "restore-static", "format-whitespace", "format-naming-style", "git-diff-check") } else { @() }
     $marker = "$(($phaseNames | ForEach-Object { "VERIFY_PHASE_COMPLETE name=$_ elapsed_seconds=1 completed_at_utc=2026-01-01T00:00:00.0000000+00:00`n" }) -join '')VERIFY_COMPLETE schema_version=1 component=$Component status=passed elapsed_seconds=1`n"
     [IO.File]::WriteAllText((Join-Path $resultsRoot "watchdog.log"), $marker, [Text.UTF8Encoding]::new($false))
     if ($Component -ceq "solution") {
@@ -51,8 +51,9 @@ function New-TestComponent {
         }
     }
     else {
-        foreach ($name in @("verify-sdk-diagnostics.tests.ps1", "verify-preflight-overlap.tests.ps1", "verify-coverage.tests.ps1", "verify-bounded-phases.tests.ps1", "verify-parallel.tests.ps1", "verify-test-inventory.tests.ps1", "verify-watchdog.tests.ps1", "verify-promotion-fan-in.tests.ps1")) {
-            [IO.File]::WriteAllText((Join-Path $logsRoot "$name.log"), "passed", [Text.UTF8Encoding]::new($false))
+        foreach ($name in @("verify-sdk-diagnostics.tests.ps1", "verify-preflight-overlap.tests.ps1", "verify-coverage.tests.ps1", "verify-bounded-phases.tests.ps1", "delivery-handoff.tests.ps1", "verify-parallel.tests.ps1", "verify-test-inventory.tests.ps1", "verify-watchdog.tests.ps1", "verify-promotion-fan-in.tests.ps1")) {
+            $content = if ($name -ceq "delivery-handoff.tests.ps1") { "DELIVERY_HANDOFF_TESTS_PASSED assertions=1`n" } else { "passed" }
+            [IO.File]::WriteAllText((Join-Path $logsRoot "$name.log"), $content, [Text.UTF8Encoding]::new($false))
         }
         foreach ($name in @("frontend-preflight.log", "restore-static.log", "format-whitespace.log", "format-naming-style.log", "git-diff-check.log")) {
             $content = if ($name -in @("format-whitespace.log", "format-naming-style.log", "git-diff-check.log")) { "" } else { "passed" }
@@ -60,7 +61,7 @@ function New-TestComponent {
         }
     }
 
-    $evidence = [ordered]@{ schemaVersion = 1; component = $Component; repositoryHead = "head"; githubRunId = "run"; githubRunAttempt = "attempt"; laneCount = if ($Component -ceq "solution") { 10 } else { 0 }; inventoryComplete = ($Component -ceq "solution"); coverageComplete = ($Component -ceq "solution"); staticContractCount = if ($Component -ceq "static-contracts") { 8 } else { 0 }; frontendComplete = ($Component -ceq "static-contracts"); formatComplete = ($Component -ceq "static-contracts"); diffComplete = ($Component -ceq "static-contracts"); manifestSha256 = "" }
+    $evidence = [ordered]@{ schemaVersion = 1; component = $Component; repositoryHead = "head"; githubRunId = "run"; githubRunAttempt = "attempt"; laneCount = if ($Component -ceq "solution") { 10 } else { 0 }; inventoryComplete = ($Component -ceq "solution"); coverageComplete = ($Component -ceq "solution"); staticContractCount = if ($Component -ceq "static-contracts") { 9 } else { 0 }; frontendComplete = ($Component -ceq "static-contracts"); formatComplete = ($Component -ceq "static-contracts"); diffComplete = ($Component -ceq "static-contracts"); manifestSha256 = "" }
     $evidencePath = Join-Path $resultsRoot "verification-component-evidence.json"
     Write-TestJson -Path $evidencePath -Value $evidence
     $manifestPath = Join-Path $resultsRoot "verification-component-manifest.json"
@@ -100,6 +101,16 @@ try {
     New-TestComponent -Root $staticRoot -Component "static-contracts"
     Invoke-VerificationPromotionFanIn -SolutionArtifactRoot $solutionRoot -StaticArtifactRoot $staticRoot -ExpectedHead "head" -ExpectedRunId "run" -ExpectedRunAttempt "attempt" -SolutionResult "success" -StaticResult "success"
     $assertionCount++
+
+    $deliveryHandoffLogPath = Join-Path $staticRoot "VerificationResults\Logs\delivery-handoff.tests.ps1.log"
+    [IO.File]::WriteAllText($deliveryHandoffLogPath, "passed", [Text.UTF8Encoding]::new($false))
+    Update-TestComponentEvidence -Root $staticRoot
+    Assert-Throws -Message "fabricated delivery handoff result" -Action { Invoke-VerificationPromotionFanIn -SolutionArtifactRoot $solutionRoot -StaticArtifactRoot $staticRoot -ExpectedHead "head" -ExpectedRunId "run" -ExpectedRunAttempt "attempt" -SolutionResult "success" -StaticResult "success" }
+    New-TestComponent -Root $staticRoot -Component "static-contracts"
+    Remove-Item -LiteralPath $deliveryHandoffLogPath
+    Update-TestComponentEvidence -Root $staticRoot
+    Assert-Throws -Message "missing delivery handoff contract" -Action { Invoke-VerificationPromotionFanIn -SolutionArtifactRoot $solutionRoot -StaticArtifactRoot $staticRoot -ExpectedHead "head" -ExpectedRunId "run" -ExpectedRunAttempt "attempt" -SolutionResult "success" -StaticResult "success" }
+    New-TestComponent -Root $staticRoot -Component "static-contracts"
 
     $watchdogEvidencePath = Join-Path $solutionRoot "VerificationResults\verification-watchdog-evidence.json"
     $watchdogEvidence = Get-Content -LiteralPath $watchdogEvidencePath -Raw | ConvertFrom-Json
