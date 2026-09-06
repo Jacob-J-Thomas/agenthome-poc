@@ -7,6 +7,7 @@ internal sealed class ExpectedServerRestartRequestTracker
     private const int MaxTrackedSameAuthorityRequests = 1024;
     private const int MaxDeclaredReadOnlyGetTargets = 16;
     private const int MaxProvenanceTraceEntries = 128;
+    private const int MaxTraceRequestIdLength = 96;
     private const int Idle = 0;
     private const int Preparing = 1;
     private const int Active = 2;
@@ -75,6 +76,7 @@ internal sealed class ExpectedServerRestartRequestTracker
             _provenanceTraceSequence = 0;
             _provenanceTraceTruncated = false;
             Interlocked.Exchange(ref _expectedServerRestart, Preparing);
+            RecordLifecycleTransition("prepare");
         }
     }
 
@@ -96,24 +98,26 @@ internal sealed class ExpectedServerRestartRequestTracker
                 _capturedExpectedServerRestartRequests.TryAdd(request.Key, 0);
                 if (_requestProvenance.TryGetValue(request.Key, out var provenance))
                 {
-                    var declaredTargetIndex = GetDeclaredReadOnlyGetTargetIndex(request.Value, provenance.Method);
+                    var declaredTargetIndex = GetDeclaredTargetIndex(request.Value);
                     var currentMatch = declaredTargetIndex >= 0;
+                    var isGet = IsGetMethod(provenance.Method);
                     if (provenance.IsDeclaredReadOnlyGetTarget || currentMatch)
                     {
-                        RecordProvenanceTrace(request.Key, declaredTargetIndex, provenance.Method, provenance.IsDeclaredReadOnlyGetTarget, currentMatch, frozenSnapshot: true, active: false, currentMatch ? "accepted-at-freeze" : "not-declared-at-freeze");
+                        RecordProvenanceTrace(request.Key, declaredTargetIndex, provenance.Method, provenance.IsDeclaredReadOnlyGetTarget, currentMatch, frozenSnapshot: true, active: false, currentMatch && isGet ? "accepted-at-freeze" : GetMethodRejectionReason(provenance.Method));
                     }
 
                     _requestProvenance[request.Key] = provenance with
                     {
                         Generation = _restartGeneration,
                         LiveAtSuccessfulFreeze = true,
-                        IsDeclaredReadOnlyGetTarget = currentMatch,
+                        IsDeclaredReadOnlyGetTarget = currentMatch && isGet,
                         DeclaredTargetIndex = declaredTargetIndex
                     };
                 }
             }
 
             Interlocked.Exchange(ref _expectedServerRestart, Active);
+            RecordLifecycleTransition("successful-freeze-active");
         }
     }
 
@@ -129,10 +133,8 @@ internal sealed class ExpectedServerRestartRequestTracker
                 _terminalCorrelations.Clear();
                 _qualifiedReadOnlyRefusalEvidence.Clear();
                 _qualifiedReadOnlyRefusalEvidenceKeys.Clear();
-                _provenanceTrace.Clear();
-                _provenanceTraceSequence = 0;
-                _provenanceTraceTruncated = false;
                 Interlocked.Exchange(ref _expectedServerRestart, Idle);
+                RecordLifecycleTransition("abort");
             }
         }
     }
@@ -147,7 +149,10 @@ internal sealed class ExpectedServerRestartRequestTracker
     {
         lock (_gate)
         {
-            Interlocked.CompareExchange(ref _expectedServerRestart, ReplacementStarting, Active);
+            if (Interlocked.CompareExchange(ref _expectedServerRestart, ReplacementStarting, Active) == Active)
+            {
+                RecordLifecycleTransition("replacement-start");
+            }
         }
     }
 
@@ -156,6 +161,7 @@ internal sealed class ExpectedServerRestartRequestTracker
         lock (_gate)
         {
             Interlocked.Exchange(ref _expectedServerRestart, Idle);
+            RecordLifecycleTransition("end");
         }
     }
 
@@ -171,8 +177,8 @@ internal sealed class ExpectedServerRestartRequestTracker
             }
 
             var expectedServerRestart = Volatile.Read(ref _expectedServerRestart);
-            var declaredTargetIndex = GetDeclaredReadOnlyGetTargetIndex(url, method);
-            var declaredReadOnlyGetTarget = declaredTargetIndex >= 0;
+            var declaredTargetIndex = GetDeclaredTargetIndex(url);
+            var declaredReadOnlyGetTarget = declaredTargetIndex >= 0 && IsGetMethod(method);
             _requestUrls[requestId] = url;
             _terminalCorrelations.Remove(requestId);
             _requestProvenance[requestId] = new RestartRequestProvenance(
@@ -182,9 +188,9 @@ internal sealed class ExpectedServerRestartRequestTracker
                 BeganDuringActiveOutage: expectedServerRestart == Active,
                 IsDeclaredReadOnlyGetTarget: declaredReadOnlyGetTarget,
                 DeclaredTargetIndex: declaredTargetIndex);
-            if (declaredReadOnlyGetTarget)
+            if (declaredTargetIndex >= 0)
             {
-                RecordProvenanceTrace(requestId, declaredTargetIndex, method, cachedMatch: false, currentMatch: true, frozenSnapshot: false, active: expectedServerRestart == Active, expectedServerRestart == ReplacementStarting ? "replacement-start" : "tracked");
+                RecordProvenanceTrace(requestId, declaredTargetIndex, method, cachedMatch: false, currentMatch: true, frozenSnapshot: false, active: expectedServerRestart == Active, expectedServerRestart == ReplacementStarting ? "replacement-start" : declaredReadOnlyGetTarget ? "tracked" : GetMethodRejectionReason(method));
             }
             TrimUnderLock();
             if (_requestUrls.ContainsKey(requestId)
@@ -468,16 +474,25 @@ internal sealed class ExpectedServerRestartRequestTracker
         return value?.Contains(_targetAuthority, StringComparison.OrdinalIgnoreCase) == true;
     }
 
-    private int GetDeclaredReadOnlyGetTargetIndex(string url, string? method)
+    private int GetDeclaredTargetIndex(string url)
     {
-        if (!string.Equals(method, "GET", StringComparison.Ordinal)
-            || !Uri.TryCreate(url, UriKind.Absolute, out var uri)
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)
             || !string.Equals(uri.Authority, _targetAuthority, StringComparison.OrdinalIgnoreCase))
         {
             return -1;
         }
 
         return _declaredReadOnlyGetTargets.FindIndex(target => string.Equals(target, uri.PathAndQuery, StringComparison.Ordinal));
+    }
+
+    private static bool IsGetMethod(string? method)
+    {
+        return string.Equals(method, "GET", StringComparison.Ordinal);
+    }
+
+    private static string GetMethodRejectionReason(string? method)
+    {
+        return method is null ? "missing-method" : "method-not-get";
     }
 
     private bool IsQualifiedReadOnlyRefusal(RestartRequestProvenance provenance)
@@ -497,13 +512,18 @@ internal sealed class ExpectedServerRestartRequestTracker
                 continue;
             }
 
-            var declaredTargetIndex = GetDeclaredReadOnlyGetTargetIndex(url, request.Value.Method);
+            var declaredTargetIndex = GetDeclaredTargetIndex(url);
             var currentMatch = declaredTargetIndex >= 0;
             if (request.Value.IsDeclaredReadOnlyGetTarget || currentMatch)
             {
-                RecordProvenanceTrace(request.Key, declaredTargetIndex, request.Value.Method, request.Value.IsDeclaredReadOnlyGetTarget, currentMatch, request.Value.LiveAtSuccessfulFreeze, phase == Active, request.Value.LiveAtSuccessfulFreeze ? "post-freeze-declaration" : "declaration-updated");
+                RecordProvenanceTrace(request.Key, declaredTargetIndex, request.Value.Method, request.Value.IsDeclaredReadOnlyGetTarget, currentMatch, request.Value.LiveAtSuccessfulFreeze, phase == Active, request.Value.LiveAtSuccessfulFreeze ? "post-freeze-declaration" : IsGetMethod(request.Value.Method) ? "declaration-updated" : GetMethodRejectionReason(request.Value.Method));
             }
         }
+    }
+
+    private void RecordLifecycleTransition(string transition)
+    {
+        RecordProvenanceTrace("none", -1, null, cachedMatch: false, currentMatch: false, frozenSnapshot: false, active: Volatile.Read(ref _expectedServerRestart) == Active, "lifecycle-" + transition);
     }
 
     private void RecordProvenanceTrace(string requestId, int declaredTargetIndex, string? method, bool cachedMatch, bool currentMatch, bool frozenSnapshot, bool active, string rejectionReason)
@@ -520,7 +540,18 @@ internal sealed class ExpectedServerRestartRequestTracker
         }
 
         _provenanceTraceSequence++;
-        _provenanceTrace.Add($"provenanceTrace sequence={_provenanceTraceSequence}; phase={Volatile.Read(ref _expectedServerRestart)}; generation={_restartGeneration}; requestId={requestId}; declaredTargetIndex={declaredTargetIndex}; methodPresent={method is not null}; method={method ?? "none"}; cachedMatch={cachedMatch}; currentMatch={currentMatch}; frozenSnapshot={frozenSnapshot}; active={active}; rejectionReason={rejectionReason}");
+        _provenanceTrace.Add($"provenanceTrace sequence={_provenanceTraceSequence}; phase={Volatile.Read(ref _expectedServerRestart)}; generation={_restartGeneration}; requestId={SanitizeTraceRequestId(requestId)}; declaredTargetIndex={declaredTargetIndex}; methodPresent={method is not null}; method={NormalizeTraceMethod(method)}; cachedMatch={cachedMatch}; currentMatch={currentMatch}; frozenSnapshot={frozenSnapshot}; active={active}; rejectionReason={rejectionReason}");
+    }
+
+    private static string SanitizeTraceRequestId(string requestId)
+    {
+        var normalized = requestId.Replace('\r', '_').Replace('\n', '_');
+        return normalized.Length <= MaxTraceRequestIdLength ? normalized : normalized[..MaxTraceRequestIdLength];
+    }
+
+    private static string NormalizeTraceMethod(string? method)
+    {
+        return method is null ? "missing" : IsGetMethod(method) ? "GET" : "other";
     }
 
     private bool IsExactQualifiedReadOnlyGetRoute(string? suppliedUrl, string? correlatedRequestUrl)

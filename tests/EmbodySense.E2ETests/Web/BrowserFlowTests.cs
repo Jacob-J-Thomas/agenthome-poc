@@ -425,9 +425,9 @@ public sealed partial class BrowserFlowTests
         const string Target = "/api/loop-runs?maximumCount=50";
         const string RequestUrl = "https://127.0.0.1:5001/api/loop-runs?maximumCount=50";
         var tracker = new ExpectedServerRestartRequestTracker("127.0.0.1:5001");
-        tracker.PrepareExpectedServerRestart();
         tracker.Track("failure-before-log", RequestUrl, "GET");
         tracker.DeclareReadOnlyGetTargets([Target]);
+        tracker.PrepareExpectedServerRestart();
         tracker.FreezeExpectedServerRestart();
         Assert.True(tracker.ProcessLoadingFailed("failure-before-log", canceled: false, "net::ERR_CONNECTION_REFUSED"));
         tracker.EndExpectedServerRestart();
@@ -440,6 +440,71 @@ public sealed partial class BrowserFlowTests
         Assert.True(tracker.IsExpectedServerRestartLogEntry("log-before-failure", "network", "Failed to load resource: net::ERR_CONNECTION_REFUSED", RequestUrl));
         Assert.True(tracker.ProcessLoadingFailed("log-before-failure", canceled: false, "net::ERR_CONNECTION_REFUSED"));
         Assert.Contains(tracker.ReadQualifiedReadOnlyRefusalEvidenceSummary(), entry => entry.Contains("frozenSnapshot=True", StringComparison.Ordinal) && entry.Contains("rejectionReason=accepted-at-freeze", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Restart_request_tracking_records_ordered_lifecycle_transitions()
+    {
+        var tracker = new ExpectedServerRestartRequestTracker("127.0.0.1:5001");
+        tracker.PrepareExpectedServerRestart();
+        tracker.FreezeExpectedServerRestart();
+        tracker.MarkExpectedReplacementServerStarting();
+        tracker.EndExpectedServerRestart();
+        var lifecycle = tracker.ReadQualifiedReadOnlyRefusalEvidenceSummary().Where(entry => entry.Contains("rejectionReason=lifecycle-", StringComparison.Ordinal)).ToArray();
+        Assert.Collection(
+            lifecycle,
+            entry => Assert.Contains("rejectionReason=lifecycle-prepare", entry, StringComparison.Ordinal),
+            entry => Assert.Contains("rejectionReason=lifecycle-successful-freeze-active", entry, StringComparison.Ordinal),
+            entry => Assert.Contains("rejectionReason=lifecycle-replacement-start", entry, StringComparison.Ordinal),
+            entry => Assert.Contains("rejectionReason=lifecycle-end", entry, StringComparison.Ordinal));
+
+        var abortTracker = new ExpectedServerRestartRequestTracker("127.0.0.1:5001");
+        abortTracker.PrepareExpectedServerRestart();
+        abortTracker.AbortExpectedServerRestart();
+        var abortLifecycle = abortTracker.ReadQualifiedReadOnlyRefusalEvidenceSummary().Where(entry => entry.Contains("rejectionReason=lifecycle-", StringComparison.Ordinal)).ToArray();
+        Assert.Collection(
+            abortLifecycle,
+            entry => Assert.Contains("rejectionReason=lifecycle-prepare", entry, StringComparison.Ordinal),
+            entry => Assert.Contains("rejectionReason=lifecycle-abort", entry, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Restart_request_tracking_traces_declared_target_method_rejections_without_qualifying_them()
+    {
+        const string Target = "/api/loop-runs?maximumCount=50";
+        const string RequestUrl = "https://127.0.0.1:5001/api/loop-runs?maximumCount=50";
+        var tracker = new ExpectedServerRestartRequestTracker("127.0.0.1:5001");
+        tracker.DeclareReadOnlyGetTargets([Target]);
+        tracker.PrepareExpectedServerRestart();
+        tracker.Track("missing\r\nmethod", RequestUrl);
+        tracker.Track("other-method", RequestUrl, "PATCH");
+        tracker.FreezeExpectedServerRestart();
+        Assert.False(tracker.ProcessLoadingFailed("missing\r\nmethod", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+        Assert.False(tracker.ProcessLoadingFailed("other-method", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+        var trace = tracker.ReadQualifiedReadOnlyRefusalEvidenceSummary().Where(entry => entry.StartsWith("provenanceTrace sequence=", StringComparison.Ordinal)).ToArray();
+        Assert.Contains(trace, entry => entry.Contains("requestId=missing__method", StringComparison.Ordinal) && entry.Contains("declaredTargetIndex=0", StringComparison.Ordinal) && entry.Contains("method=missing", StringComparison.Ordinal) && entry.Contains("rejectionReason=missing-method", StringComparison.Ordinal));
+        Assert.Contains(trace, entry => entry.Contains("requestId=other-method", StringComparison.Ordinal) && entry.Contains("declaredTargetIndex=0", StringComparison.Ordinal) && entry.Contains("method=other", StringComparison.Ordinal) && entry.Contains("rejectionReason=method-not-get", StringComparison.Ordinal));
+        Assert.All(trace, entry => Assert.DoesNotContain('\r', entry));
+        Assert.All(trace, entry => Assert.DoesNotContain('\n', entry));
+    }
+
+    [Fact]
+    public void Restart_request_tracking_caps_provenance_trace_at_128_entries_plus_one_marker()
+    {
+        const string Target = "/api/loop-runs?maximumCount=50";
+        const string RequestUrl = "https://127.0.0.1:5001/api/loop-runs?maximumCount=50";
+        var tracker = new ExpectedServerRestartRequestTracker("127.0.0.1:5001");
+        tracker.DeclareReadOnlyGetTargets([Target]);
+        tracker.PrepareExpectedServerRestart();
+        foreach (var index in Enumerable.Range(0, 130))
+        {
+            tracker.Track("trace-" + index, RequestUrl, "GET");
+        }
+
+        var trace = tracker.ReadQualifiedReadOnlyRefusalEvidenceSummary().Where(entry => entry.StartsWith("provenanceTrace", StringComparison.Ordinal)).ToArray();
+        Assert.Equal(128, trace.Count(entry => entry.StartsWith("provenanceTrace sequence=", StringComparison.Ordinal)));
+        Assert.Equal(1, trace.Count(entry => string.Equals(entry, "provenanceTrace=truncated", StringComparison.Ordinal)));
+        Assert.Equal(129, trace.Length);
     }
 
     [Fact]
