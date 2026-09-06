@@ -126,6 +126,7 @@ jobs:
             tests/VerificationResults/Logs/verify-preflight-overlap.tests.ps1.log
             tests/VerificationResults/Logs/verify-coverage.tests.ps1.log
             tests/VerificationResults/Logs/verify-bounded-phases.tests.ps1.log
+            tests/VerificationResults/Logs/delivery-handoff.tests.ps1.log
             tests/VerificationResults/Logs/verify-parallel.tests.ps1.log
             tests/VerificationResults/Logs/verify-test-inventory.tests.ps1.log
             tests/VerificationResults/Logs/verify-watchdog.tests.ps1.log

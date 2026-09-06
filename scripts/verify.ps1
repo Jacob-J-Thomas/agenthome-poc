@@ -261,6 +261,7 @@ function Invoke-StaticVerificationContracts {
         "verify-preflight-overlap.tests.ps1",
         "verify-coverage.tests.ps1",
         "verify-bounded-phases.tests.ps1",
+        "delivery-handoff.tests.ps1",
         "verify-parallel.tests.ps1",
         "verify-test-inventory.tests.ps1",
         "verify-watchdog.tests.ps1",
@@ -455,6 +456,7 @@ try {
             (Join-Path $verificationLogsPath "verify-preflight-overlap.tests.ps1.log"),
             (Join-Path $verificationLogsPath "verify-coverage.tests.ps1.log"),
             (Join-Path $verificationLogsPath "verify-bounded-phases.tests.ps1.log"),
+            (Join-Path $verificationLogsPath "delivery-handoff.tests.ps1.log"),
             (Join-Path $verificationLogsPath "verify-parallel.tests.ps1.log"),
             (Join-Path $verificationLogsPath "verify-test-inventory.tests.ps1.log"),
             (Join-Path $verificationLogsPath "verify-watchdog.tests.ps1.log"),
@@ -465,7 +467,7 @@ try {
             (Join-Path $verificationLogsPath "format-naming-style.log"),
             (Join-Path $verificationLogsPath "git-diff-check.log")
         )
-        Write-VerificationComponentEvidence -Component "static-contracts" -ManifestPaths $staticManifestPaths -StaticContractCount 8 -FrontendComplete $true -FormatComplete $true -DiffComplete $true
+        Write-VerificationComponentEvidence -Component "static-contracts" -ManifestPaths $staticManifestPaths -StaticContractCount 9 -FrontendComplete $true -FormatComplete $true -DiffComplete $true
         $verificationStopwatch.Stop()
         $elapsedText = $verificationStopwatch.Elapsed.TotalSeconds.ToString("0.###", [Globalization.CultureInfo]::InvariantCulture)
         Write-Output "VERIFY_COMPLETE schema_version=1 component=static-contracts status=passed elapsed_seconds=$elapsedText"

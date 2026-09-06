@@ -180,22 +180,26 @@ function Assert-FanInSolutionEvidence {
 function Assert-FanInStaticEvidence {
     param([string]$ResultsRoot, [object]$Evidence)
 
-    $contractNames = @("verify-sdk-diagnostics.tests.ps1", "verify-preflight-overlap.tests.ps1", "verify-coverage.tests.ps1", "verify-bounded-phases.tests.ps1", "verify-parallel.tests.ps1", "verify-test-inventory.tests.ps1", "verify-watchdog.tests.ps1", "verify-promotion-fan-in.tests.ps1")
+    $contractNames = @("verify-sdk-diagnostics.tests.ps1", "verify-preflight-overlap.tests.ps1", "verify-coverage.tests.ps1", "verify-bounded-phases.tests.ps1", "delivery-handoff.tests.ps1", "verify-parallel.tests.ps1", "verify-test-inventory.tests.ps1", "verify-watchdog.tests.ps1", "verify-promotion-fan-in.tests.ps1")
     foreach ($contractName in $contractNames) {
         $contractFile = Get-FanInSingleFile -Root (Join-Path $ResultsRoot "Logs") -Name "$contractName.log" -Description "Static contract evidence"
+        if ($contractName -ceq "delivery-handoff.tests.ps1") {
+            $deliveryHandoffResult = Get-Content -LiteralPath $contractFile.FullName -Raw
+            Assert-FanInCondition -Condition ([regex]::IsMatch($deliveryHandoffResult, '\ADELIVERY_HANDOFF_TESTS_PASSED assertions=[1-9][0-9]*\r?\n?\z', [Text.RegularExpressions.RegexOptions]::CultureInvariant)) -Message "Delivery handoff contract evidence must contain its exact positive assertion result."
+        }
     }
     foreach ($logName in @("frontend-preflight.log", "format-whitespace.log", "format-naming-style.log", "git-diff-check.log")) {
         $log = Get-FanInSingleFile -Root (Join-Path $ResultsRoot "Logs") -Name $logName -Description "Static phase evidence"
     }
     $manifest = Read-FanInJsonFile -Path (Join-Path $ResultsRoot "verification-component-manifest.json") -Description "Static component manifest"
     $manifestPaths = @($manifest.files | ForEach-Object { [string]$_.path })
-    foreach ($requiredPath in @("Logs/verify-sdk-diagnostics.tests.ps1.log", "Logs/verify-preflight-overlap.tests.ps1.log", "Logs/verify-coverage.tests.ps1.log", "Logs/verify-bounded-phases.tests.ps1.log", "Logs/verify-parallel.tests.ps1.log", "Logs/verify-test-inventory.tests.ps1.log", "Logs/verify-watchdog.tests.ps1.log", "Logs/verify-promotion-fan-in.tests.ps1.log", "Logs/frontend-preflight.log", "Logs/restore-static.log", "Logs/format-whitespace.log", "Logs/format-naming-style.log", "Logs/git-diff-check.log")) {
+    foreach ($requiredPath in @("Logs/verify-sdk-diagnostics.tests.ps1.log", "Logs/verify-preflight-overlap.tests.ps1.log", "Logs/verify-coverage.tests.ps1.log", "Logs/verify-bounded-phases.tests.ps1.log", "Logs/delivery-handoff.tests.ps1.log", "Logs/verify-parallel.tests.ps1.log", "Logs/verify-test-inventory.tests.ps1.log", "Logs/verify-watchdog.tests.ps1.log", "Logs/verify-promotion-fan-in.tests.ps1.log", "Logs/frontend-preflight.log", "Logs/restore-static.log", "Logs/format-whitespace.log", "Logs/format-naming-style.log", "Logs/git-diff-check.log")) {
         Assert-FanInCondition -Condition ($manifestPaths -contains $requiredPath) -Message "Static component manifest omitted required evidence: $requiredPath"
     }
-    Assert-FanInCondition -Condition ($manifestPaths.Count -eq 13) -Message "Static component manifest must contain exactly eight contract logs and five static phase logs."
+    Assert-FanInCondition -Condition ($manifestPaths.Count -eq 14) -Message "Static component manifest must contain exactly nine contract logs and five static phase logs."
     $phaseNames = @($contractNames | ForEach-Object { "contract-$([IO.Path]::GetFileNameWithoutExtension($_))" }) + @("frontend-preflight", "restore-static", "format-whitespace", "format-naming-style", "git-diff-check")
     Assert-FanInPhaseCompletions -ResultsRoot $ResultsRoot -Names $phaseNames
-    Assert-FanInCondition -Condition ([int]$Evidence.staticContractCount -eq 8 -and [bool]$Evidence.frontendComplete -and [bool]$Evidence.formatComplete -and [bool]$Evidence.diffComplete) -Message "Static component evidence is incomplete."
+    Assert-FanInCondition -Condition ([int]$Evidence.staticContractCount -eq 9 -and [bool]$Evidence.frontendComplete -and [bool]$Evidence.formatComplete -and [bool]$Evidence.diffComplete) -Message "Static component evidence is incomplete."
 }
 
 function Read-FanInComponent {
