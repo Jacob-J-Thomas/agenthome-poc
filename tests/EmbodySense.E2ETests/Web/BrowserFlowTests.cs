@@ -1096,6 +1096,7 @@ public sealed partial class BrowserFlowTests
             profileSpecs);
         await using var browser = await HeadlessBrowserSession.StartAsync(app.BaseUrl);
         HeadlessBrowserSession? staleBrowser = null;
+        string? profileMutationLifecycle = null;
 
         try
         {
@@ -1162,25 +1163,45 @@ public sealed partial class BrowserFlowTests
             await SetValueAsync(staleBrowser, "#governedGraphDisplayName", "Stale browser replacement");
             await staleBrowser.WaitForExpressionAsync("!document.getElementById('governedGraphSaveButton').disabled");
             // Deliberately hold the stale author's request until the current author commits, then prove the stale mutation receives a conflict; see https://github.com/Jacob-J-Thomas/agenthome-poc/issues/417.
-            await staleBrowser.EvaluateAsync("(() => { const original = window.fetch.bind(window); window.__originalStaleFetch = original; window.fetch = (url, options) => { if (String(url).endsWith('/api/governed-graphs/mutate')) { window.__staleMutation = { url, options }; return new Promise((resolve) => { window.__resolveStaleMutation = resolve; }); } return original(url, options); }; })()");
+            await staleBrowser.EvaluateAsync("(() => { const original = window.fetch.bind(window); window.__originalStaleFetch = original; window.fetch = (url, options) => { if (String(url).endsWith('/api/governed-graphs/mutate')) { const input = JSON.parse(options?.body ?? '{}'); window.__profileConflictMutation = { operationId: input.operationId ?? null, clientRequestStartedAtUtc: new Date().toISOString(), clientRequestEndedAtUtc: null, responseStatus: null, resultStatus: null, resultOperationId: null, cancelled: false, exceptionName: null, serverEntryExit: 'unavailable-without-production-instrumentation' }; window.__staleMutation = { url, options }; return new Promise((resolve) => { window.__resolveStaleMutation = async (response) => { const trace = window.__profileConflictMutation; trace.clientRequestEndedAtUtc = new Date().toISOString(); trace.responseStatus = response.status; try { const payload = await response.clone().json(); trace.resultStatus = payload?.status ?? null; trace.resultOperationId = payload?.operationId ?? null; } catch (error) { trace.cancelled = error?.name === 'AbortError'; trace.exceptionName = error?.name ?? 'unknown'; } resolve(response); }; }); } return original(url, options); }; })()");
             await ClickAsync(staleBrowser, "#governedGraphSaveButton");
             await staleBrowser.WaitForExpressionAsync("Boolean(window.__staleMutation?.options?.body) && typeof window.__resolveStaleMutation === 'function'");
 
             await SetValueAsync(browser, "#governedGraphRevisionId", "revision-2");
             await SetValueAsync(browser, "#governedGraphPurpose", "Current tab owns this exact replacement.");
             await browser.WaitForExpressionAsync("!document.getElementById('governedGraphSaveButton').disabled && document.getElementById('governedGraphRevisionId').value === 'revision-2' && document.getElementById('governedGraphPurpose').value === 'Current tab owns this exact replacement.'");
+            await browser.EvaluateAsync("(() => { const original = window.fetch.bind(window); window.fetch = async (url, options) => { if (!String(url).endsWith('/api/governed-graphs/mutate')) return original(url, options); const input = JSON.parse(options?.body ?? '{}'); const trace = window.__profileCurrentMutation = { operationId: input.operationId ?? null, clientRequestStartedAtUtc: new Date().toISOString(), clientRequestEndedAtUtc: null, responseStatus: null, resultStatus: null, resultOperationId: null, cancelled: false, exceptionName: null, serverEntryExit: 'unavailable-without-production-instrumentation' }; try { const response = await original(url, options); trace.clientRequestEndedAtUtc = new Date().toISOString(); trace.responseStatus = response.status; try { const payload = await response.clone().json(); trace.resultStatus = payload?.status ?? null; trace.resultOperationId = payload?.operationId ?? null; } catch (error) { trace.cancelled = error?.name === 'AbortError'; trace.exceptionName = error?.name ?? 'unknown'; } return response; } catch (error) { trace.clientRequestEndedAtUtc = new Date().toISOString(); trace.cancelled = error?.name === 'AbortError'; trace.exceptionName = error?.name ?? 'unknown'; throw error; } }; })()");
             await ClickAsync(browser, "#governedGraphSaveButton");
             await browser.WaitForExpressionAsync("document.getElementById('governedGraphNotice').textContent.includes('Committed') && document.getElementById('governedGraphPurpose').value === 'Current tab owns this exact replacement.'");
-            var staleMutationResult = await staleBrowser.EvaluateStringAsync("(async () => { const response = await window.__originalStaleFetch(window.__staleMutation.url, window.__staleMutation.options); const clone = response.clone(); window.__resolveStaleMutation(response); return JSON.stringify({ status: clone.status, body: await clone.text() }); })()");
+            var staleMutationResult = await staleBrowser.EvaluateStringAsync("(async () => { try { const response = await window.__originalStaleFetch(window.__staleMutation.url, window.__staleMutation.options); const clone = response.clone(); await window.__resolveStaleMutation(response); return JSON.stringify({ status: clone.status, body: await clone.text() }); } catch (error) { const trace = window.__profileConflictMutation; trace.clientRequestEndedAtUtc = new Date().toISOString(); trace.cancelled = error?.name === 'AbortError'; trace.exceptionName = error?.name ?? 'unknown'; throw error; } })()");
             using (var staleMutationDocument = JsonDocument.Parse(staleMutationResult))
             {
                 Assert.True(
                     staleMutationDocument.RootElement.GetProperty("status").GetInt32() == 409,
                     staleMutationDocument.RootElement.GetProperty("body").GetString());
             }
+            var currentMutationLifecycle = await browser.EvaluateStringAsync("JSON.stringify(window.__profileCurrentMutation)");
+            var staleMutationLifecycle = await staleBrowser.EvaluateStringAsync("JSON.stringify(window.__profileConflictMutation)");
+            using (var currentMutationDocument = JsonDocument.Parse(currentMutationLifecycle))
+            using (var staleMutationLifecycleDocument = JsonDocument.Parse(staleMutationLifecycle))
+            {
+                profileMutationLifecycle = JsonSerializer.Serialize(new { currentMutation = currentMutationDocument.RootElement, staleMutation = staleMutationLifecycleDocument.RootElement }, _jsonOptions);
+            }
             await staleBrowser.WaitForExpressionAsync("document.getElementById('governedGraphNotice').textContent.toLowerCase().includes('conflict')");
             Assert.Contains("conflict", await staleBrowser.EvaluateStringAsync("document.getElementById('governedGraphNotice').textContent"), StringComparison.OrdinalIgnoreCase);
             Assert.False(await staleBrowser.EvaluateBooleanAsync("Object.keys(sessionStorage).some((key) => key.includes('governed-graph-pending-mutation') && sessionStorage.getItem(key))"));
+            using (var currentMutationDocument = JsonDocument.Parse(currentMutationLifecycle))
+            using (var staleMutationDocument = JsonDocument.Parse(staleMutationLifecycle))
+            {
+                Assert.Equal(currentMutationDocument.RootElement.GetProperty("operationId").GetString(), currentMutationDocument.RootElement.GetProperty("resultOperationId").GetString());
+                Assert.Equal("committed", currentMutationDocument.RootElement.GetProperty("resultStatus").GetString());
+                Assert.Equal(200, currentMutationDocument.RootElement.GetProperty("responseStatus").GetInt32());
+                Assert.Equal(staleMutationDocument.RootElement.GetProperty("operationId").GetString(), staleMutationDocument.RootElement.GetProperty("resultOperationId").GetString());
+                Assert.Equal("conflict", staleMutationDocument.RootElement.GetProperty("resultStatus").GetString());
+                Assert.Equal(409, staleMutationDocument.RootElement.GetProperty("responseStatus").GetInt32());
+                Assert.Equal("unavailable-without-production-instrumentation", currentMutationDocument.RootElement.GetProperty("serverEntryExit").GetString());
+                Assert.Equal("unavailable-without-production-instrumentation", staleMutationDocument.RootElement.GetProperty("serverEntryExit").GetString());
+            }
             await staleBrowser.DisposeAsync();
             staleBrowser = null;
 
@@ -1207,7 +1228,7 @@ public sealed partial class BrowserFlowTests
         }
         catch
         {
-            await WriteFailureDiagnosticsAsync(nameof(Browser_preserves_server_owned_profile_fallback_order_override_conflicts_and_safe_text), browser, app);
+            await WriteFailureDiagnosticsAsync(nameof(Browser_preserves_server_owned_profile_fallback_order_override_conflicts_and_safe_text), browser, app, profileMutationLifecycle: profileMutationLifecycle);
             throw;
         }
         finally
@@ -2173,7 +2194,7 @@ public sealed partial class BrowserFlowTests
         return string.Join(Environment.NewLine, snapshot.Transcripts.SelectMany(transcript => transcript.Lines));
     }
 
-    private static async Task WriteFailureDiagnosticsAsync(string scenario, HeadlessBrowserSession? browser, ExternalWebApplicationProcess? app, string? retiredServerOutput = null)
+    private static async Task WriteFailureDiagnosticsAsync(string scenario, HeadlessBrowserSession? browser, ExternalWebApplicationProcess? app, string? retiredServerOutput = null, string? profileMutationLifecycle = null)
     {
         var configuredRoot = Environment.GetEnvironmentVariable("EMBODYSENSE_BROWSER_E2E_ARTIFACTS");
         var root = string.IsNullOrWhiteSpace(configuredRoot)
@@ -2194,6 +2215,11 @@ public sealed partial class BrowserFlowTests
         if (!string.IsNullOrWhiteSpace(retiredServerOutput))
         {
             await File.WriteAllTextAsync(Path.Combine(directory, "retired-server-output.txt"), retiredServerOutput);
+        }
+
+        if (!string.IsNullOrWhiteSpace(profileMutationLifecycle))
+        {
+            await File.WriteAllTextAsync(Path.Combine(directory, "profile-mutation-lifecycle.json"), profileMutationLifecycle);
         }
     }
 
