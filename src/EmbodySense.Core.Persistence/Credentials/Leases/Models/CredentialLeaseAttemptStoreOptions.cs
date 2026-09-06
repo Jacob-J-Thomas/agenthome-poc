@@ -25,4 +25,8 @@ public sealed record CredentialLeaseAttemptStoreOptions
     /// state thread-safe and release any callback-owned resources independently. The default production path leaves this unset.
     /// </remarks>
     public Func<ValueTask>? OwnerTakeoverPollingObserver { get; init; }
+
+    /// <summary>Gets the monotonic clock used only for bounded owner-marker takeover polling.</summary>
+    /// <remarks>The default preserves the production two-second policy through <see cref="TimeProvider.System"/>.</remarks>
+    public TimeProvider OwnerTakeoverTimeProvider { get; init; } = TimeProvider.System;
 }
