@@ -332,6 +332,15 @@ Assert-True -Condition ([regex]::Matches($laneScript, 'New-VerificationTestLane 
 Assert-Contains -Actual $laneScript -Expected '[switch]$NestedProcessOnly' -Message "The nested-process component must select its exact Startup fixture lane through an explicit lane contract."
 Assert-Contains -Actual $laneScript -Expected '[switch]$SolutionCoreOnly' -Message "The solution component must select the disjoint Startup remainder through an explicit lane contract."
 Assert-Contains -Actual $verifyScript -Expected '-NestedProcessOnly:($VerificationComponent -eq "NestedProcess") -SolutionCoreOnly:($VerificationComponent -eq "Solution")' -Message "Hosted components must pass disjoint Startup lane ownership into canonical discovery and execution."
+Assert-Contains -Actual $verifyScript -Expected '"$($Lane.Name).vstest.diag.log"' -Message "Only the Startup remainder must retain built-in VSTest diagnostic output under VerificationResults/Logs."
+Assert-Contains -Actual $verifyScript -Expected '"$($Lane.Name).parent-lifecycle.jsonl"' -Message "Only the Startup remainder must retain bounded parent lifecycle diagnostics under VerificationResults/Logs."
+Assert-Contains -Actual $verifyScript -Expected '"--Diag:$vstestDiagnosticPath"' -Message "Startup remainder diagnostics must use the built-in VSTest diagnostic switch."
+Assert-Contains -Actual $parallelScript -Expected '-Event "before-output-drain"' -Message "Parallel diagnostics must retain the boundary before redirected stream drainage."
+Assert-Contains -Actual $parallelScript -Expected '-Event "after-output-drain"' -Message "Parallel diagnostics must retain the boundary after redirected stream drainage."
+Assert-True -Condition ($verifyScript.IndexOf('ParentDiagnosticPath', [StringComparison]::Ordinal) -ge 0 -and $parallelScript.IndexOf('ParentDiagnosticPath', [StringComparison]::Ordinal) -ge 0) -Message "Parent lifecycle observations must remain opt-in rather than changing every verification phase."
+$componentManifestStart = $verifyScript.IndexOf('$componentManifestPaths = @(', [StringComparison]::Ordinal)
+$componentManifestSource = $verifyScript.Substring($componentManifestStart)
+Assert-True -Condition ($componentManifestStart -ge 0 -and $componentManifestSource.IndexOf('vstest.diag.log', [StringComparison]::Ordinal) -lt 0 -and $componentManifestSource.IndexOf('parent-lifecycle.jsonl', [StringComparison]::Ordinal) -lt 0) -Message "Startup diagnostics must remain outside authenticated component receipts."
 foreach ($parallelAssemblyInfoPath in @(
     "tests\EmbodySense.Core.Persistence.Tests\AssemblyInfo.cs",
     "tests\EmbodySense.Core.Startup.Tests\AssemblyInfo.cs",

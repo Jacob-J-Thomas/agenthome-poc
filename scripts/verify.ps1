@@ -246,11 +246,12 @@ function Add-ProfiledRequiredGatePhase {
         [Parameter(Mandatory = $true)] [string]$OutputPath,
         [string]$CoverageSearchRoot,
         [string]$TrxPath,
-        [hashtable]$Environment
+        [hashtable]$Environment,
+        [string]$ParentDiagnosticPath
     )
 
     $profile = Get-VerificationRequiredGateScheduleProfile -Name $Name
-    Add-VerificationParallelPhase -Name $Name -FileName $FileName -Arguments $Arguments -TimeoutSeconds $profile.TimeoutSeconds -WorkingDirectory $repoRoot -OutputPath $OutputPath -CoverageSearchRoot $CoverageSearchRoot -TrxPath $TrxPath -Environment $Environment -EstimatedDurationSeconds $profile.EstimatedDurationSeconds -Weight $profile.Weight -ResourceClass $profile.ResourceClass
+    Add-VerificationParallelPhase -Name $Name -FileName $FileName -Arguments $Arguments -TimeoutSeconds $profile.TimeoutSeconds -WorkingDirectory $repoRoot -OutputPath $OutputPath -CoverageSearchRoot $CoverageSearchRoot -TrxPath $TrxPath -Environment $Environment -ParentDiagnosticPath $ParentDiagnosticPath -EstimatedDurationSeconds $profile.EstimatedDurationSeconds -Weight $profile.Weight -ResourceClass $profile.ResourceClass
 }
 
 function Add-TestExecutionPhase {
@@ -259,6 +260,8 @@ function Add-TestExecutionPhase {
     $trxName = "$($Lane.Name).trx"
     # #773: retain completed-case evidence when the bounded Startup child exits before it can finalize its TRX.
     $consoleVerbosity = if ($Lane.Name -ceq "EmbodySense.Core.Startup.Tests-remainder") { "detailed" } else { "minimal" }
+    $vstestDiagnosticPath = if ($Lane.Name -ceq "EmbodySense.Core.Startup.Tests-remainder") { Join-Path $verificationLogsPath "$($Lane.Name).vstest.diag.log" } else { $null }
+    $parentDiagnosticPath = if ($Lane.Name -ceq "EmbodySense.Core.Startup.Tests-remainder") { Join-Path $verificationLogsPath "$($Lane.Name).parent-lifecycle.jsonl" } else { $null }
     $arguments = @(
         "vstest", $Lane.AssemblyPath,
         "--Settings:$(if ($SkipCoverage) { $stressRunSettingsPath } else { $Isolation.RunSettingsPath })",
@@ -271,8 +274,11 @@ function Add-TestExecutionPhase {
     if (-not $SkipCoverage) {
         $arguments += "--Collect:XPlat Code Coverage"
     }
+    if ($null -ne $vstestDiagnosticPath) {
+        $arguments += "--Diag:$vstestDiagnosticPath"
+    }
 
-    Add-ProfiledRequiredGatePhase -Name "tests-$($Lane.Name)" -FileName "dotnet" -Arguments $arguments -OutputPath (Join-Path $verificationLogsPath "$($Lane.Name).log") -CoverageSearchRoot $(if ($SkipCoverage) { $null } else { $Lane.ResultsPath }) -TrxPath (Join-Path $Lane.ResultsPath $trxName) -Environment $Lane.Environment
+    Add-ProfiledRequiredGatePhase -Name "tests-$($Lane.Name)" -FileName "dotnet" -Arguments $arguments -OutputPath (Join-Path $verificationLogsPath "$($Lane.Name).log") -CoverageSearchRoot $(if ($SkipCoverage) { $null } else { $Lane.ResultsPath }) -TrxPath (Join-Path $Lane.ResultsPath $trxName) -Environment $Lane.Environment -ParentDiagnosticPath $parentDiagnosticPath
 }
 
 function Invoke-StaticVerificationContracts {
