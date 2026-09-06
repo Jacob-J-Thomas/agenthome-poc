@@ -78,25 +78,34 @@ function Write-VerificationParallelParentDiagnostic {
         [Parameter(Mandatory = $true)] [bool]$TerminationRequested
     )
 
-    if ([string]::IsNullOrWhiteSpace($Entry.Phase.ParentDiagnosticPath)) {
-        return
-    }
+    try {
+        if ([string]::IsNullOrWhiteSpace($Entry.Phase.ParentDiagnosticPath)) {
+            return
+        }
 
-    $diagnosticDirectory = Split-Path -Parent $Entry.Phase.ParentDiagnosticPath
-    New-Item -ItemType Directory -Path $diagnosticDirectory -Force | Out-Null
-    $record = [ordered]@{
-        schemaVersion = 1
-        phase = $Entry.Phase.Name
-        event = $Event
-        observedAtUtc = [DateTimeOffset]::UtcNow.ToString("O")
-        monotonicElapsedMilliseconds = [Math]::Round($Entry.Stopwatch.Elapsed.TotalMilliseconds, 3)
-        processId = $Entry.Process.Id
-        observedHasExited = $Entry.Process.HasExited
-        terminationRequested = $TerminationRequested
-        standardOutputCompleted = $Entry.StandardOutput.IsCompleted
-        standardErrorCompleted = $Entry.StandardError.IsCompleted
+        $diagnosticDirectory = Split-Path -Parent $Entry.Phase.ParentDiagnosticPath
+        New-Item -ItemType Directory -Path $diagnosticDirectory -Force | Out-Null
+        $record = [ordered]@{
+            schemaVersion = 1
+            phase = $Entry.Phase.Name
+            event = $Event
+            observedAtUtc = [DateTimeOffset]::UtcNow.ToString("O")
+            monotonicElapsedMilliseconds = [Math]::Round($Entry.Stopwatch.Elapsed.TotalMilliseconds, 3)
+            processId = $Entry.Process.Id
+            observedHasExited = $Entry.Process.HasExited
+            terminationRequested = $TerminationRequested
+            standardOutputCompleted = $Entry.StandardOutput.IsCompleted
+            standardErrorCompleted = $Entry.StandardError.IsCompleted
+        }
+        Add-Content -LiteralPath $Entry.Phase.ParentDiagnosticPath -Value ($record | ConvertTo-Json -Compress) -Encoding UTF8
     }
-    Add-Content -LiteralPath $Entry.Phase.ParentDiagnosticPath -Value ($record | ConvertTo-Json -Compress) -Encoding UTF8
+    catch {
+        try {
+            Write-Warning "VERIFY_PARENT_DIAGNOSTIC_UNAVAILABLE event=$Event"
+        }
+        catch {
+        }
+    }
 }
 
 function Get-VerificationParallelPhaseSchedulingOrder {

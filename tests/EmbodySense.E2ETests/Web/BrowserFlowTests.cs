@@ -1237,7 +1237,14 @@ public sealed partial class BrowserFlowTests
                 // The causal probe is supplemental; preserve the original scenario failure.
             }
 
-            await WriteFailureDiagnosticsAsync(nameof(Browser_preserves_server_owned_profile_fallback_order_override_conflicts_and_safe_text), browser, app, profileMutationLifecycle: profileMutationLifecycle);
+            try
+            {
+                await WriteFailureDiagnosticsAsync(nameof(Browser_preserves_server_owned_profile_fallback_order_override_conflicts_and_safe_text), browser, app, profileMutationLifecycle: profileMutationLifecycle);
+            }
+            catch
+            {
+                // Browser failure artifacts are supplemental; preserve the originating journey failure.
+            }
             throw;
         }
         finally

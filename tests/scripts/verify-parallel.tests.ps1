@@ -366,6 +366,14 @@ exit $ExitCode
     Assert-True -Condition (@($normalDiagnostics | Where-Object { $_.event -ceq "process-started" -and $_.processId -gt 0 -and -not $_.terminationRequested }).Count -eq 1) -Message "Parent diagnostics must identify the started child without recording command arguments or environment values."
     Assert-True -Condition (@($normalDiagnostics | Where-Object { $_.event -ceq "after-output-drain" -and $_.observedHasExited -and $_.standardOutputCompleted -and $_.standardErrorCompleted -and -not $_.terminationRequested }).Count -eq 1) -Message "Normal parent diagnostics must distinguish a completed process and drained redirected streams."
 
+    $invalidDiagnosticTarget = Join-Path $scenarioRoot "invalid-parent-diagnostic-target"
+    New-Item -ItemType Directory -Path $invalidDiagnosticTarget | Out-Null
+    Reset-VerificationParallelPhaseState
+    Add-VerificationParallelPhase -Name "invalid-diagnostic-target" -FileName $powerShellExecutable -Arguments ($baseArguments + @("invalid-diagnostic-target", "50", "0")) -TimeoutSeconds $processProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "invalid-diagnostic-target.log") -ParentDiagnosticPath $invalidDiagnosticTarget
+    $invalidDiagnosticResults = @(Invoke-VerificationParallelPhases -MaximumResourceCapacity 1)
+    Assert-True -Condition ($invalidDiagnosticResults.Count -eq 1 -and -not $invalidDiagnosticResults[0].TimedOut -and $invalidDiagnosticResults[0].ExitCode -eq 0) -Message "An unavailable parent diagnostic target must not change a normal child result."
+    Assert-Contains -Actual (Get-Content -Raw (Join-Path $scenarioRoot "invalid-diagnostic-target.log")) -Expected "probe=invalid-diagnostic-target" -Message "An unavailable parent diagnostic target must not suppress normal child output."
+
     $nearDeadlineDiagnosticPath = Join-Path $scenarioRoot "near-deadline-parent-lifecycle.jsonl"
     Reset-VerificationParallelPhaseState
     Add-VerificationParallelPhase -Name "exited-near-deadline" -FileName $powerShellExecutable -Arguments ($baseArguments + @("exited-near-deadline", "2500", "0")) -TimeoutSeconds 3 -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "exited-near-deadline.log") -ParentDiagnosticPath $nearDeadlineDiagnosticPath
