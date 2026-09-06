@@ -86,11 +86,20 @@ The implementation loop ends as `READY`, `QUEUED`, `BLOCKED`, or `FAILED`. `BLOC
 
 ## Read-only audit
 
-Run the hierarchy audit from an authenticated checkout:
+Run the complete repository audit manually with:
 
 ```powershell
-./scripts/audit-issue-hierarchy.ps1 -Repository Jacob-J-Thomas/agenthome-poc -Campaign 332 -Phase 523
+./scripts/audit-issue-hierarchy.ps1 -Repository Jacob-J-Thomas/agenthome-poc
 ```
 
-The audit reads GitHub state and fails on active hierarchy, label, body-parent, native `blocked by`, human-intervention-contract, or PR-closing violations. It reports non-blocking decomposition warnings separately and never mutates an issue or pull request.
-The repository workflow runs it on Saturday for weekend review and supports an explicit manual run; it intentionally does not launch a full-tree API audit for every individual issue edit.
+For a diagnostic view of one native Campaign subtree, use:
+
+```powershell
+./scripts/audit-issue-hierarchy.ps1 -Repository Jacob-J-Thomas/agenthome-poc -Campaign 332
+```
+
+The auditor fully paginates the repository's open-and-closed issue inventory and open pull requests through read-only GraphQL queries. It derives complete child relationships from each issue's native parent, reconciles page totals, and fails closed if pagination drifts or bounded label/closing-reference connections overflow. It never edits GitHub state.
+
+`AIDLC-W001` records an open tracking UOW whose `Admission and placement` section explicitly says `Intentionally dormant with zero Bolts`. `AIDLC-W002` records an open tracking UOW whose section declares an `Explicit decomposition-needed posture`. These warnings preserve deliberate backlog states; all other named hierarchy, lifecycle, dependency, lock, and PR-closing violations remain errors. `AIDLC-W003` identifies an open aggregate whose native children are all closed and therefore needs outcome review.
+
+The workflow runs the frozen contract suite and then this whole-repository audit on its existing Saturday schedule or by manual dispatch. Its output is point-in-time read-only evidence. It does not certify parent acceptance or grant continuation, review, merge, or closure authority.
