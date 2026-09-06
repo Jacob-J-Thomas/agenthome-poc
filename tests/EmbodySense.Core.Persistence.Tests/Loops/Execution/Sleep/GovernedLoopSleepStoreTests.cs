@@ -607,11 +607,15 @@ public sealed class GovernedLoopSleepStoreTests
         var paths = new WorkspacePaths(workspace.RootPath);
         var checkpoint = GovernedLoopSleepContractTestFixture.TimestampCheckpoint();
         var postureHash = GovernedLoopSleepContractTestFixture.Hash('9');
-        var waitingStore = new GovernedLoopSleepStore(paths);
+        var lockPath = Path.Combine(StoreRoot(paths), ".queue.lock");
+        string? contendedPath = null;
+        var waitingStore = new GovernedLoopSleepStore(paths, new GovernedLoopSleepStoreOptions
+        {
+            MutationLockContentionObserver = path => contendedPath = path,
+        });
         Assert.Equal(GovernedLoopSleepCheckpointMutationStatus.Committed, (await waitingStore.PublishAndReleaseAsync(checkpoint, postureHash))!.Status);
         // https://github.com/Jacob-J-Thomas/agenthome-poc/issues/508
         // Hold the exact production mutation lease in a separate process and publish readiness only after acquisition.
-        var lockPath = Path.Combine(StoreRoot(paths), ".queue.lock");
         var releaseMarker = workspace.File("release-sleep-lease-holder");
         var readyMarker = workspace.File("sleep-lease-holder-ready");
         var resultMarker = workspace.File("sleep-lease-holder-result");
@@ -652,10 +656,10 @@ public sealed class GovernedLoopSleepStoreTests
                     checkpoint.PublishedAtUtc,
                     1,
                     cancellation.Token);
-                var contendedPath = await backgroundReadReachedNativeLock.Task.WaitAsync(TimeSpan.FromSeconds(10));
+                var backgroundContendedPath = await backgroundReadReachedNativeLock.Task.WaitAsync(TimeSpan.FromSeconds(10));
                 Assert.Equal(
                     Path.GetFullPath(lockPath),
-                    Path.GetFullPath(contendedPath));
+                    Path.GetFullPath(backgroundContendedPath));
                 cancellation.Cancel();
                 await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pending);
             }
@@ -677,10 +681,13 @@ public sealed class GovernedLoopSleepStoreTests
             }
         }
 
-        static async Task AssertCancellationAsync(Func<CancellationToken, Task> operation)
+        async Task AssertCancellationAsync(Func<CancellationToken, Task> operation)
         {
+            contendedPath = null;
             using var cancellation = new CancellationTokenSource();
             var pending = operation(cancellation.Token);
+            Assert.False(pending.IsCompleted);
+            Assert.Equal(Path.GetFullPath(lockPath), Path.GetFullPath(Assert.IsType<string>(contendedPath)));
             cancellation.Cancel();
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pending);
         }
