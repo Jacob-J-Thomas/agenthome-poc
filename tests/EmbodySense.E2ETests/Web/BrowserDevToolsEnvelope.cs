@@ -39,4 +39,85 @@ internal static class BrowserDevToolsEnvelope
 
         throw new BrowserDevToolsException("malformed-envelope", "unknown", null, "event-method-missing");
     }
+
+    public static bool TryReadConsumedEventParameters(string method, JsonElement envelope, out JsonElement parameters)
+    {
+        if (!IsConsumedEvent(method))
+        {
+            parameters = default;
+            return false;
+        }
+
+        if (!envelope.TryGetProperty("params", out parameters) || parameters.ValueKind != JsonValueKind.Object)
+        {
+            throw new BrowserDevToolsException("malformed-event", method, null, "event-params-invalid");
+        }
+
+        return true;
+    }
+
+    public static JsonElement RequireObjectProperty(JsonElement source, string method, string propertyName)
+    {
+        if (!source.TryGetProperty(propertyName, out var value) || value.ValueKind != JsonValueKind.Object)
+        {
+            throw new BrowserDevToolsException("malformed-event", method, null, "nested-object-invalid");
+        }
+
+        return value;
+    }
+
+    public static string RequireStringProperty(JsonElement source, string method, string propertyName)
+    {
+        if (!source.TryGetProperty(propertyName, out var value) || value.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(value.GetString()))
+        {
+            throw new BrowserDevToolsException("malformed-event", method, null, "nested-string-invalid");
+        }
+
+        return value.GetString()!;
+    }
+
+    public static string? ReadOptionalStringProperty(JsonElement source, string method, string propertyName)
+    {
+        if (!source.TryGetProperty(propertyName, out var value))
+        {
+            return null;
+        }
+
+        if (value.ValueKind != JsonValueKind.String)
+        {
+            throw new BrowserDevToolsException("malformed-event", method, null, "nested-string-invalid");
+        }
+
+        return value.GetString();
+    }
+
+    public static bool ReadOptionalBooleanProperty(JsonElement source, string method, string propertyName)
+    {
+        if (!source.TryGetProperty(propertyName, out var value))
+        {
+            return false;
+        }
+
+        if (value.ValueKind is not JsonValueKind.True and not JsonValueKind.False)
+        {
+            throw new BrowserDevToolsException("malformed-event", method, null, "nested-boolean-invalid");
+        }
+
+        return value.ValueKind == JsonValueKind.True;
+    }
+
+    private static bool IsConsumedEvent(string method)
+    {
+        return method is "Network.loadingFailed"
+            or "Network.requestWillBeSent"
+            or "Network.webSocketCreated"
+            or "Network.loadingFinished"
+            or "Network.webSocketClosed"
+            or "Network.responseReceived"
+            or "Page.javascriptDialogOpening"
+            or "Page.frameNavigated"
+            or "Runtime.exceptionThrown"
+            or "Runtime.consoleAPICalled"
+            or "Log.entryAdded";
+    }
 }

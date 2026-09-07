@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net.WebSockets;
 using System.Text.Json;
 
@@ -140,6 +141,41 @@ public sealed class BrowserDevToolsContractTests
     }
 
     [Fact]
+    public async Task Browser_devtools_reader_failure_completes_pending_with_the_original_typed_failure()
+    {
+        var pending = new ConcurrentDictionary<int, TaskCompletionSource<JsonElement>>();
+        var handlers = new PendingBrowserCommandResponses();
+        var completion = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
+        pending.TryAdd(1, completion);
+        handlers.Add(1, _ => throw new InvalidOperationException("callback should have been removed"));
+        var failure = new BrowserDevToolsException("malformed-envelope", "unknown", null, "response-id-missing");
+
+        BrowserDevToolsReaderFailure.CompletePending(pending, handlers, failure);
+
+        var observed = await Assert.ThrowsAsync<BrowserDevToolsException>(() => completion.Task);
+        Assert.Same(failure, observed);
+        Assert.Empty(pending);
+        Assert.Equal(0, handlers.Count);
+    }
+
+    [Fact]
+    public void Browser_devtools_consumed_events_require_object_params_and_safe_nested_shapes()
+    {
+        using var missingParams = JsonDocument.Parse("{\"method\":\"Network.requestWillBeSent\"}");
+        using var nonObjectParams = JsonDocument.Parse("{\"method\":\"Network.responseReceived\",\"params\":[]}");
+        using var malformedRequest = JsonDocument.Parse("{\"request\":[]}");
+        using var malformedNestedString = JsonDocument.Parse("{\"requestId\":17}");
+        using var unconsumed = JsonDocument.Parse("{\"method\":\"Page.loadEventFired\"}");
+
+        Assert.Throws<BrowserDevToolsException>(() => BrowserDevToolsEnvelope.TryReadConsumedEventParameters("Network.requestWillBeSent", missingParams.RootElement, out _));
+        Assert.Throws<BrowserDevToolsException>(() => BrowserDevToolsEnvelope.TryReadConsumedEventParameters("Network.responseReceived", nonObjectParams.RootElement, out _));
+        Assert.Throws<BrowserDevToolsException>(() => BrowserDevToolsEnvelope.RequireObjectProperty(malformedRequest.RootElement, "Network.requestWillBeSent", "request"));
+        var exception = Assert.Throws<BrowserDevToolsException>(() => BrowserDevToolsEnvelope.RequireStringProperty(malformedNestedString.RootElement, "Network.requestWillBeSent", "requestId"));
+        Assert.DoesNotContain("17", exception.Message, StringComparison.Ordinal);
+        Assert.False(BrowserDevToolsEnvelope.TryReadConsumedEventParameters("Page.loadEventFired", unconsumed.RootElement, out _));
+    }
+
+    [Fact]
     public async Task Browser_read_only_wait_retries_only_exact_turnover_and_keeps_terminal_attempts_single()
     {
         var actionSendCount = 0;
@@ -168,11 +204,13 @@ public sealed class BrowserDevToolsContractTests
         await AssertTerminalOnFirstAttemptAsync(new OperationCanceledException(canceled.Token));
 
         var turnoverAttempts = 0;
-        await Assert.ThrowsAsync<TimeoutException>(() => BrowserReadOnlyWait.WaitForTrueAsync(_ =>
+        var timeout = await Assert.ThrowsAsync<TimeoutException>(() => BrowserReadOnlyWait.WaitForTrueAsync(_ =>
         {
             turnoverAttempts++;
             return Task.FromException<bool>(new BrowserDevToolsException("protocol-error", "Runtime.evaluate", -32000, "Cannot find context with specified id"));
-        }, TimeSpan.FromMilliseconds(220), "read-only deadline"));
+        }, TimeSpan.FromMilliseconds(220), "Browser Runtime.evaluate read-only wait timed out."));
+        Assert.Equal("Browser Runtime.evaluate read-only wait timed out.", timeout.Message);
+        Assert.DoesNotContain("secret-expression", timeout.Message, StringComparison.Ordinal);
         Assert.InRange(turnoverAttempts, 2, 4);
     }
 

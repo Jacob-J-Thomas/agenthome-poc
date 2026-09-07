@@ -91,7 +91,7 @@ internal sealed class HeadlessBrowserTab : IAsyncDisposable
     internal async Task WaitForExpressionAsync(string expression)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(expression);
-        await BrowserReadOnlyWait.WaitForTrueAsync(token => EvaluateBooleanAsync(expression, token), TimeSpan.FromSeconds(30), $"Browser tab expression did not become true: {expression}").ConfigureAwait(false);
+        await BrowserReadOnlyWait.WaitForTrueAsync(token => EvaluateBooleanAsync(expression, token), TimeSpan.FromSeconds(30), "Browser Runtime.evaluate read-only wait timed out.").ConfigureAwait(false);
     }
 
     internal Task<string> EvaluateStringAsync(string expression, CancellationToken cancellationToken = default)
@@ -241,7 +241,7 @@ internal sealed class HeadlessBrowserTab : IAsyncDisposable
                 }
             }
         }
-        catch (Exception exception) when (exception is WebSocketException or IOException or InvalidOperationException or JsonException or ObjectDisposedException)
+        catch (Exception exception) when (exception is BrowserDevToolsException or WebSocketException or IOException or InvalidOperationException or JsonException or ObjectDisposedException)
         {
             failure = exception;
             if (Volatile.Read(ref _disposed) == 0)
@@ -252,13 +252,7 @@ internal sealed class HeadlessBrowserTab : IAsyncDisposable
         finally
         {
             var completionFailure = _readerFailure ?? failure ?? new ObjectDisposedException(nameof(HeadlessBrowserTab));
-            foreach (var pending in _pendingCommands.ToArray())
-            {
-                if (_pendingCommands.TryRemove(pending.Key, out var completion))
-                {
-                    completion.TrySetException(completionFailure);
-                }
-            }
+            BrowserDevToolsReaderFailure.CompletePending(_pendingCommands, null, completionFailure);
         }
     }
 

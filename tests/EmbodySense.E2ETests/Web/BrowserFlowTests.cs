@@ -3002,7 +3002,7 @@ public sealed partial class BrowserFlowTests
 
         public async Task WaitForExpressionAsync(string expression, TimeSpan timeoutValue)
         {
-            await BrowserReadOnlyWait.WaitForTrueAsync(async token => (await EvaluateAsync($"Boolean({expression})", token)).ValueKind == JsonValueKind.True, timeoutValue, $"Browser expression did not become true: {expression}");
+            await BrowserReadOnlyWait.WaitForTrueAsync(async token => (await EvaluateAsync($"Boolean({expression})", token)).ValueKind == JsonValueKind.True, timeoutValue, "Browser Runtime.evaluate read-only wait timed out.");
         }
 
         public async Task EvaluateAsync(string expression)
@@ -3413,7 +3413,7 @@ public sealed partial class BrowserFlowTests
                     RecordDiagnosticEvent(root);
                 }
             }
-            catch (Exception exception) when (exception is WebSocketException or IOException or InvalidOperationException or JsonException or ObjectDisposedException)
+            catch (Exception exception) when (exception is BrowserDevToolsException or WebSocketException or IOException or InvalidOperationException or JsonException or ObjectDisposedException)
             {
                 failure = exception;
                 if (Volatile.Read(ref _disposed) == 0)
@@ -3426,14 +3426,7 @@ public sealed partial class BrowserFlowTests
                 var completionFailure = _readerFailure
                     ?? failure
                     ?? new ObjectDisposedException(nameof(HeadlessBrowserSession));
-                foreach (var pending in _pendingCommands.ToArray())
-                {
-                    if (_pendingCommands.TryRemove(pending.Key, out var completion))
-                    {
-                        _pendingResponseHandlers.Remove(pending.Key);
-                        completion.TrySetException(completionFailure);
-                    }
-                }
+                BrowserDevToolsReaderFailure.CompletePending(_pendingCommands, _pendingResponseHandlers, completionFailure);
             }
         }
 
@@ -3475,19 +3468,17 @@ public sealed partial class BrowserFlowTests
                 return;
             }
 
-            var method = methodValue.GetString();
-            if (!message.TryGetProperty("params", out var parameters))
+            var method = methodValue.GetString()!;
+            if (!BrowserDevToolsEnvelope.TryReadConsumedEventParameters(method, message, out var parameters))
             {
                 return;
             }
 
             if (method == "Network.loadingFailed")
             {
-                var requestId = parameters.TryGetProperty("requestId", out var requestIdValue) && requestIdValue.ValueKind == JsonValueKind.String
-                    ? requestIdValue.GetString()
-                    : null;
-                var canceled = parameters.TryGetProperty("canceled", out var canceledValue) && canceledValue.ValueKind == JsonValueKind.True;
-                var errorText = parameters.TryGetProperty("errorText", out var errorTextValue) ? errorTextValue.GetString() : null;
+                var requestId = BrowserDevToolsEnvelope.RequireStringProperty(parameters, method, "requestId");
+                var canceled = BrowserDevToolsEnvelope.ReadOptionalBooleanProperty(parameters, method, "canceled");
+                var errorText = BrowserDevToolsEnvelope.RequireStringProperty(parameters, method, "errorText");
                 if (!_requestTracker.ProcessLoadingFailed(requestId, canceled, errorText))
                 {
                     AddDiagnostic("network load failed: " + parameters.GetRawText());
@@ -3511,38 +3502,31 @@ public sealed partial class BrowserFlowTests
 
             if (method == "Runtime.exceptionThrown")
             {
-                if (!parameters.TryGetProperty("exceptionDetails", out var exceptionDetails)
-                    || exceptionDetails.ValueKind != JsonValueKind.Object)
-                {
-                    AddDiagnostic("page exception: " + parameters.GetRawText());
-                    return;
-                }
+                var exceptionDetails = BrowserDevToolsEnvelope.RequireObjectProperty(parameters, method, "exceptionDetails");
 
-                var text = exceptionDetails.TryGetProperty("text", out var textValue) && textValue.ValueKind == JsonValueKind.String ? textValue.GetString() : null;
-                var url = exceptionDetails.TryGetProperty("url", out var urlValue) && urlValue.ValueKind == JsonValueKind.String ? urlValue.GetString() : null;
-                var description = exceptionDetails.TryGetProperty("exception", out var exceptionValue)
-                    && exceptionValue.ValueKind == JsonValueKind.Object
-                    && exceptionValue.TryGetProperty("description", out var descriptionValue)
-                    && descriptionValue.ValueKind == JsonValueKind.String
-                        ? descriptionValue.GetString()
-                        : null;
+                var text = BrowserDevToolsEnvelope.ReadOptionalStringProperty(exceptionDetails, method, "text");
+                var url = BrowserDevToolsEnvelope.ReadOptionalStringProperty(exceptionDetails, method, "url");
+                var exceptionValue = exceptionDetails.TryGetProperty("exception", out _)
+                    ? BrowserDevToolsEnvelope.RequireObjectProperty(exceptionDetails, method, "exception")
+                    : default;
+                var description = exceptionValue.ValueKind == JsonValueKind.Object
+                    ? BrowserDevToolsEnvelope.ReadOptionalStringProperty(exceptionValue, method, "description")
+                    : null;
                 var className = exceptionValue.ValueKind == JsonValueKind.Object
-                    && exceptionValue.TryGetProperty("className", out var classNameValue)
-                    && classNameValue.ValueKind == JsonValueKind.String
-                        ? classNameValue.GetString()
-                        : null;
-                var stackFrame = exceptionDetails.TryGetProperty("stackTrace", out var stackTrace)
-                    && stackTrace.ValueKind == JsonValueKind.Object
-                    && stackTrace.TryGetProperty("callFrames", out var callFrames)
-                    && callFrames.ValueKind == JsonValueKind.Array
-                    && callFrames.GetArrayLength() > 0
-                        ? callFrames[0]
-                        : default;
+                    ? BrowserDevToolsEnvelope.ReadOptionalStringProperty(exceptionValue, method, "className")
+                    : null;
+                var stackTrace = exceptionDetails.TryGetProperty("stackTrace", out _)
+                    ? BrowserDevToolsEnvelope.RequireObjectProperty(exceptionDetails, method, "stackTrace")
+                    : default;
+                var callFrames = stackTrace.ValueKind == JsonValueKind.Object && stackTrace.TryGetProperty("callFrames", out var frames)
+                    ? frames.ValueKind == JsonValueKind.Array
+                        ? frames
+                        : throw new BrowserDevToolsException("malformed-event", method, null, "nested-array-invalid")
+                    : default;
+                var stackFrame = callFrames.ValueKind == JsonValueKind.Array && callFrames.GetArrayLength() > 0 ? callFrames[0] : default;
                 var functionName = stackFrame.ValueKind == JsonValueKind.Object
-                    && stackFrame.TryGetProperty("functionName", out var functionNameValue)
-                    && functionNameValue.ValueKind == JsonValueKind.String
-                        ? functionNameValue.GetString()
-                        : null;
+                    ? BrowserDevToolsEnvelope.ReadOptionalStringProperty(stackFrame, method, "functionName")
+                    : null;
                 if (ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartPageException(
                     _requestTracker.IsExpectedServerRestart(),
                     text,
@@ -3560,18 +3544,21 @@ public sealed partial class BrowserFlowTests
             }
 
             if (method == "Runtime.consoleAPICalled"
-                && parameters.TryGetProperty("type", out var consoleType)
-                && string.Equals(consoleType.GetString(), "error", StringComparison.OrdinalIgnoreCase))
+                && string.Equals(BrowserDevToolsEnvelope.ReadOptionalStringProperty(parameters, method, "type"), "error", StringComparison.OrdinalIgnoreCase))
             {
                 AddDiagnostic("console error: " + parameters.GetRawText());
                 return;
             }
 
-            if (method == "Log.entryAdded"
-                && parameters.TryGetProperty("entry", out var entry)
-                && entry.TryGetProperty("level", out var level)
-                && string.Equals(level.GetString(), "error", StringComparison.OrdinalIgnoreCase))
+            if (method == "Log.entryAdded")
             {
+                var entry = BrowserDevToolsEnvelope.RequireObjectProperty(parameters, method, "entry");
+                var level = BrowserDevToolsEnvelope.RequireStringProperty(entry, method, "level");
+                if (!string.Equals(level, "error", StringComparison.OrdinalIgnoreCase))
+                {
+                    return;
+                }
+
                 if (IsExpectedServerRestartLogEntry(entry))
                 {
                     return;
@@ -3581,12 +3568,19 @@ public sealed partial class BrowserFlowTests
                 return;
             }
 
-            if (method == "Network.responseReceived"
-                && parameters.TryGetProperty("response", out var response)
-                && response.TryGetProperty("status", out var status)
-                && status.TryGetDouble(out var statusCode)
-                && statusCode >= 400)
+            if (method == "Network.responseReceived")
             {
+                var response = BrowserDevToolsEnvelope.RequireObjectProperty(parameters, method, "response");
+                if (!response.TryGetProperty("status", out var status) || status.ValueKind != JsonValueKind.Number || !status.TryGetDouble(out var statusCode))
+                {
+                    throw new BrowserDevToolsException("malformed-event", method, null, "nested-number-invalid");
+                }
+
+                if (statusCode < 400)
+                {
+                    return;
+                }
+
                 if (IsExpectedServerRestartHttpResponse(response, statusCode))
                 {
                     return;
@@ -3598,31 +3592,26 @@ public sealed partial class BrowserFlowTests
 
         }
 
-        private void CaptureRequestUrl(string? method, JsonElement parameters)
+        private void CaptureRequestUrl(string method, JsonElement parameters)
         {
-            if (!parameters.TryGetProperty("requestId", out var requestIdValue) || requestIdValue.ValueKind != JsonValueKind.String)
+            if (method is not ("Network.requestWillBeSent" or "Network.webSocketCreated" or "Network.loadingFinished" or "Network.webSocketClosed"))
             {
                 return;
             }
 
-            var requestId = requestIdValue.GetString()!;
-            if (method == "Network.requestWillBeSent"
-                && parameters.TryGetProperty("request", out var request)
-                && request.TryGetProperty("url", out var requestUrl)
-                && requestUrl.ValueKind == JsonValueKind.String)
+            var requestId = BrowserDevToolsEnvelope.RequireStringProperty(parameters, method, "requestId");
+            if (method == "Network.requestWillBeSent")
             {
-                var requestMethod = request.TryGetProperty("method", out var methodValue) && methodValue.ValueKind == JsonValueKind.String
-                    ? methodValue.GetString()
-                    : null;
-                _requestTracker.Track(requestId, requestUrl.GetString()!, requestMethod);
+                var request = BrowserDevToolsEnvelope.RequireObjectProperty(parameters, method, "request");
+                var requestUrl = BrowserDevToolsEnvelope.RequireStringProperty(request, method, "url");
+                var requestMethod = BrowserDevToolsEnvelope.ReadOptionalStringProperty(request, method, "method");
+                _requestTracker.Track(requestId, requestUrl, requestMethod);
                 return;
             }
 
-            if (method == "Network.webSocketCreated"
-                && parameters.TryGetProperty("url", out var websocketUrl)
-                && websocketUrl.ValueKind == JsonValueKind.String)
+            if (method == "Network.webSocketCreated")
             {
-                _requestTracker.Track(requestId, websocketUrl.GetString()!);
+                _requestTracker.Track(requestId, BrowserDevToolsEnvelope.RequireStringProperty(parameters, method, "url"));
                 return;
             }
 
@@ -3634,12 +3623,10 @@ public sealed partial class BrowserFlowTests
 
         private bool IsExpectedServerRestartLogEntry(JsonElement entry)
         {
-            var requestId = entry.TryGetProperty("networkRequestId", out var requestIdValue) && requestIdValue.ValueKind == JsonValueKind.String
-                ? requestIdValue.GetString()
-                : null;
-            var source = entry.TryGetProperty("source", out var sourceValue) ? sourceValue.GetString() : null;
-            var text = entry.TryGetProperty("text", out var textValue) ? textValue.GetString() : null;
-            var url = entry.TryGetProperty("url", out var urlValue) ? urlValue.GetString() : null;
+            var requestId = BrowserDevToolsEnvelope.ReadOptionalStringProperty(entry, "Log.entryAdded", "networkRequestId");
+            var source = BrowserDevToolsEnvelope.ReadOptionalStringProperty(entry, "Log.entryAdded", "source");
+            var text = BrowserDevToolsEnvelope.ReadOptionalStringProperty(entry, "Log.entryAdded", "text");
+            var url = BrowserDevToolsEnvelope.ReadOptionalStringProperty(entry, "Log.entryAdded", "url");
             return _requestTracker.IsExpectedServerRestartLogEntry(requestId, source, text, url);
         }
 
