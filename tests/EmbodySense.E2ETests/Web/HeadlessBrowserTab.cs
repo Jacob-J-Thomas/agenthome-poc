@@ -15,6 +15,7 @@ internal sealed class HeadlessBrowserTab : IAsyncDisposable
     private readonly SemaphoreSlim _sendGate = new(1, 1);
     private readonly byte[] _buffer = new byte[65536];
     private readonly Task _readerTask;
+    private readonly BrowserDevToolsReaderFailure _readerFailureState = new();
     private Exception? _readerFailure;
     private int _nextCommandId;
     private int _disposed;
@@ -182,19 +183,14 @@ internal sealed class HeadlessBrowserTab : IAsyncDisposable
             ? null
             : new CancellationTokenSource(TimeSpan.FromSeconds(30));
         var effectiveCancellationToken = commandTimeout?.Token ?? cancellationToken;
-        if (_readerFailure is not null)
-        {
-            throw new InvalidOperationException("Browser tab DevTools reader failed.", _readerFailure);
-        }
-
         var commandId = Interlocked.Increment(ref _nextCommandId);
         var payload = parameters is null
             ? JsonSerializer.Serialize(new { id = commandId, method }, _jsonOptions)
             : JsonSerializer.Serialize(new { id = commandId, method, @params = parameters }, _jsonOptions);
         var completion = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
-        if (!_pendingCommands.TryAdd(commandId, completion))
+        if (!_readerFailureState.TryRegister(_pendingCommands, null, commandId, completion, null))
         {
-            throw new InvalidOperationException($"Browser tab DevTools command id {commandId} was already pending.");
+            return await completion.Task.ConfigureAwait(false);
         }
 
         try
@@ -202,9 +198,9 @@ internal sealed class HeadlessBrowserTab : IAsyncDisposable
             await _sendGate.WaitAsync(effectiveCancellationToken).ConfigureAwait(false);
             try
             {
-                if (_readerFailure is not null)
+                if (_readerFailureState.TerminalFailure is { } terminalFailure)
                 {
-                    throw new InvalidOperationException("Browser tab DevTools reader failed.", _readerFailure);
+                    throw terminalFailure;
                 }
 
                 await _socket.SendAsync(Encoding.UTF8.GetBytes(payload), WebSocketMessageType.Text, true, effectiveCancellationToken).ConfigureAwait(false);
@@ -220,7 +216,8 @@ internal sealed class HeadlessBrowserTab : IAsyncDisposable
         }
         catch
         {
-            _pendingCommands.TryRemove(commandId, out _);
+            _readerFailureState.Remove(_pendingCommands, null, commandId);
+            _readerFailureState.ThrowIfTerminal();
             throw;
         }
     }
@@ -234,10 +231,9 @@ internal sealed class HeadlessBrowserTab : IAsyncDisposable
             {
                 using var document = await ReadMessageAsync().ConfigureAwait(false);
                 var root = document.RootElement;
-                if (BrowserDevToolsEnvelope.TryReadCommandId(root, out var commandId)
-                    && _pendingCommands.TryRemove(commandId, out var completion))
+                if (BrowserDevToolsEnvelope.TryReadCommandId(root, out var commandId))
                 {
-                    completion.TrySetResult(root.Clone());
+                    _readerFailureState.TryComplete(_pendingCommands, null, commandId, root);
                 }
             }
         }
@@ -251,8 +247,8 @@ internal sealed class HeadlessBrowserTab : IAsyncDisposable
         }
         finally
         {
-            var completionFailure = _readerFailure ?? failure ?? new ObjectDisposedException(nameof(HeadlessBrowserTab));
-            BrowserDevToolsReaderFailure.CompletePending(_pendingCommands, null, completionFailure);
+            var completionFailure = _readerFailureState.TransitionToTerminal(_pendingCommands, null, _readerFailure ?? failure ?? new ObjectDisposedException(nameof(HeadlessBrowserTab)));
+            _readerFailure = completionFailure;
         }
     }
 

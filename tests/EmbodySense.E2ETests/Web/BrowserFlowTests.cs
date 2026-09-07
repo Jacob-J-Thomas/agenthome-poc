@@ -2891,6 +2891,7 @@ public sealed partial class BrowserFlowTests
         private readonly Task _readerTask;
         private readonly ExpectedServerRestartRequestTracker _requestTracker;
         private readonly BrowserRestartBarrierGuard _restartBarrierGuard = new();
+        private readonly BrowserDevToolsReaderFailure _readerFailureState = new();
         private Exception? _readerFailure;
         private int _acceptNextJavaScriptDialog;
         private int _nextCommandId;
@@ -3299,29 +3300,26 @@ public sealed partial class BrowserFlowTests
         private async Task<JsonElement> SendCommandAsync(string method, object? parameters = null, CancellationToken cancellationToken = default, Action<JsonElement>? responseHandler = null)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            ThrowIfReaderFailed();
             var commandId = Interlocked.Increment(ref _nextCommandId);
             var payload = parameters is null
                 ? JsonSerializer.Serialize(new { id = commandId, method }, _jsonOptions)
                 : JsonSerializer.Serialize(new { id = commandId, method, @params = parameters }, _jsonOptions);
             var bytes = Encoding.UTF8.GetBytes(payload);
             var completion = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
-            if (!_pendingCommands.TryAdd(commandId, completion))
+            Action<JsonElement>? registeredResponseHandler = responseHandler is null
+                ? null
+                : response =>
+                {
+                    BrowserDevToolsResponse.Validate(method, response);
+                    responseHandler(response);
+                };
+            if (!_readerFailureState.TryRegister(_pendingCommands, _pendingResponseHandlers, commandId, completion, registeredResponseHandler))
             {
-                throw new InvalidOperationException($"Browser DevTools command id {commandId} was already pending.");
+                return await completion.Task.ConfigureAwait(false);
             }
 
             try
             {
-                if (responseHandler is not null)
-                {
-                    _pendingResponseHandlers.Add(commandId, response =>
-                    {
-                        BrowserDevToolsResponse.Validate(method, response);
-                        responseHandler(response);
-                    });
-                }
-
                 var sendTask = SendPayloadAsync(bytes);
                 _pendingSends[commandId] = sendTask;
                 _ = ObserveSendCompletionAsync(commandId, sendTask);
@@ -3329,14 +3327,14 @@ public sealed partial class BrowserFlowTests
             }
             catch (OperationCanceledException)
             {
-                _pendingCommands.TryRemove(commandId, out _);
-                _pendingResponseHandlers.Remove(commandId);
+                _readerFailureState.Remove(_pendingCommands, _pendingResponseHandlers, commandId);
+                _readerFailureState.ThrowIfTerminal();
                 throw;
             }
             catch (Exception exception) when (exception is WebSocketException or IOException or InvalidOperationException or ObjectDisposedException)
             {
-                _pendingCommands.TryRemove(commandId, out _);
-                _pendingResponseHandlers.Remove(commandId);
+                _readerFailureState.Remove(_pendingCommands, _pendingResponseHandlers, commandId);
+                _readerFailureState.ThrowIfTerminal();
                 throw new InvalidOperationException("Browser DevTools command send failed." + Environment.NewLine + FormatOutput(), exception);
             }
 
@@ -3348,8 +3346,8 @@ public sealed partial class BrowserFlowTests
             }
             catch
             {
-                _pendingCommands.TryRemove(commandId, out _);
-                _pendingResponseHandlers.Remove(commandId);
+                _readerFailureState.Remove(_pendingCommands, _pendingResponseHandlers, commandId);
+                _readerFailureState.ThrowIfTerminal();
                 throw;
             }
         }
@@ -3394,19 +3392,7 @@ public sealed partial class BrowserFlowTests
                     var root = document.RootElement;
                     if (BrowserDevToolsEnvelope.TryReadCommandId(root, out var commandId))
                     {
-                        if (_pendingCommands.TryRemove(commandId, out var completion))
-                        {
-                            try
-                            {
-                                _pendingResponseHandlers.Handle(commandId, root);
-                                completion.TrySetResult(root.Clone());
-                            }
-                            catch (Exception exception)
-                            {
-                                completion.TrySetException(exception);
-                            }
-                        }
-
+                        _readerFailureState.TryComplete(_pendingCommands, _pendingResponseHandlers, commandId, root);
                         continue;
                     }
 
@@ -3423,10 +3409,8 @@ public sealed partial class BrowserFlowTests
             }
             finally
             {
-                var completionFailure = _readerFailure
-                    ?? failure
-                    ?? new ObjectDisposedException(nameof(HeadlessBrowserSession));
-                BrowserDevToolsReaderFailure.CompletePending(_pendingCommands, _pendingResponseHandlers, completionFailure);
+                var completionFailure = _readerFailureState.TransitionToTerminal(_pendingCommands, _pendingResponseHandlers, _readerFailure ?? failure ?? new ObjectDisposedException(nameof(HeadlessBrowserSession)));
+                _readerFailure = completionFailure;
             }
         }
 
@@ -3675,9 +3659,9 @@ public sealed partial class BrowserFlowTests
 
         private void ThrowIfReaderFailed()
         {
-            if (_readerFailure is not null)
+            if (_readerFailureState.TerminalFailure is { } terminalFailure)
             {
-                throw new InvalidOperationException("Browser DevTools reader failed." + Environment.NewLine + FormatOutput(), _readerFailure);
+                throw terminalFailure;
             }
         }
 

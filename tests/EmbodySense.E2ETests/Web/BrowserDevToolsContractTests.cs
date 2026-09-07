@@ -130,7 +130,7 @@ public sealed class BrowserDevToolsContractTests
         Assert.False(BrowserDevToolsEnvelope.TryReadCommandId(eventEnvelope.RootElement, out _));
         Assert.Throws<BrowserDevToolsException>(() => BrowserDevToolsEnvelope.TryReadCommandId(missingResponseId.RootElement, out _));
         Assert.Throws<BrowserDevToolsException>(() => BrowserDevToolsEnvelope.TryReadCommandId(fractionalResponseId.RootElement, out _));
-        Assert.Throws<JsonException>(() => BrowserDevToolsEnvelope.Parse("{invalid-json"));
+        Assert.ThrowsAny<JsonException>(() => BrowserDevToolsEnvelope.Parse("{invalid-json"));
 
         var transitions = new List<string>();
         var guard = new BrowserRestartBarrierGuard();
@@ -141,19 +141,55 @@ public sealed class BrowserDevToolsContractTests
     }
 
     [Fact]
-    public async Task Browser_devtools_reader_failure_completes_pending_with_the_original_typed_failure()
+    public async Task Browser_devtools_reader_latch_correlates_serialized_responses_without_consuming_raw_events()
     {
         var pending = new ConcurrentDictionary<int, TaskCompletionSource<JsonElement>>();
         var handlers = new PendingBrowserCommandResponses();
+        var readerFailure = new BrowserDevToolsReaderFailure();
         var completion = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
-        pending.TryAdd(1, completion);
-        handlers.Add(1, _ => throw new InvalidOperationException("callback should have been removed"));
+        var callbackObserved = false;
+        Assert.True(readerFailure.TryRegister(pending, handlers, 1, completion, _ =>
+        {
+            Assert.False(completion.Task.IsCompleted);
+            callbackObserved = true;
+        }));
+
+        using var response = BrowserDevToolsEnvelope.Parse("{\"id\":1,\"result\":{}}");
+        Assert.True(BrowserDevToolsEnvelope.TryReadCommandId(response.RootElement, out var commandId));
+        Assert.True(readerFailure.TryComplete(pending, handlers, commandId, response.RootElement));
+        Assert.True(callbackObserved);
+        Assert.Equal(JsonValueKind.Object, (await completion.Task).ValueKind);
+
+        var rawCompletion = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Assert.True(readerFailure.TryRegister(pending, handlers, 2, rawCompletion, null));
+        using var rawEvent = BrowserDevToolsEnvelope.Parse("{\"method\":\"Page.loadEventFired\"}");
+        Assert.False(BrowserDevToolsEnvelope.TryReadCommandId(rawEvent.RootElement, out _));
+        Assert.False(rawCompletion.Task.IsCompleted);
+        readerFailure.Remove(pending, handlers, 2);
+        Assert.Empty(pending);
+        Assert.Equal(0, handlers.Count);
+    }
+
+    [Fact]
+    public async Task Browser_devtools_reader_latch_preserves_terminal_failure_for_late_registration()
+    {
+        var pending = new ConcurrentDictionary<int, TaskCompletionSource<JsonElement>>();
+        var handlers = new PendingBrowserCommandResponses();
+        var readerFailure = new BrowserDevToolsReaderFailure();
+        var registered = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Assert.True(readerFailure.TryRegister(pending, handlers, 1, registered, _ => throw new InvalidOperationException("callback should have been removed")));
         var failure = new BrowserDevToolsException("malformed-envelope", "unknown", null, "response-id-missing");
 
-        BrowserDevToolsReaderFailure.CompletePending(pending, handlers, failure);
+        Assert.Same(failure, readerFailure.TransitionToTerminal(pending, handlers, failure));
+        var terminalBeforeSendFailure = Assert.Throws<BrowserDevToolsException>(() => readerFailure.ThrowIfTerminal());
+        Assert.Same(failure, terminalBeforeSendFailure);
+        var observedRegistered = await Assert.ThrowsAsync<BrowserDevToolsException>(() => registered.Task);
+        Assert.Same(failure, observedRegistered);
 
-        var observed = await Assert.ThrowsAsync<BrowserDevToolsException>(() => completion.Task);
-        Assert.Same(failure, observed);
+        var late = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Assert.False(readerFailure.TryRegister(pending, handlers, 2, late, _ => throw new InvalidOperationException("late callback should not register")));
+        var observedLate = await Assert.ThrowsAsync<BrowserDevToolsException>(() => late.Task);
+        Assert.Same(failure, observedLate);
         Assert.Empty(pending);
         Assert.Equal(0, handlers.Count);
     }
