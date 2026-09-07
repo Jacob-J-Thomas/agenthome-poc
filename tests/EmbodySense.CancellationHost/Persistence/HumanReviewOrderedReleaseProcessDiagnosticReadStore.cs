@@ -38,7 +38,7 @@ internal sealed class HumanReviewOrderedReleaseProcessDiagnosticReadStore : IGov
             Report($"Human Review ordered-release race canonical attempt read was non-Current: status={result?.Status.ToString() ?? "<null>"}.");
         }
 
-        return result;
+        return result!;
     }
 
     private void Report(string diagnostic)
