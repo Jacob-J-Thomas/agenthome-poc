@@ -890,6 +890,348 @@ test("Human Input selection clears prior request drafts and keeps feedback scope
   assert.equal(fixture.elements.humanInputResponseStatus.textContent, "");
 });
 
+test("Human Input stale list refresh cannot overwrite a newer real-surface selection", async () => {
+  const fixture = createFixture();
+  const expiry = posture({ requestId: "request-input-expiry" });
+  const supersede = posture({
+    requestId: "request-input-supersede",
+    presentation: {
+      ...posture().presentation,
+      requestVersionId: "version-input-supersede",
+      purpose: "Supersede purpose.",
+      prompt: "Supersede prompt.",
+    },
+    currentRequest: {
+      schemaVersion: 1,
+      requestId: "request-input-supersede",
+      requestVersionId: "version-input-supersede",
+      requestHash: hash,
+    },
+  });
+  let listReadCount = 0;
+  let releaseOldList;
+  const oldList = new Promise((resolve) => {
+    releaseOldList = resolve;
+  });
+  const calls = [];
+  const requestJson = async (url, options = {}) => {
+    calls.push({ url, options });
+    if (url === "/api/human-input?maximumCount=50") {
+      listReadCount++;
+      return listReadCount === 1
+        ? { status: "ready", requests: [expiry, supersede], nextCursor: null }
+        : oldList;
+    }
+    if (url.endsWith("request-input-expiry")) return expiry;
+    if (url.endsWith("request-input-supersede")) return supersede;
+    if (options.method === "POST") return { status: "committed" };
+    throw new Error(`unexpected request: ${url}`);
+  };
+  const surface = createHumanInputSurface({
+    document: fixture.document,
+    requestJson,
+  });
+
+  await surface.activate();
+  const staleRefresh = surface.refresh(expiry.requestId);
+  await surface.selectRequest(supersede.requestId);
+  releaseOldList({
+    status: "ready",
+    requests: [expiry, supersede],
+    nextCursor: null,
+  });
+  await staleRefresh;
+
+  const selectedItems = fixture.elements.humanInputList.children.filter(
+    (item) => item.attributes.get("aria-selected") === "true",
+  );
+  assert.equal(selectedItems.length, 1);
+  assert.equal(selectedItems[0].dataset.requestId, supersede.requestId);
+  assert.equal(
+    fixture.elements.humanInputIdentity.textContent,
+    `Request ${supersede.requestId}`,
+  );
+  assert.match(
+    fixture.elements.humanInputDetailStatus.textContent,
+    /Canonical state reread/,
+  );
+  assert.equal(fixture.elements.humanInputRefreshButton.disabled, false);
+  assert.equal(fixture.elements.humanInputDetailRefreshButton.disabled, false);
+
+  fixture.elements.humanInputResponseEditor.children[0].children[1].value =
+    "response for supersede";
+  await clickAndFlush(fixture.elements.humanInputResponseSubmitButton);
+  const answer = calls.find((call) => call.url.endsWith("/answer"));
+  assert.ok(answer);
+  assert.equal(
+    JSON.parse(answer.options.body).expectedRequest.requestId,
+    supersede.requestId,
+  );
+  assert.match(answer.url, new RegExp(`${supersede.requestId}/answer$`));
+});
+
+test("Human Input ignores delayed old detail success and failure after selection changes", async () => {
+  const fixture = createFixture();
+  const first = posture({ requestId: "request-input-first" });
+  const second = posture({
+    requestId: "request-input-second",
+    presentation: {
+      ...posture().presentation,
+      requestVersionId: "version-input-second",
+      purpose: "Second purpose.",
+      prompt: "Second prompt.",
+    },
+    currentRequest: {
+      schemaVersion: 1,
+      requestId: "request-input-second",
+      requestVersionId: "version-input-second",
+      requestHash: hash,
+    },
+  });
+  let firstDetailReadCount = 0;
+  let notifyInitialDetailStarted;
+  let notifyFailedDetailStarted;
+  const initialDetailStarted = new Promise((resolve) => {
+    notifyInitialDetailStarted = resolve;
+  });
+  const failedDetailStarted = new Promise((resolve) => {
+    notifyFailedDetailStarted = resolve;
+  });
+  let releaseInitialDetail;
+  let releaseFailedDetail;
+  const initialDetail = new Promise((resolve) => {
+    releaseInitialDetail = resolve;
+  });
+  const failedDetail = new Promise((_, reject) => {
+    releaseFailedDetail = reject;
+  });
+  const requestJson = async (url) => {
+    if (url === "/api/human-input?maximumCount=50")
+      return { status: "ready", requests: [first, second], nextCursor: null };
+    if (url.endsWith("request-input-first")) {
+      firstDetailReadCount++;
+      if (firstDetailReadCount === 1) {
+        notifyInitialDetailStarted();
+        return initialDetail;
+      }
+      if (firstDetailReadCount === 2) {
+        notifyFailedDetailStarted();
+        return failedDetail;
+      }
+      return first;
+    }
+    if (url.endsWith("request-input-second")) return second;
+    throw new Error(`unexpected request: ${url}`);
+  };
+  const surface = createHumanInputSurface({
+    document: fixture.document,
+    requestJson,
+  });
+
+  const initialRefresh = surface.activate();
+  await initialDetailStarted;
+  await surface.selectRequest(second.requestId);
+  releaseInitialDetail(first);
+  await initialRefresh;
+  assert.equal(
+    fixture.elements.humanInputIdentity.textContent,
+    `Request ${second.requestId}`,
+  );
+
+  const delayedOldDetail = surface.selectRequest(first.requestId);
+  await failedDetailStarted;
+  await surface.selectRequest(second.requestId);
+  releaseFailedDetail(new Error("delayed detail unavailable"));
+  await delayedOldDetail;
+  assert.equal(
+    fixture.elements.humanInputIdentity.textContent,
+    `Request ${second.requestId}`,
+  );
+  assert.match(
+    fixture.elements.humanInputDetailStatus.textContent,
+    /Canonical state reread/,
+  );
+});
+
+test("Human Input ignores a failed old list refresh while preserving the newer selection", async () => {
+  const fixture = createFixture();
+  const first = posture({ requestId: "request-input-first" });
+  const second = posture({
+    requestId: "request-input-second",
+    presentation: {
+      ...posture().presentation,
+      requestVersionId: "version-input-second",
+    },
+    currentRequest: {
+      schemaVersion: 1,
+      requestId: "request-input-second",
+      requestVersionId: "version-input-second",
+      requestHash: hash,
+    },
+  });
+  let listReadCount = 0;
+  let rejectOldList;
+  const oldList = new Promise((_, reject) => {
+    rejectOldList = reject;
+  });
+  const requestJson = async (url) => {
+    if (url === "/api/human-input?maximumCount=50") {
+      listReadCount++;
+      return listReadCount === 1
+        ? { status: "ready", requests: [first, second], nextCursor: null }
+        : oldList;
+    }
+    if (url.endsWith("request-input-first")) return first;
+    if (url.endsWith("request-input-second")) return second;
+    throw new Error(`unexpected request: ${url}`);
+  };
+  const surface = createHumanInputSurface({
+    document: fixture.document,
+    requestJson,
+  });
+
+  await surface.activate();
+  const staleRefresh = surface.refresh(first.requestId);
+  await surface.selectRequest(second.requestId);
+  rejectOldList(new Error("old list unavailable"));
+  await staleRefresh;
+
+  const selectedItems = fixture.elements.humanInputList.children.filter(
+    (item) => item.attributes.get("aria-selected") === "true",
+  );
+  assert.equal(selectedItems.length, 1);
+  assert.equal(selectedItems[0].dataset.requestId, second.requestId);
+  assert.equal(
+    fixture.elements.humanInputIdentity.textContent,
+    `Request ${second.requestId}`,
+  );
+  assert.match(
+    fixture.elements.humanInputDetailStatus.textContent,
+    /Canonical state reread/,
+  );
+});
+
+test("Human Input stale refresh settlement cannot enable controls during a newer detail read", async () => {
+  const fixture = createFixture();
+  const expiry = posture({ requestId: "request-input-expiry" });
+  const supersede = posture({
+    requestId: "request-input-supersede",
+    presentation: {
+      ...posture().presentation,
+      requestVersionId: "version-input-supersede",
+    },
+    currentRequest: {
+      schemaVersion: 1,
+      requestId: "request-input-supersede",
+      requestVersionId: "version-input-supersede",
+      requestHash: hash,
+    },
+  });
+  let expiryDetailReadCount = 0;
+  let notifyOldDetailStarted;
+  let notifyNewDetailStarted;
+  let releaseOldDetail;
+  let releaseNewDetail;
+  const oldDetailStarted = new Promise((resolve) => {
+    notifyOldDetailStarted = resolve;
+  });
+  const newDetailStarted = new Promise((resolve) => {
+    notifyNewDetailStarted = resolve;
+  });
+  const oldDetail = new Promise((resolve) => {
+    releaseOldDetail = resolve;
+  });
+  const newDetail = new Promise((resolve) => {
+    releaseNewDetail = resolve;
+  });
+  const requestJson = async (url) => {
+    if (url === "/api/human-input?maximumCount=50")
+      return {
+        status: "ready",
+        requests: [expiry, supersede],
+        nextCursor: null,
+      };
+    if (url.endsWith("request-input-expiry")) {
+      expiryDetailReadCount++;
+      if (expiryDetailReadCount === 1) return expiry;
+      notifyOldDetailStarted();
+      return oldDetail;
+    }
+    if (url.endsWith("request-input-supersede")) {
+      notifyNewDetailStarted();
+      return newDetail;
+    }
+    throw new Error(`unexpected request: ${url}`);
+  };
+  const surface = createHumanInputSurface({
+    document: fixture.document,
+    requestJson,
+  });
+
+  await surface.activate();
+  const staleRefresh = surface.refresh(expiry.requestId);
+  await oldDetailStarted;
+  const newerSelection = surface.selectRequest(supersede.requestId);
+  await newDetailStarted;
+  releaseOldDetail(expiry);
+  await staleRefresh;
+  assert.equal(fixture.elements.humanInputSupersedeButton.disabled, true);
+  releaseNewDetail(supersede);
+  await newerSelection;
+  assert.equal(fixture.elements.humanInputSupersedeButton.disabled, false);
+});
+
+test("Human Input refresh preserves the same selection and handles a disappearing selection", async () => {
+  const fixture = createFixture();
+  const first = posture({ requestId: "request-input-first" });
+  const second = posture({
+    requestId: "request-input-second",
+    presentation: {
+      ...posture().presentation,
+      requestVersionId: "version-input-second",
+    },
+    currentRequest: {
+      schemaVersion: 1,
+      requestId: "request-input-second",
+      requestVersionId: "version-input-second",
+      requestHash: hash,
+    },
+  });
+  let items = [first, second];
+  const requestJson = async (url) => {
+    if (url === "/api/human-input?maximumCount=50")
+      return { status: "ready", requests: items, nextCursor: null };
+    if (url.endsWith("request-input-first")) return first;
+    if (url.endsWith("request-input-second")) return second;
+    throw new Error(`unexpected request: ${url}`);
+  };
+  const surface = createHumanInputSurface({
+    document: fixture.document,
+    requestJson,
+  });
+
+  await surface.activate();
+  await surface.refresh(first.requestId);
+  assert.equal(
+    fixture.elements.humanInputIdentity.textContent,
+    `Request ${first.requestId}`,
+  );
+
+  items = [second];
+  await surface.refresh(first.requestId);
+  assert.equal(
+    fixture.elements.humanInputIdentity.textContent,
+    `Request ${second.requestId}`,
+  );
+  assert.equal(fixture.elements.humanInputList.children.length, 1);
+
+  items = [];
+  await surface.refresh(second.requestId);
+  assert.equal(fixture.elements.humanInputEmpty.hidden, false);
+  assert.equal(fixture.elements.humanInputDetailPanel.hidden, true);
+  assert.equal(fixture.elements.humanInputIdentity.textContent, "");
+});
+
 test("Human Input pagination rejects cycles and aggregate overflow", async () => {
   const first = posture({ requestId: "request-input-first" });
   const fixture = createFixture();
