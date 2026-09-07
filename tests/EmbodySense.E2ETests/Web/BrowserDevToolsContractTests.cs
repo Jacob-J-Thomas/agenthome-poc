@@ -248,15 +248,14 @@ public sealed class BrowserDevToolsContractTests
         canceled.Cancel();
         await AssertTerminalOnFirstAttemptAsync(new OperationCanceledException(canceled.Token));
 
-        var turnoverAttempts = 0;
-        var timeout = await Assert.ThrowsAsync<TimeoutException>(() => BrowserReadOnlyWait.WaitForTrueAsync(_ =>
-        {
-            turnoverAttempts++;
-            return Task.FromException<bool>(new BrowserDevToolsException("protocol-error", "Runtime.evaluate", -32000, "Cannot find context with specified id"));
-        }, TimeSpan.FromMilliseconds(220), "Browser Runtime.evaluate read-only wait timed out."));
+        var timeout = await Assert.ThrowsAsync<TimeoutException>(() => BrowserReadOnlyWait.WaitForTrueAsync(_ => Task.FromException<bool>(new BrowserDevToolsException("protocol-error", "Runtime.evaluate", -32000, "Cannot find context with specified id")), TimeSpan.FromMilliseconds(220), "Browser Runtime.evaluate read-only wait timed out."));
         Assert.Equal("Browser Runtime.evaluate read-only wait timed out.", timeout.Message);
         Assert.DoesNotContain("secret-expression", timeout.Message, StringComparison.Ordinal);
-        Assert.InRange(turnoverAttempts, 2, 4);
+        var turnover = Assert.IsType<BrowserDevToolsException>(timeout.InnerException);
+        Assert.Equal("protocol-error", turnover.Category);
+        Assert.Equal("Runtime.evaluate", turnover.Method);
+        Assert.Equal(-32000, turnover.Code);
+        Assert.Equal("Cannot find context with specified id", turnover.SafeMessage);
     }
 
     [Fact]
