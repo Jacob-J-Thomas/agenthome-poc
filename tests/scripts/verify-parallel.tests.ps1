@@ -181,7 +181,7 @@ Assert-True -Condition ($declaredRequiredGateProfiles.Count -eq $requiredGatePro
 $persistenceProfile = Get-VerificationRequiredGateScheduleProfile -Name "tests-EmbodySense.Core.Persistence.Tests-all"
 Assert-True -Condition ($persistenceProfile.EstimatedDurationSeconds -eq 720 -and $persistenceProfile.TimeoutSeconds -eq 840 -and $persistenceProfile.Weight -eq 6 -and $persistenceProfile.ResourceClass -ceq "ProcessHeavy") -Message "Persistence must retain its measured 720-second duration, 840-second dedicated ceiling, and half-runner process-heavy reservation."
 $startupRemainderProfile = Get-VerificationRequiredGateScheduleProfile -Name "tests-EmbodySense.Core.Startup.Tests-remainder"
-Assert-True -Condition ($startupRemainderProfile.EstimatedDurationSeconds -eq 560 -and $startupRemainderProfile.TimeoutSeconds -eq 750 -and $startupRemainderProfile.Weight -eq 6 -and $startupRemainderProfile.ResourceClass -ceq "ProcessHeavy") -Message "The Startup remainder must retain its separate 560-second duration, bounded 750-second Coverlet-finalization ceiling, and half-runner process-heavy reservation."
+Assert-True -Condition ($startupRemainderProfile.EstimatedDurationSeconds -eq 720 -and $startupRemainderProfile.TimeoutSeconds -eq 840 -and $startupRemainderProfile.Weight -eq 6 -and $startupRemainderProfile.ResourceClass -ceq "ProcessHeavy") -Message "The Startup remainder must retain its separate 720-second duration, bounded 840-second finalization ceiling, and half-runner process-heavy reservation."
 $nestedProcessProfile = Get-VerificationRequiredGateScheduleProfile -Name "tests-EmbodySense.Core.Startup.Tests-nested-process"
 Assert-True -Condition ($nestedProcessProfile.EstimatedDurationSeconds -eq 180 -and $nestedProcessProfile.TimeoutSeconds -eq 600 -and $nestedProcessProfile.Weight -eq 12 -and $nestedProcessProfile.ResourceClass -ceq "ProcessHeavy") -Message "The nested-process Startup lane must reserve the entire logical capacity with its measured profile."
 Assert-True -Condition (@($requiredGateProfiles | Where-Object { $_.Name -ceq "tests-EmbodySense.Core.Startup.Tests-all" }).Count -eq 0) -Message "The stale all-Startup scheduling profile must not survive the two-lane partition."
@@ -196,7 +196,7 @@ try {
     $persistenceProfileSource.TimeoutSeconds = 839
     try {
         Get-VerificationRequiredGateScheduleProfile -Name $persistenceProfileSource.Name | Out-Null
-        throw "Expected insufficient Persistence timeout headroom to fail closed."
+        throw "Expected invalid Persistence profile to be rejected."
     }
     catch {
         Assert-True -Condition ($_.Exception.Message.IndexOf("timeout headroom", [StringComparison]::Ordinal) -ge 0) -Message "A stale dominant-lane child budget must fail closed."
@@ -211,13 +211,22 @@ try {
         Assert-True -Condition ($_.Exception.Message.IndexOf("bounded child-timeout policy of 840 seconds", [StringComparison]::Ordinal) -ge 0) -Message "A Persistence timeout above its dedicated maximum must fail closed."
     }
 
-    $startupRemainderProfileSource.TimeoutSeconds = 751
+    $startupRemainderProfileSource.TimeoutSeconds = 839
+    try {
+        Get-VerificationRequiredGateScheduleProfile -Name $startupRemainderProfileSource.Name | Out-Null
+        throw "Expected invalid Startup remainder profile to be rejected."
+    }
+    catch {
+        Assert-True -Condition ($_.Exception.Message.IndexOf("timeout headroom", [StringComparison]::Ordinal) -ge 0) -Message "A stale Startup remainder child budget must fail closed."
+    }
+
+    $startupRemainderProfileSource.TimeoutSeconds = 841
     try {
         Get-VerificationRequiredGateScheduleProfile -Name $startupRemainderProfileSource.Name | Out-Null
         throw "Expected a Startup remainder timeout above the shared maximum to fail closed."
     }
     catch {
-        Assert-True -Condition ($_.Exception.Message.IndexOf("bounded child-timeout policy of 750 seconds", [StringComparison]::Ordinal) -ge 0) -Message "The Startup remainder must fail closed above its bounded Coverlet-finalization ceiling."
+        Assert-True -Condition ($_.Exception.Message.IndexOf("bounded child-timeout policy of 840 seconds", [StringComparison]::Ordinal) -ge 0) -Message "The Startup remainder must fail closed above its bounded finalization ceiling."
     }
 }
 finally {

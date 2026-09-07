@@ -5,7 +5,7 @@ $script:VerificationRequiredGateMaximumProcessHeavyWorkers = 2
 $script:VerificationRequiredGateMaximumCpuBoundWorkers = 1
 $script:VerificationRequiredGateMinimumTimeoutHeadroomSeconds = 120
 $script:VerificationRequiredGateDefaultTestTimeoutSeconds = 600
-$script:VerificationRequiredGateExtendedTestTimeoutSeconds = 750
+$script:VerificationRequiredGateExtendedTestTimeoutSeconds = 840
 $script:VerificationRequiredGatePersistenceTestTimeoutSeconds = 840
 $script:VerificationRequiredGatePersistenceTestName = "tests-EmbodySense.Core.Persistence.Tests-all"
 $script:VerificationRequiredGateExtendedTimeoutNames = @(
@@ -18,8 +18,8 @@ $script:VerificationRequiredGateScheduleProfiles = @(
     # https://github.com/Jacob-J-Thomas/agenthome-poc/issues/422: reserve the complete four-core runner for the two dominant assemblies so a third process cannot starve both coverage lanes.
     # https://github.com/Jacob-J-Thomas/agenthome-poc/issues/610: run 33278142400 selected the complete 2,403-test Persistence lane but timed out at 720.134/720 and 720.089/720; run 33275739423 passed at 718.865 seconds.
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Persistence.Tests-all"; EstimatedDurationSeconds = 720; TimeoutSeconds = 840; Weight = 6; ResourceClass = "ProcessHeavy" }
-    # R11 exact-head evidence completed all Startup tests and testhost shutdown before Coverlet finalization remained active at the 720-second child deadline; retain a bounded 750-second finalization budget without changing the measured estimate or resource reservation.
-    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Startup.Tests-remainder"; EstimatedDurationSeconds = 560; TimeoutSeconds = 750; Weight = 6; ResourceClass = "ProcessHeavy" }
+    # R19 exact-head verifier evidence observed the Startup remainder test process still running at its 750-second child deadline after xUnit completion; allow bounded coverage-finalization/report-attachment time without asserting a counterfactual success outcome.
+    [pscustomobject]@{ Name = "tests-EmbodySense.Core.Startup.Tests-remainder"; EstimatedDurationSeconds = 720; TimeoutSeconds = 840; Weight = 6; ResourceClass = "ProcessHeavy" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Core.Startup.Tests-nested-process"; EstimatedDurationSeconds = 180; TimeoutSeconds = 600; Weight = 12; ResourceClass = "ProcessHeavy" }
     [pscustomobject]@{ Name = "tests-EmbodySense.Web.Tests-all"; EstimatedDurationSeconds = 210; TimeoutSeconds = 600; Weight = 3; ResourceClass = "ProcessHeavy" }
     [pscustomobject]@{ Name = "tests-EmbodySense.IntegrationTests-all"; EstimatedDurationSeconds = 180; TimeoutSeconds = 600; Weight = 3; ResourceClass = "ProcessHeavy" }

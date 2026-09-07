@@ -1,5 +1,5 @@
 using System.Diagnostics;
-using System.Reflection;
+using EmbodySense.CancellationHost.Persistence;
 using EmbodySense.Core.Application.Loops.EffectAttempts.Models;
 using EmbodySense.Tests.Support;
 using Xunit.Sdk;
@@ -91,16 +91,16 @@ public sealed class CrossProcessReadinessDiagnosticsTests
     public async Task Ordered_release_diagnostic_reader_preserves_delegate_outcomes_when_reporting_fails()
     {
         var unavailable = new GovernedLoopEffectAttemptReadResult(GovernedLoopEffectAttemptReadStatus.Unavailable);
-        var unavailableReader = CreateDiagnosticReader((_, _, _, _) => Task.FromResult(unavailable), ThrowingDiagnosticWriter);
-        Assert.Same(unavailable, await ReadDiagnosticAsync(unavailableReader));
+        var unavailableReader = new HumanReviewOrderedReleaseProcessDiagnosticReadStore((_, _, _, _) => Task.FromResult(unavailable), ThrowingDiagnosticWriter);
+        Assert.Same(unavailable, await unavailableReader.ReadAsync("workspace", "operation", 1L));
 
         var current = new GovernedLoopEffectAttemptReadResult(GovernedLoopEffectAttemptReadStatus.Current);
-        var currentReader = CreateDiagnosticReader((_, _, _, _) => Task.FromResult(current), ThrowingDiagnosticWriter);
-        Assert.Same(current, await ReadDiagnosticAsync(currentReader));
+        var currentReader = new HumanReviewOrderedReleaseProcessDiagnosticReadStore((_, _, _, _) => Task.FromResult(current), ThrowingDiagnosticWriter);
+        Assert.Same(current, await currentReader.ReadAsync("workspace", "operation", 1L));
 
         var expected = new IOException("canonical read failure");
-        var throwingReader = CreateDiagnosticReader((_, _, _, _) => Task.FromException<GovernedLoopEffectAttemptReadResult>(expected), ThrowingDiagnosticWriter);
-        var exception = await Assert.ThrowsAsync<IOException>(() => ReadDiagnosticAsync(throwingReader));
+        var throwingReader = new HumanReviewOrderedReleaseProcessDiagnosticReadStore((_, _, _, _) => Task.FromException<GovernedLoopEffectAttemptReadResult>(expected), ThrowingDiagnosticWriter);
+        var exception = await Assert.ThrowsAsync<IOException>(() => throwingReader.ReadAsync("workspace", "operation", 1L));
         Assert.Same(expected, exception);
     }
 
@@ -195,16 +195,6 @@ public sealed class CrossProcessReadinessDiagnosticsTests
         return false;
     }
 
-    private static object CreateDiagnosticReader(Func<string, string, long, CancellationToken, Task<GovernedLoopEffectAttemptReadResult>> read, Action<string> report)
-    {
-        var hostAssemblyPath = Path.Combine(AppContext.BaseDirectory, "CancellationHost", "EmbodySense.CancellationHost.dll");
-        var readerType = Assembly.LoadFrom(hostAssemblyPath).GetType("EmbodySense.CancellationHost.Persistence.HumanReviewOrderedReleaseProcessDiagnosticReadStore", throwOnError: true)!;
-        return Activator.CreateInstance(readerType, BindingFlags.Instance | BindingFlags.NonPublic, null, [read, report], null)!;
-    }
-
-    private static Task<GovernedLoopEffectAttemptReadResult> ReadDiagnosticAsync(object reader)
-        => (Task<GovernedLoopEffectAttemptReadResult>)reader.GetType().GetMethod("ReadAsync")!.Invoke(reader, ["workspace", "operation", 1L, CancellationToken.None])!;
-
-    private static void ThrowingDiagnosticWriter(string _) => throw new IOException("diagnostic writer failure");
+    private static void ThrowingDiagnosticWriter(string diagnostic) => throw new IOException("diagnostic writer failure");
 
 }

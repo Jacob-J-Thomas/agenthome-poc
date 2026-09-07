@@ -255,7 +255,7 @@ Assert-Contains -Actual $parallelScript -Expected '$Pending[$index].SchedulingDe
 Assert-Contains -Actual $parallelScript -Expected 'VERIFY_CHILD_TIMEOUT name=$($result.Name)' -Message "Parallel timeouts must emit structured watchdog evidence."
 Assert-Contains -Actual $verifyScript -Expected '-TimeoutSeconds $profile.TimeoutSeconds' -Message "Every required lane must execute only with its checked-in profile-owned timeout."
 Assert-Contains -Actual $scheduleScript -Expected '$script:VerificationRequiredGateMinimumTimeoutHeadroomSeconds = 120' -Message "Required test lanes must retain explicit measured timeout headroom."
-Assert-Contains -Actual $scheduleScript -Expected '$script:VerificationRequiredGateExtendedTestTimeoutSeconds = 750' -Message "Startup must retain the shared bounded Coverlet-finalization child timeout."
+Assert-Contains -Actual $scheduleScript -Expected '$script:VerificationRequiredGateExtendedTestTimeoutSeconds = 840' -Message "Startup must retain the shared bounded finalization child timeout."
 Assert-Contains -Actual $scheduleScript -Expected '$script:VerificationRequiredGatePersistenceTestTimeoutSeconds = 840' -Message "Persistence must retain its explicit bounded child-timeout maximum."
 Assert-Contains -Actual $scheduleScript -Expected '$profile.Name -ceq $script:VerificationRequiredGatePersistenceTestName' -Message "Persistence must use a dedicated timeout-policy branch rather than widening the shared Startup ceiling."
 Assert-Contains -Actual $verifyScript -Expected 'Get-ProjectCoverageIsolation' -Message "Every test project must execute from isolated exact-build copies."
@@ -406,7 +406,7 @@ foreach ($webSharedRuntimeTest in @(
 }
 foreach ($assemblyProfile in @(
     'Name = "tests-EmbodySense.Core.Persistence.Tests-all"; EstimatedDurationSeconds = 720; TimeoutSeconds = 840; Weight = 6; ResourceClass = "ProcessHeavy"'
-    'Name = "tests-EmbodySense.Core.Startup.Tests-remainder"; EstimatedDurationSeconds = 560; TimeoutSeconds = 750; Weight = 6; ResourceClass = "ProcessHeavy"'
+    'Name = "tests-EmbodySense.Core.Startup.Tests-remainder"; EstimatedDurationSeconds = 720; TimeoutSeconds = 840; Weight = 6; ResourceClass = "ProcessHeavy"'
     'Name = "tests-EmbodySense.Core.Startup.Tests-nested-process"; EstimatedDurationSeconds = 180; TimeoutSeconds = 600; Weight = 12; ResourceClass = "ProcessHeavy"'
     'Name = "tests-EmbodySense.Web.Tests-all"; EstimatedDurationSeconds = 210; TimeoutSeconds = 600; Weight = 3; ResourceClass = "ProcessHeavy"'
     'Name = "tests-EmbodySense.IntegrationTests-all"; EstimatedDurationSeconds = 180; TimeoutSeconds = 600; Weight = 3; ResourceClass = "ProcessHeavy"'
