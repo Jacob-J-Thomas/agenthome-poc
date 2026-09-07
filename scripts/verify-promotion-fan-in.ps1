@@ -302,7 +302,7 @@ function Assert-FanInMacOSPlatformEvidence {
     $declaredText = (@($facts | Sort-Object fact) | ConvertTo-Json -Depth 12 -Compress)
     $derivedText = (@($derivedFacts | Sort-Object fact) | ConvertTo-Json -Depth 12 -Compress)
     Assert-FanInCondition -Condition ($declaredText -ceq $derivedText) -Message "macOS platform result map does not match the authoritative raw TRX reconciliation."
-    $phaseNames = @("build-macos-platform-contract") + @($selection | Group-Object Project | ForEach-Object { $assembly = [IO.Path]::GetFileNameWithoutExtension($_.Name); @("discover-macos-$assembly", "macos-$assembly") })
+    $phaseNames = @("clean-test-results", "build-macos-platform-contract") + @($selection | Group-Object Project | ForEach-Object { $assembly = [IO.Path]::GetFileNameWithoutExtension($_.Name); @("discover-macos-$assembly", "macos-$assembly") })
     $watchdogFile = Get-FanInSingleFile -Root $ResultsRoot -Name "watchdog.log" -Description "macOS platform watchdog evidence"
     $phaseMarkers = @([regex]::Matches((Get-Content -LiteralPath $watchdogFile.FullName -Raw), '(?m)^VERIFY_PHASE_COMPLETE name=(?<name>[^ ]+) elapsed_seconds=[0-9]+(?:\.[0-9]+)? completed_at_utc=\S+\r?$') | ForEach-Object { $_.Groups["name"].Value })
     Assert-FanInCondition -Condition ($phaseMarkers.Count -eq $phaseNames.Count -and (@($phaseMarkers | Where-Object { $phaseNames -notcontains $_ }).Count -eq 0)) -Message "macOS platform watchdog evidence contains a missing, duplicate, or foreign completed phase marker."

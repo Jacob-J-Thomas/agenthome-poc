@@ -199,7 +199,7 @@ function New-TestMacOSPlatformComponent {
     $assemblies = @(Get-MacOSPlatformContractAssemblies -Selection $selection)
     $facts = [Collections.Generic.List[object]]::new()
     $discoveries = [Collections.Generic.List[object]]::new()
-    $phaseNames = @("build-macos-platform-contract")
+    $phaseNames = @("clean-test-results", "build-macos-platform-contract")
     $index = 1
     foreach ($assembly in $assemblies) {
         $assemblyRoot = Join-Path $platformRoot $assembly.Assembly
@@ -269,16 +269,31 @@ try {
         $outputPath = $Arguments[([Array]::IndexOf($Arguments, "-OutputPath") + 1)]
         $filter = $Arguments[([Array]::IndexOf($Arguments, "-Filter") + 1)]
         $tests = @($controlledDiscoveryAssembly.Group | ForEach-Object { [ordered]@{ fullyQualifiedName = $_.Fact; id = "20000000-0000-0000-0000-$([Array]::IndexOf($controlledDiscoveryAssembly.Group, $_).ToString('000000000000'))"; xunitTestCaseUniqueId = "controlled-$($_.Fact)" } })
-        Write-TestJson -Path $outputPath -Value ([ordered]@{ schemaVersion = 1; source = [IO.Path]::GetFullPath($controlledDiscoveryAssembly.TestAssemblyPath); filter = $filter; totalTests = $tests.Count; tests = $tests })
         Write-Output "VERIFY_PHASE_START name=$Name"
+        if ($script:controlledDiscoveryShouldThrow) { throw "controlled discovery failure" }
+        Write-TestJson -Path $outputPath -Value ([ordered]@{ schemaVersion = 1; source = [IO.Path]::GetFullPath($controlledDiscoveryAssembly.TestAssemblyPath); filter = $filter; totalTests = $tests.Count; tests = $tests })
         Write-Output "VERIFY_PHASE_COMPLETE name=$Name"
     }
+    $script:controlledDiscoveryShouldThrow = $false
     $controlledDiscoveryInformationPath = Join-Path $controlledDiscoveryRoot "phase-information.log"
     $controlledDiscoveryStopwatch = [Diagnostics.Stopwatch]::StartNew()
     $controlledDiscoveryRecords = @(Invoke-MacOSPlatformContractDiscovery -Assembly $controlledDiscoveryAssembly -Stopwatch $controlledDiscoveryStopwatch -DiscoveryRoot $controlledDiscoveryRoot 6> $controlledDiscoveryInformationPath)
     $controlledDiscoveryInformation = Get-Content -LiteralPath $controlledDiscoveryInformationPath -Raw
     Assert-True -Condition ($controlledDiscoveryRecords.Count -eq $controlledDiscoveryAssembly.Group.Count -and @($controlledDiscoveryRecords | Where-Object { $_ -is [pscustomobject] }).Count -eq $controlledDiscoveryAssembly.Group.Count) -Message "Discovery must return only shaped provenance records."
     Assert-True -Condition ($controlledDiscoveryInformation.Contains("VERIFY_PHASE_START name=discover-macos-$($controlledDiscoveryAssembly.Assembly)") -and $controlledDiscoveryInformation.Contains("VERIFY_PHASE_COMPLETE name=discover-macos-$($controlledDiscoveryAssembly.Assembly)")) -Message "Discovery phase markers must remain visible outside the record return stream."
+    $script:controlledDiscoveryShouldThrow = $true
+    $controlledFailureInformationPath = Join-Path $controlledDiscoveryRoot "phase-failure-information.log"
+    $controlledFailureRecords = @()
+    try {
+        $controlledFailureRecords = @(Invoke-MacOSPlatformContractDiscovery -Assembly $controlledDiscoveryAssembly -Stopwatch $controlledDiscoveryStopwatch -DiscoveryRoot $controlledDiscoveryRoot 6> $controlledFailureInformationPath)
+        throw "Expected controlled discovery failure."
+    }
+    catch {
+        Assert-True -Condition ($_.Exception.Message -ceq "controlled discovery failure") -Message "Discovery must preserve the original phase exception."
+    }
+    $controlledFailureInformation = Get-Content -LiteralPath $controlledFailureInformationPath -Raw
+    Assert-True -Condition ($controlledFailureRecords.Count -eq 0 -and $controlledFailureInformation.Contains("VERIFY_PHASE_START name=discover-macos-$($controlledDiscoveryAssembly.Assembly)") -and -not $controlledFailureInformation.Contains("VERIFY_PHASE_COMPLETE name=discover-macos-$($controlledDiscoveryAssembly.Assembly)")) -Message "A failed discovery must retain START without COMPLETE or provenance records."
+    $script:controlledDiscoveryShouldThrow = $false
     $productionNestedLane = Get-Content -LiteralPath (Join-Path $nestedRoot "VerificationResults/required-test-lanes.json") -Raw | ConvertFrom-Json
     $productionNestedCoverage = Get-Content -LiteralPath (Join-Path $nestedRoot "VerificationResults/coverage-manifest.json") -Raw | ConvertFrom-Json
     Assert-True -Condition ($productionNestedLane.lanes[0].name -ceq "EmbodySense.Core.Startup.Tests-nested-process") -Message "Inventory lane identity must match the canonical verifier producer."
@@ -414,6 +429,21 @@ try {
         [IO.File]::WriteAllText($watchdogPath, $watchdogText, [Text.UTF8Encoding]::new($false))
         Update-TestComponentAuth -Root $macOSRoot
         Assert-Throws -Message "macOS $phaseCase phase evidence" -Action { Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot -MacOSRoot $macOSRoot }
+    }
+    New-TestMacOSPlatformComponent -Root $macOSRoot
+
+    foreach ($cleanupPhaseCase in @("missing", "duplicate", "reordered")) {
+        New-TestMacOSPlatformComponent -Root $macOSRoot
+        $watchdogPath = Join-Path $macOSRoot "VerificationResults/watchdog.log"
+        $watchdogText = Get-Content -LiteralPath $watchdogPath -Raw
+        $cleanupMarker = 'VERIFY_PHASE_COMPLETE name=clean-test-results elapsed_seconds=1 completed_at_utc=2026-01-01T00:00:00.0000000+00:00' + [Environment]::NewLine
+        $buildMarker = 'VERIFY_PHASE_COMPLETE name=build-macos-platform-contract elapsed_seconds=1 completed_at_utc=2026-01-01T00:00:00.0000000+00:00' + [Environment]::NewLine
+        if ($cleanupPhaseCase -eq "missing") { $watchdogText = $watchdogText.Replace($cleanupMarker, "") }
+        elseif ($cleanupPhaseCase -eq "duplicate") { $watchdogText = $cleanupMarker + $watchdogText }
+        else { $watchdogText = $watchdogText.Replace($cleanupMarker, "").Replace($buildMarker, $buildMarker + $cleanupMarker) }
+        [IO.File]::WriteAllText($watchdogPath, $watchdogText, [Text.UTF8Encoding]::new($false))
+        Update-TestComponentAuth -Root $macOSRoot
+        Assert-Throws -Message "macOS $cleanupPhaseCase cleanup phase evidence" -Action { Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot -MacOSRoot $macOSRoot }
     }
     New-TestMacOSPlatformComponent -Root $macOSRoot
 
