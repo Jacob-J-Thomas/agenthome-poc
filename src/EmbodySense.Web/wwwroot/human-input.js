@@ -355,7 +355,9 @@ export function createHumanInputSurface({
     operationNumber: 0,
     operations: new Map(),
     operationFeedback: null,
+    detailReadInFlight: false,
     responseDraft: null,
+    refreshInFlight: false,
     refreshPromise: null,
     selectedPosture: null,
     selectionGeneration: 0,
@@ -387,9 +389,12 @@ export function createHumanInputSurface({
   }
 
   async function refreshCore(requestId) {
+    const refreshSelectionGeneration = state.selectionGeneration;
+    state.refreshInFlight = true;
     setBusy(true);
     try {
       const page = await readPages();
+      if (refreshSelectionGeneration !== state.selectionGeneration) return page;
       state.items = page.status === "ready" ? page.items : [];
       if (requestId && state.items.some((item) => item.requestId === requestId))
         state.selectedPosture =
@@ -406,12 +411,14 @@ export function createHumanInputSurface({
       else clearDetail();
       return page;
     } catch (error) {
+      if (refreshSelectionGeneration !== state.selectionGeneration) return null;
       state.items = [];
       renderList({ status: statusFromError(error), items: [], cursor: null });
       clearDetail(true);
       return null;
     } finally {
-      setBusy(false);
+      state.refreshInFlight = false;
+      setBusy(state.detailReadInFlight);
     }
   }
 
@@ -458,6 +465,8 @@ export function createHumanInputSurface({
       return;
     }
     const generation = ++state.selectionGeneration;
+    state.detailReadInFlight = true;
+    setBusy(true);
     renderDetailLoading(selected);
     let result;
     try {
@@ -473,16 +482,25 @@ export function createHumanInputSurface({
         httpStatus: error?.status ?? null,
       };
     }
-    if (generation !== state.selectionGeneration) return;
-    const posture =
-      result.status === "ready" ? projectHumanInputPosture(result.value) : null;
-    const ready = posture && sameIdentity(selected, posture);
-    state.selectedPosture = ready ? posture : selected;
-    if (ready) {
-      state.candidate = null;
-      if (terminalStatuses.has(posture.status)) state.responseDraft = null;
+    try {
+      if (generation !== state.selectionGeneration) return;
+      const posture =
+        result.status === "ready"
+          ? projectHumanInputPosture(result.value)
+          : null;
+      const ready = posture && sameIdentity(selected, posture);
+      state.selectedPosture = ready ? posture : selected;
+      if (ready) {
+        state.candidate = null;
+        if (terminalStatuses.has(posture.status)) state.responseDraft = null;
+      }
+      renderDetail(selected, result, ready ? posture : null);
+    } finally {
+      if (generation === state.selectionGeneration) {
+        state.detailReadInFlight = false;
+        setBusy(state.refreshInFlight);
+      }
     }
-    renderDetail(selected, result, ready ? posture : null);
   }
 
   function selectRequest(requestId) {
@@ -977,6 +995,7 @@ export function createHumanInputSurface({
   function clearDetail(preserveOperationFeedback = false) {
     state.selectedPosture = null;
     state.editor = null;
+    state.detailReadInFlight = false;
     state.candidate = null;
     state.responseDraft = null;
     state.selectionGeneration++;
@@ -999,21 +1018,24 @@ export function createHumanInputSurface({
 
   function setBusy(busy) {
     const blocked = busy || state.actionInFlight;
+    const detailReady =
+      state.selectedPosture !== null &&
+      elements.detailStatus?.textContent.startsWith("Canonical state reread.");
     if (elements.refreshButton) elements.refreshButton.disabled = busy;
     if (elements.detailRefreshButton)
       elements.detailRefreshButton.disabled = busy;
     if (elements.responseSubmitButton && state.selectedPosture)
       elements.responseSubmitButton.disabled =
-        blocked || !canRespond(state.selectedPosture);
+        blocked || !detailReady || !canRespond(state.selectedPosture);
     if (elements.rejectButton && state.selectedPosture)
       elements.rejectButton.disabled =
-        blocked || !canLifecycle(state.selectedPosture);
+        blocked || !detailReady || !canLifecycle(state.selectedPosture);
     if (elements.cancelButton && state.selectedPosture)
       elements.cancelButton.disabled =
-        blocked || !canLifecycle(state.selectedPosture);
+        blocked || !detailReady || !canLifecycle(state.selectedPosture);
     if (elements.supersedeButton && state.selectedPosture)
       elements.supersedeButton.disabled =
-        blocked || !canSupersede(state.selectedPosture);
+        blocked || !detailReady || !canSupersede(state.selectedPosture);
   }
 
   function setResponseStatus(message, tone) {

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using EmbodySense.Core.Application.Inference.Profiles;
 using EmbodySense.Core.Application.Inference.Profiles.Models;
@@ -397,6 +398,118 @@ public sealed class ConfiguredModelProfileRegistryTests
     }
 
     [Fact]
+    public async Task Configured_resolver_keeps_a_live_snapshot_during_registry_scavenge_and_disposes_it_idempotently()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var executable = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "test-model");
+        var packageRoot = Path.GetDirectoryName(executable)!;
+        var entryScript = Path.Combine(packageRoot, "codex.js");
+        var vendorDirectory = Path.Combine(packageRoot, "vendor", "host-platform");
+        Directory.CreateDirectory(vendorDirectory);
+        var vendorScript = Path.Combine(vendorDirectory, "codex-runtime.js");
+        File.Move(entryScript, vendorScript);
+        await File.WriteAllTextAsync(entryScript, "require('./vendor/host-platform/codex-runtime.js');\n");
+        await File.WriteAllTextAsync(Path.Combine(packageRoot, "package.json"), "{\"name\":\"@openai/codex\",\"private\":true}\n");
+        var options = Options(workspace, executable);
+        var status = RuntimeStatus(executable, options.Model!, "codex-cli snapshot-lease");
+        var registry = new ConfiguredModelProfileRegistry(options, status);
+        var request = await ConfiguredResolverRequestAsync(registry);
+        var metadata = Assert.IsType<GovernedModelProfileMetadata>((await registry.ReadAsync(ProfileId())).Metadata);
+        var posture = await registry.ReadPostureAsync(metadata);
+        var resolver = new ConfiguredModelProfileInferenceClientResolver(
+            options,
+            registry,
+            new FixedAdapterRegistry(new ModelProfileAdapterPosture(ModelProfileAdapterPostureStatus.Ready, metadata.ContentHash, posture.RegistryRevisionHash)));
+        var priorSnapshots = SnapshotDirectories();
+
+        var resolution = await resolver.ResolveAsync(request);
+        Assert.Equal(ExactModelProfileInferenceClientResolutionStatus.Resolved, resolution.Status);
+        var lease = Assert.IsAssignableFrom<IExactModelProfileInferenceClientLease>(resolution.Lease);
+        var snapshot = Assert.Single(SnapshotDirectories(), path => !priorSnapshots.Contains(path));
+        Assert.True(File.Exists(Path.Combine(snapshot, ".embodysense-model-profile-lease")));
+        Assert.True(File.Exists(Path.Combine(snapshot, "package.json")));
+        Assert.True(File.Exists(Path.Combine(snapshot, "codex.js")));
+        Assert.True(File.Exists(Path.Combine(snapshot, "vendor", "host-platform", "codex-runtime.js")));
+
+        var secondRegistry = new ConfiguredModelProfileRegistry(options, status);
+        Assert.Equal(ModelProfileSourceReadStatus.Found, (await secondRegistry.ReadAsync(ProfileId())).Status);
+        Assert.Contains(snapshot, SnapshotDirectories());
+        Assert.True(File.Exists(Path.Combine(snapshot, ".embodysense-model-profile-lease")));
+
+        await lease.DisposeAsync();
+        Assert.DoesNotContain(snapshot, SnapshotDirectories());
+        await lease.DisposeAsync();
+        Assert.DoesNotContain(snapshot, SnapshotDirectories());
+    }
+
+    [Fact]
+    public async Task Configured_resolver_returns_unavailable_and_cleans_up_owned_process_and_snapshot_after_initialize_error()
+    {
+        using var workspace = new TestWorkspace();
+        await WorkspaceInitializer.ForFileCapabilityTrustRoot(workspace.ServerStatePath).InitializeAsync(workspace.RootPath);
+        var directory = workspace.File("fake-codex-initialize-error");
+        Directory.CreateDirectory(directory);
+        var executable = Path.Combine(directory, OperatingSystem.IsWindows() ? "codex.cmd" : "codex");
+        var scriptPath = Path.Combine(directory, "codex.js");
+        var childPidPath = workspace.File("initialize-error-child.pid");
+        var packageMarkerName = $"snapshot-marker-{Guid.NewGuid():N}.txt";
+        var childPidLiteral = JsonSerializer.Serialize(childPidPath);
+        await File.WriteAllTextAsync(scriptPath, $$"""
+            const fs = require("node:fs");
+            const readline = require("node:readline");
+            fs.writeFileSync({{childPidLiteral}}, String(process.pid));
+            const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+            input.on("line", line => {
+              const message = JSON.parse(line);
+              if (message.method === "initialize") {
+                process.stdout.write(`${JSON.stringify({ id: message.id, error: { message: "deterministic initialize error" } })}\n`);
+              }
+            });
+            setInterval(() => {}, 1000);
+            """);
+        if (OperatingSystem.IsWindows())
+        {
+            await File.WriteAllTextAsync(executable, "@echo off\r\nnode \"%~dp0codex.js\" %*\r\n");
+        }
+        else
+        {
+            await File.WriteAllTextAsync(executable, "#!/bin/sh\nexec node \"$(dirname \"$0\")/codex.js\" \"$@\"\n");
+            File.SetUnixFileMode(executable, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+        await File.WriteAllTextAsync(Path.Combine(directory, "package.json"), "{\"name\":\"@openai/codex\",\"private\":true}\n");
+        await File.WriteAllTextAsync(Path.Combine(directory, packageMarkerName), "R13 initialize-error fixture marker");
+        var options = Options(workspace, executable);
+        var status = RuntimeStatus(executable, options.Model!, "codex-cli initialize-error");
+        var registry = new ConfiguredModelProfileRegistry(options, status);
+        var request = await ConfiguredResolverRequestAsync(registry);
+        var metadata = Assert.IsType<GovernedModelProfileMetadata>((await registry.ReadAsync(ProfileId())).Metadata);
+        var posture = await registry.ReadPostureAsync(metadata);
+        var resolver = new ConfiguredModelProfileInferenceClientResolver(
+            options,
+            registry,
+            new FixedAdapterRegistry(new ModelProfileAdapterPosture(ModelProfileAdapterPostureStatus.Ready, metadata.ContentHash, posture.RegistryRevisionHash)));
+
+        var resolution = await resolver.ResolveAsync(request);
+
+        Assert.Equal(ExactModelProfileInferenceClientResolutionStatus.Unavailable, resolution.Status);
+        Assert.Null(resolution.Lease);
+        Assert.DoesNotContain(SnapshotDirectories(), path => File.Exists(Path.Combine(path, packageMarkerName)));
+        var childPid = int.Parse(await File.ReadAllTextAsync(childPidPath));
+        var childTerminated = true;
+        try
+        {
+            using var child = Process.GetProcessById(childPid);
+            childTerminated = child.HasExited;
+        }
+        catch (ArgumentException)
+        {
+        }
+
+        Assert.True(childTerminated);
+    }
+
+    [Fact]
     public async Task Snapshot_lease_retains_the_package_tree_referenced_by_a_Windows_npm_shim()
     {
         if (!OperatingSystem.IsWindows())
@@ -452,6 +565,14 @@ public sealed class ConfiguredModelProfileRegistryTests
     {
         var options = Options(workspace, executable);
         return new ConfiguredModelProfileRegistry(options, RuntimeStatus(executable, options.Model!, version));
+    }
+
+    private static HashSet<string> SnapshotDirectories()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "embodysense-model-profile-snapshots");
+        return Directory.Exists(root)
+            ? Directory.GetDirectories(root).ToHashSet(StringComparer.Ordinal)
+            : new HashSet<string>(StringComparer.Ordinal);
     }
 
     private static LlmInferenceClientOptions Options(TestWorkspace workspace, string executable)

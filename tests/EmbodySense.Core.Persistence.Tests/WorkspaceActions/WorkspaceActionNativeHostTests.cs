@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using System.Security.AccessControl;
@@ -20,6 +21,7 @@ namespace EmbodySense.Core.Persistence.Tests.WorkspaceActions;
 
 public sealed class WorkspaceActionNativeHostTests
 {
+    private const int MaximumCrashWorkerEvidenceCharacters = 8_192;
     private const string WorkerBeforeVariable = "EMBODYSENSE_WORKSPACE_ACTION_WORKER_BEFORE";
     private const string WorkerFailpointMarkerVariable = "EMBODYSENSE_WORKSPACE_ACTION_WORKER_FAILPOINT_MARKER";
     private const string WorkerExitBeforeMutationVariable = "EMBODYSENSE_WORKSPACE_ACTION_WORKER_EXIT_BEFORE_MUTATION";
@@ -28,6 +30,8 @@ public sealed class WorkspaceActionNativeHostTests
     private const string WorkerInputVariable = "EMBODYSENSE_WORKSPACE_ACTION_WORKER_INPUT";
     private const string WorkerKindVariable = "EMBODYSENSE_WORKSPACE_ACTION_WORKER_KIND";
     private const string WorkerRootVariable = "EMBODYSENSE_WORKSPACE_ACTION_WORKER_ROOT";
+    private static readonly TimeSpan _crashWorkerCleanupTimeout = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan _crashWorkerExitTimeout = TimeSpan.FromSeconds(30);
 
     [Fact]
     public async Task Windows_private_workspace_action_root_reopens_nested_children_with_exact_current_user_acl()
@@ -583,15 +587,16 @@ public sealed class WorkspaceActionNativeHostTests
         startInfo.Environment[WorkerInputVariable] = Convert.ToBase64String(Encoding.UTF8.GetBytes(WorkspaceActionInputContract.Encode(input)));
         startInfo.Environment[WorkerKindVariable] = kind.ToString();
         startInfo.Environment[WorkerFailpointMarkerVariable] = failpointMarker;
-        using var worker = Process.Start(startInfo) ?? throw new InvalidOperationException("The workspace action crash worker did not start.");
-        var output = worker.StandardOutput.ReadToEndAsync();
-        var error = worker.StandardError.ReadToEndAsync();
-        await worker.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
+        using var evidenceCancellation = new CancellationTokenSource();
+        using var worker = Verification.CrossProcessProcessOwnership.Start(startInfo);
+        var output = worker.ReadStandardOutputToEndAsync(evidenceCancellation.Token);
+        var error = worker.ReadStandardErrorToEndAsync(evidenceCancellation.Token);
+        var workerEvidence = await WaitForCrashWorkerExitAsync(worker, output, error, evidenceCancellation, failpointMarker);
 
         Assert.NotEqual(0, worker.ExitCode);
         AssertCrashWorkerReachedFailpoint(failpointMarker);
-        _ = await error;
-        _ = await output;
+        _ = workerEvidence.Error;
+        _ = workerEvidence.Output;
         if (kind == WorkspaceActionKind.Write)
         {
             Assert.Equal("committed-before-crash", await File.ReadAllTextAsync(path));
@@ -3197,16 +3202,89 @@ public sealed class WorkspaceActionNativeHostTests
         startInfo.Environment[WorkerFailpointMarkerVariable] = failpointMarker;
         startInfo.Environment[WorkerExitBeforeMutationVariable] = exitBeforeMutation ? "1" : "0";
         startInfo.Environment[WorkerExitAfterWindowsReplacementSystemCallVariable] = exitAfterWindowsReplacementSystemCall ? "1" : "0";
-        using var worker = Process.Start(startInfo) ?? throw new InvalidOperationException("The workspace action crash worker did not start.");
-        var output = worker.StandardOutput.ReadToEndAsync();
-        var error = worker.StandardError.ReadToEndAsync();
-        await worker.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
+        using var evidenceCancellation = new CancellationTokenSource();
+        using var worker = Verification.CrossProcessProcessOwnership.Start(startInfo);
+        var output = worker.ReadStandardOutputToEndAsync(evidenceCancellation.Token);
+        var error = worker.ReadStandardErrorToEndAsync(evidenceCancellation.Token);
+        var workerEvidence = await WaitForCrashWorkerExitAsync(worker, output, error, evidenceCancellation, failpointMarker);
         Assert.NotEqual(0, worker.ExitCode);
-        _ = await output;
-        var stderr = await error;
         AssertCrashWorkerReachedFailpoint(failpointMarker);
-        return stderr;
+        return workerEvidence.Error;
     }
+
+    private static async Task<(string Output, string Error)> WaitForCrashWorkerExitAsync(
+        Verification.CrossProcessProcess worker,
+        Task<string> output,
+        Task<string> error,
+        CancellationTokenSource evidenceCancellation,
+        string failpointMarker)
+    {
+        try
+        {
+            await worker.WaitForExitAsync().WaitAsync(_crashWorkerExitTimeout);
+        }
+        catch (TimeoutException exception)
+        {
+            var processId = worker.Id;
+            var termination = "requested";
+            try
+            {
+                worker.Ownership.TerminateProcessTree();
+                await worker.WaitForExitAsync().WaitAsync(_crashWorkerCleanupTimeout);
+            }
+            catch (Exception cleanupException) when (cleanupException is InvalidOperationException or TimeoutException or System.ComponentModel.Win32Exception)
+            {
+                termination = $"failed:{cleanupException.GetType().Name}:{BoundCrashWorkerEvidence(cleanupException.Message)}";
+            }
+
+            if (!worker.HasExited)
+            {
+                evidenceCancellation.Cancel();
+            }
+
+            throw new TimeoutException(
+                $"The workspace action crash worker did not exit within {_crashWorkerExitTimeout.TotalSeconds.ToString("0", CultureInfo.InvariantCulture)} seconds. pid={processId} state={(worker.HasExited ? "exited" : "running")} exit={(worker.HasExited ? worker.ExitCode.ToString(CultureInfo.InvariantCulture) : "<unavailable>")} failpoint={File.Exists(failpointMarker)} termination={termination} stdout={DescribeCrashWorkerEvidence(output)} stderr={DescribeCrashWorkerEvidence(error)}",
+                exception);
+        }
+
+        try
+        {
+            var streams = await Task.WhenAll(output, error).WaitAsync(_crashWorkerCleanupTimeout);
+            return (streams[0], streams[1]);
+        }
+        catch (TimeoutException exception)
+        {
+            evidenceCancellation.Cancel();
+            throw new TimeoutException(
+                $"The workspace action crash worker exited but its redirected streams did not close within {_crashWorkerCleanupTimeout.TotalSeconds.ToString("0", CultureInfo.InvariantCulture)} seconds. pid={worker.Id} exit={worker.ExitCode.ToString(CultureInfo.InvariantCulture)} failpoint={File.Exists(failpointMarker)} stdout={DescribeCrashWorkerEvidence(output)} stderr={DescribeCrashWorkerEvidence(error)}",
+                exception);
+        }
+    }
+
+    private static string DescribeCrashWorkerEvidence(Task<string> evidence)
+    {
+        if (!evidence.IsCompleted)
+        {
+            return "<pending>";
+        }
+
+        if (evidence.IsCanceled)
+        {
+            return "<cancelled>";
+        }
+
+        if (evidence.IsFaulted)
+        {
+            return $"<faulted:{BoundCrashWorkerEvidence(evidence.Exception?.GetBaseException().Message ?? "unknown")}>";
+        }
+
+        return BoundCrashWorkerEvidence(evidence.Result);
+    }
+
+    private static string BoundCrashWorkerEvidence(string evidence)
+        => evidence.Length <= MaximumCrashWorkerEvidenceCharacters
+            ? evidence
+            : "<truncated>" + evidence[^MaximumCrashWorkerEvidenceCharacters..];
 
     private static void AssertCrashWorkerReachedFailpoint(string markerPath)
     {

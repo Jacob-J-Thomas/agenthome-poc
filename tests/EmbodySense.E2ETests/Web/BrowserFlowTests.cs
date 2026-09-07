@@ -69,33 +69,56 @@ public sealed partial class BrowserFlowTests
     [Fact]
     public void Browser_health_optional_failure_filter_is_empty_safe_allowlisted_and_exact()
     {
+        const string CollectionRoute = "/api/effect-reconciliation?maximumCount=50";
         const string CaseRoute = "/api/effect-reconciliation/case?";
         const string ResolutionRoute = "/api/effect-reconciliation/case/resolution";
         var mandatory = (UrlFragment: ResolutionRoute, StatusCode: 404);
         var optional = new[]
         {
+            (UrlFragment: CollectionRoute, StatusCode: 503),
             (UrlFragment: CaseRoute, StatusCode: 503),
             (UrlFragment: ResolutionRoute, StatusCode: 503),
         };
         var diagnostics = new List<string>
         {
             "HTTP error response: {\"url\":\"https://example.test/api/effect-reconciliation/case/resolution\",\"status\":404}",
-            "HTTP error response: {\"url\":\"https://example.test/api/effect-reconciliation/case?\",\"status\":503}",
+            $"HTTP error response: {{\"url\":\"https://example.test{CollectionRoute}\",\"status\":503}}",
+            $"browser error for {CollectionRoute} with status of 503 (Service Unavailable)",
+            "HTTP error response: {\"url\":\"https://example.test/api/effect-reconciliation/case?expectedGeneration=1\",\"status\":503}",
             "browser error for /api/effect-reconciliation/case/resolution with status of 503 (Service Unavailable)",
         };
 
         Assert.Equal(0, HeadlessBrowserSession.RemoveMatchingExpectedHttpFailureDiagnostics(diagnostics, []));
         Assert.Equal(1, HeadlessBrowserSession.RemoveMatchingExpectedHttpFailureDiagnostics(diagnostics, [mandatory]));
-        Assert.Equal(2, HeadlessBrowserSession.RemoveMatchingExpectedHttpFailureDiagnostics(diagnostics, optional));
+        Assert.Equal(4, HeadlessBrowserSession.RemoveMatchingExpectedHttpFailureDiagnostics(diagnostics, optional));
         Assert.Empty(diagnostics);
 
         var unexpected = new List<string>
         {
-            "HTTP error response: {\"url\":\"https://example.test/api/effect-reconciliation/other?\",\"status\":503}",
-            "HTTP error response: {\"url\":\"https://example.test/api/effect-reconciliation/case?\",\"status\":500}",
+            "HTTP error response: {\"url\":\"https://example.test/api/effect-reconciliation?maximumCount=49\",\"status\":503}",
+            "HTTP error response: {\"url\":\"https://example.test/api/effect-reconciliation?maximumCount=500\",\"status\":503}",
+            "HTTP error response: {\"url\":\"https://example.test/api/effect-reconciliation?maximumCount=50&cursor=next\",\"status\":503}",
+            "HTTP error response: {\"url\":\"https://example.test/api/effect-reconciliation?maximumCount=50#page\",\"status\":503}",
+            "browser error for /api/effect-reconciliation?maximumCount=50/details with status of 503 (Service Unavailable)",
+            "HTTP error response: {\"url\":\"https://example.test/api/effect-reconciliation/probes?maximumCount=50\",\"status\":503}",
+            "HTTP error response: {\"url\":\"https://example.test/api/effect-reconciliation?maximumCount=50\",\"status\":500}",
         };
         Assert.Equal(0, HeadlessBrowserSession.RemoveMatchingExpectedHttpFailureDiagnostics(unexpected, optional));
-        Assert.Equal(2, unexpected.Count);
+        Assert.Equal(7, unexpected.Count);
+    }
+
+    [Fact]
+    public void Effect_reconciliation_catalog_recovery_requires_the_exact_visible_settled_refresh_state()
+    {
+        const string Unavailable = EffectReconciliationCatalogRecoveryContract.TemporaryUnavailableMessage;
+
+        Assert.True(EffectReconciliationCatalogRecoveryContract.CanRefresh(true, "false", Unavailable, true, false));
+        Assert.False(EffectReconciliationCatalogRecoveryContract.CanRefresh(false, "false", Unavailable, true, false));
+        Assert.False(EffectReconciliationCatalogRecoveryContract.CanRefresh(true, "true", Unavailable, true, false));
+        Assert.False(EffectReconciliationCatalogRecoveryContract.CanRefresh(true, "false", "Effect Reconciliation canonical state", true, false));
+        Assert.False(EffectReconciliationCatalogRecoveryContract.CanRefresh(true, "false", Unavailable + " Retry again.", true, false));
+        Assert.False(EffectReconciliationCatalogRecoveryContract.CanRefresh(true, "false", Unavailable, false, false));
+        Assert.False(EffectReconciliationCatalogRecoveryContract.CanRefresh(true, "false", Unavailable, true, true));
     }
 
     [Fact]
@@ -105,6 +128,8 @@ public sealed partial class BrowserFlowTests
 
         Assert.True(ExpectedServerRestartDiagnosticClassifier.IsExpectedNetworkFailure(true, false, "ws://127.0.0.1:5001/hubs/session", "net::ERR_CONNECTION_RESET", TargetAuthority));
         Assert.True(ExpectedServerRestartDiagnosticClassifier.IsExpectedNetworkFailure(true, false, "https://127.0.0.1:5001/api/session", "net::ERR_CONNECTION_RESET", TargetAuthority));
+        Assert.True(ExpectedServerRestartDiagnosticClassifier.IsExpectedNetworkFailure(true, false, "ws://127.0.0.1:5001/hubs/session", "net::ERR_CONNECTION_REFUSED", TargetAuthority));
+        Assert.True(ExpectedServerRestartDiagnosticClassifier.IsExpectedNetworkFailure(true, false, "https://127.0.0.1:5001/api/session", "net::ERR_CONNECTION_REFUSED", TargetAuthority));
         Assert.True(ExpectedServerRestartDiagnosticClassifier.IsExpectedNetworkFailure(false, true, "wss://127.0.0.1:5001/hubs/session", "net::ERR_CONNECTION_RESET", TargetAuthority));
         Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedNetworkFailure(false, false, "ws://127.0.0.1:5001/hubs/session", "net::ERR_CONNECTION_RESET", TargetAuthority));
         Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedNetworkFailure(true, false, "https://127.0.0.1:5001/", "net::ERR_CONNECTION_RESET", TargetAuthority));
@@ -131,6 +156,7 @@ public sealed partial class BrowserFlowTests
 
         Assert.True(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "WebSocket failed: net::ERR_CONNECTION_RESET", "ws://127.0.0.1:5001/hubs/session", null, TargetAuthority));
         Assert.True(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "fetch failed: net::ERR_CONNECTION_RESET", "https://127.0.0.1:5001/api/session", null, TargetAuthority));
+        Assert.True(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "fetch failed: net::ERR_CONNECTION_REFUSED", "https://127.0.0.1:5001/api/session", null, TargetAuthority));
         Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "fetch failed: net::ERR_CONNECTION_RESET", "https://127.0.0.1:5001/", null, TargetAuthority));
         Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "WebSocket failed: net::ERR_CONNECTION_RESET", "ws://example.test/hubs/session", null, TargetAuthority));
         Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "console", "WebSocket failed: net::ERR_CONNECTION_RESET", "ws://127.0.0.1:5001/hubs/session", null, TargetAuthority));
@@ -151,6 +177,21 @@ public sealed partial class BrowserFlowTests
         Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "fetch failed: net::ERR_CONNECTION_RESET", "https://example.test/api/loop-runs?maximumCount=50", null, TargetAuthority, capturedAtRestart: true));
         Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "fetch failed: net::ERR_CONNECTION_RESET", "https://example.test/api/loop-runs?maximumCount=50", "https://127.0.0.1:5001/api/loop-runs?maximumCount=50", TargetAuthority, capturedAtRestart: true));
         Assert.False(ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartLogEntry(true, false, "network", "500 (Internal Server Error)", "https://127.0.0.1:5001/api/loop-runs?maximumCount=50", null, TargetAuthority, capturedAtRestart: true));
+    }
+
+    [Fact]
+    public void Restart_refusal_qualification_does_not_suppress_non_401_http_responses_or_wrong_authority()
+    {
+        const string TargetAuthority = "127.0.0.1:5001";
+        const string TargetUrl = "https://127.0.0.1:5001/api/loop-runs?maximumCount=50";
+
+        Assert.True(HeadlessBrowserSession.IsExpectedServerRestartHttpResponseForTest(true, 401, TargetUrl, TargetAuthority));
+        Assert.False(HeadlessBrowserSession.IsExpectedServerRestartHttpResponseForTest(true, 403, TargetUrl, TargetAuthority));
+        Assert.False(HeadlessBrowserSession.IsExpectedServerRestartHttpResponseForTest(true, 409, TargetUrl, TargetAuthority));
+        Assert.False(HeadlessBrowserSession.IsExpectedServerRestartHttpResponseForTest(true, 500, TargetUrl, TargetAuthority));
+        Assert.False(HeadlessBrowserSession.IsExpectedServerRestartHttpResponseForTest(true, 503, TargetUrl, TargetAuthority));
+        Assert.False(HeadlessBrowserSession.IsExpectedServerRestartHttpResponseForTest(true, 401, "https://example.test/api/loop-runs?maximumCount=50", TargetAuthority));
+        Assert.False(HeadlessBrowserSession.IsExpectedServerRestartHttpResponseForTest(false, 401, TargetUrl, TargetAuthority));
     }
 
     [Fact]
@@ -350,6 +391,317 @@ public sealed partial class BrowserFlowTests
         Assert.False(tracker.IsExpectedServerRestartLogEntry("redirected", "network", "fetch failed: net::ERR_CONNECTION_RESET", ExternalUrl));
     }
 
+    [Fact]
+    public void Restart_request_tracking_allows_declared_read_only_refusals_in_both_event_orders_and_records_bounded_provenance()
+    {
+        const string TargetAuthority = "127.0.0.1:5001";
+        const string Target = "/api/loop-runs?maximumCount=50";
+        const string RequestUrl = "https://127.0.0.1:5001/api/loop-runs?maximumCount=50";
+        var tracker = new ExpectedServerRestartRequestTracker(TargetAuthority);
+        tracker.DeclareReadOnlyGetTargets([Target]);
+        tracker.Track("failure-before-log", RequestUrl, "GET");
+        tracker.BeginExpectedServerRestart();
+
+        Assert.True(tracker.ProcessLoadingFailed("failure-before-log", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+        tracker.EndExpectedServerRestart();
+        Assert.True(tracker.IsExpectedServerRestartLogEntry("failure-before-log", "network", "Failed to load resource: net::ERR_CONNECTION_REFUSED", null));
+
+        tracker.BeginExpectedServerRestart();
+        tracker.Track("log-before-failure", RequestUrl, "GET");
+        Assert.True(tracker.IsExpectedServerRestartLogEntry("log-before-failure", "network", "Failed to load resource: net::ERR_CONNECTION_REFUSED", RequestUrl));
+        Assert.True(tracker.ProcessLoadingFailed("log-before-failure", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+
+        var evidence = tracker.ReadQualifiedReadOnlyRefusalEvidence();
+        var summary = tracker.ReadQualifiedReadOnlyRefusalEvidenceSummary();
+        Assert.Single(evidence);
+        Assert.Contains("generation=2; method=GET; target=/api/loop-runs?maximumCount=50", evidence[0], StringComparison.Ordinal);
+        Assert.Equal("declaredReadOnlyGetTargets=1", summary[0]);
+        Assert.Equal(evidence[0], summary[1]);
+    }
+
+    [Fact]
+    public void Restart_request_tracking_recomputes_declared_get_eligibility_at_the_successful_freeze()
+    {
+        const string Target = "/api/loop-runs?maximumCount=50";
+        const string RequestUrl = "https://127.0.0.1:5001/api/loop-runs?maximumCount=50";
+        var tracker = new ExpectedServerRestartRequestTracker("127.0.0.1:5001");
+        tracker.Track("failure-before-log", RequestUrl, "GET");
+        tracker.DeclareReadOnlyGetTargets([Target]);
+        tracker.PrepareExpectedServerRestart();
+        tracker.FreezeExpectedServerRestart();
+        Assert.True(tracker.ProcessLoadingFailed("failure-before-log", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+        tracker.EndExpectedServerRestart();
+        Assert.True(tracker.IsExpectedServerRestartLogEntry("failure-before-log", "network", "Failed to load resource: net::ERR_CONNECTION_REFUSED", null));
+
+        tracker.PrepareExpectedServerRestart();
+        tracker.Track("log-before-failure", RequestUrl, "GET");
+        tracker.DeclareReadOnlyGetTargets([Target]);
+        tracker.FreezeExpectedServerRestart();
+        Assert.True(tracker.IsExpectedServerRestartLogEntry("log-before-failure", "network", "Failed to load resource: net::ERR_CONNECTION_REFUSED", RequestUrl));
+        Assert.True(tracker.ProcessLoadingFailed("log-before-failure", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+        Assert.Contains(tracker.ReadQualifiedReadOnlyRefusalEvidenceSummary(), entry => entry.Contains("frozenSnapshot=True", StringComparison.Ordinal) && entry.Contains("rejectionReason=accepted-at-freeze", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Restart_request_tracking_records_ordered_lifecycle_transitions()
+    {
+        var tracker = new ExpectedServerRestartRequestTracker("127.0.0.1:5001");
+        tracker.PrepareExpectedServerRestart();
+        tracker.FreezeExpectedServerRestart();
+        tracker.MarkExpectedReplacementServerStarting();
+        tracker.EndExpectedServerRestart();
+        var lifecycle = tracker.ReadQualifiedReadOnlyRefusalEvidenceSummary().Where(entry => entry.Contains("rejectionReason=lifecycle-", StringComparison.Ordinal)).ToArray();
+        Assert.Collection(
+            lifecycle,
+            entry => Assert.Contains("rejectionReason=lifecycle-prepare", entry, StringComparison.Ordinal),
+            entry => Assert.Contains("rejectionReason=lifecycle-successful-freeze-active", entry, StringComparison.Ordinal),
+            entry => Assert.Contains("rejectionReason=lifecycle-replacement-start", entry, StringComparison.Ordinal),
+            entry => Assert.Contains("rejectionReason=lifecycle-end", entry, StringComparison.Ordinal));
+
+        var abortTracker = new ExpectedServerRestartRequestTracker("127.0.0.1:5001");
+        abortTracker.PrepareExpectedServerRestart();
+        abortTracker.AbortExpectedServerRestart();
+        var abortLifecycle = abortTracker.ReadQualifiedReadOnlyRefusalEvidenceSummary().Where(entry => entry.Contains("rejectionReason=lifecycle-", StringComparison.Ordinal)).ToArray();
+        Assert.Collection(
+            abortLifecycle,
+            entry => Assert.Contains("rejectionReason=lifecycle-prepare", entry, StringComparison.Ordinal),
+            entry => Assert.Contains("rejectionReason=lifecycle-abort", entry, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Restart_request_tracking_reports_removed_declarations_as_not_declared_at_freeze()
+    {
+        const string FormerTarget = "/api/loop-runs?maximumCount=50";
+        const string ReplacementTarget = "/api/loop-runs/quota";
+        const string RequestUrl = "https://127.0.0.1:5001/api/loop-runs?maximumCount=50";
+        var tracker = new ExpectedServerRestartRequestTracker("127.0.0.1:5001");
+        tracker.DeclareReadOnlyGetTargets([FormerTarget]);
+        tracker.Track("removed-target", RequestUrl, "GET");
+        tracker.DeclareReadOnlyGetTargets([ReplacementTarget]);
+        tracker.PrepareExpectedServerRestart();
+        tracker.FreezeExpectedServerRestart();
+        Assert.False(tracker.ProcessLoadingFailed("removed-target", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+        Assert.Contains(tracker.ReadQualifiedReadOnlyRefusalEvidenceSummary(), entry => entry.Contains("rejectionReason=not-declared-at-freeze", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Restart_request_tracking_traces_declared_target_method_rejections_without_qualifying_them()
+    {
+        const string Target = "/api/loop-runs?maximumCount=50";
+        const string RequestUrl = "https://127.0.0.1:5001/api/loop-runs?maximumCount=50";
+        var tracker = new ExpectedServerRestartRequestTracker("127.0.0.1:5001");
+        tracker.DeclareReadOnlyGetTargets([Target]);
+        tracker.PrepareExpectedServerRestart();
+        tracker.Track("missing\r\nmethod", RequestUrl);
+        tracker.Track("other-method", RequestUrl, "PATCH");
+        tracker.FreezeExpectedServerRestart();
+        Assert.False(tracker.ProcessLoadingFailed("missing\r\nmethod", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+        Assert.False(tracker.ProcessLoadingFailed("other-method", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+        var trace = tracker.ReadQualifiedReadOnlyRefusalEvidenceSummary().Where(entry => entry.StartsWith("provenanceTrace sequence=", StringComparison.Ordinal)).ToArray();
+        Assert.Contains(trace, entry => entry.Contains("requestId=missing__method", StringComparison.Ordinal) && entry.Contains("declaredTargetIndex=0", StringComparison.Ordinal) && entry.Contains("method=missing", StringComparison.Ordinal) && entry.Contains("rejectionReason=missing-method", StringComparison.Ordinal));
+        Assert.Contains(trace, entry => entry.Contains("requestId=other-method", StringComparison.Ordinal) && entry.Contains("declaredTargetIndex=0", StringComparison.Ordinal) && entry.Contains("method=other", StringComparison.Ordinal) && entry.Contains("rejectionReason=method-not-get", StringComparison.Ordinal));
+        Assert.All(trace, entry => Assert.DoesNotContain('\r', entry));
+        Assert.All(trace, entry => Assert.DoesNotContain('\n', entry));
+    }
+
+    [Fact]
+    public void Restart_request_tracking_caps_provenance_trace_at_128_entries_plus_one_marker()
+    {
+        const string Target = "/api/loop-runs?maximumCount=50";
+        const string RequestUrl = "https://127.0.0.1:5001/api/loop-runs?maximumCount=50";
+        var tracker = new ExpectedServerRestartRequestTracker("127.0.0.1:5001");
+        tracker.DeclareReadOnlyGetTargets([Target]);
+        tracker.PrepareExpectedServerRestart();
+        foreach (var index in Enumerable.Range(0, 130))
+        {
+            tracker.Track("trace-" + index, RequestUrl, "GET");
+        }
+
+        var trace = tracker.ReadQualifiedReadOnlyRefusalEvidenceSummary().Where(entry => entry.StartsWith("provenanceTrace", StringComparison.Ordinal)).ToArray();
+        Assert.Equal(128, trace.Count(entry => entry.StartsWith("provenanceTrace sequence=", StringComparison.Ordinal)));
+        Assert.Equal(1, trace.Count(entry => string.Equals(entry, "provenanceTrace=truncated", StringComparison.Ordinal)));
+        Assert.Equal(129, trace.Length);
+    }
+
+    [Fact]
+    public void Restart_request_tracking_rejects_completed_post_freeze_declared_and_replacement_requests()
+    {
+        const string Target = "/api/loop-runs?maximumCount=50";
+        const string RequestUrl = "https://127.0.0.1:5001/api/loop-runs?maximumCount=50";
+        var completedTracker = new ExpectedServerRestartRequestTracker("127.0.0.1:5001");
+        completedTracker.PrepareExpectedServerRestart();
+        completedTracker.Track("completed", RequestUrl, "GET");
+        completedTracker.Complete("completed");
+        completedTracker.DeclareReadOnlyGetTargets([Target]);
+        completedTracker.FreezeExpectedServerRestart();
+        Assert.False(completedTracker.ProcessLoadingFailed("completed", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+
+        var postFreezeDeclarationTracker = new ExpectedServerRestartRequestTracker("127.0.0.1:5001");
+        postFreezeDeclarationTracker.PrepareExpectedServerRestart();
+        postFreezeDeclarationTracker.Track("post-freeze-declaration", RequestUrl, "GET");
+        postFreezeDeclarationTracker.FreezeExpectedServerRestart();
+        postFreezeDeclarationTracker.DeclareReadOnlyGetTargets([Target]);
+        Assert.False(postFreezeDeclarationTracker.ProcessLoadingFailed("post-freeze-declaration", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+
+        var replacementTracker = new ExpectedServerRestartRequestTracker("127.0.0.1:5001");
+        replacementTracker.DeclareReadOnlyGetTargets([Target]);
+        replacementTracker.BeginExpectedServerRestart();
+        replacementTracker.MarkExpectedReplacementServerStarting();
+        replacementTracker.Track("replacement", RequestUrl, "GET");
+        Assert.False(replacementTracker.ProcessLoadingFailed("replacement", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+        Assert.Contains(replacementTracker.ReadQualifiedReadOnlyRefusalEvidenceSummary(), entry => entry.Contains("rejectionReason=replacement-start", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Restart_request_tracking_keeps_refusals_visible_without_exact_declared_get_provenance()
+    {
+        const string TargetAuthority = "127.0.0.1:5001";
+        const string Target = "/api/loop-runs?maximumCount=50";
+        const string RequestUrl = "https://127.0.0.1:5001/api/loop-runs?maximumCount=50";
+        var tracker = new ExpectedServerRestartRequestTracker(TargetAuthority);
+        tracker.Track("undeclared", RequestUrl, "GET");
+        tracker.BeginExpectedServerRestart();
+        Assert.False(tracker.ProcessLoadingFailed("undeclared", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+
+        tracker.DeclareReadOnlyGetTargets([Target]);
+        tracker.Track("missing-method", RequestUrl);
+        tracker.Track("post", RequestUrl, "POST");
+        tracker.Track("altered-query", RequestUrl + "&other=value", "GET");
+        tracker.Track("different-port", "https://127.0.0.1:5002/api/loop-runs?maximumCount=50", "GET");
+        tracker.Track("embedded-authority", "https://example.test/127.0.0.1:5001/api/loop-runs?maximumCount=50", "GET");
+        Assert.False(tracker.ProcessLoadingFailed("missing-method", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+        Assert.False(tracker.ProcessLoadingFailed("post", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+        Assert.False(tracker.ProcessLoadingFailed("altered-query", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+        Assert.False(tracker.ProcessLoadingFailed("different-port", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+        Assert.False(tracker.ProcessLoadingFailed("embedded-authority", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+
+        tracker.MarkExpectedReplacementServerStarting();
+        tracker.Track("after-replacement", RequestUrl, "GET");
+        Assert.False(tracker.ProcessLoadingFailed("after-replacement", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+        Assert.False(tracker.IsExpectedServerRestartLogEntry("after-replacement", "console", "fetch failed: net::ERR_CONNECTION_REFUSED", RequestUrl));
+        Assert.False(tracker.IsExpectedServerRestartLogEntry("unknown", "network", "fetch failed: net::ERR_CONNECTION_REFUSED", RequestUrl));
+        Assert.False(tracker.ProcessLoadingFailed("unknown", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+
+        var logTracker = new ExpectedServerRestartRequestTracker(TargetAuthority);
+        logTracker.DeclareReadOnlyGetTargets([Target]);
+        logTracker.BeginExpectedServerRestart();
+        logTracker.Track("wrong-route", RequestUrl, "GET");
+        Assert.False(logTracker.IsExpectedServerRestartLogEntry("wrong-route", "network", "Failed to load resource: net::ERR_CONNECTION_REFUSED", "https://127.0.0.1:5001/api/loop-runs/quota"));
+        Assert.False(logTracker.IsExpectedServerRestartLogEntry("wrong-route", "network", "Failed to load resource: net::ERR_CONNECTION_REFUSED extra", RequestUrl));
+
+        var errorTracker = new ExpectedServerRestartRequestTracker(TargetAuthority);
+        errorTracker.DeclareReadOnlyGetTargets([Target]);
+        errorTracker.BeginExpectedServerRestart();
+        foreach (var error in new[] { "fetch failed", "401 (Unauthorized)", "403 (Forbidden)", "409 (Conflict)", "500 (Internal Server Error)", "503 (Service Unavailable)" })
+        {
+            errorTracker.Track(error, RequestUrl, "GET");
+            Assert.False(errorTracker.ProcessLoadingFailed(error, canceled: false, error));
+        }
+    }
+
+    [Fact]
+    public void Restart_request_tracking_clears_declared_refusal_correlation_across_abort_and_generation_changes()
+    {
+        const string Target = "/api/loop-runs?maximumCount=50";
+        const string RequestUrl = "https://127.0.0.1:5001/api/loop-runs?maximumCount=50";
+        var tracker = new ExpectedServerRestartRequestTracker("127.0.0.1:5001");
+        tracker.DeclareReadOnlyGetTargets([Target]);
+        tracker.Track("aborted", RequestUrl, "GET");
+        tracker.BeginExpectedServerRestart();
+        tracker.AbortExpectedServerRestart();
+        Assert.False(tracker.ProcessLoadingFailed("aborted", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+
+        tracker.Track("evidence-aborted", RequestUrl, "GET");
+        tracker.BeginExpectedServerRestart();
+        Assert.True(tracker.ProcessLoadingFailed("evidence-aborted", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+        Assert.Single(tracker.ReadQualifiedReadOnlyRefusalEvidence());
+        tracker.AbortExpectedServerRestart();
+        Assert.Empty(tracker.ReadQualifiedReadOnlyRefusalEvidence());
+
+        tracker.Track("generation", RequestUrl, "GET");
+        tracker.BeginExpectedServerRestart();
+        Assert.True(tracker.ProcessLoadingFailed("generation", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+        tracker.BeginExpectedServerRestart();
+        Assert.False(tracker.IsExpectedServerRestartLogEntry("generation", "network", "fetch failed: net::ERR_CONNECTION_REFUSED", null));
+        Assert.Empty(tracker.ReadQualifiedReadOnlyRefusalEvidence());
+    }
+
+    [Fact]
+    public void Restart_request_tracking_rejects_invalid_declarations_and_deduplicates_exact_targets()
+    {
+        const string Target = "/api/loop-runs?maximumCount=50";
+        const string RequestUrl = "https://127.0.0.1:5001/api/loop-runs?maximumCount=50";
+        var tracker = new ExpectedServerRestartRequestTracker("127.0.0.1:5001");
+        tracker.DeclareReadOnlyGetTargets([null!, "", "//127.0.0.1:5001/api/loop-runs?maximumCount=50", Target, Target]);
+        Assert.Equal("declaredReadOnlyGetTargets=1", tracker.ReadQualifiedReadOnlyRefusalEvidenceSummary()[0]);
+        tracker.Track("duplicate", RequestUrl, "GET");
+        tracker.BeginExpectedServerRestart();
+        Assert.True(tracker.ProcessLoadingFailed("duplicate", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+        Assert.True(tracker.IsExpectedServerRestartLogEntry("duplicate", "network", "Failed to load resource: net::ERR_CONNECTION_REFUSED", null));
+        Assert.Single(tracker.ReadQualifiedReadOnlyRefusalEvidence());
+
+        var emptyTracker = new ExpectedServerRestartRequestTracker("127.0.0.1:5001");
+        emptyTracker.DeclareReadOnlyGetTargets([]);
+        Assert.Equal("declaredReadOnlyGetTargets=0", emptyTracker.ReadQualifiedReadOnlyRefusalEvidenceSummary()[0]);
+        emptyTracker.Track("empty", RequestUrl, "GET");
+        emptyTracker.BeginExpectedServerRestart();
+        Assert.False(emptyTracker.ProcessLoadingFailed("empty", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+
+        var cappedTracker = new ExpectedServerRestartRequestTracker("127.0.0.1:5001");
+        cappedTracker.DeclareReadOnlyGetTargets(Enumerable.Range(0, 17).Select(index => "/api/test?index=" + index));
+        Assert.Equal("declaredReadOnlyGetTargets=16", cappedTracker.ReadQualifiedReadOnlyRefusalEvidenceSummary()[0]);
+    }
+
+    [Fact]
+    public void Restart_request_provenance_summary_accepts_zero_refusals_and_both_event_orders()
+    {
+        const string Target = "/api/loop-runs?maximumCount=50";
+        const string RequestUrl = "https://127.0.0.1:5001/api/loop-runs?maximumCount=50";
+        var lifecycleTracker = new ExpectedServerRestartRequestTracker("127.0.0.1:5001");
+        lifecycleTracker.DeclareReadOnlyGetTargets([Target]);
+        lifecycleTracker.PrepareExpectedServerRestart();
+        lifecycleTracker.FreezeExpectedServerRestart();
+        lifecycleTracker.MarkExpectedReplacementServerStarting();
+        lifecycleTracker.EndExpectedServerRestart();
+        var lifecycleSummary = lifecycleTracker.ReadQualifiedReadOnlyRefusalEvidenceSummary();
+        AssertExpectedRestartProvenanceSummary(lifecycleSummary, [Target]);
+        Assert.DoesNotContain(lifecycleSummary, entry => entry.StartsWith("requestId=", StringComparison.Ordinal));
+
+        var mixedTracker = new ExpectedServerRestartRequestTracker("127.0.0.1:5001");
+        mixedTracker.DeclareReadOnlyGetTargets([Target]);
+        mixedTracker.Track("failure-before-log", RequestUrl, "GET");
+        mixedTracker.Track("log-before-failure", RequestUrl, "GET");
+        mixedTracker.BeginExpectedServerRestart();
+        Assert.True(mixedTracker.ProcessLoadingFailed("failure-before-log", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+        Assert.True(mixedTracker.IsExpectedServerRestartLogEntry("failure-before-log", "network", "Failed to load resource: net::ERR_CONNECTION_REFUSED", null));
+        Assert.True(mixedTracker.IsExpectedServerRestartLogEntry("log-before-failure", "network", "Failed to load resource: net::ERR_CONNECTION_REFUSED", RequestUrl));
+        Assert.True(mixedTracker.ProcessLoadingFailed("log-before-failure", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+        mixedTracker.EndExpectedServerRestart();
+        var mixedSummary = mixedTracker.ReadQualifiedReadOnlyRefusalEvidenceSummary();
+        AssertExpectedRestartProvenanceSummary(mixedSummary, [Target]);
+        Assert.Equal(2, mixedSummary.Count(entry => entry.StartsWith("requestId=", StringComparison.Ordinal)));
+        Assert.Contains(mixedSummary, entry => entry.Contains("rejectionReason=accepted-at-freeze", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Restart_request_provenance_summary_rejects_malformed_unknown_wrong_method_and_undeclared_rows()
+    {
+        const string Target = "/api/loop-runs?maximumCount=50";
+        var invalidRows = new[]
+        {
+            "requestId=missing-fields; generation=1; method=GET",
+            "unexpected=row",
+            "requestId=wrong-method; generation=1; method=POST; target=/api/loop-runs?maximumCount=50",
+            "requestId=wrong-target; generation=1; method=GET; target=/api/loop-runs/quota",
+            "provenanceTrace sequence=1; phase=2; generation=1; requestId=bad; declaredTargetIndex=0; methodPresent=True; method=GET; cachedMatch=False; currentMatch=True; frozenSnapshot=True; active=True; rejectionReason=unknown"
+        };
+
+        foreach (var invalidRow in invalidRows)
+        {
+            Assert.False(TryValidateExpectedRestartProvenanceSummary(["declaredReadOnlyGetTargets=1", invalidRow], [Target], out _), invalidRow);
+        }
+    }
+
     [InstalledBrowserFact]
     public async Task Default_chat_recovers_in_place_after_process_restart_and_preserves_unsaved_draft()
     {
@@ -379,6 +731,8 @@ public sealed partial class BrowserFlowTests
             await ClickAsync(browser, "#chatNav");
 
             app.AssertHealthy();
+            string[] expectedRestartReadOnlyGetTargets = ["/api/loop-runs?maximumCount=50", "/api/loop-runs?maximumCount=50&loopId=default-conversation", "/api/loop-runs/quota", "/api/loop-operations/posture?maximumQueueEntries=50&maximumSchedules=50&maximumWakes=50&maximumRuns=50"];
+            browser.DeclareReadOnlyGetTargets(expectedRestartReadOnlyGetTargets);
             await browser.BeginExpectedServerRestartAsync();
             await app.DisposeAsync();
             app = null;
@@ -392,6 +746,12 @@ public sealed partial class BrowserFlowTests
             await browser.WaitForExpressionAsync("document.getElementById('workspaceStatus').textContent.includes('Initialized')");
             Assert.True(await browser.EvaluateBooleanAsync("Array.from({ length: sessionStorage.length }, (_, index) => sessionStorage.getItem(sessionStorage.key(index))).some(value => value && value.includes('unsaved restart draft'))"), "The unsaved draft storage was cleared during host recovery.");
             await browser.EndExpectedServerRestartAsync();
+            var restartProvenanceDirectory = GetBrowserE2EArtifactDirectory(nameof(Default_chat_recovers_in_place_after_process_restart_and_preserves_unsaved_draft));
+            Directory.CreateDirectory(restartProvenanceDirectory);
+            var restartProvenancePath = Path.Combine(restartProvenanceDirectory, "expected-restart-qualified-refusals.txt");
+            var restartProvenance = await browser.WriteExpectedRestartProvenanceAsync(restartProvenancePath);
+            AssertExpectedRestartProvenanceSummary(restartProvenance, expectedRestartReadOnlyGetTargets);
+            Assert.Equal(restartProvenance, await File.ReadAllLinesAsync(restartProvenancePath));
             await browser.WaitForExpressionAsync("document.getElementById('transcript').textContent.includes('browser-first-turn') && document.getElementById('transcript').textContent.includes('browser response: browser-first-turn')");
             Assert.Equal(1, await browser.EvaluateInt32Async("Array.from(document.querySelectorAll('#transcript .message.user')).filter(message => message.textContent.includes('browser-first-turn')).length"));
             Assert.Equal(1, await browser.EvaluateInt32Async("Array.from(document.querySelectorAll('#transcript .message.agent')).filter(message => message.textContent.includes('browser response: browser-first-turn')).length"));
@@ -1073,6 +1433,7 @@ public sealed partial class BrowserFlowTests
             profileSpecs);
         await using var browser = await HeadlessBrowserSession.StartAsync(app.BaseUrl);
         HeadlessBrowserSession? staleBrowser = null;
+        string? profileMutationLifecycle = null;
 
         try
         {
@@ -1139,25 +1500,45 @@ public sealed partial class BrowserFlowTests
             await SetValueAsync(staleBrowser, "#governedGraphDisplayName", "Stale browser replacement");
             await staleBrowser.WaitForExpressionAsync("!document.getElementById('governedGraphSaveButton').disabled");
             // Deliberately hold the stale author's request until the current author commits, then prove the stale mutation receives a conflict; see https://github.com/Jacob-J-Thomas/agenthome-poc/issues/417.
-            await staleBrowser.EvaluateAsync("(() => { const original = window.fetch.bind(window); window.__originalStaleFetch = original; window.fetch = (url, options) => { if (String(url).endsWith('/api/governed-graphs/mutate')) { window.__staleMutation = { url, options }; return new Promise((resolve) => { window.__resolveStaleMutation = resolve; }); } return original(url, options); }; })()");
+            await staleBrowser.EvaluateAsync("(() => { const original = window.fetch.bind(window); window.__originalStaleFetch = original; window.fetch = (url, options) => { if (String(url).endsWith('/api/governed-graphs/mutate')) { const input = JSON.parse(options?.body ?? '{}'); window.__profileConflictMutation = { operationId: input.operationId ?? null, clientRequestStartedAtUtc: new Date().toISOString(), clientRequestEndedAtUtc: null, responseStatus: null, resultStatus: null, resultOperationId: null, cancelled: false, exceptionName: null, serverEntryExit: 'unavailable-without-production-instrumentation' }; window.__staleMutation = { url, options }; return new Promise((resolve) => { window.__resolveStaleMutation = async (response) => { const trace = window.__profileConflictMutation; trace.clientRequestEndedAtUtc = new Date().toISOString(); trace.responseStatus = response.status; try { const payload = await response.clone().json(); trace.resultStatus = payload?.status ?? null; trace.resultOperationId = payload?.operationId ?? null; } catch (error) { trace.cancelled = error?.name === 'AbortError'; trace.exceptionName = error?.name ?? 'unknown'; } resolve(response); }; }); } return original(url, options); }; })()");
             await ClickAsync(staleBrowser, "#governedGraphSaveButton");
             await staleBrowser.WaitForExpressionAsync("Boolean(window.__staleMutation?.options?.body) && typeof window.__resolveStaleMutation === 'function'");
 
             await SetValueAsync(browser, "#governedGraphRevisionId", "revision-2");
             await SetValueAsync(browser, "#governedGraphPurpose", "Current tab owns this exact replacement.");
             await browser.WaitForExpressionAsync("!document.getElementById('governedGraphSaveButton').disabled && document.getElementById('governedGraphRevisionId').value === 'revision-2' && document.getElementById('governedGraphPurpose').value === 'Current tab owns this exact replacement.'");
+            await browser.EvaluateAsync("(() => { const original = window.fetch.bind(window); window.fetch = async (url, options) => { if (!String(url).endsWith('/api/governed-graphs/mutate')) return original(url, options); const input = JSON.parse(options?.body ?? '{}'); const trace = window.__profileCurrentMutation = { operationId: input.operationId ?? null, clientRequestStartedAtUtc: new Date().toISOString(), clientRequestEndedAtUtc: null, responseStatus: null, resultStatus: null, resultOperationId: null, cancelled: false, exceptionName: null, serverEntryExit: 'unavailable-without-production-instrumentation' }; try { const response = await original(url, options); trace.clientRequestEndedAtUtc = new Date().toISOString(); trace.responseStatus = response.status; try { const payload = await response.clone().json(); trace.resultStatus = payload?.status ?? null; trace.resultOperationId = payload?.operationId ?? null; } catch (error) { trace.cancelled = error?.name === 'AbortError'; trace.exceptionName = error?.name ?? 'unknown'; } return response; } catch (error) { trace.clientRequestEndedAtUtc = new Date().toISOString(); trace.cancelled = error?.name === 'AbortError'; trace.exceptionName = error?.name ?? 'unknown'; throw error; } }; })()");
             await ClickAsync(browser, "#governedGraphSaveButton");
             await browser.WaitForExpressionAsync("document.getElementById('governedGraphNotice').textContent.includes('Committed') && document.getElementById('governedGraphPurpose').value === 'Current tab owns this exact replacement.'");
-            var staleMutationResult = await staleBrowser.EvaluateStringAsync("(async () => { const response = await window.__originalStaleFetch(window.__staleMutation.url, window.__staleMutation.options); const clone = response.clone(); window.__resolveStaleMutation(response); return JSON.stringify({ status: clone.status, body: await clone.text() }); })()");
+            var staleMutationResult = await staleBrowser.EvaluateStringAsync("(async () => { try { const response = await window.__originalStaleFetch(window.__staleMutation.url, window.__staleMutation.options); const clone = response.clone(); await window.__resolveStaleMutation(response); return JSON.stringify({ status: clone.status, body: await clone.text() }); } catch (error) { const trace = window.__profileConflictMutation; trace.clientRequestEndedAtUtc = new Date().toISOString(); trace.cancelled = error?.name === 'AbortError'; trace.exceptionName = error?.name ?? 'unknown'; throw error; } })()");
             using (var staleMutationDocument = JsonDocument.Parse(staleMutationResult))
             {
                 Assert.True(
                     staleMutationDocument.RootElement.GetProperty("status").GetInt32() == 409,
                     staleMutationDocument.RootElement.GetProperty("body").GetString());
             }
+            var currentMutationLifecycle = await browser.EvaluateStringAsync("JSON.stringify(window.__profileCurrentMutation)");
+            var staleMutationLifecycle = await staleBrowser.EvaluateStringAsync("JSON.stringify(window.__profileConflictMutation)");
+            using (var currentMutationDocument = JsonDocument.Parse(currentMutationLifecycle))
+            using (var staleMutationLifecycleDocument = JsonDocument.Parse(staleMutationLifecycle))
+            {
+                profileMutationLifecycle = JsonSerializer.Serialize(new { currentMutation = currentMutationDocument.RootElement, staleMutation = staleMutationLifecycleDocument.RootElement }, _jsonOptions);
+            }
             await staleBrowser.WaitForExpressionAsync("document.getElementById('governedGraphNotice').textContent.toLowerCase().includes('conflict')");
             Assert.Contains("conflict", await staleBrowser.EvaluateStringAsync("document.getElementById('governedGraphNotice').textContent"), StringComparison.OrdinalIgnoreCase);
             Assert.False(await staleBrowser.EvaluateBooleanAsync("Object.keys(sessionStorage).some((key) => key.includes('governed-graph-pending-mutation') && sessionStorage.getItem(key))"));
+            using (var currentMutationDocument = JsonDocument.Parse(currentMutationLifecycle))
+            using (var staleMutationDocument = JsonDocument.Parse(staleMutationLifecycle))
+            {
+                Assert.Equal(currentMutationDocument.RootElement.GetProperty("operationId").GetString(), currentMutationDocument.RootElement.GetProperty("resultOperationId").GetString());
+                Assert.Equal("committed", currentMutationDocument.RootElement.GetProperty("resultStatus").GetString());
+                Assert.Equal(200, currentMutationDocument.RootElement.GetProperty("responseStatus").GetInt32());
+                Assert.Equal(staleMutationDocument.RootElement.GetProperty("operationId").GetString(), staleMutationDocument.RootElement.GetProperty("resultOperationId").GetString());
+                Assert.Equal("conflict", staleMutationDocument.RootElement.GetProperty("resultStatus").GetString());
+                Assert.Equal(409, staleMutationDocument.RootElement.GetProperty("responseStatus").GetInt32());
+                Assert.Equal("unavailable-without-production-instrumentation", currentMutationDocument.RootElement.GetProperty("serverEntryExit").GetString());
+                Assert.Equal("unavailable-without-production-instrumentation", staleMutationDocument.RootElement.GetProperty("serverEntryExit").GetString());
+            }
             await staleBrowser.DisposeAsync();
             staleBrowser = null;
 
@@ -1184,7 +1565,23 @@ public sealed partial class BrowserFlowTests
         }
         catch
         {
-            await WriteFailureDiagnosticsAsync(nameof(Browser_preserves_server_owned_profile_fallback_order_override_conflicts_and_safe_text), browser, app);
+            try
+            {
+                profileMutationLifecycle = await CaptureProfileMutationLifecycleAsync(browser, staleBrowser);
+            }
+            catch
+            {
+                // The causal probe is supplemental; preserve the original scenario failure.
+            }
+
+            try
+            {
+                await WriteFailureDiagnosticsAsync(nameof(Browser_preserves_server_owned_profile_fallback_order_override_conflicts_and_safe_text), browser, app, profileMutationLifecycle: profileMutationLifecycle);
+            }
+            catch
+            {
+                // Browser failure artifacts are supplemental; preserve the originating journey failure.
+            }
             throw;
         }
         finally
@@ -1417,6 +1814,215 @@ public sealed partial class BrowserFlowTests
             await WriteFailureDiagnosticsAsync(nameof(Incompatible_runtime_is_visible_and_restores_chat_controls_after_rejection), browser, app);
             throw;
         }
+    }
+
+    private static void AssertExpectedRestartProvenanceSummary(IReadOnlyList<string> summary, IReadOnlyList<string> declaredTargets)
+    {
+        Assert.True(TryValidateExpectedRestartProvenanceSummary(summary, declaredTargets, out var failure), failure);
+    }
+
+    private static bool TryValidateExpectedRestartProvenanceSummary(IReadOnlyList<string> summary, IReadOnlyList<string> declaredTargets, out string failure)
+    {
+        if (summary.Count == 0)
+        {
+            return FailExpectedRestartProvenanceValidation("The expected-restart provenance summary is empty.", out failure);
+        }
+
+        if (declaredTargets.Distinct(StringComparer.Ordinal).Count() != declaredTargets.Count)
+        {
+            return FailExpectedRestartProvenanceValidation("The expected declared-target contract contains duplicates.", out failure);
+        }
+
+        var expectedHeader = "declaredReadOnlyGetTargets=" + declaredTargets.Count;
+        if (!string.Equals(summary[0], expectedHeader, StringComparison.Ordinal))
+        {
+            return FailExpectedRestartProvenanceValidation($"Expected provenance header '{expectedHeader}', but found '{summary[0]}'.", out failure);
+        }
+
+        long traceSequence = 0;
+        var traceStarted = false;
+        var traceTruncated = false;
+        for (var index = 1; index < summary.Count; index++)
+        {
+            var row = summary[index];
+            if (row.Contains('\r') || row.Contains('\n'))
+            {
+                return FailExpectedRestartProvenanceValidation($"Provenance row {index} contains a line break.", out failure);
+            }
+
+            if (row.StartsWith("requestId=", StringComparison.Ordinal))
+            {
+                if (traceStarted)
+                {
+                    return FailExpectedRestartProvenanceValidation($"Qualified refusal row {index} appears after the bounded trace.", out failure);
+                }
+
+                if (!TryValidateQualifiedRestartRefusal(row, declaredTargets, out failure))
+                {
+                    return false;
+                }
+
+                continue;
+            }
+
+            traceStarted = true;
+            if (string.Equals(row, "provenanceTrace=truncated", StringComparison.Ordinal))
+            {
+                if (traceTruncated || traceSequence != 128 || index != summary.Count - 1)
+                {
+                    return FailExpectedRestartProvenanceValidation("The bounded provenance trace has a misplaced or duplicate truncation marker.", out failure);
+                }
+
+                traceTruncated = true;
+                continue;
+            }
+
+            if (!TryValidateExpectedRestartTrace(row, declaredTargets.Count, ref traceSequence, out failure))
+            {
+                return false;
+            }
+        }
+
+        failure = string.Empty;
+        return true;
+    }
+
+    private static bool TryValidateQualifiedRestartRefusal(string row, IReadOnlyList<string> declaredTargets, out string failure)
+    {
+        if (!TryReadExpectedRestartFields(row, ["requestId", "generation", "method", "target"], out var fields)
+            || string.IsNullOrEmpty(fields[0])
+            || !long.TryParse(fields[1], NumberStyles.None, CultureInfo.InvariantCulture, out var generation)
+            || generation <= 0)
+        {
+            return FailExpectedRestartProvenanceValidation("A qualified refusal row is malformed.", out failure);
+        }
+
+        if (!string.Equals(fields[2], "GET", StringComparison.Ordinal))
+        {
+            return FailExpectedRestartProvenanceValidation("A qualified refusal row does not prove the exact GET method.", out failure);
+        }
+
+        if (!declaredTargets.Contains(fields[3], StringComparer.Ordinal))
+        {
+            return FailExpectedRestartProvenanceValidation("A qualified refusal row names an undeclared target.", out failure);
+        }
+
+        failure = string.Empty;
+        return true;
+    }
+
+    private static bool TryValidateExpectedRestartTrace(string row, int declaredTargetCount, ref long traceSequence, out string failure)
+    {
+        string[] expectedFields = ["provenanceTrace sequence", "phase", "generation", "requestId", "declaredTargetIndex", "methodPresent", "method", "cachedMatch", "currentMatch", "frozenSnapshot", "active", "rejectionReason"];
+        if (!TryReadExpectedRestartFields(row, expectedFields, out var fields)
+            || !long.TryParse(fields[0], NumberStyles.None, CultureInfo.InvariantCulture, out var sequence)
+            || sequence != traceSequence + 1
+            || !int.TryParse(fields[1], NumberStyles.None, CultureInfo.InvariantCulture, out var phase)
+            || phase is < 0 or > 3
+            || !long.TryParse(fields[2], NumberStyles.None, CultureInfo.InvariantCulture, out var generation)
+            || generation < 0
+            || string.IsNullOrEmpty(fields[3])
+            || fields[3].Length > 96
+            || !int.TryParse(fields[4], NumberStyles.Integer, CultureInfo.InvariantCulture, out var declaredTargetIndex)
+            || declaredTargetIndex < -1
+            || declaredTargetIndex >= declaredTargetCount
+            || !TryParseExpectedRestartBoolean(fields[5], out var methodPresent)
+            || fields[6] is not ("missing" or "GET" or "other")
+            || methodPresent == string.Equals(fields[6], "missing", StringComparison.Ordinal)
+            || !TryParseExpectedRestartBoolean(fields[7], out var cachedMatch)
+            || !TryParseExpectedRestartBoolean(fields[8], out var currentMatch)
+            || !TryParseExpectedRestartBoolean(fields[9], out var frozenSnapshot)
+            || !TryParseExpectedRestartBoolean(fields[10], out _)
+            || currentMatch != (declaredTargetIndex >= 0)
+            || !IsExpectedRestartTraceReason(fields[11]))
+        {
+            return FailExpectedRestartProvenanceValidation("A bounded provenance trace row is malformed or violates its declared-target contract.", out failure);
+        }
+
+        var lifecycle = fields[11].StartsWith("lifecycle-", StringComparison.Ordinal);
+        if (lifecycle && (!string.Equals(fields[3], "none", StringComparison.Ordinal) || declaredTargetIndex != -1 || methodPresent || cachedMatch || currentMatch || frozenSnapshot))
+        {
+            return FailExpectedRestartProvenanceValidation("A lifecycle trace row contains request-specific provenance.", out failure);
+        }
+
+        if (string.Equals(fields[11], "accepted-at-freeze", StringComparison.Ordinal)
+            && (!string.Equals(fields[6], "GET", StringComparison.Ordinal) || !currentMatch || !frozenSnapshot))
+        {
+            return FailExpectedRestartProvenanceValidation("An accepted-at-freeze row lacks exact frozen GET provenance.", out failure);
+        }
+
+        traceSequence = sequence;
+        failure = string.Empty;
+        return true;
+    }
+
+    private static bool TryReadExpectedRestartFields(string row, IReadOnlyList<string> expectedNames, out string[] values)
+    {
+        var parts = row.Split("; ", StringSplitOptions.None);
+        values = new string[expectedNames.Count];
+        if (parts.Length != expectedNames.Count)
+        {
+            return false;
+        }
+
+        for (var index = 0; index < expectedNames.Count; index++)
+        {
+            var prefix = expectedNames[index] + "=";
+            if (!parts[index].StartsWith(prefix, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            values[index] = parts[index][prefix.Length..];
+        }
+
+        return true;
+    }
+
+    private static bool TryParseExpectedRestartBoolean(string value, out bool result)
+    {
+        if (string.Equals(value, bool.TrueString, StringComparison.Ordinal))
+        {
+            result = true;
+            return true;
+        }
+
+        if (string.Equals(value, bool.FalseString, StringComparison.Ordinal))
+        {
+            result = false;
+            return true;
+        }
+
+        result = false;
+        return false;
+    }
+
+    private static bool IsExpectedRestartTraceReason(string value)
+    {
+        return value is "tracked"
+            or "replacement-start"
+            or "completed"
+            or "accepted-at-freeze"
+            or "not-declared-at-freeze"
+            or "missing-method"
+            or "method-not-get"
+            or "declaration-added"
+            or "declaration-updated"
+            or "declaration-removed"
+            or "post-freeze-declaration-added"
+            or "post-freeze-declaration-unchanged"
+            or "post-freeze-declaration-removed"
+            or "lifecycle-prepare"
+            or "lifecycle-successful-freeze-active"
+            or "lifecycle-replacement-start"
+            or "lifecycle-end"
+            or "lifecycle-abort";
+    }
+
+    private static bool FailExpectedRestartProvenanceValidation(string message, out string failure)
+    {
+        failure = message;
+        return false;
     }
 
     private static int GetFreePort()
@@ -2150,13 +2756,40 @@ public sealed partial class BrowserFlowTests
         return string.Join(Environment.NewLine, snapshot.Transcripts.SelectMany(transcript => transcript.Lines));
     }
 
-    private static async Task WriteFailureDiagnosticsAsync(string scenario, HeadlessBrowserSession? browser, ExternalWebApplicationProcess? app, string? retiredServerOutput = null)
+    private static async Task<string> CaptureProfileMutationLifecycleAsync(HeadlessBrowserSession browser, HeadlessBrowserSession? staleBrowser)
     {
-        var configuredRoot = Environment.GetEnvironmentVariable("EMBODYSENSE_BROWSER_E2E_ARTIFACTS");
-        var root = string.IsNullOrWhiteSpace(configuredRoot)
-            ? Path.GetFullPath(Path.Combine("tests", "EmbodySense.E2ETests", "TestResults", "BrowserE2E"))
-            : Path.GetFullPath(configuredRoot);
-        var directory = Path.Combine(root, scenario);
+        using var captureTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        var current = await CaptureProfileMutationAsync(browser, "JSON.stringify(window.__profileCurrentMutation ?? null)", captureTimeout.Token);
+        var stale = await CaptureProfileMutationAsync(staleBrowser, "JSON.stringify(window.__profileConflictMutation ?? null)", captureTimeout.Token);
+        return JsonSerializer.Serialize(new { schemaVersion = 1, captureStatus = new { current = current.Status, stale = stale.Status }, currentMutation = current.Mutation, staleMutation = stale.Mutation }, _jsonOptions);
+    }
+
+    private static async Task<(string Status, JsonElement? Mutation)> CaptureProfileMutationAsync(HeadlessBrowserSession? browser, string expression, CancellationToken cancellationToken)
+    {
+        if (browser is null)
+        {
+            return ("tab-unavailable", null);
+        }
+
+        try
+        {
+            var serializedMutation = await browser.EvaluateStringAsync(expression, cancellationToken);
+            using var mutation = JsonDocument.Parse(serializedMutation);
+            return mutation.RootElement.ValueKind == JsonValueKind.Null ? ("not-recorded", null) : ("captured", mutation.RootElement.Clone());
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return ("capture-timed-out", null);
+        }
+        catch
+        {
+            return ("capture-failed", null);
+        }
+    }
+
+    private static async Task WriteFailureDiagnosticsAsync(string scenario, HeadlessBrowserSession? browser, ExternalWebApplicationProcess? app, string? retiredServerOutput = null, string? profileMutationLifecycle = null)
+    {
+        var directory = GetBrowserE2EArtifactDirectory(scenario);
         Directory.CreateDirectory(directory);
         if (browser is not null)
         {
@@ -2172,6 +2805,20 @@ public sealed partial class BrowserFlowTests
         {
             await File.WriteAllTextAsync(Path.Combine(directory, "retired-server-output.txt"), retiredServerOutput);
         }
+
+        if (!string.IsNullOrWhiteSpace(profileMutationLifecycle))
+        {
+            await File.WriteAllTextAsync(Path.Combine(directory, "profile-mutation-lifecycle.json"), profileMutationLifecycle);
+        }
+    }
+
+    private static string GetBrowserE2EArtifactDirectory(string scenario)
+    {
+        var configuredRoot = Environment.GetEnvironmentVariable("EMBODYSENSE_BROWSER_E2E_ARTIFACTS");
+        var root = string.IsNullOrWhiteSpace(configuredRoot)
+            ? Path.GetFullPath(Path.Combine("tests", "EmbodySense.E2ETests", "TestResults", "BrowserE2E"))
+            : Path.GetFullPath(configuredRoot);
+        return Path.Combine(root, scenario);
     }
 
     private sealed class BrowserCapabilityArtifactVerifier : ICapabilityArtifactTrustVerifier
@@ -2450,6 +3097,11 @@ public sealed partial class BrowserFlowTests
             }
         }
 
+        public void DeclareReadOnlyGetTargets(IEnumerable<string> pathAndQueries)
+        {
+            _requestTracker.DeclareReadOnlyGetTargets(pathAndQueries);
+        }
+
         public void MarkExpectedReplacementServerStarting()
         {
             _requestTracker.MarkExpectedReplacementServerStarting();
@@ -2513,9 +3165,40 @@ public sealed partial class BrowserFlowTests
         }
 
         internal static bool MatchesExpectedHttpFailure(string diagnostic, (string UrlFragment, int StatusCode) expected)
-            => diagnostic.Contains(expected.UrlFragment, StringComparison.Ordinal)
+            => ContainsExpectedUrlFragment(diagnostic, expected.UrlFragment)
                 && (diagnostic.Contains($"\"status\":{expected.StatusCode}", StringComparison.Ordinal)
                     || diagnostic.Contains($"status of {expected.StatusCode} (", StringComparison.Ordinal));
+
+        private static bool ContainsExpectedUrlFragment(string diagnostic, string urlFragment)
+        {
+            var queryIndex = urlFragment.IndexOf('?', StringComparison.Ordinal);
+            if (queryIndex < 0 || queryIndex == urlFragment.Length - 1)
+            {
+                return diagnostic.Contains(urlFragment, StringComparison.Ordinal);
+            }
+
+            var searchIndex = 0;
+            while (searchIndex <= diagnostic.Length - urlFragment.Length)
+            {
+                var matchIndex = diagnostic.IndexOf(urlFragment, searchIndex, StringComparison.Ordinal);
+                if (matchIndex < 0)
+                {
+                    return false;
+                }
+
+                var boundaryIndex = matchIndex + urlFragment.Length;
+                if (boundaryIndex == diagnostic.Length || IsRequestTargetBoundary(diagnostic[boundaryIndex]))
+                {
+                    return true;
+                }
+
+                searchIndex = matchIndex + 1;
+            }
+
+            return false;
+        }
+
+        private static bool IsRequestTargetBoundary(char value) => value == '\"' || char.IsWhiteSpace(value);
 
         public async Task WriteDiagnosticsAsync(string directory)
         {
@@ -2540,6 +3223,14 @@ public sealed partial class BrowserFlowTests
             }
 
             await File.WriteAllLinesAsync(Path.Combine(directory, "browser-events.txt"), GetDiagnosticsSnapshot());
+            await File.WriteAllLinesAsync(Path.Combine(directory, "expected-restart-qualified-refusals.txt"), _requestTracker.ReadQualifiedReadOnlyRefusalEvidenceSummary());
+        }
+
+        public async Task<IReadOnlyList<string>> WriteExpectedRestartProvenanceAsync(string filePath)
+        {
+            var evidence = _requestTracker.ReadQualifiedReadOnlyRefusalEvidenceSummary();
+            await File.WriteAllLinesAsync(filePath, evidence);
+            return evidence;
         }
 
         public async ValueTask DisposeAsync()
@@ -2953,7 +3644,10 @@ public sealed partial class BrowserFlowTests
                 && request.TryGetProperty("url", out var requestUrl)
                 && requestUrl.ValueKind == JsonValueKind.String)
             {
-                _requestTracker.Track(requestId, requestUrl.GetString()!);
+                var requestMethod = request.TryGetProperty("method", out var methodValue) && methodValue.ValueKind == JsonValueKind.String
+                    ? methodValue.GetString()
+                    : null;
+                _requestTracker.Track(requestId, requestUrl.GetString()!, requestMethod);
                 return;
             }
 
@@ -2984,16 +3678,17 @@ public sealed partial class BrowserFlowTests
 
         private bool IsExpectedServerRestartHttpResponse(JsonElement response, double statusCode)
         {
-            return statusCode == 401
-                && _requestTracker.IsExpectedServerRestart()
-                && response.TryGetProperty("url", out var url)
-                && url.ValueKind == JsonValueKind.String
-                && ContainsTargetAuthority(url.GetString());
+            var url = response.TryGetProperty("url", out var urlValue) && urlValue.ValueKind == JsonValueKind.String
+                ? urlValue.GetString()
+                : null;
+            return IsExpectedServerRestartHttpResponseForTest(_requestTracker.IsExpectedServerRestart(), statusCode, url, _requestTracker.TargetAuthority);
         }
 
-        private bool ContainsTargetAuthority(string? value)
+        internal static bool IsExpectedServerRestartHttpResponseForTest(bool expectedServerRestart, double statusCode, string? url, string targetAuthority)
         {
-            return value?.Contains(_requestTracker.TargetAuthority, StringComparison.OrdinalIgnoreCase) == true;
+            return statusCode == 401
+                && expectedServerRestart
+                && url?.Contains(targetAuthority, StringComparison.OrdinalIgnoreCase) == true;
         }
 
         private async Task AcceptJavaScriptDialogAsync()

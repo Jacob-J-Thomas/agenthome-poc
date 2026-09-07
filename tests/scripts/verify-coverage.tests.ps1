@@ -215,7 +215,8 @@ function Invoke-CoverageVerification {
         [string]$ManifestPath,
         [string]$ReportPath,
         [int]$MaximumCoverageWorkers = 1,
-        [switch]$ExternalProcess
+        [switch]$ExternalProcess,
+        [switch]$CollectOnly
     )
 
     $coverageParameters = @{
@@ -228,6 +229,9 @@ function Invoke-CoverageVerification {
     }
     if (-not [string]::IsNullOrWhiteSpace($ReportPath)) {
         $coverageParameters.ReportPath = $ReportPath
+    }
+    if ($CollectOnly) {
+        $coverageParameters.CollectOnly = $true
     }
 
     if (-not $ExternalProcess) {
@@ -262,6 +266,9 @@ function Invoke-CoverageVerification {
         $arguments += @("-ReportPath", $ReportPath)
     }
     $arguments += @("-MaximumCoverageWorkers", [string]$MaximumCoverageWorkers)
+    if ($CollectOnly) {
+        $arguments += "-CollectOnly"
+    }
     $startInfo = New-VerificationProcessStartInfo -FileName $powerShellExecutable -Arguments $arguments -WorkingDirectory $RepositoryRoot
     $startInfo.CreateNoWindow = $true
     $startInfo.RedirectStandardOutput = $true
@@ -832,6 +839,14 @@ try {
     Assert-Contains -Actual $failingExternalResult.Output -Expected $expectedGap -Message "The external coverage-verifier entry point must preserve actionable gap evidence."
     Assert-Contains -Actual $failingExternalResult.Output -Expected "Fixture.One line coverage 80% is below 90%" -Message "The external coverage-verifier entry point must preserve the immutable threshold failure."
 
+    $failingCollectSummaryPath = Join-Path $failingRepository "coverage-summary-collect-only.json"
+    $failingCollectResult = Invoke-CoverageVerification -RepositoryRoot $failingRepository -MinimumWriteTimeUtc $minimumWriteTimeUtc -ReportPath $failingCollectSummaryPath -CollectOnly
+    Assert-True -Condition ($failingCollectResult.ExitCode -eq 0) -Message "Collect-only coverage must tolerate an under-threshold package for a partial component. Actual: $($failingCollectResult.Output)"
+    Assert-Contains -Actual $failingCollectResult.Output -Expected "Fixture.One: 80%" -Message "Collect-only coverage must emit the observed under-threshold package rate."
+    Assert-Contains -Actual $failingCollectResult.Output -Expected "COVERAGE_GAP package=Fixture.One" -Message "Collect-only coverage must retain truthful uncovered-line evidence."
+    $failingCollectSummary = Get-Content -LiteralPath $failingCollectSummaryPath -Raw | ConvertFrom-Json
+    Assert-True -Condition (@($failingCollectSummary.packages).Count -eq 2 -and @($failingCollectSummary.failures).Count -eq 0) -Message "Collect-only coverage summaries must include observed packages and no falsely claimed failure."
+
     $missingRepository = New-FixtureRepository -ScenarioRoot $scenarioRoot -Name "missing-package"
     $onePassingClass = New-CoverageClass -Name "Fixture.One.Passing" -FileName "src/Fixture.One/File.cs" -Lines @(New-CoverageLines -Hits @(1, 1, 1, 1, 1, 1, 1, 1, 1, 0))
     $onePassingPackage = New-CoveragePackage -Name "Fixture.One" -Classes @($onePassingClass)
@@ -840,6 +855,45 @@ try {
     $missingResult = Invoke-CoverageVerification -RepositoryRoot $missingRepository -MinimumWriteTimeUtc $minimumWriteTimeUtc
     Assert-True -Condition ($missingResult.ExitCode -ne 0) -Message "Missing production packages must fail."
     Assert-Contains -Actual $missingResult.Output -Expected "Coverage output did not include expected production package Fixture.Two" -Message "Missing-package diagnostics must be preserved."
+    $missingCollectSummaryPath = Join-Path $missingRepository "coverage-summary-collect-only.json"
+    $missingCollectResult = Invoke-CoverageVerification -RepositoryRoot $missingRepository -MinimumWriteTimeUtc $minimumWriteTimeUtc -ReportPath $missingCollectSummaryPath -CollectOnly
+    Assert-True -Condition ($missingCollectResult.ExitCode -eq 0) -Message "Collect-only coverage must tolerate an absent production package for a partial component. Actual: $($missingCollectResult.Output)"
+    Assert-Contains -Actual $missingCollectResult.Output -Expected "Fixture.One: 90%" -Message "Collect-only coverage must report the package that was actually observed."
+    $missingCollectSummary = Get-Content -LiteralPath $missingCollectSummaryPath -Raw | ConvertFrom-Json
+    Assert-True -Condition (@($missingCollectSummary.packages).Count -eq 1 -and [string]$missingCollectSummary.packages[0].package -ceq "Fixture.One" -and @($missingCollectSummary.failures).Count -eq 0) -Message "Collect-only summaries must not invent an absent package or failure."
+
+    $collectMissingRepository = New-FixtureRepository -ScenarioRoot $scenarioRoot -Name "collect-only-missing-report"
+    Write-CoverageReport -RepositoryRoot $collectMissingRepository -Name "primary" -Packages $primaryPackages -LastWriteTimeUtc $freshWriteTimeUtc
+    $collectMissingResultsRoot = Join-Path $collectMissingRepository "tests\Fixture.Tests\TestResults"
+    $collectMissingManifestPath = Join-Path $collectMissingResultsRoot "coverage-manifest.json"
+    Write-FixtureCoverageManifest -ResultsRoot $collectMissingResultsRoot -ManifestPath $collectMissingManifestPath -MinimumWriteTimeUtc $minimumWriteTimeUtc
+    $collectMissingManifest = Get-Content -LiteralPath $collectMissingManifestPath -Raw | ConvertFrom-Json
+    Remove-Item -LiteralPath ([string]$collectMissingManifest.reports[0].path) -Force
+    $collectMissingResult = Invoke-CoverageVerification -RepositoryRoot $collectMissingRepository -MinimumWriteTimeUtc $minimumWriteTimeUtc -ResultsRoot $collectMissingResultsRoot -ManifestPath $collectMissingManifestPath -CollectOnly
+    Assert-True -Condition ($collectMissingResult.ExitCode -ne 0) -Message "Collect-only coverage must reject a missing manifest-authenticated report."
+    Assert-Contains -Actual $collectMissingResult.Output -Expected "missing or is not a leaf" -Message "Collect-only missing-report diagnostics must identify the authenticated inventory failure."
+
+    $collectTamperedRepository = New-FixtureRepository -ScenarioRoot $scenarioRoot -Name "collect-only-tampered-report"
+    Write-CoverageReport -RepositoryRoot $collectTamperedRepository -Name "primary" -Packages $primaryPackages -LastWriteTimeUtc $freshWriteTimeUtc
+    $collectTamperedResultsRoot = Join-Path $collectTamperedRepository "tests\Fixture.Tests\TestResults"
+    $collectTamperedManifestPath = Join-Path $collectTamperedResultsRoot "coverage-manifest.json"
+    Write-FixtureCoverageManifest -ResultsRoot $collectTamperedResultsRoot -ManifestPath $collectTamperedManifestPath -MinimumWriteTimeUtc $minimumWriteTimeUtc
+    $collectTamperedManifest = Get-Content -LiteralPath $collectTamperedManifestPath -Raw | ConvertFrom-Json
+    $collectTamperedPath = [string]$collectTamperedManifest.reports[0].path
+    $collectTamperedXml = (Get-Content -LiteralPath $collectTamperedPath -Raw).Replace('hits="1"', 'hits="2"')
+    [IO.File]::WriteAllText($collectTamperedPath, $collectTamperedXml, [Text.UTF8Encoding]::new($false))
+    $collectTamperedResult = Invoke-CoverageVerification -RepositoryRoot $collectTamperedRepository -MinimumWriteTimeUtc $minimumWriteTimeUtc -ResultsRoot $collectTamperedResultsRoot -ManifestPath $collectTamperedManifestPath -CollectOnly
+    Assert-True -Condition ($collectTamperedResult.ExitCode -ne 0) -Message "Collect-only coverage must reject a tampered manifest-authenticated report."
+    Assert-Contains -Actual $collectTamperedResult.Output -Expected "evidence does not match its fresh immutable byte snapshot" -Message "Collect-only tamper diagnostics must identify the authenticated byte mismatch."
+
+    $collectStaleRepository = New-FixtureRepository -ScenarioRoot $scenarioRoot -Name "collect-only-stale-report"
+    Write-CoverageReport -RepositoryRoot $collectStaleRepository -Name "primary" -Packages $primaryPackages -LastWriteTimeUtc $staleWriteTimeUtc
+    $collectStaleResultsRoot = Join-Path $collectStaleRepository "tests\Fixture.Tests\TestResults"
+    $collectStaleManifestPath = Join-Path $collectStaleResultsRoot "coverage-manifest.json"
+    Write-FixtureCoverageManifest -ResultsRoot $collectStaleResultsRoot -ManifestPath $collectStaleManifestPath -MinimumWriteTimeUtc $minimumWriteTimeUtc
+    $collectStaleResult = Invoke-CoverageVerification -RepositoryRoot $collectStaleRepository -MinimumWriteTimeUtc $minimumWriteTimeUtc -ResultsRoot $collectStaleResultsRoot -ManifestPath $collectStaleManifestPath -CollectOnly
+    Assert-True -Condition ($collectStaleResult.ExitCode -ne 0) -Message "Collect-only coverage must reject a stale manifest-authenticated report."
+    Assert-Contains -Actual $collectStaleResult.Output -Expected "evidence does not match its fresh immutable byte snapshot" -Message "Collect-only stale-report diagnostics must identify the freshness mismatch."
 
     $emptyRepository = New-FixtureRepository -ScenarioRoot $scenarioRoot -Name "empty-package"
     $emptyClass = New-CoverageClass -Name "Fixture.Two.Empty" -FileName "src/Fixture.Two/Empty.cs" -Lines @()

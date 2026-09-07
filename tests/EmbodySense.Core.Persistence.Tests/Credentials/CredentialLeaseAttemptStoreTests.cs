@@ -26,6 +26,8 @@ namespace EmbodySense.Core.Persistence.Tests.Credentials;
 public sealed class CredentialLeaseAttemptStoreTests
 {
     private static readonly DateTimeOffset _now = new(2026, 8, 13, 12, 0, 0, TimeSpan.Zero);
+    private static readonly TimeSpan _takeoverDeadline = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan _deadlockGuard = TimeSpan.FromSeconds(1);
 
     [Fact]
     public async Task Exact_begin_uses_hashed_filenames_and_cross_instance_owner_exclusion()
@@ -115,7 +117,8 @@ public sealed class CredentialLeaseAttemptStoreTests
         var intent = Intent();
         var prepared = CredentialLeaseContract.Prepare(intent, _now);
         var begun = await new CredentialLeaseAttemptStore(paths).BeginAsync(intent, prepared);
-        using var owner = Assert.IsAssignableFrom<ICredentialLeaseAttemptLease>(begun.Lease);
+        ICredentialLeaseAttemptLease? owner = Assert.IsAssignableFrom<ICredentialLeaseAttemptLease>(begun.Lease);
+        var timeProvider = new CredentialLeaseTakeoverTestTimeProvider(_now);
         var observerStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var observerRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var observerFinished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -134,19 +137,36 @@ public sealed class CredentialLeaseAttemptStoreTests
                 }
                 return ValueTask.CompletedTask;
             },
+            OwnerTakeoverTimeProvider = timeProvider,
         });
 
         try
         {
             var resumed = store.ResumeAsync(intent.CredentialUseOperationId, intent.CredentialUseGeneration);
-            await observerStarted.Task.WaitAsync(TimeSpan.FromSeconds(1));
-            var result = await resumed.WaitAsync(TimeSpan.FromSeconds(3));
+            await observerStarted.Task.WaitAsync(_deadlockGuard);
+            await timeProvider.WaitForTimerCreationsAsync(1).WaitAsync(_deadlockGuard);
+            Assert.False(resumed.IsCompleted);
+
+            timeProvider.Advance(_takeoverDeadline - TimeSpan.FromMilliseconds(1));
+            await timeProvider.WaitForTimerCreationsAsync(2).WaitAsync(_deadlockGuard);
+            Assert.False(resumed.IsCompleted);
+
+            timeProvider.Advance(TimeSpan.FromMilliseconds(1));
+            var result = await resumed.WaitAsync(_deadlockGuard);
             Assert.Equal(CredentialLeaseAttemptStoreStatus.OperationInProgress, result.Status);
+            Assert.Null(result.Lease);
+
+            owner.Dispose();
+            owner = null;
+            var recovered = await new CredentialLeaseAttemptStore(paths).ResumeAsync(intent.CredentialUseOperationId, intent.CredentialUseGeneration);
+            Assert.Equal(CredentialLeaseAttemptStoreStatus.Replayed, recovered.Status);
+            recovered.Lease!.Dispose();
         }
         finally
         {
+            owner?.Dispose();
             observerRelease.TrySetResult();
-            await observerFinished.Task.WaitAsync(TimeSpan.FromSeconds(1));
+            await observerFinished.Task.WaitAsync(_deadlockGuard);
         }
     }
 
@@ -158,8 +178,9 @@ public sealed class CredentialLeaseAttemptStoreTests
         var intent = Intent();
         var prepared = CredentialLeaseContract.Prepare(intent, _now);
         var begun = await new CredentialLeaseAttemptStore(paths).BeginAsync(intent, prepared);
-        using var owner = Assert.IsAssignableFrom<ICredentialLeaseAttemptLease>(begun.Lease);
+        ICredentialLeaseAttemptLease? owner = Assert.IsAssignableFrom<ICredentialLeaseAttemptLease>(begun.Lease);
         using var cancellation = new CancellationTokenSource();
+        var timeProvider = new CredentialLeaseTakeoverTestTimeProvider(_now);
         var observerStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var observerRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var observerFinished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -178,19 +199,28 @@ public sealed class CredentialLeaseAttemptStoreTests
                 }
                 return ValueTask.CompletedTask;
             },
+            OwnerTakeoverTimeProvider = timeProvider,
         });
 
         try
         {
             var resumed = store.ResumeAsync(intent.CredentialUseOperationId, intent.CredentialUseGeneration, cancellation.Token);
-            await observerStarted.Task.WaitAsync(TimeSpan.FromSeconds(1));
+            await observerStarted.Task.WaitAsync(_deadlockGuard);
+            await timeProvider.WaitForTimerCreationsAsync(1).WaitAsync(_deadlockGuard);
             cancellation.Cancel();
-            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => resumed).WaitAsync(TimeSpan.FromSeconds(1));
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => resumed).WaitAsync(_deadlockGuard);
+
+            owner.Dispose();
+            owner = null;
+            var recovered = await new CredentialLeaseAttemptStore(paths).ResumeAsync(intent.CredentialUseOperationId, intent.CredentialUseGeneration);
+            Assert.Equal(CredentialLeaseAttemptStoreStatus.Replayed, recovered.Status);
+            recovered.Lease!.Dispose();
         }
         finally
         {
+            owner?.Dispose();
             observerRelease.TrySetResult();
-            await observerFinished.Task.WaitAsync(TimeSpan.FromSeconds(1));
+            await observerFinished.Task.WaitAsync(_deadlockGuard);
         }
     }
 
@@ -202,15 +232,41 @@ public sealed class CredentialLeaseAttemptStoreTests
         var intent = Intent();
         var prepared = CredentialLeaseContract.Prepare(intent, _now);
         var begun = await new CredentialLeaseAttemptStore(paths).BeginAsync(intent, prepared);
-        using var owner = Assert.IsAssignableFrom<ICredentialLeaseAttemptLease>(begun.Lease);
+        ICredentialLeaseAttemptLease? owner = Assert.IsAssignableFrom<ICredentialLeaseAttemptLease>(begun.Lease);
+        var timeProvider = new CredentialLeaseTakeoverTestTimeProvider(_now);
+        var observerStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var store = new CredentialLeaseAttemptStore(paths, new CredentialLeaseAttemptStoreOptions
         {
-            OwnerTakeoverPollingObserver = static () => ValueTask.FromException(new InvalidOperationException("test observer failure")),
+            OwnerTakeoverPollingObserver = () =>
+            {
+                observerStarted.TrySetResult();
+                throw new InvalidOperationException("test observer failure");
+            },
+            OwnerTakeoverTimeProvider = timeProvider,
         });
 
-        var resumed = await store.ResumeAsync(intent.CredentialUseOperationId, intent.CredentialUseGeneration)
-            .WaitAsync(TimeSpan.FromSeconds(3));
-        Assert.Equal(CredentialLeaseAttemptStoreStatus.OperationInProgress, resumed.Status);
+        try
+        {
+            var resume = store.ResumeAsync(intent.CredentialUseOperationId, intent.CredentialUseGeneration);
+            await observerStarted.Task.WaitAsync(_deadlockGuard);
+            await timeProvider.WaitForTimerCreationsAsync(1).WaitAsync(_deadlockGuard);
+            Assert.False(resume.IsCompleted);
+
+            timeProvider.Advance(_takeoverDeadline);
+            var result = await resume.WaitAsync(_deadlockGuard);
+            Assert.Equal(CredentialLeaseAttemptStoreStatus.OperationInProgress, result.Status);
+            Assert.Null(result.Lease);
+
+            owner.Dispose();
+            owner = null;
+            var recovered = await new CredentialLeaseAttemptStore(paths).ResumeAsync(intent.CredentialUseOperationId, intent.CredentialUseGeneration);
+            Assert.Equal(CredentialLeaseAttemptStoreStatus.Replayed, recovered.Status);
+            recovered.Lease!.Dispose();
+        }
+        finally
+        {
+            owner?.Dispose();
+        }
     }
 
     [Fact]
@@ -221,7 +277,8 @@ public sealed class CredentialLeaseAttemptStoreTests
         var intent = Intent();
         var prepared = CredentialLeaseContract.Prepare(intent, _now);
         var begun = await new CredentialLeaseAttemptStore(paths).BeginAsync(intent, prepared);
-        using var owner = Assert.IsAssignableFrom<ICredentialLeaseAttemptLease>(begun.Lease);
+        ICredentialLeaseAttemptLease? owner = Assert.IsAssignableFrom<ICredentialLeaseAttemptLease>(begun.Lease);
+        var timeProvider = new CredentialLeaseTakeoverTestTimeProvider(_now);
         var observerStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var observerFinished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var store = new CredentialLeaseAttemptStore(paths, new CredentialLeaseAttemptStoreOptions
@@ -239,18 +296,121 @@ public sealed class CredentialLeaseAttemptStoreTests
                     observerFinished.TrySetResult();
                 }
             },
+            OwnerTakeoverTimeProvider = timeProvider,
         });
 
         try
         {
             var resumed = store.ResumeAsync(intent.CredentialUseOperationId, intent.CredentialUseGeneration);
-            await observerStarted.Task.WaitAsync(TimeSpan.FromSeconds(1));
-            var result = await resumed.WaitAsync(TimeSpan.FromSeconds(3));
+            await observerStarted.Task.WaitAsync(_deadlockGuard);
+            await timeProvider.WaitForTimerCreationsAsync(1).WaitAsync(_deadlockGuard);
+            Assert.False(resumed.IsCompleted);
+
+            timeProvider.Advance(_takeoverDeadline);
+            var result = await resumed.WaitAsync(_deadlockGuard);
             Assert.Equal(CredentialLeaseAttemptStoreStatus.OperationInProgress, result.Status);
+            Assert.Null(result.Lease);
+
+            owner.Dispose();
+            owner = null;
+            var recovered = await new CredentialLeaseAttemptStore(paths).ResumeAsync(intent.CredentialUseOperationId, intent.CredentialUseGeneration);
+            Assert.Equal(CredentialLeaseAttemptStoreStatus.Replayed, recovered.Status);
+            recovered.Lease!.Dispose();
         }
         finally
         {
-            await observerFinished.Task.WaitAsync(TimeSpan.FromSeconds(1));
+            owner?.Dispose();
+            await observerFinished.Task.WaitAsync(_deadlockGuard);
+        }
+    }
+
+    [Fact]
+    public async Task Completed_poll_observer_cannot_change_live_owner_classification()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var intent = Intent();
+        var prepared = CredentialLeaseContract.Prepare(intent, _now);
+        var begun = await new CredentialLeaseAttemptStore(paths).BeginAsync(intent, prepared);
+        ICredentialLeaseAttemptLease? owner = Assert.IsAssignableFrom<ICredentialLeaseAttemptLease>(begun.Lease);
+        var timeProvider = new CredentialLeaseTakeoverTestTimeProvider(_now);
+        var observerStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var store = new CredentialLeaseAttemptStore(paths, new CredentialLeaseAttemptStoreOptions
+        {
+            OwnerTakeoverPollingObserver = () =>
+            {
+                observerStarted.TrySetResult();
+                return ValueTask.CompletedTask;
+            },
+            OwnerTakeoverTimeProvider = timeProvider,
+        });
+
+        try
+        {
+            var resume = store.ResumeAsync(intent.CredentialUseOperationId, intent.CredentialUseGeneration);
+            await observerStarted.Task.WaitAsync(_deadlockGuard);
+            await timeProvider.WaitForTimerCreationsAsync(1).WaitAsync(_deadlockGuard);
+            Assert.False(resume.IsCompleted);
+
+            timeProvider.Advance(_takeoverDeadline);
+            var result = await resume.WaitAsync(_deadlockGuard);
+            Assert.Equal(CredentialLeaseAttemptStoreStatus.OperationInProgress, result.Status);
+            Assert.Null(result.Lease);
+
+            owner.Dispose();
+            owner = null;
+            var recovered = await new CredentialLeaseAttemptStore(paths).ResumeAsync(intent.CredentialUseOperationId, intent.CredentialUseGeneration);
+            Assert.Equal(CredentialLeaseAttemptStoreStatus.Replayed, recovered.Status);
+            recovered.Lease!.Dispose();
+        }
+        finally
+        {
+            owner?.Dispose();
+        }
+    }
+
+    [Fact]
+    public async Task Lease_released_after_takeover_deadline_is_not_accepted_late()
+    {
+        using var workspace = new TestWorkspace();
+        var paths = new WorkspacePaths(workspace.RootPath);
+        var intent = Intent();
+        var prepared = CredentialLeaseContract.Prepare(intent, _now);
+        var begun = await new CredentialLeaseAttemptStore(paths).BeginAsync(intent, prepared);
+        ICredentialLeaseAttemptLease? owner = Assert.IsAssignableFrom<ICredentialLeaseAttemptLease>(begun.Lease);
+        var timeProvider = new CredentialLeaseTakeoverTestTimeProvider(_now);
+        var observerStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var store = new CredentialLeaseAttemptStore(paths, new CredentialLeaseAttemptStoreOptions
+        {
+            OwnerTakeoverPollingObserver = () =>
+            {
+                observerStarted.TrySetResult();
+                return ValueTask.CompletedTask;
+            },
+            OwnerTakeoverTimeProvider = timeProvider,
+        });
+
+        try
+        {
+            var resume = store.ResumeAsync(intent.CredentialUseOperationId, intent.CredentialUseGeneration);
+            await observerStarted.Task.WaitAsync(_deadlockGuard);
+            await timeProvider.WaitForTimerCreationsAsync(1).WaitAsync(_deadlockGuard);
+            timeProvider.AdvanceClockWithoutFiringTimers(_takeoverDeadline + TimeSpan.FromMilliseconds(1));
+            owner.Dispose();
+            owner = null;
+
+            timeProvider.Advance(TimeSpan.Zero);
+            var result = await resume.WaitAsync(_deadlockGuard);
+            Assert.Equal(CredentialLeaseAttemptStoreStatus.OperationInProgress, result.Status);
+            Assert.Null(result.Lease);
+
+            var recovered = await new CredentialLeaseAttemptStore(paths).ResumeAsync(intent.CredentialUseOperationId, intent.CredentialUseGeneration);
+            Assert.Equal(CredentialLeaseAttemptStoreStatus.Replayed, recovered.Status);
+            recovered.Lease!.Dispose();
+        }
+        finally
+        {
+            owner?.Dispose();
         }
     }
 

@@ -37,15 +37,46 @@ public static class FakeCodexExecutable
 
     public static async Task<string> CreateCompatibleAsync(TestWorkspace workspace, params string[] advertisedModels)
     {
+        return await CreateCompatibleCoreAsync(workspace, null, advertisedModels);
+    }
+
+    public static async Task<string> CreateCompatibleWithMilestoneTraceAsync(TestWorkspace workspace, string milestoneTracePath, params string[] advertisedModels)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(milestoneTracePath);
+        return await CreateCompatibleCoreAsync(workspace, milestoneTracePath, advertisedModels);
+    }
+
+    private static async Task<string> CreateCompatibleCoreAsync(TestWorkspace workspace, string? milestoneTracePath, string[] advertisedModels)
+    {
         ArgumentNullException.ThrowIfNull(workspace);
         var directory = workspace.File("fake-codex");
         Directory.CreateDirectory(directory);
+        if (!string.IsNullOrWhiteSpace(milestoneTracePath))
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(milestoneTracePath)!);
+        }
+
         var commandPath = Path.Combine(directory, OperatingSystem.IsWindows() ? "codex.cmd" : "codex");
         var scriptPath = Path.Combine(directory, "codex.js");
         var modelsJson = System.Text.Json.JsonSerializer.Serialize(advertisedModels);
+        var milestoneTracePathJson = System.Text.Json.JsonSerializer.Serialize(milestoneTracePath);
         await File.WriteAllTextAsync(scriptPath, $$"""
+            const milestoneTracePath = {{milestoneTracePathJson}};
+            const fileSystem = milestoneTracePath ? require("node:fs") : null;
+
+            function traceMilestone(milestone, detail = {}) {
+              if (!milestoneTracePath) {
+                return;
+              }
+
+              fileSystem.appendFileSync(milestoneTracePath, `${JSON.stringify({ timestampUtc: new Date().toISOString(), processId: process.pid, milestone, detail })}\n`);
+            }
+
+            traceMilestone("process-start", { arguments: process.argv.slice(2) });
             if (process.argv.slice(2).includes("--version")) {
+              traceMilestone("version-request");
               process.stdout.write("codex-cli compatible-test\n");
+              traceMilestone("version-response", { version: "codex-cli compatible-test" });
               process.exit(0);
             }
 
@@ -131,12 +162,17 @@ public static class FakeCodexExecutable
 
               switch (message.method) {
                 case "initialize":
+                  traceMilestone("initialize-request", { id: message.id });
                   write({ id: message.id, result: {} });
+                  traceMilestone("initialize-response", { id: message.id });
                   break;
                 case "model/list":
+                  traceMilestone("model/list-request", { id: message.id });
                   write({ id: message.id, result: { data: advertisedModels.map((model) => ({ id: model, model })), nextCursor: null } });
+                  traceMilestone("model/list-response", { id: message.id, advertisedModels });
                   break;
                 case "thread/start": {
+                  traceMilestone("thread/start-request", { id: message.id });
                   const threadId = `thread-browser-${++threadNumber}`;
                   const model = String(message.params?.model ?? "");
                   const modelProvider = String(message.params?.modelProvider ?? "");
@@ -148,6 +184,7 @@ public static class FakeCodexExecutable
                       thread: { id: threadId, modelProvider }
                     }
                   });
+                  traceMilestone("thread/start-response", { id: message.id, threadId, model, modelProvider });
                   break;
                 }
                 case "turn/start": {

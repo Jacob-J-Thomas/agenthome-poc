@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Net.Sockets;
 using System.Net.WebSockets;
+using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using EmbodySense.Core.Application.Capabilities;
@@ -367,6 +368,9 @@ public sealed class WebGovernedLoopBackgroundLifetimeTests
             using var shutdownDeadline = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
             await app.StopAsync(shutdownDeadline.Token).WaitAsync(TimeSpan.FromSeconds(10));
 
+            // Reproduce the exact late projection from a reconciliation admitted before shutdown without delaying the
+            // real hosted lifetime or replacing its canonical runtime.
+            SetGovernedLoopBackgroundPosture(runtimeHost, WebGovernedLoopBackgroundPosture.Ready);
             Assert.Equal(WebGovernedLoopBackgroundPosture.Draining, runtimeHost.GetStatus().BackgroundPosture);
             Assert.False(turn.IsCompleted);
 
@@ -758,4 +762,7 @@ public sealed class WebGovernedLoopBackgroundLifetimeTests
         listener.Stop();
         return port;
     }
+
+    [UnsafeAccessor(UnsafeAccessorKind.Method, Name = "SetGovernedLoopBackgroundPosture")]
+    private static extern void SetGovernedLoopBackgroundPosture(WebAgentRuntimeHost instance, WebGovernedLoopBackgroundPosture posture);
 }

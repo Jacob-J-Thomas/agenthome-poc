@@ -22,12 +22,19 @@ using EmbodySense.Web.Models;
 using EmbodySense.Web.Services;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
+using Xunit.Abstractions;
 
 namespace EmbodySense.E2ETests.Web;
 
 public sealed class WebClientFlowTests
 {
     private static readonly JsonSerializerOptions _jsonOptions = CreateJsonOptions();
+    private readonly ITestOutputHelper _output;
+
+    public WebClientFlowTests(ITestOutputHelper output)
+    {
+        _output = output;
+    }
 
     [Fact]
     public async Task Localhost_web_client_serves_assets_and_bootstrap_endpoints()
@@ -194,19 +201,25 @@ public sealed class WebClientFlowTests
     {
         using var workspace = new TestWorkspace();
         await WorkspaceInitializer.ForWeb().InitializeAsync(workspace.RootPath);
-        var codexExecutable = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
+        var diagnostics = new List<string>();
+        var milestoneTracePath = workspace.File("diagnostics", "external-web-background-lifetime.ndjson");
+        var codexExecutable = await FakeCodexExecutable.CreateCompatibleWithMilestoneTraceAsync(workspace, milestoneTracePath, "gpt-test");
         var port = GetFreePort();
-        var first = await ExternalWebApplicationProcess.StartAsync(workspace.RootPath, port, codexExecutable, "gpt-test");
+        var coordinatorStore = new GovernedLoopCoordinatorEvidenceStore(new WorkspacePaths(workspace.RootPath));
+        ExternalWebApplicationProcess? first = null;
 
         try
         {
+            first = await ExternalWebApplicationProcess.StartAsync(workspace.RootPath, port, codexExecutable, "gpt-test");
             using var firstClient = new HttpClient { BaseAddress = new Uri(first.BaseUrl) };
             Assert.Equal(
                 WebGovernedLoopBackgroundPosture.Ready,
-                (await WaitForBackgroundPostureAsync(firstClient, WebGovernedLoopBackgroundPosture.Ready, TimeSpan.FromSeconds(5))).BackgroundPosture);
+                (await WaitForBackgroundPostureAsync(firstClient, WebGovernedLoopBackgroundPosture.Ready, TimeSpan.FromSeconds(5), first, diagnostics, "first-host")).BackgroundPosture);
+            await CaptureCoordinatorEvidenceAsync(coordinatorStore, diagnostics, "first-host-ready");
             await first.StopAsync();
             Assert.Contains("Application is shutting down", first.FormatOutput(), StringComparison.Ordinal);
-            var stoppedEvidence = await new GovernedLoopCoordinatorEvidenceStore(new WorkspacePaths(workspace.RootPath)).ReadAsync("local-background");
+            var stoppedEvidence = await coordinatorStore.ReadAsync("local-background");
+            AppendDiagnostic(diagnostics, "first-host-stopped-coordinator", stoppedEvidence);
             Assert.Equal(GovernedLoopCoordinatorReadStatus.Found, stoppedEvidence!.Status);
             Assert.Equal(GovernedLoopCoordinatorStatus.Stopped, stoppedEvidence.Snapshot!.LatestLifecycle.Status);
 
@@ -217,24 +230,34 @@ public sealed class WebClientFlowTests
             using var secondClient = new HttpClient { BaseAddress = new Uri(second.BaseUrl) };
             Assert.Equal(
                 WebGovernedLoopBackgroundPosture.Degraded,
-                (await WaitForBackgroundPostureAsync(secondClient, WebGovernedLoopBackgroundPosture.Degraded, TimeSpan.FromSeconds(5), second)).BackgroundPosture);
+                (await WaitForBackgroundPostureAsync(secondClient, WebGovernedLoopBackgroundPosture.Degraded, TimeSpan.FromSeconds(5), second, diagnostics, "second-host")).BackgroundPosture);
+            await CaptureCoordinatorEvidenceAsync(coordinatorStore, diagnostics, "second-host-degraded");
             Assert.Equal(
                 WebGovernedLoopBackgroundPosture.Ready,
-                (await WaitForBackgroundPostureAsync(secondClient, WebGovernedLoopBackgroundPosture.Ready, reacquisitionWindow, second)).BackgroundPosture);
+                (await WaitForBackgroundPostureAsync(secondClient, WebGovernedLoopBackgroundPosture.Ready, reacquisitionWindow, second, diagnostics, "second-host")).BackgroundPosture);
 
-            var restartedEvidence = await new GovernedLoopCoordinatorEvidenceStore(new WorkspacePaths(workspace.RootPath)).ReadAsync("local-background");
+            var restartedEvidence = await coordinatorStore.ReadAsync("local-background");
+            AppendDiagnostic(diagnostics, "second-host-ready-coordinator", restartedEvidence);
             Assert.Equal(GovernedLoopCoordinatorReadStatus.Found, restartedEvidence!.Status);
             Assert.Equal(2, restartedEvidence.Snapshot!.Ownership.OwnershipEpoch);
             Assert.Equal(GovernedLoopCoordinatorStatus.Running, restartedEvidence.Snapshot.LatestLifecycle.Status);
 
             await second.StopAsync();
-            var restoppedEvidence = await new GovernedLoopCoordinatorEvidenceStore(new WorkspacePaths(workspace.RootPath)).ReadAsync("local-background");
+            var restoppedEvidence = await coordinatorStore.ReadAsync("local-background");
+            AppendDiagnostic(diagnostics, "second-host-stopped-coordinator", restoppedEvidence);
             Assert.Equal(GovernedLoopCoordinatorReadStatus.Found, restoppedEvidence!.Status);
             Assert.Equal(GovernedLoopCoordinatorStatus.Stopped, restoppedEvidence.Snapshot!.LatestLifecycle.Status);
         }
         finally
         {
-            await first.DisposeAsync();
+            await CaptureCoordinatorEvidenceAsync(coordinatorStore, diagnostics, "test-finally");
+            AppendDiagnostic(diagnostics, "first-host-output", first?.FormatOutput());
+            AppendDiagnostic(diagnostics, "fake-child-milestones", await ReadDiagnosticFileAsync(milestoneTracePath));
+            _output.WriteLine("R14 external Web background lifetime trace:" + Environment.NewLine + string.Join(Environment.NewLine, diagnostics));
+            if (first is not null)
+            {
+                await first.DisposeAsync();
+            }
         }
     }
 
@@ -344,23 +367,63 @@ public sealed class WebClientFlowTests
         HttpClient client,
         WebGovernedLoopBackgroundPosture posture,
         TimeSpan timeout,
-        ExternalWebApplicationProcess? process = null)
+        ExternalWebApplicationProcess? process = null,
+        ICollection<string>? diagnostics = null,
+        string? host = null)
     {
         WebStatus? last = null;
         var deadline = DateTimeOffset.UtcNow + timeout;
         while (DateTimeOffset.UtcNow < deadline)
         {
-            var status = await client.GetFromJsonAsync<WebStatus>("/api/status", _jsonOptions);
-            last = status;
-            if (status?.BackgroundPosture == posture)
+            try
             {
-                return status;
+                var status = await client.GetFromJsonAsync<WebStatus>("/api/status", _jsonOptions);
+                last = status;
+                AppendDiagnostic(diagnostics, $"{host ?? "external-web-host"}-status", status);
+                if (status?.BackgroundPosture == posture)
+                {
+                    return status;
+                }
+            }
+            catch (Exception exception)
+            {
+                AppendDiagnostic(diagnostics, $"{host ?? "external-web-host"}-status-error", exception.ToString());
+                throw;
             }
 
             await Task.Delay(100);
         }
 
         throw new TimeoutException($"The external Web host did not reach background posture `{posture}`; last posture: `{last?.BackgroundPosture}`. {process?.FormatOutput()}");
+    }
+
+    private static async Task CaptureCoordinatorEvidenceAsync(GovernedLoopCoordinatorEvidenceStore coordinatorStore, ICollection<string> diagnostics, string observation)
+    {
+        try
+        {
+            AppendDiagnostic(diagnostics, observation + "-coordinator", await coordinatorStore.ReadAsync("local-background"));
+        }
+        catch (Exception exception)
+        {
+            AppendDiagnostic(diagnostics, observation + "-coordinator-error", exception.ToString());
+        }
+    }
+
+    private static async Task<string> ReadDiagnosticFileAsync(string path)
+    {
+        try
+        {
+            return File.Exists(path) ? await File.ReadAllTextAsync(path) : "No fake-child milestone file was created.";
+        }
+        catch (Exception exception)
+        {
+            return "Failed to read fake-child milestone file: " + exception;
+        }
+    }
+
+    private static void AppendDiagnostic(ICollection<string>? diagnostics, string observation, object? value)
+    {
+        diagnostics?.Add($"{DateTimeOffset.UtcNow:O} {observation}: {JsonSerializer.Serialize(value, _jsonOptions)}");
     }
 
     private static JsonSerializerOptions CreateJsonOptions()

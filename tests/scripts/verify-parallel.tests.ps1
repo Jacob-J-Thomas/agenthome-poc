@@ -181,7 +181,7 @@ Assert-True -Condition ($declaredRequiredGateProfiles.Count -eq $requiredGatePro
 $persistenceProfile = Get-VerificationRequiredGateScheduleProfile -Name "tests-EmbodySense.Core.Persistence.Tests-all"
 Assert-True -Condition ($persistenceProfile.EstimatedDurationSeconds -eq 720 -and $persistenceProfile.TimeoutSeconds -eq 840 -and $persistenceProfile.Weight -eq 6 -and $persistenceProfile.ResourceClass -ceq "ProcessHeavy") -Message "Persistence must retain its measured 720-second duration, 840-second dedicated ceiling, and half-runner process-heavy reservation."
 $startupRemainderProfile = Get-VerificationRequiredGateScheduleProfile -Name "tests-EmbodySense.Core.Startup.Tests-remainder"
-Assert-True -Condition ($startupRemainderProfile.EstimatedDurationSeconds -eq 560 -and $startupRemainderProfile.TimeoutSeconds -eq 720 -and $startupRemainderProfile.Weight -eq 6 -and $startupRemainderProfile.ResourceClass -ceq "ProcessHeavy") -Message "The Startup remainder must retain its separate 560-second duration, shared 720-second ceiling, and half-runner process-heavy reservation."
+Assert-True -Condition ($startupRemainderProfile.EstimatedDurationSeconds -eq 560 -and $startupRemainderProfile.TimeoutSeconds -eq 750 -and $startupRemainderProfile.Weight -eq 6 -and $startupRemainderProfile.ResourceClass -ceq "ProcessHeavy") -Message "The Startup remainder must retain its separate 560-second duration, bounded 750-second Coverlet-finalization ceiling, and half-runner process-heavy reservation."
 $nestedProcessProfile = Get-VerificationRequiredGateScheduleProfile -Name "tests-EmbodySense.Core.Startup.Tests-nested-process"
 Assert-True -Condition ($nestedProcessProfile.EstimatedDurationSeconds -eq 180 -and $nestedProcessProfile.TimeoutSeconds -eq 600 -and $nestedProcessProfile.Weight -eq 12 -and $nestedProcessProfile.ResourceClass -ceq "ProcessHeavy") -Message "The nested-process Startup lane must reserve the entire logical capacity with its measured profile."
 Assert-True -Condition (@($requiredGateProfiles | Where-Object { $_.Name -ceq "tests-EmbodySense.Core.Startup.Tests-all" }).Count -eq 0) -Message "The stale all-Startup scheduling profile must not survive the two-lane partition."
@@ -211,13 +211,13 @@ try {
         Assert-True -Condition ($_.Exception.Message.IndexOf("bounded child-timeout policy of 840 seconds", [StringComparison]::Ordinal) -ge 0) -Message "A Persistence timeout above its dedicated maximum must fail closed."
     }
 
-    $startupRemainderProfileSource.TimeoutSeconds = 721
+    $startupRemainderProfileSource.TimeoutSeconds = 751
     try {
         Get-VerificationRequiredGateScheduleProfile -Name $startupRemainderProfileSource.Name | Out-Null
         throw "Expected a Startup remainder timeout above the shared maximum to fail closed."
     }
     catch {
-        Assert-True -Condition ($_.Exception.Message.IndexOf("bounded child-timeout policy of 720 seconds", [StringComparison]::Ordinal) -ge 0) -Message "The Persistence-only maximum cannot silently widen the Startup remainder ceiling."
+        Assert-True -Condition ($_.Exception.Message.IndexOf("bounded child-timeout policy of 750 seconds", [StringComparison]::Ordinal) -ge 0) -Message "The Startup remainder must fail closed above its bounded Coverlet-finalization ceiling."
     }
 }
 finally {
@@ -356,6 +356,88 @@ exit $ExitCode
     Assert-True -Condition ($results.Count -eq 6) -Message "Every successful parallel phase must be aggregated."
     Assert-True -Condition (@(Get-ChildItem -LiteralPath $synchronizationRoot -Filter "*.ready" -File).Count -eq 6) -Message "Six ordinary probes must be able to pack the explicit six-unit logical capacity."
     Assert-Contains -Actual (Get-Content -Raw (Join-Path $scenarioRoot "first.log")) -Expected "probe=first" -Message "Each phase must retain isolated output."
+
+    $normalDiagnosticPath = Join-Path $scenarioRoot "normal-parent-lifecycle.jsonl"
+    Reset-VerificationParallelPhaseState
+    Add-VerificationParallelPhase -Name "normal-diagnostic" -FileName $powerShellExecutable -Arguments ($baseArguments + @("normal-diagnostic", "50", "0")) -TimeoutSeconds $processProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "normal-diagnostic.log") -ParentDiagnosticPath $normalDiagnosticPath
+    Invoke-VerificationParallelPhases -MaximumResourceCapacity 1 | Out-Null
+    $normalDiagnostics = @(Get-Content -LiteralPath $normalDiagnosticPath | ConvertFrom-Json)
+    Assert-True -Condition ($normalDiagnostics.Count -ge 6) -Message "A normal diagnostic phase must retain the bounded parent lifecycle observations."
+    Assert-True -Condition (@($normalDiagnostics | Where-Object { $_.event -ceq "process-started" -and $_.processId -gt 0 -and -not $_.terminationRequested }).Count -eq 1) -Message "Parent diagnostics must identify the started child without recording command arguments or environment values."
+    Assert-True -Condition (@($normalDiagnostics | Where-Object { $_.event -ceq "after-output-drain" -and $_.observedHasExited -and $_.standardOutputCompleted -and $_.standardErrorCompleted -and -not $_.terminationRequested }).Count -eq 1) -Message "Normal parent diagnostics must distinguish a completed process and drained redirected streams."
+
+    $invalidDiagnosticTarget = Join-Path $scenarioRoot "invalid-parent-diagnostic-target"
+    New-Item -ItemType Directory -Path $invalidDiagnosticTarget | Out-Null
+    Reset-VerificationParallelPhaseState
+    Add-VerificationParallelPhase -Name "invalid-diagnostic-target" -FileName $powerShellExecutable -Arguments ($baseArguments + @("invalid-diagnostic-target", "50", "0")) -TimeoutSeconds $processProbeTimeoutSeconds -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "invalid-diagnostic-target.log") -ParentDiagnosticPath $invalidDiagnosticTarget
+    $invalidDiagnosticResults = @(Invoke-VerificationParallelPhases -MaximumResourceCapacity 1)
+    Assert-True -Condition ($invalidDiagnosticResults.Count -eq 1 -and -not $invalidDiagnosticResults[0].TimedOut -and $invalidDiagnosticResults[0].ExitCode -eq 0) -Message "An unavailable parent diagnostic target must not change a normal child result."
+    Assert-Contains -Actual (Get-Content -Raw (Join-Path $scenarioRoot "invalid-diagnostic-target.log")) -Expected "probe=invalid-diagnostic-target" -Message "An unavailable parent diagnostic target must not suppress normal child output."
+
+    $savedParentDiagnosticWriter = (Get-Command Write-VerificationParallelParentDiagnostic -CommandType Function).ScriptBlock
+    try {
+        function Write-VerificationParallelParentDiagnostic {
+            param(
+                [Parameter(Mandatory = $true)] [object]$Entry,
+                [Parameter(Mandatory = $true)] [ValidateNotNullOrEmpty()] [string]$Event,
+                [Parameter(Mandatory = $true)] [bool]$TerminationRequested
+            )
+
+            $controlledElapsedMilliseconds = switch ($Entry.Phase.Name) {
+                "exited-near-deadline-2999" { 2999; break }
+                "exited-near-deadline-3000" { 3000; break }
+                "exited-near-deadline-3001" { 3001; break }
+                default { $null }
+            }
+            if ($Event -ceq "process-started" -and $null -ne $controlledElapsedMilliseconds) {
+                if (-not $Entry.Process.WaitForExit(5000)) {
+                    throw "The zero-delay near-deadline child did not provide a natural-exit readiness witness within five seconds."
+                }
+
+                $controlledStopwatch = [pscustomobject]@{ Elapsed = [TimeSpan]::FromMilliseconds($controlledElapsedMilliseconds); IsStopped = $false }
+                $controlledStopwatch | Add-Member -MemberType ScriptMethod -Name Stop -Value { $this.IsStopped = $true }
+                $Entry.Stopwatch = $controlledStopwatch
+            }
+
+            & $savedParentDiagnosticWriter @PSBoundParameters
+        }
+
+        foreach ($nearDeadlineCase in @(
+            [pscustomobject]@{ Name = "exited-near-deadline-2999"; ExpectedElapsedMilliseconds = 2999; ExpectedTimedOut = $false }
+            [pscustomobject]@{ Name = "exited-near-deadline-3000"; ExpectedElapsedMilliseconds = 3000; ExpectedTimedOut = $true }
+            [pscustomobject]@{ Name = "exited-near-deadline-3001"; ExpectedElapsedMilliseconds = 3001; ExpectedTimedOut = $true }
+        )) {
+            $nearDeadlineDiagnosticPath = Join-Path $scenarioRoot "$($nearDeadlineCase.Name)-parent-lifecycle.jsonl"
+            $nearDeadlineOutputPath = Join-Path $scenarioRoot "$($nearDeadlineCase.Name).log"
+            Reset-VerificationParallelPhaseState
+            Add-VerificationParallelPhase -Name $nearDeadlineCase.Name -FileName $powerShellExecutable -Arguments ($baseArguments + @($nearDeadlineCase.Name, "0", "0")) -TimeoutSeconds 3 -WorkingDirectory $scenarioRoot -OutputPath $nearDeadlineOutputPath -ParentDiagnosticPath $nearDeadlineDiagnosticPath
+            if ($nearDeadlineCase.ExpectedTimedOut) {
+                try {
+                    Invoke-VerificationParallelPhases -MaximumResourceCapacity 1 | Out-Null
+                    throw "Expected aggregate timeout for controlled elapsed $($nearDeadlineCase.ExpectedElapsedMilliseconds) milliseconds."
+                }
+                catch {
+                    Assert-Contains -Actual $_.Exception.Message -Expected "'$($nearDeadlineCase.Name)' timed out" -Message "A controlled elapsed value at or beyond the unchanged deadline must fail the aggregate."
+                }
+            }
+            else {
+                $nearDeadlineResults = @(Invoke-VerificationParallelPhases -MaximumResourceCapacity 1)
+                Assert-True -Condition ($nearDeadlineResults.Count -eq 1 -and -not $nearDeadlineResults[0].TimedOut -and $nearDeadlineResults[0].ExitCode -eq 0) -Message "A controlled elapsed value below the unchanged deadline must remain a normal exit."
+            }
+
+            $nearDeadlineDiagnostics = @(Get-Content -LiteralPath $nearDeadlineDiagnosticPath | ConvertFrom-Json)
+            Assert-True -Condition (@($nearDeadlineDiagnostics | Where-Object { $_.event -ceq "process-started" -and $_.observedHasExited -and -not $_.terminationRequested }).Count -eq 1) -Message "Near-deadline diagnostics must show a natural child exit readiness witness."
+            Assert-True -Condition (@($nearDeadlineDiagnostics | Where-Object { $_.event -ceq "completion-observed" -and $_.observedHasExited -and -not $_.terminationRequested }).Count -eq 1) -Message "Near-deadline diagnostics must show that the parent observed a natural child exit before requesting termination."
+            Assert-True -Condition (@($nearDeadlineDiagnostics | Where-Object { $_.event -in @("before-termination-request", "after-termination-request") }).Count -eq 0) -Message "A naturally exited near-deadline child must not record termination events."
+            Assert-True -Condition (@($nearDeadlineDiagnostics | Where-Object { $_.terminationRequested }).Count -eq 0) -Message "A naturally exited near-deadline child must retain a false termination-requested flag."
+            Assert-True -Condition (@($nearDeadlineDiagnostics | Where-Object { $_.event -ceq "after-output-drain" -and $_.observedHasExited -and $_.standardOutputCompleted -and $_.standardErrorCompleted -and -not $_.terminationRequested }).Count -eq 1) -Message "Near-deadline diagnostics must retain completed redirected streams after natural exit."
+            Assert-True -Condition (@($nearDeadlineDiagnostics | Where-Object { $_.monotonicElapsedMilliseconds -ne $nearDeadlineCase.ExpectedElapsedMilliseconds }).Count -eq 0) -Message "Near-deadline diagnostics must retain the exact controlled elapsed evidence."
+            Assert-Contains -Actual (Get-Content -Raw -LiteralPath $nearDeadlineOutputPath) -Expected "probe=$($nearDeadlineCase.Name)" -Message "Near-deadline output must remain retained after natural child exit."
+        }
+    }
+    finally {
+        Set-Item -Path Function:\Write-VerificationParallelParentDiagnostic -Value $savedParentDiagnosticWriter
+    }
 
     $weightedProbePath = Join-Path $scenarioRoot "weighted-probe.ps1"
     @'
@@ -607,8 +689,9 @@ finally {
     $order = @(Get-Content -LiteralPath $orderPath)
     Assert-True -Condition ($order.Count -eq 4 -and $order[0] -ceq "high" -and $order[1] -ceq "tie-alpha" -and $order[2] -ceq "tie-zulu" -and $order[3] -ceq "low") -Message "Ordinary phases must retain longest-estimate ordering, with exact-name ordering for deterministic ties."
 
+    $timeoutDiagnosticPath = Join-Path $scenarioRoot "timeout-parent-lifecycle.jsonl"
     Reset-VerificationParallelPhaseState
-    Add-VerificationParallelPhase -Name "timeout" -FileName $powerShellExecutable -Arguments ($baseArguments + @("timeout", "5000", "0")) -TimeoutSeconds 1 -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "timeout.log")
+    Add-VerificationParallelPhase -Name "timeout" -FileName $powerShellExecutable -Arguments ($baseArguments + @("timeout", "5000", "0")) -TimeoutSeconds 1 -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "timeout.log") -ParentDiagnosticPath $timeoutDiagnosticPath
     try {
         Invoke-VerificationParallelPhases -MaximumResourceCapacity 1 | Out-Null
         throw "Expected aggregate timeout."
@@ -616,6 +699,10 @@ finally {
     catch {
         Assert-Contains -Actual $_.Exception.Message -Expected "'timeout' timed out" -Message "Timeouts must kill the child tree and fail the aggregate."
     }
+    $timeoutDiagnostics = @(Get-Content -LiteralPath $timeoutDiagnosticPath | ConvertFrom-Json)
+    Assert-True -Condition (@($timeoutDiagnostics | Where-Object { $_.event -ceq "before-termination-request" -and -not $_.observedHasExited -and -not $_.terminationRequested }).Count -eq 1) -Message "Timeout diagnostics must identify that test execution had not completed before parent termination."
+    Assert-True -Condition (@($timeoutDiagnostics | Where-Object { $_.event -ceq "after-termination-request" -and $_.terminationRequested }).Count -eq 1) -Message "Timeout diagnostics must retain the parent termination request before stream drainage."
+    Assert-True -Condition (@($timeoutDiagnostics | Where-Object { $_.event -ceq "before-output-drain" }).Count -eq 1) -Message "Timeout diagnostics must retain the stream-drain boundary even when the child was terminated."
 
     Reset-VerificationParallelPhaseState
     Add-VerificationParallelPhase -Name "duplicate" -FileName $powerShellExecutable -Arguments ($baseArguments + @("one", "10", "0")) -TimeoutSeconds 10 -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "one.log")

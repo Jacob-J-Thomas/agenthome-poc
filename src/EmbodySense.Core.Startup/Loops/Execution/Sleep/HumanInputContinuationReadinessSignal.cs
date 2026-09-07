@@ -21,6 +21,8 @@ public sealed class HumanInputContinuationReadinessSignal
     /// <summary>Gets whether the current composed worker has a clean, policy-source-healthy bounded probe outcome.</summary>
     public bool IsExecutable => Volatile.Read(ref _isExecutable) != 0;
 
+    internal void Invalidate() => Volatile.Write(ref _isExecutable, 0);
+
     internal void Observe(GovernedLoopLocalWorkResult? result)
     {
         switch (result?.Status)

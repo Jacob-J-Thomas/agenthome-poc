@@ -38,6 +38,12 @@ public sealed class HumanReviewRecoveryReadinessSignal
     /// <summary>Gets whether the most recent non-cancelled probe or recovery pass was healthy.</summary>
     public bool IsExecutable => Volatile.Read(ref _isExecutable) != 0;
 
+    internal void Invalidate()
+    {
+        Volatile.Write(ref _recoveryInvalidated, 1);
+        Volatile.Write(ref _isExecutable, 0);
+    }
+
     internal Task ObserveAsync(HumanReviewRecoveryPassStatus status, CancellationToken cancellationToken)
         => ObserveAsync(status == HumanReviewRecoveryPassStatus.Current, cancellationToken);
 

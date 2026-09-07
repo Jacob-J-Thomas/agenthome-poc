@@ -315,8 +315,10 @@ public sealed partial class BrowserFlowTests
             await SelectHumanInputAsync(browser, SupersedeId);
             await SetValueAsync(browser, "#humanInputSupersedePurpose", "Prepared successor purpose");
             await SetValueAsync(browser, "#humanInputSupersedePrompt", "Prepared successor prompt");
+            Assert.True(await browser.EvaluateBooleanAsync(HumanInputSelectionReadyExpression(SupersedeId)), "The supersede prepare action must remain bound to the exact selected canonical request.");
             await ClickAsync(browser, "[data-testid=\"human-input-supersede\"]");
             await browser.WaitForExpressionAsync("document.getElementById('humanInputSupersedeStatus').textContent.toLowerCase().includes('prepared') && document.querySelector('[data-testid=\"human-input-supersede\"]')?.textContent.toLowerCase().includes('commit')");
+            Assert.True(await browser.EvaluateBooleanAsync(HumanInputSelectionReadyExpression(SupersedeId)), "The supersede commit action must remain bound to the exact selected canonical request.");
             await ClickAsync(browser, "[data-testid=\"human-input-supersede\"]");
             await WaitForHumanInputLifecycleAsync(browser, "superseded");
             var superseded = await HumanInputBrowserFixture.ReadAsync(paths, capabilityTrustRoot, SupersedeId);
@@ -411,7 +413,7 @@ public sealed partial class BrowserFlowTests
         var selector = JsonSerializer.Serialize($"[data-testid=\"human-input-item\"][data-request-id=\"{requestId}\"]");
         await browser.WaitForExpressionAsync($"document.querySelector({selector}) !== null");
         await browser.EvaluateWithUserGestureAsync($"document.querySelector({selector})?.click()");
-        await browser.WaitForExpressionAsync("document.getElementById('humanInputDetailPanel').hidden === false && document.getElementById('humanInputDetailStatus').textContent.includes('Canonical state reread')");
+        await browser.WaitForExpressionAsync(HumanInputSelectionReadyExpression(requestId));
     }
 
     private static async Task SelectHumanInputAsync(HeadlessBrowserTab tab, string requestId)
@@ -419,7 +421,22 @@ public sealed partial class BrowserFlowTests
         var selector = JsonSerializer.Serialize($"[data-testid=\"human-input-item\"][data-request-id=\"{requestId}\"]");
         await tab.WaitForExpressionAsync($"document.querySelector({selector}) !== null");
         await tab.EvaluateWithUserGestureAsync($"document.querySelector({selector})?.click()");
-        await tab.WaitForExpressionAsync("document.getElementById('humanInputDetailPanel').hidden === false && document.getElementById('humanInputDetailStatus').textContent.includes('Canonical state reread')");
+        await tab.WaitForExpressionAsync(HumanInputSelectionReadyExpression(requestId));
+    }
+
+    private static string HumanInputSelectionReadyExpression(string requestId)
+    {
+        var requestIdJson = JsonSerializer.Serialize(requestId);
+        var identityJson = JsonSerializer.Serialize($"Request {requestId}");
+        return string.Join(" && ", [
+            "document.getElementById('humanInputDetailPanel')?.hidden === false",
+            "document.querySelectorAll('[data-testid=\"human-input-item\"][aria-selected=\"true\"]').length === 1",
+            $"document.querySelector('[data-testid=\"human-input-item\"][aria-selected=\"true\"]')?.getAttribute('data-request-id') === {requestIdJson}",
+            $"document.getElementById('humanInputIdentity')?.textContent === {identityJson}",
+            "document.getElementById('humanInputDetailStatus')?.textContent === 'Canonical state reread. Response data remains in this form only until submission.'",
+            "document.getElementById('humanInputRefreshButton')?.disabled === false",
+            "document.getElementById('humanInputDetailRefreshButton')?.disabled === false",
+        ]);
     }
 
     private static async Task InitializeWorkspaceInTabAsync(HeadlessBrowserTab tab)

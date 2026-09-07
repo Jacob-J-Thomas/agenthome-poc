@@ -208,7 +208,7 @@ public sealed partial class BrowserFlowTests
             await InitializeWorkspaceAsyncIfNeededAsync(browser);
             await OpenHumanReviewAsync(browser);
             await browser.EvaluateWithUserGestureAsync($"(() => {{ const item = document.querySelector({selector}); if (!item) throw new Error('Ambiguous Human Review item disappeared.'); item.click(); }})()");
-            await browser.WaitForExpressionAsync("document.getElementById('humanReviewDetailPanel').hidden === false && document.querySelector('[data-testid=\"human-review-approve\"]')?.getAttribute('aria-disabled') === 'true'");
+            await browser.WaitForExpressionAsync("document.getElementById('humanReviewDetailPanel').hidden === false && document.querySelector('[data-testid=\"human-review-approve\"]')?.getAttribute('aria-disabled') === 'true' && !document.getElementById('humanReviewDetailStatus').textContent.includes('Rereading canonical review')");
             var afterReloadEvidence = await ReadHumanReviewEndpointAsync(browser, $"/api/human-reviews/{Uri.EscapeDataString(runId)}/evidence");
             Assert.Equal(evidence, afterReloadEvidence);
             var effectAfter = await ReadCanonicalEffectAttemptAsync(paths, runId);

@@ -65,6 +65,63 @@ jobs:
             tests/VerificationResults/required-test-report.json
             tests/VerificationResults/coverage-manifest.json
             tests/VerificationResults/coverage-summary.json
+            tests/VerificationResults/**/*.cobertura.xml
+            tests/VerificationResults/**/*.trx
+          if-no-files-found: error
+          retention-days: 30
+
+  verify-nested-process:
+    name: verify-nested-process
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    concurrency:
+      group: verify-nested-process-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
+    runs-on: windows-latest
+    # Five exclusive Startup fixtures have an independent bounded process-heavy runner.
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install pinned .NET SDK
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+
+      - name: Verify nested Startup fixtures
+        shell: pwsh
+        run: ./scripts/verify-with-watchdog.ps1 -Configuration Release -DeadlineSeconds 600 -VerificationComponent NestedProcess
+
+      - name: Upload nested-process diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: verification-nested-process-diagnostics-${{ github.run_attempt }}
+          path: |
+            tests/VerificationResults/**
+            tests/**/TestResults/**/*.trx
+            tests/**/TestResults/**/coverage.cobertura.xml
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload nested-process receipt
+        if: success()
+        uses: actions/upload-artifact@v7
+        with:
+          name: verification-nested-process-receipt-${{ github.run_attempt }}
+          path: |
+            tests/VerificationResults/verification-component-evidence.json
+            tests/VerificationResults/verification-component-manifest.json
+            tests/VerificationResults/verification-watchdog-evidence.json
+            tests/VerificationResults/watchdog.log
+            tests/VerificationResults/required-test-lanes.json
+            tests/VerificationResults/required-test-partition.json
+            tests/VerificationResults/required-execution-tests.json
+            tests/VerificationResults/required-test-report.json
+            tests/VerificationResults/coverage-manifest.json
+            tests/VerificationResults/coverage-summary.json
+            tests/VerificationResults/**/*.cobertura.xml
             tests/VerificationResults/**/*.trx
           if-no-files-found: error
           retention-days: 30
@@ -141,8 +198,8 @@ jobs:
   verify:
     name: verify
     if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
-    needs: [verify-solution, verify-contracts]
-    runs-on: ubuntu-latest
+    needs: [verify-solution, verify-nested-process, verify-contracts]
+    runs-on: windows-latest
     # The protected fan-in downloads only the small authenticated receipt bundles; full diagnostics remain separate.
     timeout-minutes: 5
 
@@ -166,6 +223,12 @@ jobs:
           name: verification-contract-receipt-${{ github.run_attempt }}
           path: fan-in/static
 
+      - name: Download nested-process evidence
+        uses: actions/download-artifact@v7
+        with:
+          name: verification-nested-process-receipt-${{ github.run_attempt }}
+          path: fan-in/nested
+
       - name: Authenticate complete verification evidence
         shell: pwsh
-        run: ./scripts/verify-promotion-fan-in.ps1 -SolutionArtifactRoot ./fan-in/solution -StaticArtifactRoot ./fan-in/static -ExpectedHead '${{ github.sha }}' -ExpectedRunId '${{ github.run_id }}' -ExpectedRunAttempt '${{ github.run_attempt }}' -SolutionResult '${{ needs.verify-solution.result }}' -StaticResult '${{ needs.verify-contracts.result }}'
+        run: ./scripts/verify-promotion-fan-in.ps1 -SolutionArtifactRoot ./fan-in/solution -NestedArtifactRoot ./fan-in/nested -StaticArtifactRoot ./fan-in/static -ExpectedHead '${{ github.sha }}' -ExpectedRunId '${{ github.run_id }}' -ExpectedRunAttempt '${{ github.run_attempt }}' -SolutionResult '${{ needs.verify-solution.result }}' -NestedResult '${{ needs.verify-nested-process.result }}' -StaticResult '${{ needs.verify-contracts.result }}'

@@ -6976,11 +6976,14 @@ function beginSessionRecovery() {
 }
 
 function waitForLoopBuilderOperation(operation, signal) {
-  if (!signal) return Promise.resolve(operation);
-  if (signal.aborted)
+  const observedOperation = Promise.resolve(operation);
+  if (!signal) return observedOperation;
+  if (signal.aborted) {
+    void observedOperation.catch(() => {});
     return Promise.reject(
       signal.reason ?? new Error("The browser session is unavailable."),
     );
+  }
   return new Promise((resolve, reject) => {
     let settled = false;
     const finish = (callback, value) => {
@@ -6995,7 +6998,7 @@ function waitForLoopBuilderOperation(operation, signal) {
         signal.reason ?? new Error("The browser session is unavailable."),
       );
     signal.addEventListener("abort", abort, { once: true });
-    Promise.resolve(operation).then(
+    observedOperation.then(
       (value) => finish(resolve, value),
       (error) => finish(reject, error),
     );

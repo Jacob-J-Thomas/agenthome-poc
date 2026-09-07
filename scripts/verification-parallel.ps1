@@ -35,6 +35,8 @@ function Add-VerificationParallelPhase {
 
         [hashtable]$Environment,
 
+        [string]$ParentDiagnosticPath,
+
         [ValidateRange(1, 86400)]
         [int]$EstimatedDurationSeconds = 1,
 
@@ -59,12 +61,50 @@ function Add-VerificationParallelPhase {
         CoverageSearchRoot = if ([string]::IsNullOrWhiteSpace($CoverageSearchRoot)) { $null } else { [IO.Path]::GetFullPath($CoverageSearchRoot) }
         TrxPath = if ([string]::IsNullOrWhiteSpace($TrxPath)) { $null } else { [IO.Path]::GetFullPath($TrxPath) }
         Environment = if ($null -eq $Environment) { @{} } else { $Environment.Clone() }
+        ParentDiagnosticPath = if ([string]::IsNullOrWhiteSpace($ParentDiagnosticPath)) { $null } else { [IO.Path]::GetFullPath($ParentDiagnosticPath) }
         EstimatedDurationSeconds = $EstimatedDurationSeconds
         SchedulingPrioritySeconds = $EstimatedDurationSeconds
         Weight = $Weight
         EffectiveWeight = $Weight
         ResourceClass = $ResourceClass
         SchedulingDeferrals = 0
+    }
+}
+
+function Write-VerificationParallelParentDiagnostic {
+    param(
+        [Parameter(Mandatory = $true)] [object]$Entry,
+        [Parameter(Mandatory = $true)] [ValidateNotNullOrEmpty()] [string]$Event,
+        [Parameter(Mandatory = $true)] [bool]$TerminationRequested
+    )
+
+    try {
+        if ([string]::IsNullOrWhiteSpace($Entry.Phase.ParentDiagnosticPath)) {
+            return
+        }
+
+        $diagnosticDirectory = Split-Path -Parent $Entry.Phase.ParentDiagnosticPath
+        New-Item -ItemType Directory -Path $diagnosticDirectory -Force | Out-Null
+        $record = [ordered]@{
+            schemaVersion = 1
+            phase = $Entry.Phase.Name
+            event = $Event
+            observedAtUtc = [DateTimeOffset]::UtcNow.ToString("O")
+            monotonicElapsedMilliseconds = [Math]::Round($Entry.Stopwatch.Elapsed.TotalMilliseconds, 3)
+            processId = $Entry.Process.Id
+            observedHasExited = $Entry.Process.HasExited
+            terminationRequested = $TerminationRequested
+            standardOutputCompleted = $Entry.StandardOutput.IsCompleted
+            standardErrorCompleted = $Entry.StandardError.IsCompleted
+        }
+        Add-Content -LiteralPath $Entry.Phase.ParentDiagnosticPath -Value ($record | ConvertTo-Json -Compress) -Encoding UTF8
+    }
+    catch {
+        try {
+            Write-Warning "VERIFY_PARENT_DIAGNOSTIC_UNAVAILABLE event=$Event"
+        }
+        catch {
+        }
     }
 }
 
@@ -268,6 +308,7 @@ function Invoke-VerificationParallelPhases {
                         StandardOutput = $outputTask
                         StandardError = $errorTask
                     })
+                    Write-VerificationParallelParentDiagnostic -Entry $running[$running.Count - 1] -Event "process-started" -TerminationRequested $false
                     $activeResourceCapacity += $phase.EffectiveWeight
                     $activeResourceClassCounts[$phase.ResourceClass]++
                 }
@@ -288,14 +329,23 @@ function Invoke-VerificationParallelPhases {
                     continue
                 }
 
+                $terminationRequested = $false
+                Write-VerificationParallelParentDiagnostic -Entry $entry -Event "completion-observed" -TerminationRequested $terminationRequested
                 if ($timedOut -and -not $entry.Process.HasExited) {
+                    Write-VerificationParallelParentDiagnostic -Entry $entry -Event "before-termination-request" -TerminationRequested $terminationRequested
                     Stop-VerificationProcessTree $entry.Process
+                    $terminationRequested = $true
+                    Write-VerificationParallelParentDiagnostic -Entry $entry -Event "after-termination-request" -TerminationRequested $terminationRequested
                 }
 
+                Write-VerificationParallelParentDiagnostic -Entry $entry -Event "before-wait-for-exit" -TerminationRequested $terminationRequested
                 $entry.Process.WaitForExit()
+                Write-VerificationParallelParentDiagnostic -Entry $entry -Event "after-wait-for-exit" -TerminationRequested $terminationRequested
                 $entry.Stopwatch.Stop()
+                Write-VerificationParallelParentDiagnostic -Entry $entry -Event "before-output-drain" -TerminationRequested $terminationRequested
                 $standardOutput = $entry.StandardOutput.GetAwaiter().GetResult()
                 $standardError = $entry.StandardError.GetAwaiter().GetResult()
+                Write-VerificationParallelParentDiagnostic -Entry $entry -Event "after-output-drain" -TerminationRequested $terminationRequested
                 [IO.File]::WriteAllText($entry.Phase.OutputPath, $standardOutput + $standardError, [Text.UTF8Encoding]::new($false))
                 $result = [pscustomobject]@{
                     Name = $entry.Phase.Name

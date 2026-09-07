@@ -27,6 +27,7 @@ public sealed class CredentialLeaseAttemptStore : ICredentialLeaseAttemptStore
     private readonly long _maximumStoreBytes;
     private readonly int _maximumVersionsPerAttempt;
     private readonly Func<ValueTask>? _ownerTakeoverPollingObserver;
+    private readonly TimeProvider _ownerTakeoverTimeProvider;
     private readonly string _root;
 
     /// <summary>Creates one bounded workspace-scoped credential lease-attempt store.</summary>
@@ -42,12 +43,14 @@ public sealed class CredentialLeaseAttemptStore : ICredentialLeaseAttemptStore
         {
             throw new ArgumentOutOfRangeException(nameof(options));
         }
+        ArgumentNullException.ThrowIfNull(options.OwnerTakeoverTimeProvider);
 
         _maximumAttempts = options.MaxAttempts;
         _maximumRecordBytes = options.MaxRecordUtf8Bytes;
         _maximumStoreBytes = options.MaxStoreUtf8Bytes;
         _maximumVersionsPerAttempt = options.MaxVersionsPerAttempt;
         _ownerTakeoverPollingObserver = options.OwnerTakeoverPollingObserver;
+        _ownerTakeoverTimeProvider = options.OwnerTakeoverTimeProvider;
         _root = paths.CredentialLeaseAttemptsPath;
         _guard = new CustomLoopArtifactPathGuard(paths.RootPath);
     }
@@ -319,13 +322,12 @@ public sealed class CredentialLeaseAttemptStore : ICredentialLeaseAttemptStore
     {
         // Process termination and handle release are separate observations on Windows. Retry only the exact owner
         // marker for a short bounded interval; never delete or bypass retained ownership evidence.
-        using var takeoverDeadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        takeoverDeadline.CancelAfter(_ownerTakeoverTimeout);
+        var startedAt = _ownerTakeoverTimeProvider.GetTimestamp();
         var pollingStarted = false;
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (takeoverDeadline.IsCancellationRequested)
+            if (_ownerTakeoverTimeProvider.GetElapsedTime(startedAt) >= _ownerTakeoverTimeout)
             {
                 return null;
             }
@@ -338,7 +340,7 @@ public sealed class CredentialLeaseAttemptStore : ICredentialLeaseAttemptStore
                     lease.Dispose();
                     cancellationToken.ThrowIfCancellationRequested();
                 }
-                if (takeoverDeadline.IsCancellationRequested)
+                if (_ownerTakeoverTimeProvider.GetElapsedTime(startedAt) >= _ownerTakeoverTimeout)
                 {
                     lease.Dispose();
                     return null;
@@ -352,14 +354,13 @@ public sealed class CredentialLeaseAttemptStore : ICredentialLeaseAttemptStore
                 QueueOwnerTakeoverPollingObserver();
             }
 
-            try
-            {
-                await Task.Delay(_ownerTakeoverPollInterval, takeoverDeadline.Token).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            var remaining = _ownerTakeoverTimeout - _ownerTakeoverTimeProvider.GetElapsedTime(startedAt);
+            if (remaining <= TimeSpan.Zero)
             {
                 return null;
             }
+            var delay = remaining < _ownerTakeoverPollInterval ? remaining : _ownerTakeoverPollInterval;
+            await Task.Delay(delay, _ownerTakeoverTimeProvider, cancellationToken).ConfigureAwait(false);
         }
     }
 
