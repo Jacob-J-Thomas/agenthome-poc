@@ -908,9 +908,10 @@ public sealed partial class BrowserFlowTests
             await browser.WaitForExpressionAsync("/reconnect|retry/i.test(document.getElementById('clientStatus').textContent)");
             browser.MarkExpectedReplacementServerStarting();
             app = await ExternalWebApplicationProcess.StartAsync(workspace.RootPath, port, codexExecutable, "gpt-test");
+            var priorDocumentTimeOrigin = await browser.EvaluateStringAsync("String(performance.timeOrigin)");
+            var priorDocumentTimeOriginJson = JsonSerializer.Serialize(priorDocumentTimeOrigin);
             await browser.ReloadAsync(acceptBeforeUnload: true);
-            await browser.WaitForExpressionAsync("document.getElementById('workspaceStatus').textContent.includes('Initialized')");
-            await browser.WaitForExpressionAsync("document.getElementById('configContent').textContent.includes('compatible-test')");
+            await browser.WaitForExpressionAsync("(() => { const workspaceStatus = document.getElementById('workspaceStatus'); const configContent = document.getElementById('configContent'); return String(performance.timeOrigin) !== " + priorDocumentTimeOriginJson + " && document.readyState !== 'loading' && workspaceStatus !== null && configContent !== null && workspaceStatus.textContent.includes('Initialized') && configContent.textContent.includes('compatible-test'); })()");
             await browser.EndExpectedServerRestartAsync();
             await ClickAsync(browser, "#loopsNav");
             await browser.WaitForExpressionAsync("document.getElementById('loopName').value === 'Browser governed loop' && document.getElementById('saveState').textContent.includes('Unsaved draft')");

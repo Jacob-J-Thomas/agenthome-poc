@@ -1467,7 +1467,7 @@ public sealed class CustomLoopRunStoreTests
         var running = Advance(admitted, CustomLoopRunStatus.Running);
         Task<CustomLoopRunStoreResult> updateTask;
 
-        using (var externalReader = WindowsFileLock.OpenRestrictiveReader(artifactPath, workspace.RootPath))
+        using (var externalReader = await WindowsRestrictiveReaderProcess.StartAsync(artifactPath, workspace.RootPath))
         {
             updateTask = store.UpdateAsync(running, admitted.LifecycleVersion);
             var firstTimer = timeProvider.WaitForTimerCountAsync(1);
@@ -1481,6 +1481,7 @@ public sealed class CustomLoopRunStoreTests
             Assert.Equal(TimeSpan.FromMilliseconds(50), timeProvider.GetRequestedDelay(2));
             Assert.Equal(oldSnapshot, await File.ReadAllBytesAsync(artifactPath));
             Assert.Equal(CustomLoopRunStatus.Admitted, CustomLoopRunArtifactSerializer.Deserialize(oldSnapshot).Status);
+            await externalReader.ReleaseAsync();
         }
 
         timeProvider.Advance(TimeSpan.FromMilliseconds(50));
@@ -1511,7 +1512,7 @@ public sealed class CustomLoopRunStoreTests
         var running = Advance(admitted, CustomLoopRunStatus.Running);
         Task<CustomLoopRunStoreResult> updateTask;
 
-        using (var externalReader = WindowsFileLock.OpenRestrictiveReader(artifactPath, workspace.RootPath))
+        using (var externalReader = await WindowsRestrictiveReaderProcess.StartAsync(artifactPath, workspace.RootPath))
         {
             updateTask = store.UpdateAsync(running, admitted.LifecycleVersion);
             var firstTimer = timeProvider.WaitForTimerCountAsync(1);
@@ -1523,6 +1524,7 @@ public sealed class CustomLoopRunStoreTests
             Assert.Same(finalTimer, await Task.WhenAny(finalTimer, updateTask));
             Assert.False(updateTask.IsCompleted, "The atomic update crossed its semantic deadline before exactly six seconds.");
             Assert.Equal(TimeSpan.FromMilliseconds(1), timeProvider.GetRequestedDelay(2));
+            await externalReader.ReleaseAsync();
         }
 
         timeProvider.Advance(TimeSpan.FromMilliseconds(1));
@@ -1562,7 +1564,7 @@ public sealed class CustomLoopRunStoreTests
         var running = Advance(admitted, CustomLoopRunStatus.Running);
         using var cancellation = new CancellationTokenSource();
 
-        using (var externalReader = WindowsFileLock.OpenRestrictiveReader(artifactPath, workspace.RootPath))
+        using (var externalReader = await WindowsRestrictiveReaderProcess.StartAsync(artifactPath, workspace.RootPath))
         {
             var updateTask = store.UpdateAsync(running, admitted.LifecycleVersion, cancellation.Token);
             var firstTimer = timeProvider.WaitForTimerCountAsync(1);
@@ -1573,6 +1575,7 @@ public sealed class CustomLoopRunStoreTests
             var exception = await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await updateTask);
             Assert.Equal(cancellation.Token, exception.CancellationToken);
             Assert.Equal(1, timeProvider.TimerCount);
+            await externalReader.ReleaseAsync();
         }
 
         Assert.Equal(oldSnapshot, await File.ReadAllBytesAsync(artifactPath));
@@ -1596,7 +1599,7 @@ public sealed class CustomLoopRunStoreTests
         var pendingPath = Path.Combine(paths.CustomLoopRunsPath, ".custom-loop-run-index.pending");
 
         // Permit discovery reads while withholding the sharing required to replace the derived index.
-        using (var restrictiveReader = WindowsFileLock.OpenRestrictiveReader(indexPath, workspace.RootPath))
+        using (var restrictiveReader = await WindowsRestrictiveReaderProcess.StartAsync(indexPath, workspace.RootPath))
         {
             var replacementWindow = Stopwatch.StartNew();
             // This lower bound rules out an immediate bypass in the retained contention scenario; it does not claim
@@ -1607,6 +1610,7 @@ public sealed class CustomLoopRunStoreTests
             Assert.Equal(CustomLoopRunStoreStatus.Created, result.Status);
             Assert.True(replacementWindow.Elapsed >= TimeSpan.FromMilliseconds(1500), "The derived-index replacement completed without consuming the bounded contention budget.");
             Assert.True(File.Exists(pendingPath));
+            await restrictiveReader.ReleaseAsync();
         }
 
         Assert.Equal(CustomLoopRunStatus.Admitted, (await store.GetAsync("run-derived-index"))!.Status);
@@ -1640,11 +1644,12 @@ public sealed class CustomLoopRunStoreTests
         Assert.Equal(CustomLoopTraceDeletionStoreStatus.Deleted, (await store.DeleteTerminalTraceAsync(mutation)).Status);
         var operationPath = Path.Combine(paths.CustomLoopTraceDeletionOperationsPath, mutation.Request.OperationId + ".json");
 
-        using (var restrictiveReader = WindowsFileLock.OpenRestrictiveReader(operationPath, workspace.RootPath))
+        using (var restrictiveReader = await WindowsRestrictiveReaderProcess.StartAsync(operationPath, workspace.RootPath))
         {
             var replacementWindow = Stopwatch.StartNew();
             await Assert.ThrowsAnyAsync<IOException>(() => store.MarkTraceDeletionOutcomeAsync(mutation.Request.OperationId, CustomLoopTraceDeletionIntegrity.OutcomeAuditStarted).WaitAsync(TimeSpan.FromSeconds(5)));
             Assert.True(replacementWindow.Elapsed >= TimeSpan.FromMilliseconds(1500), "The trace-deletion operation replacement did not consume its bounded auxiliary contention budget.");
+            await restrictiveReader.ReleaseAsync();
         }
 
         Assert.Equal(CustomLoopTraceDeletionAuditMarkStatus.Marked, await store.MarkTraceDeletionOutcomeAsync(mutation.Request.OperationId, CustomLoopTraceDeletionIntegrity.OutcomeAuditStarted));
@@ -1679,7 +1684,7 @@ public sealed class CustomLoopRunStoreTests
         var previous = SynchronizationContext.Current;
         Task<CustomLoopTraceDeletionAuditMarkStatus>? markTask = null;
 
-        using (var restrictiveReader = WindowsFileLock.OpenRestrictiveReader(operationPath, workspace.RootPath))
+        using (var restrictiveReader = await WindowsRestrictiveReaderProcess.StartAsync(operationPath, workspace.RootPath))
         {
             SynchronizationContext.SetSynchronizationContext(gated);
             try
@@ -1706,6 +1711,7 @@ public sealed class CustomLoopRunStoreTests
             await gated.DrainUntilCompletedAsync(markTask, TimeSpan.FromSeconds(5));
             var exception = await Assert.ThrowsAnyAsync<IOException>(() => markTask);
             Assert.Equal(CustomLoopRunPersistenceDiagnosticStage.Unknown, Assert.IsType<CustomLoopRunPersistenceDiagnostic>(CustomLoopRunPersistenceDiagnostic.Find(exception)).Stage);
+            await restrictiveReader.ReleaseAsync();
         }
 
         Assert.Equal(CustomLoopTraceDeletionAuditMarkStatus.Marked, await store.MarkTraceDeletionOutcomeAsync(mutation.Request.OperationId, CustomLoopTraceDeletionIntegrity.OutcomeAuditStarted));

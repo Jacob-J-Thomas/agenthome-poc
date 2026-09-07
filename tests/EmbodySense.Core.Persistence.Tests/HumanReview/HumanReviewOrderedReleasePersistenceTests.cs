@@ -157,45 +157,68 @@ public sealed class HumanReviewOrderedReleasePersistenceTests
         var firstResultPath = workspace.File("approved-release-race-first-result");
         var secondResultPath = workspace.File("approved-release-race-second-result");
         using var first = CancellationHostProcess.StartAppHostOwned("human-review-ordered-effect-race", workspace.RootPath, claimed.Id, markerPath, firstReadyPath, releasePath, firstResultPath);
-        using var second = CancellationHostProcess.StartAppHostOwned("human-review-ordered-effect-race", workspace.RootPath, claimed.Id, markerPath, secondReadyPath, releasePath, secondResultPath);
         using var firstEvidenceCancellation = new CancellationTokenSource();
         using var secondEvidenceCancellation = new CancellationTokenSource();
         var firstOutput = first.ReadStandardOutputToEndAsync(firstEvidenceCancellation.Token);
         var firstError = first.ReadStandardErrorToEndAsync(firstEvidenceCancellation.Token);
-        var secondOutput = second.ReadStandardOutputToEndAsync(secondEvidenceCancellation.Token);
-        var secondError = second.ReadStandardErrorToEndAsync(secondEvidenceCancellation.Token);
-        var children = new[]
-        {
-            new CrossProcessReadinessChild("first", first, firstReadyPath, firstResultPath, firstOutput, firstError, firstEvidenceCancellation),
-            new CrossProcessReadinessChild("second", second, secondReadyPath, secondResultPath, secondOutput, secondError, secondEvidenceCancellation),
-        };
+        CrossProcessProcess? second = null;
+        Task<string>? secondOutput = null;
+        Task<string>? secondError = null;
         try
         {
-            await CrossProcessReadinessDiagnostics.WaitForChildrenReadyAsync("human-review-ordered-effect-race", children, TimeSpan.FromSeconds(30));
-            await File.WriteAllTextAsync(releasePath, "release");
-            await Task.WhenAll(first.WaitForExitAsync(), second.WaitForExitAsync()).WaitAsync(TimeSpan.FromSeconds(30));
+            try
+            {
+                var firstChild = new CrossProcessReadinessChild("first", first, firstReadyPath, firstResultPath, firstOutput, firstError, firstEvidenceCancellation);
+                var readinessTimeout = TimeSpan.FromSeconds(30);
+                var readinessStopwatch = Stopwatch.StartNew();
+                await CrossProcessReadinessDiagnostics.WaitForChildrenReadyAsync("human-review-ordered-effect-race", new[] { firstChild }, readinessTimeout);
+                Assert.False(first.HasExited);
+
+                second = CancellationHostProcess.StartAppHostOwned("human-review-ordered-effect-race", workspace.RootPath, claimed.Id, markerPath, secondReadyPath, releasePath, secondResultPath);
+                secondOutput = second.ReadStandardOutputToEndAsync(secondEvidenceCancellation.Token);
+                secondError = second.ReadStandardErrorToEndAsync(secondEvidenceCancellation.Token);
+                var secondChild = new CrossProcessReadinessChild("second", second, secondReadyPath, secondResultPath, secondOutput, secondError, secondEvidenceCancellation);
+                var remainingReadiness = readinessTimeout - readinessStopwatch.Elapsed;
+                if (remainingReadiness <= TimeSpan.Zero) throw new TimeoutException("The first Human Review race child exhausted the shared readiness budget.");
+
+                await CrossProcessReadinessDiagnostics.WaitForChildrenReadyAsync("human-review-ordered-effect-race", new[] { firstChild, secondChild }, remainingReadiness);
+                Assert.False(first.HasExited);
+                Assert.False(second.HasExited);
+                Assert.False(File.Exists(markerPath));
+                Assert.False(File.Exists(firstResultPath));
+                Assert.False(File.Exists(secondResultPath));
+                Assert.Equal(GovernedLoopEffectPhase.IntentPrepared, (await ReadEffectAttemptAsync(paths, claimed)).Payload.Phase);
+
+                await File.WriteAllTextAsync(releasePath, "release");
+                await Task.WhenAll(first.WaitForExitAsync(), second.WaitForExitAsync()).WaitAsync(TimeSpan.FromSeconds(30));
+            }
+            finally
+            {
+                await StopAsync(first);
+                if (second is not null) await StopAsync(second);
+            }
+
+            var secondProcess = second ?? throw new InvalidOperationException("The second Human Review race child did not start.");
+            var firstStatus = await ReadOptionalAsync(firstResultPath);
+            var secondStatus = await ReadOptionalAsync(secondResultPath);
+            Assert.Contains(first.ExitCode, new[] { 0, 3 });
+            Assert.Contains(secondProcess.ExitCode, new[] { 0, 3 });
+            Assert.Contains(firstStatus, new[] { HumanReviewContinuationReleaseStatus.Completed.ToString(), HumanReviewContinuationReleaseStatus.Unavailable.ToString() });
+            Assert.Contains(secondStatus, new[] { HumanReviewContinuationReleaseStatus.Completed.ToString(), HumanReviewContinuationReleaseStatus.Unavailable.ToString() });
+            Assert.Contains(HumanReviewContinuationReleaseStatus.Completed.ToString(), new[] { firstStatus, secondStatus });
+            Assert.DoesNotContain("NeedsReview", new[] { await firstError, await (secondError ?? throw new InvalidOperationException("The second Human Review race child did not start.")) });
+            _ = await firstOutput;
+            _ = await (secondOutput ?? throw new InvalidOperationException("The second Human Review race child did not start."));
+
+            var replayResultPath = workspace.File("approved-release-race-replay-result");
+            await AssertEffectHostCompletedAsync(workspace.RootPath, claimed.Id, markerPath, replayResultPath);
+            using var restarted = new CustomLoopRunStore(paths);
+            await AssertSingleApprovedEffectAsync(paths, markerPath, Assert.IsType<CustomLoopRunRecord>(await restarted.GetAsync(claimed.Id)));
         }
         finally
         {
-            await StopAsync(first);
-            await StopAsync(second);
+            second?.Dispose();
         }
-
-        var firstStatus = await ReadOptionalAsync(firstResultPath);
-        var secondStatus = await ReadOptionalAsync(secondResultPath);
-        Assert.Contains(first.ExitCode, new[] { 0, 3 });
-        Assert.Contains(second.ExitCode, new[] { 0, 3 });
-        Assert.Contains(firstStatus, new[] { HumanReviewContinuationReleaseStatus.Completed.ToString(), HumanReviewContinuationReleaseStatus.Unavailable.ToString() });
-        Assert.Contains(secondStatus, new[] { HumanReviewContinuationReleaseStatus.Completed.ToString(), HumanReviewContinuationReleaseStatus.Unavailable.ToString() });
-        Assert.Contains(HumanReviewContinuationReleaseStatus.Completed.ToString(), new[] { firstStatus, secondStatus });
-        Assert.DoesNotContain("NeedsReview", new[] { await firstError, await secondError });
-        _ = await firstOutput;
-        _ = await secondOutput;
-
-        var replayResultPath = workspace.File("approved-release-race-replay-result");
-        await AssertEffectHostCompletedAsync(workspace.RootPath, claimed.Id, markerPath, replayResultPath);
-        using var restarted = new CustomLoopRunStore(paths);
-        await AssertSingleApprovedEffectAsync(paths, markerPath, Assert.IsType<CustomLoopRunRecord>(await restarted.GetAsync(claimed.Id)));
     }
 
     [Fact]

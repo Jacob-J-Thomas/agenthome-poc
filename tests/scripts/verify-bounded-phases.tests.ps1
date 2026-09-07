@@ -32,6 +32,9 @@ $cancellationHostProjectPath = Join-Path $repoRoot "tests\EmbodySense.Cancellati
 $cancellationHostProgramPath = Join-Path $repoRoot "tests\EmbodySense.CancellationHost\Program.cs"
 $scheduleStoreTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Triggers\Schedules\ScheduleStoreTests.cs"
 $scheduleStoreHostPath = Join-Path $repoRoot "tests\Shared\ScheduleStoreCrossProcessHost.cs"
+$customLoopRunStoreTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Loops\CustomLoopRunStoreTests.cs"
+$restrictiveReaderProcessPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Verification\WindowsRestrictiveReaderProcess.cs"
+$restrictiveReaderHostPath = Join-Path $repoRoot "tests\Shared\WindowsRestrictiveReaderCrossProcessHost.cs"
 $humanReviewOrderedReleaseTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\HumanReview\HumanReviewOrderedReleasePersistenceTests.cs"
 $humanReviewOrderedReleaseHostPath = Join-Path $repoRoot "tests\EmbodySense.CancellationHost\Persistence\HumanReviewOrderedReleaseProcessHost.cs"
 $humanReviewOrderedReleaseAuthorityPath = Join-Path $repoRoot "tests\EmbodySense.CancellationHost\Persistence\HumanReviewOrderedReleaseProcessAuthority.cs"
@@ -45,6 +48,7 @@ $customLoopDefinitionReceiptRetentionTestPath = Join-Path $repoRoot "tests\Embod
 $persistenceEnvironmentCollectionPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Verification\ProcessEnvironmentCollection.cs"
 $persistenceCapabilityCatalogTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Capabilities\FileCapabilityCatalogTrustProviderTests.cs"
 $windowsFileLockPath = Join-Path $repoRoot "tests\EmbodySense.Tests.Support\WindowsFileLock.cs"
+$crossProcessExclusiveFileLockPath = Join-Path $repoRoot "tests\EmbodySense.Tests.Support\CrossProcessExclusiveFileLock.cs"
 $workspaceActionNativeHostTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\WorkspaceActions\WorkspaceActionNativeHostTests.cs"
 $startupRuntimeCollectionPath = Join-Path $repoRoot "tests\EmbodySense.Core.Startup.Tests\Loops\Execution\LoopRuntimeIntegrationCollection.cs"
 $startupNestedProcessTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Startup.Tests\Runtime\AgentRuntimeFactoryNestedProcessTests.cs"
@@ -210,6 +214,9 @@ $cancellationHostProject = Get-Content -LiteralPath $cancellationHostProjectPath
 $cancellationHostProgram = Get-Content -LiteralPath $cancellationHostProgramPath -Raw
 $scheduleStoreTest = Get-Content -LiteralPath $scheduleStoreTestPath -Raw
 $scheduleStoreHost = Get-Content -LiteralPath $scheduleStoreHostPath -Raw
+$customLoopRunStoreTest = Get-Content -LiteralPath $customLoopRunStoreTestPath -Raw
+$restrictiveReaderProcess = Get-Content -LiteralPath $restrictiveReaderProcessPath -Raw
+$restrictiveReaderHost = Get-Content -LiteralPath $restrictiveReaderHostPath -Raw
 $humanReviewOrderedReleaseTest = Get-Content -LiteralPath $humanReviewOrderedReleaseTestPath -Raw
 $humanReviewOrderedReleaseHost = Get-Content -LiteralPath $humanReviewOrderedReleaseHostPath -Raw
 $humanReviewOrderedReleaseAuthority = Get-Content -LiteralPath $humanReviewOrderedReleaseAuthorityPath -Raw
@@ -223,6 +230,7 @@ $customLoopDefinitionReceiptRetentionTest = Get-Content -LiteralPath $customLoop
 $persistenceEnvironmentCollection = Get-Content -LiteralPath $persistenceEnvironmentCollectionPath -Raw
 $persistenceCapabilityCatalogTest = Get-Content -LiteralPath $persistenceCapabilityCatalogTestPath -Raw
 $windowsFileLock = Get-Content -LiteralPath $windowsFileLockPath -Raw
+$crossProcessExclusiveFileLock = Get-Content -LiteralPath $crossProcessExclusiveFileLockPath -Raw
 $workspaceActionNativeHostTest = Get-Content -LiteralPath $workspaceActionNativeHostTestPath -Raw
 $startupRuntimeCollection = Get-Content -LiteralPath $startupRuntimeCollectionPath -Raw
 $startupNestedProcessTest = Get-Content -LiteralPath $startupNestedProcessTestPath -Raw
@@ -279,6 +287,13 @@ Assert-Contains -Actual $windowsFileLock -Expected 'RedirectStandardError = true
 Assert-Contains -Actual $windowsFileLock -Expected 'RedirectStandardOutput = true' -Message "The external Windows lock fixture must retain PowerShell standard-output evidence."
 Assert-Contains -Actual $windowsFileLock -Expected 'ready_path={_readyPath} lock={_lockPath}' -Message "The external Windows lock timeout must identify its readiness and target lock paths."
 Assert-Contains -Actual $windowsFileLock -Expected 'MaximumProcessEvidenceCharacters = 4_096' -Message "External Windows lock process evidence must remain bounded."
+Assert-Contains -Actual $crossProcessExclusiveFileLock -Expected 'Architecture.X64 => followPath ? FstatInode64(descriptor, buffer) : LstatInode64(path, buffer),' -Message "x64 macOS lock identity inspection must use the inode64 entry points."
+Assert-Contains -Actual $crossProcessExclusiveFileLock -Expected 'Architecture.Arm64 => followPath ? Fstat(descriptor, buffer) : Lstat(path, buffer),' -Message "Arm64 macOS lock identity inspection must retain the unsuffixed entry points."
+Assert-Contains -Actual $crossProcessExclusiveFileLock -Expected 'throw new PlatformNotSupportedException("macOS cross-process file locking is not supported for this process architecture.")' -Message "macOS lock identity inspection must fail explicitly for unsupported process architectures."
+Assert-Contains -Actual $crossProcessExclusiveFileLock -Expected '[DllImport("libc", EntryPoint = "lstat$INODE64", SetLastError = true)]' -Message "x64 macOS path identity inspection must import the inode64 lstat symbol exactly."
+Assert-Contains -Actual $crossProcessExclusiveFileLock -Expected 'private static extern int LstatInode64(string path, IntPtr buffer);' -Message "x64 macOS path identity inspection must retain its inode64 interop declaration."
+Assert-Contains -Actual $crossProcessExclusiveFileLock -Expected '[DllImport("libc", EntryPoint = "fstat$INODE64", SetLastError = true)]' -Message "x64 macOS descriptor identity inspection must import the inode64 fstat symbol exactly."
+Assert-Contains -Actual $crossProcessExclusiveFileLock -Expected 'private static extern int FstatInode64(int descriptor, IntPtr buffer);' -Message "x64 macOS descriptor identity inspection must retain its inode64 interop declaration."
 Assert-Contains -Actual $admissionStoreFixture -Expected '"crash-proof" or "crash-primary" or "crash-trust" => true' -Message "Only the three admitted abrupt-loss modes may omit an impossible child coverage report."
 Assert-Contains -Actual $admissionStoreFixture -Expected '"writer" => false' -Message "Successful cross-process writers must remain distinct from intentional crash workers."
 Assert-Contains -Actual $admissionStoreFixture -Expected 'if (mode == "writer")' -Message "Successful cross-process writers must use the direct apphost route."
@@ -303,11 +318,50 @@ Assert-Contains -Actual $cancellationHostProgram -Expected '["schedule-store", v
 Assert-Contains -Actual $cancellationHostProject -Expected '..\Shared\ScheduleStoreCrossProcessHost.cs' -Message "The cancellation host must compile the shared schedule worker."
 Assert-Contains -Actual $persistenceTestProject -Expected '..\Shared\ScheduleStoreCrossProcessHost.cs' -Message "Persistence tests must compile the same shared schedule worker."
 Assert-Contains -Actual $cancellationHostProcess -Expected 'internal static CrossProcessProcess StartAppHostOwned' -Message "Direct schedule workers must be job-owned for bounded cleanup."
+Assert-Contains -Actual $restrictiveReaderProcess -Expected 'CancellationHostProcess.StartAppHostOwned(Operation, path, readyPath, releasePath, resultPath)' -Message "Restrictive-reader workers must use the authenticated job-owned apphost route."
+Assert-Contains -Actual $restrictiveReaderProcess -Expected 'CrossProcessReadinessDiagnostics.WaitForChildrenReadyAsync' -Message "Restrictive-reader startup must use bounded child readiness diagnostics."
+Assert-Contains -Actual $restrictiveReaderProcess -Expected 'CrossProcessReadinessDiagnostics.WaitForChildrenCompletedAsync' -Message "Restrictive-reader release must use bounded child completion diagnostics."
+Assert-Contains -Actual $restrictiveReaderProcess -Expected '_readinessTimeout = TimeSpan.FromSeconds(30)' -Message "Restrictive-reader startup must retain the bounded fixture-start allowance."
+Assert-Contains -Actual $restrictiveReaderProcess -Expected '_process.WaitForExitAsync().WaitAsync(_terminationTimeout)' -Message "Restrictive-reader cleanup must wait boundedly for the terminated apphost before disposal."
+Assert-Contains -Actual $restrictiveReaderProcess -Expected '_terminationTimeout = TimeSpan.FromSeconds(5)' -Message "Restrictive-reader cleanup must retain the five-second process-exit bound."
+Assert-Contains -Actual $restrictiveReaderProcess -Expected 'var suffix = Guid.NewGuid().ToString("N")' -Message "Restrictive-reader markers must use an operation-unique identity."
+Assert-Contains -Actual $restrictiveReaderProcess -Expected 'DeleteMarker(_resultPath)' -Message "Restrictive-reader cleanup must remove its result marker after ownership is released."
+Assert-Contains -Actual $restrictiveReaderHost -Expected 'new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read)' -Message "Restrictive-reader host must preserve the exact Windows read-sharing contract."
+Assert-Contains -Actual $restrictiveReaderHost -Expected '_releaseTimeout = TimeSpan.FromSeconds(60)' -Message "Restrictive-reader host release waiting must remain bounded."
+Assert-Contains -Actual $restrictiveReaderHost -Expected 'string.Equals(readyPath, releasePath, StringComparison.Ordinal)' -Message "Restrictive-reader host must reject ambiguous marker identities before opening the target."
+Assert-Contains -Actual $cancellationHostProgram -Expected '["windows-restrictive-reader", var readerPath' -Message "The cancellation host must expose the restrictive-reader apphost operation."
+Assert-Contains -Actual $cancellationHostProject -Expected '..\Shared\WindowsRestrictiveReaderCrossProcessHost.cs' -Message "The cancellation host must compile the shared restrictive-reader worker."
+Assert-Contains -Actual $persistenceTestProject -Expected '..\Shared\WindowsRestrictiveReaderCrossProcessHost.cs' -Message "Persistence tests must compile the same shared restrictive-reader worker."
+Assert-True -Condition ([regex]::Matches($customLoopRunStoreTest, 'WindowsRestrictiveReaderProcess\.StartAsync').Count -eq 6) -Message "All six restrictive-reader facts must use the bounded owned process wrapper."
+Assert-True -Condition ([regex]::Matches($customLoopRunStoreTest, '(?:externalReader|restrictiveReader)\.ReleaseAsync\(\)').Count -eq 6) -Message "All six restrictive-reader facts must complete the explicit release handshake."
+Assert-True -Condition ($customLoopRunStoreTest.IndexOf('WindowsFileLock.OpenRestrictiveReader', [StringComparison]::Ordinal) -lt 0) -Message "Persistence restrictive-reader tests must not launch the PowerShell WindowsFileLock fixture."
 Assert-True -Condition ([regex]::Matches($humanReviewOrderedReleaseTest, 'CancellationHostProcess\.StartAppHostOwned\("human-review-ordered-effect-race"').Count -eq 2) -Message "The approved Human Review effect race must use exactly two owned apphost workers."
 Assert-True -Condition ($humanReviewOrderedReleaseTest.IndexOf('CancellationHostProcess.Start("human-review-ordered-effect-race"', [StringComparison]::Ordinal) -lt 0) -Message "The approved Human Review effect race must not use the unowned dotnet-exec route."
 Assert-Contains -Actual $humanReviewOrderedReleaseTest -Expected 'new CrossProcessReadinessChild("first"' -Message "The Human Review effect race must expose the first child through bounded readiness diagnostics."
 Assert-Contains -Actual $humanReviewOrderedReleaseTest -Expected 'CrossProcessReadinessDiagnostics.WaitForChildrenReadyAsync("human-review-ordered-effect-race"' -Message "The Human Review effect race must wait for both children through shared readiness diagnostics."
 Assert-Contains -Actual $humanReviewOrderedReleaseTest -Expected 'await Task.WhenAll(first.WaitForExitAsync(), second.WaitForExitAsync()).WaitAsync(TimeSpan.FromSeconds(30));' -Message "The Human Review effect race must preserve its bounded release/completion wait."
+$effectRaceMethodStart = $humanReviewOrderedReleaseTest.IndexOf('public async Task Concurrent_external_approved_releasers_converge_on_one_release_result_and_observable_effect()', [StringComparison]::Ordinal)
+$effectRaceMethodEnd = $humanReviewOrderedReleaseTest.IndexOf("`n    [Fact]", $effectRaceMethodStart + 1, [StringComparison]::Ordinal)
+Assert-True -Condition ($effectRaceMethodStart -ge 0 -and $effectRaceMethodEnd -gt $effectRaceMethodStart) -Message "The approved Human Review effect race must retain one bounded, inspectable fact body."
+$effectRaceMethod = $humanReviewOrderedReleaseTest.Substring($effectRaceMethodStart, $effectRaceMethodEnd - $effectRaceMethodStart)
+Assert-Contains -Actual $effectRaceMethod -Expected 'var readinessTimeout = TimeSpan.FromSeconds(30);' -Message "The staged Human Review effect race must retain one aggregate 30-second readiness budget."
+Assert-Contains -Actual $effectRaceMethod -Expected 'var readinessStopwatch = Stopwatch.StartNew();' -Message "The staged Human Review effect race must measure both readiness stages against one aggregate budget."
+Assert-Contains -Actual $effectRaceMethod -Expected 'new[] { firstChild }, readinessTimeout' -Message "The first Human Review race child must reach the existing CAS barrier before the second starts."
+Assert-Contains -Actual $effectRaceMethod -Expected 'var remainingReadiness = readinessTimeout - readinessStopwatch.Elapsed;' -Message "The second Human Review race child must consume only the first stage's remaining readiness budget."
+Assert-Contains -Actual $effectRaceMethod -Expected 'new[] { firstChild, secondChild }, remainingReadiness' -Message "Both Human Review race children must be ready under the aggregate remaining budget."
+Assert-Contains -Actual $effectRaceMethod -Expected 'Assert.False(File.Exists(markerPath));' -Message "No observable Human Review effect may occur before the shared release marker is published."
+Assert-Contains -Actual $effectRaceMethod -Expected 'Assert.False(File.Exists(firstResultPath));' -Message "The first Human Review race child must not publish a result before release."
+Assert-Contains -Actual $effectRaceMethod -Expected 'Assert.False(File.Exists(secondResultPath));' -Message "The second Human Review race child must not publish a result before release."
+Assert-Contains -Actual $effectRaceMethod -Expected 'GovernedLoopEffectPhase.IntentPrepared' -Message "The staged preflight must retain a real pre-dispatch effect attempt before release."
+$firstStart = $effectRaceMethod.IndexOf('var first = CancellationHostProcess.StartAppHostOwned(', [StringComparison]::Ordinal)
+$firstReady = $effectRaceMethod.IndexOf('new[] { firstChild }, readinessTimeout', [StringComparison]::Ordinal)
+$secondStart = $effectRaceMethod.IndexOf('second = CancellationHostProcess.StartAppHostOwned(', [StringComparison]::Ordinal)
+$bothReady = $effectRaceMethod.IndexOf('new[] { firstChild, secondChild }, remainingReadiness', [StringComparison]::Ordinal)
+$releasePublication = $effectRaceMethod.IndexOf('await File.WriteAllTextAsync(releasePath, "release");', [StringComparison]::Ordinal)
+Assert-True -Condition ($firstStart -ge 0 -and $firstReady -gt $firstStart -and $secondStart -gt $firstReady -and $bothReady -gt $secondStart -and $releasePublication -gt $bothReady) -Message "The Human Review race must stage first readiness, second readiness, then one release publication in order."
+Assert-True -Condition ([regex]::Matches($effectRaceMethod, 'await File\.WriteAllTextAsync\(releasePath, "release"\);').Count -eq 1) -Message "The staged Human Review race must publish its shared release marker exactly once."
+Assert-Contains -Actual $effectRaceMethod -Expected 'if (second is not null) await StopAsync(second);' -Message "Staged Human Review race cleanup must own a second child only after it starts."
+Assert-Contains -Actual $effectRaceMethod -Expected 'second?.Dispose();' -Message "Staged Human Review race cleanup must dispose an admitted second child after assertions or failures."
 Assert-Contains -Actual $humanReviewOrderedReleaseHost -Expected 'new HumanReviewOrderedReleaseRaceGateStore(store, readyPath, releasePath)' -Message "The Human Review effect race must synchronize at its test-only whole-run compare-exchange store."
 Assert-Contains -Actual $humanReviewOrderedReleaseHost -Expected 'releaseStore ?? store' -Message "Only the Human Review effect-race release service may receive the synchronization wrapper."
 Assert-True -Condition ($humanReviewOrderedReleaseAuthority.IndexOf('readyPath', [StringComparison]::Ordinal) -lt 0 -and $humanReviewOrderedReleaseAuthority.IndexOf('releasePath', [StringComparison]::Ordinal) -lt 0) -Message "Human Review effect-race readiness must not be misclassified as authority-source entry."

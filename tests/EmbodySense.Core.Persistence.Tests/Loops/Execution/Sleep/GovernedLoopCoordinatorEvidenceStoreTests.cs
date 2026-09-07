@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json.Nodes;
 using EmbodySense.Core.Application.Loops.Sleep.Models;
@@ -794,9 +795,36 @@ public sealed class GovernedLoopCoordinatorEvidenceStoreTests
         {
             using var cancellation = new CancellationTokenSource();
             var pending = operation(cancellation.Token);
+            Assert.False(pending.IsCompleted);
             cancellation.Cancel();
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pending);
         }
+    }
+
+    [Fact]
+    public async Task Cross_process_lock_helper_rejects_unix_linked_lock_paths()
+    {
+        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        var target = workspace.File("native-lock-target");
+        File.WriteAllText(target, string.Empty);
+        var symbolicLink = workspace.File("native-lock-symbolic-link");
+        File.CreateSymbolicLink(symbolicLink, target);
+        Assert.Throws<IOException>(() => CrossProcessExclusiveFileLock.Acquire(symbolicLink));
+
+        var hardLink = workspace.File("native-lock-hard-link");
+        Assert.Equal(0, UnixCreateHardLink(target, hardLink));
+        Assert.Throws<InvalidOperationException>(() => CrossProcessExclusiveFileLock.Acquire(hardLink));
+
+        var namedPipe = workspace.File("native-lock-fifo");
+        Assert.Equal(0, UnixCreateNamedPipe(namedPipe, 0x180));
+        var namedPipeFailure = await Task.Run(() => Record.Exception(() => CrossProcessExclusiveFileLock.Acquire(namedPipe).Dispose()))
+            .WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.IsType<InvalidOperationException>(namedPipeFailure);
     }
 
     [Fact]
@@ -1380,6 +1408,12 @@ public sealed class GovernedLoopCoordinatorEvidenceStoreTests
 
     private static string StoreRoot(WorkspacePaths paths)
         => paths.AgentFile(Path.Combine("loops", "execution", "coordinator"));
+
+    [DllImport("libc", SetLastError = true, EntryPoint = "link")]
+    private static extern int UnixCreateHardLink(string existingPath, string newPath);
+
+    [DllImport("libc", SetLastError = true, EntryPoint = "mkfifo")]
+    private static extern int UnixCreateNamedPipe(string path, uint mode);
 
     private static string LatestLedger(WorkspacePaths paths)
         => Directory.EnumerateFiles(StoreRoot(paths), "ledger-*.json").Order(StringComparer.Ordinal).Last();

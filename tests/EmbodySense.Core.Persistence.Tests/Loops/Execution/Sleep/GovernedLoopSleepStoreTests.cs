@@ -607,11 +607,11 @@ public sealed class GovernedLoopSleepStoreTests
         var paths = new WorkspacePaths(workspace.RootPath);
         var checkpoint = GovernedLoopSleepContractTestFixture.TimestampCheckpoint();
         var postureHash = GovernedLoopSleepContractTestFixture.Hash('9');
-        var waitingStore = new GovernedLoopSleepStore(paths);
-        Assert.Equal(GovernedLoopSleepCheckpointMutationStatus.Committed, (await waitingStore.PublishAndReleaseAsync(checkpoint, postureHash))!.Status);
+        var lockPath = Path.Combine(StoreRoot(paths), ".queue.lock");
+        var store = new GovernedLoopSleepStore(paths);
+        Assert.Equal(GovernedLoopSleepCheckpointMutationStatus.Committed, (await store.PublishAndReleaseAsync(checkpoint, postureHash))!.Status);
         // https://github.com/Jacob-J-Thomas/agenthome-poc/issues/508
         // Hold the exact production mutation lease in a separate process and publish readiness only after acquisition.
-        var lockPath = Path.Combine(StoreRoot(paths), ".queue.lock");
         var releaseMarker = workspace.File("release-sleep-lease-holder");
         var readyMarker = workspace.File("sleep-lease-holder-ready");
         var resultMarker = workspace.File("sleep-lease-holder-result");
@@ -635,15 +635,15 @@ public sealed class GovernedLoopSleepStoreTests
             });
             var background = new GovernedLoopBackgroundWorkSource(new ScheduleStore(paths), backgroundStore);
 
-            await AssertCancellationAsync(token => waitingStore.PublishAndReleaseAsync(secondCheckpoint, postureHash, token));
-            await AssertCancellationAsync(token => waitingStore.ReadCheckpointAsync(checkpoint.CheckpointId, token));
-            await AssertCancellationAsync(token => waitingStore.ReadWakeAsync(identity.WakeId, token));
-            await AssertCancellationAsync(token => waitingStore.CreateWakeAsync(
+            await AssertCancellationAsync((operationStore, token) => operationStore.PublishAndReleaseAsync(secondCheckpoint, postureHash, token));
+            await AssertCancellationAsync((operationStore, token) => operationStore.ReadCheckpointAsync(checkpoint.CheckpointId, token));
+            await AssertCancellationAsync((operationStore, token) => operationStore.ReadWakeAsync(identity.WakeId, token));
+            await AssertCancellationAsync((operationStore, token) => operationStore.CreateWakeAsync(
                 checkpoint,
                 prepared,
                 postureHash,
                 token));
-            await AssertCancellationAsync(token => waitingStore.AdvanceWakeAsync(prepared, committed, token));
+            await AssertCancellationAsync((operationStore, token) => operationStore.AdvanceWakeAsync(prepared, committed, token));
             // https://github.com/Jacob-J-Thomas/agenthome-poc/issues/508 owns exact native-lock readiness for the background-work projection.
             using (var cancellation = new CancellationTokenSource())
             {
@@ -652,10 +652,10 @@ public sealed class GovernedLoopSleepStoreTests
                     checkpoint.PublishedAtUtc,
                     1,
                     cancellation.Token);
-                var contendedPath = await backgroundReadReachedNativeLock.Task.WaitAsync(TimeSpan.FromSeconds(10));
+                var backgroundContendedPath = await backgroundReadReachedNativeLock.Task.WaitAsync(TimeSpan.FromSeconds(10));
                 Assert.Equal(
                     Path.GetFullPath(lockPath),
-                    Path.GetFullPath(contendedPath));
+                    Path.GetFullPath(backgroundContendedPath));
                 cancellation.Cancel();
                 await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pending);
             }
@@ -667,7 +667,7 @@ public sealed class GovernedLoopSleepStoreTests
                 1);
             Assert.Equal(GovernedLoopBackgroundWorkReadStatus.Empty, resumedBackgroundRead!.WakeStatus);
             Assert.Empty(resumedBackgroundRead.WakeCandidates);
-            Assert.Equal(GovernedLoopSleepStoreReadStatus.Found, (await waitingStore.ReadCheckpointAsync(checkpoint.CheckpointId))!.Status);
+            Assert.Equal(GovernedLoopSleepStoreReadStatus.Found, (await store.ReadCheckpointAsync(checkpoint.CheckpointId))!.Status);
         }
         finally
         {
@@ -677,12 +677,47 @@ public sealed class GovernedLoopSleepStoreTests
             }
         }
 
-        static async Task AssertCancellationAsync(Func<CancellationToken, Task> operation)
+        async Task AssertCancellationAsync(Func<GovernedLoopSleepStore, CancellationToken, Task> operation)
         {
             using var cancellation = new CancellationTokenSource();
-            var pending = operation(cancellation.Token);
-            cancellation.Cancel();
-            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pending);
+            var contention = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var operationStore = new GovernedLoopSleepStore(paths, new GovernedLoopSleepStoreOptions
+            {
+                MutationLockContentionObserver = contendedPath => contention.TrySetResult(contendedPath),
+            });
+            Task? pending = null;
+            Exception? failure = null;
+            try
+            {
+                pending = operation(operationStore, cancellation.Token);
+                var contendedPath = await contention.Task.WaitAsync(TimeSpan.FromSeconds(10));
+                Assert.Equal(Path.GetFullPath(lockPath), Path.GetFullPath(contendedPath));
+                Assert.False(pending.IsCompleted);
+                cancellation.Cancel();
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pending);
+            }
+            catch (Exception exception)
+            {
+                failure = exception;
+                throw;
+            }
+            finally
+            {
+                cancellation.Cancel();
+                if (pending is not null)
+                {
+                    try
+                    {
+                        await pending;
+                    }
+                    catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+                    {
+                    }
+                    catch when (failure is not null)
+                    {
+                    }
+                }
+            }
         }
     }
 
