@@ -340,6 +340,28 @@ Assert-True -Condition ($humanReviewOrderedReleaseTest.IndexOf('CancellationHost
 Assert-Contains -Actual $humanReviewOrderedReleaseTest -Expected 'new CrossProcessReadinessChild("first"' -Message "The Human Review effect race must expose the first child through bounded readiness diagnostics."
 Assert-Contains -Actual $humanReviewOrderedReleaseTest -Expected 'CrossProcessReadinessDiagnostics.WaitForChildrenReadyAsync("human-review-ordered-effect-race"' -Message "The Human Review effect race must wait for both children through shared readiness diagnostics."
 Assert-Contains -Actual $humanReviewOrderedReleaseTest -Expected 'await Task.WhenAll(first.WaitForExitAsync(), second.WaitForExitAsync()).WaitAsync(TimeSpan.FromSeconds(30));' -Message "The Human Review effect race must preserve its bounded release/completion wait."
+$effectRaceMethodStart = $humanReviewOrderedReleaseTest.IndexOf('public async Task Concurrent_external_approved_releasers_converge_on_one_release_result_and_observable_effect()', [StringComparison]::Ordinal)
+$effectRaceMethodEnd = $humanReviewOrderedReleaseTest.IndexOf("`n    [Fact]", $effectRaceMethodStart + 1, [StringComparison]::Ordinal)
+Assert-True -Condition ($effectRaceMethodStart -ge 0 -and $effectRaceMethodEnd -gt $effectRaceMethodStart) -Message "The approved Human Review effect race must retain one bounded, inspectable fact body."
+$effectRaceMethod = $humanReviewOrderedReleaseTest.Substring($effectRaceMethodStart, $effectRaceMethodEnd - $effectRaceMethodStart)
+Assert-Contains -Actual $effectRaceMethod -Expected 'var readinessTimeout = TimeSpan.FromSeconds(30);' -Message "The staged Human Review effect race must retain one aggregate 30-second readiness budget."
+Assert-Contains -Actual $effectRaceMethod -Expected 'var readinessStopwatch = Stopwatch.StartNew();' -Message "The staged Human Review effect race must measure both readiness stages against one aggregate budget."
+Assert-Contains -Actual $effectRaceMethod -Expected 'new[] { firstChild }, readinessTimeout' -Message "The first Human Review race child must reach the existing CAS barrier before the second starts."
+Assert-Contains -Actual $effectRaceMethod -Expected 'var remainingReadiness = readinessTimeout - readinessStopwatch.Elapsed;' -Message "The second Human Review race child must consume only the first stage's remaining readiness budget."
+Assert-Contains -Actual $effectRaceMethod -Expected 'new[] { firstChild, secondChild }, remainingReadiness' -Message "Both Human Review race children must be ready under the aggregate remaining budget."
+Assert-Contains -Actual $effectRaceMethod -Expected 'Assert.False(File.Exists(markerPath));' -Message "No observable Human Review effect may occur before the shared release marker is published."
+Assert-Contains -Actual $effectRaceMethod -Expected 'Assert.False(File.Exists(firstResultPath));' -Message "The first Human Review race child must not publish a result before release."
+Assert-Contains -Actual $effectRaceMethod -Expected 'Assert.False(File.Exists(secondResultPath));' -Message "The second Human Review race child must not publish a result before release."
+Assert-Contains -Actual $effectRaceMethod -Expected 'GovernedLoopEffectPhase.IntentPrepared' -Message "The staged preflight must retain a real pre-dispatch effect attempt before release."
+$firstStart = $effectRaceMethod.IndexOf('var first = CancellationHostProcess.StartAppHostOwned(', [StringComparison]::Ordinal)
+$firstReady = $effectRaceMethod.IndexOf('new[] { firstChild }, readinessTimeout', [StringComparison]::Ordinal)
+$secondStart = $effectRaceMethod.IndexOf('second = CancellationHostProcess.StartAppHostOwned(', [StringComparison]::Ordinal)
+$bothReady = $effectRaceMethod.IndexOf('new[] { firstChild, secondChild }, remainingReadiness', [StringComparison]::Ordinal)
+$releasePublication = $effectRaceMethod.IndexOf('await File.WriteAllTextAsync(releasePath, "release");', [StringComparison]::Ordinal)
+Assert-True -Condition ($firstStart -ge 0 -and $firstReady -gt $firstStart -and $secondStart -gt $firstReady -and $bothReady -gt $secondStart -and $releasePublication -gt $bothReady) -Message "The Human Review race must stage first readiness, second readiness, then one release publication in order."
+Assert-True -Condition ([regex]::Matches($effectRaceMethod, 'await File\.WriteAllTextAsync\(releasePath, "release"\);').Count -eq 1) -Message "The staged Human Review race must publish its shared release marker exactly once."
+Assert-Contains -Actual $effectRaceMethod -Expected 'if (second is not null) await StopAsync(second);' -Message "Staged Human Review race cleanup must own a second child only after it starts."
+Assert-Contains -Actual $effectRaceMethod -Expected 'second?.Dispose();' -Message "Staged Human Review race cleanup must dispose an admitted second child after assertions or failures."
 Assert-Contains -Actual $humanReviewOrderedReleaseHost -Expected 'new HumanReviewOrderedReleaseRaceGateStore(store, readyPath, releasePath)' -Message "The Human Review effect race must synchronize at its test-only whole-run compare-exchange store."
 Assert-Contains -Actual $humanReviewOrderedReleaseHost -Expected 'releaseStore ?? store' -Message "Only the Human Review effect-race release service may receive the synchronization wrapper."
 Assert-True -Condition ($humanReviewOrderedReleaseAuthority.IndexOf('readyPath', [StringComparison]::Ordinal) -lt 0 -and $humanReviewOrderedReleaseAuthority.IndexOf('releasePath', [StringComparison]::Ordinal) -lt 0) -Message "Human Review effect-race readiness must not be misclassified as authority-source entry."
