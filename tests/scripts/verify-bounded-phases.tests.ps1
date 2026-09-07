@@ -41,8 +41,11 @@ $admissionStoreTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistenc
 $admissionStoreFixturePath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Loops\Admission\GovernedLoopAdmissionStoreTestFixture.cs"
 $admissionStoreHostTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Loops\Admission\GovernedLoopAdmissionStoreCrossProcessHostTests.cs"
 $admissionWriterHostPath = Join-Path $repoRoot "tests\Shared\GovernedLoopAdmissionCrossProcessWriterHost.cs"
+$customLoopDefinitionReceiptRetentionTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Loops\CustomLoopDefinitionReceiptRetentionTests.cs"
 $persistenceEnvironmentCollectionPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Verification\ProcessEnvironmentCollection.cs"
 $persistenceCapabilityCatalogTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Capabilities\FileCapabilityCatalogTrustProviderTests.cs"
+$windowsFileLockPath = Join-Path $repoRoot "tests\EmbodySense.Tests.Support\WindowsFileLock.cs"
+$workspaceActionNativeHostTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\WorkspaceActions\WorkspaceActionNativeHostTests.cs"
 $startupRuntimeCollectionPath = Join-Path $repoRoot "tests\EmbodySense.Core.Startup.Tests\Loops\Execution\LoopRuntimeIntegrationCollection.cs"
 $startupNestedProcessTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Startup.Tests\Runtime\AgentRuntimeFactoryNestedProcessTests.cs"
 $startupFactoryTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Startup.Tests\Runtime\AgentRuntimeFactoryTests.cs"
@@ -216,8 +219,11 @@ $admissionStoreTest = Get-Content -LiteralPath $admissionStoreTestPath -Raw
 $admissionStoreFixture = Get-Content -LiteralPath $admissionStoreFixturePath -Raw
 $admissionStoreHostTest = Get-Content -LiteralPath $admissionStoreHostTestPath -Raw
 $admissionWriterHost = Get-Content -LiteralPath $admissionWriterHostPath -Raw
+$customLoopDefinitionReceiptRetentionTest = Get-Content -LiteralPath $customLoopDefinitionReceiptRetentionTestPath -Raw
 $persistenceEnvironmentCollection = Get-Content -LiteralPath $persistenceEnvironmentCollectionPath -Raw
 $persistenceCapabilityCatalogTest = Get-Content -LiteralPath $persistenceCapabilityCatalogTestPath -Raw
+$windowsFileLock = Get-Content -LiteralPath $windowsFileLockPath -Raw
+$workspaceActionNativeHostTest = Get-Content -LiteralPath $workspaceActionNativeHostTestPath -Raw
 $startupRuntimeCollection = Get-Content -LiteralPath $startupRuntimeCollectionPath -Raw
 $startupNestedProcessTest = Get-Content -LiteralPath $startupNestedProcessTestPath -Raw
 $startupFactoryTest = Get-Content -LiteralPath $startupFactoryTestPath -Raw
@@ -262,6 +268,17 @@ Assert-Contains -Actual $verifyScript -Expected 'Assert-VerificationDirectoryMan
 Assert-Contains -Actual $coverageChildProcess -Expected 'AddExpectedTerminationVstestArguments' -Message "Intentional process-loss cases must retain an exact VSTest testhost path instead of a custom executable helper."
 Assert-Contains -Actual $coverageChildProcess -Expected 'startInfo.ArgumentList.Add(isolatedPath);' -Message "Expected-termination VSTest must read the immutable pristine test assembly directly."
 Assert-Contains -Actual $admissionStoreTest -Expected '[Collection(Verification.ProcessEnvironmentCollection.Name)]' -Message "Admission-store qualification must retain the class-wide process fence while its coverage-bearing writer children execute."
+Assert-Contains -Actual $customLoopDefinitionReceiptRetentionTest -Expected '[Collection(Verification.ProcessEnvironmentCollection.Name)]' -Message "Receipt-retention external lock qualification must not overlap another process-heavy Persistence fixture."
+Assert-Contains -Actual $workspaceActionNativeHostTest -Expected 'Verification.CrossProcessProcessOwnership.Start(startInfo)' -Message "Workspace-action crash workers must be owned by the bounded child-process job before they execute."
+Assert-True -Condition ([regex]::Matches($workspaceActionNativeHostTest, 'Verification\.CrossProcessProcessOwnership\.Start\(startInfo\)').Count -eq 2) -Message "Both workspace-action crash-worker launch paths must use bounded process ownership."
+Assert-Contains -Actual $workspaceActionNativeHostTest -Expected 'worker.Ownership.TerminateProcessTree();' -Message "A timed-out workspace-action crash worker must terminate its complete process tree."
+Assert-Contains -Actual $workspaceActionNativeHostTest -Expected 'private static readonly TimeSpan _crashWorkerExitTimeout = TimeSpan.FromSeconds(30);' -Message "Workspace-action crash workers must retain the unchanged 30-second terminal deadline."
+Assert-Contains -Actual $workspaceActionNativeHostTest -Expected 'stdout={DescribeCrashWorkerEvidence(output)} stderr={DescribeCrashWorkerEvidence(error)}' -Message "Workspace-action crash-worker failures must retain bounded redirected-stream evidence."
+Assert-Contains -Actual $windowsFileLock -Expected 'private static readonly TimeSpan _readyTimeout = TimeSpan.FromSeconds(30);' -Message "The external Windows lock fixture must retain its unchanged 30-second readiness deadline."
+Assert-Contains -Actual $windowsFileLock -Expected 'RedirectStandardError = true' -Message "The external Windows lock fixture must retain PowerShell standard-error evidence."
+Assert-Contains -Actual $windowsFileLock -Expected 'RedirectStandardOutput = true' -Message "The external Windows lock fixture must retain PowerShell standard-output evidence."
+Assert-Contains -Actual $windowsFileLock -Expected 'ready_path={_readyPath} lock={_lockPath}' -Message "The external Windows lock timeout must identify its readiness and target lock paths."
+Assert-Contains -Actual $windowsFileLock -Expected 'MaximumProcessEvidenceCharacters = 4_096' -Message "External Windows lock process evidence must remain bounded."
 Assert-Contains -Actual $admissionStoreFixture -Expected '"crash-proof" or "crash-primary" or "crash-trust" => true' -Message "Only the three admitted abrupt-loss modes may omit an impossible child coverage report."
 Assert-Contains -Actual $admissionStoreFixture -Expected '"writer" => false' -Message "Successful cross-process writers must remain distinct from intentional crash workers."
 Assert-Contains -Actual $admissionStoreFixture -Expected 'if (mode == "writer")' -Message "Successful cross-process writers must use the direct apphost route."

@@ -20,6 +20,7 @@ using System.Text.Json.Nodes;
 
 namespace EmbodySense.Core.Persistence.Tests.Loops;
 
+[Collection(Verification.ProcessEnvironmentCollection.Name)]
 public sealed class CustomLoopDefinitionReceiptRetentionTests
 {
     private static readonly DateTimeOffset _createdAtUtc = new(2026, 1, 1, 12, 0, 0, TimeSpan.Zero);
