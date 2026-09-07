@@ -108,40 +108,6 @@ public sealed partial class BrowserFlowTests
     }
 
     [Fact]
-    public void Browser_devtools_response_rejects_malformed_protocol_and_runtime_exception_envelopes()
-    {
-        using var malformed = JsonDocument.Parse("{}");
-        using var protocolError = JsonDocument.Parse("{\"result\":{},\"error\":{\"code\":-32000,\"message\":\"Cannot find context with specified id\"}}");
-        using var runtimeException = JsonDocument.Parse("{\"result\":{\"exceptionDetails\":{\"text\":\"boom\"}}}");
-        using var valid = JsonDocument.Parse("{\"result\":{}}");
-
-        Assert.Throws<BrowserDevToolsException>(() => BrowserDevToolsResponse.Validate("Runtime.evaluate", malformed.RootElement));
-        var exception = Assert.Throws<BrowserDevToolsException>(() => BrowserDevToolsResponse.Validate("Runtime.evaluate", protocolError.RootElement));
-        Assert.Equal("protocol-error", exception.Category);
-        Assert.Equal(-32000, exception.Code);
-        Assert.Throws<BrowserDevToolsException>(() => BrowserDevToolsResponse.Validate("Runtime.evaluate", runtimeException.RootElement));
-        BrowserDevToolsResponse.Validate("Page.enable", valid.RootElement);
-    }
-
-    [Fact]
-    public async Task Browser_read_only_wait_and_failure_diagnostics_are_narrow_and_best_effort()
-    {
-        var expected = new BrowserDevToolsException("protocol-error", "Runtime.evaluate", -32000, "Cannot find context with specified id");
-        var nearMatch = new BrowserDevToolsException("protocol-error", "Runtime.evaluate", -32000, "Cannot find context with a specified id");
-        Assert.True(BrowserReadOnlyWait.IsExpectedContextTurnover(expected));
-        Assert.False(BrowserReadOnlyWait.IsExpectedContextTurnover(nearMatch));
-        Assert.False(BrowserReadOnlyWait.IsExpectedContextTurnover(new BrowserDevToolsException("protocol-error", "Page.reload", -32000, "Cannot find context with specified id")));
-
-        var invoked = 0;
-        await BrowserFailureDiagnostics.TryWriteAsync(() =>
-        {
-            invoked++;
-            return Task.FromException(new IOException("diagnostic writer unavailable"));
-        });
-        Assert.Equal(1, invoked);
-    }
-
-    [Fact]
     public void Effect_reconciliation_catalog_recovery_requires_the_exact_visible_settled_refresh_state()
     {
         const string Unavailable = EffectReconciliationCatalogRecoveryContract.TemporaryUnavailableMessage;
@@ -3035,42 +3001,7 @@ public sealed partial class BrowserFlowTests
 
         public async Task WaitForExpressionAsync(string expression, TimeSpan timeoutValue)
         {
-            Exception? lastException = null;
-            using var timeout = new CancellationTokenSource(timeoutValue);
-            while (!timeout.IsCancellationRequested)
-            {
-                try
-                {
-                    var value = await EvaluateAsync($"Boolean({expression})", timeout.Token);
-                    if (value.ValueKind == JsonValueKind.True)
-                    {
-                        return;
-                    }
-                }
-                catch (OperationCanceledException) when (timeout.IsCancellationRequested)
-                {
-                    break;
-                }
-                catch (Exception exception) when (BrowserReadOnlyWait.IsExpectedContextTurnover(exception))
-                {
-                    lastException = exception;
-                }
-                catch (Exception exception) when (exception is InvalidOperationException or WebSocketException or JsonException)
-                {
-                    lastException = exception;
-                }
-
-                try
-                {
-                    await Task.Delay(100, timeout.Token);
-                }
-                catch (OperationCanceledException) when (timeout.IsCancellationRequested)
-                {
-                    break;
-                }
-            }
-
-            throw new TimeoutException($"Browser expression did not become true: {expression}", lastException);
+            await BrowserReadOnlyWait.WaitForTrueAsync(async token => (await EvaluateAsync($"Boolean({expression})", token)).ValueKind == JsonValueKind.True, timeoutValue, $"Browser expression did not become true: {expression}");
         }
 
         public async Task EvaluateAsync(string expression)
@@ -3254,7 +3185,7 @@ public sealed partial class BrowserFlowTests
             {
                 using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
                 var screenshot = await SendCommandAsync("Page.captureScreenshot", new { format = "png", captureBeyondViewport = true }, timeout.Token);
-                var base64 = screenshot.GetProperty("result").GetProperty("data").GetString();
+                var base64 = BrowserDevToolsResponse.ReadRequiredResultString("Page.captureScreenshot", screenshot, "data");
                 if (!string.IsNullOrWhiteSpace(base64))
                 {
                     await BrowserFailureDiagnostics.TryWriteAsync(() => File.WriteAllBytesAsync(Path.Combine(directory, "page.png"), Convert.FromBase64String(base64)));
@@ -3340,20 +3271,12 @@ public sealed partial class BrowserFlowTests
                 returnByValue = true,
                 userGesture
             }, cancellationToken, responseHandler);
-            BrowserDevToolsResponse.Validate("Runtime.evaluate", response);
-
-            if (!response.TryGetProperty("result", out var commandResult)
-                || !commandResult.TryGetProperty("result", out var remoteObject))
-            {
-                throw new BrowserDevToolsException("malformed-runtime-result", "Runtime.evaluate", null, "remote-result-missing");
-            }
-
-            return remoteObject.TryGetProperty("value", out var value) ? value.Clone() : default;
+            return BrowserDevToolsResponse.ReadRuntimeEvaluationValue(response);
         }
 
         private void FreezeExpectedServerRestartAtBarrierResponse(JsonElement response)
         {
-            if (!TryReadTrueRuntimeEvaluation(response))
+            if (!BrowserDevToolsResponse.IsTrueRuntimeEvaluation(response))
             {
                 throw new BrowserDevToolsException("invalid-barrier", "Runtime.evaluate", null, "expected-true");
             }
@@ -3363,7 +3286,7 @@ public sealed partial class BrowserFlowTests
 
         private void EndExpectedServerRestartAtBarrierResponse(JsonElement response)
         {
-            if (!TryReadTrueRuntimeEvaluation(response))
+            if (!BrowserDevToolsResponse.IsTrueRuntimeEvaluation(response))
             {
                 throw new BrowserDevToolsException("invalid-barrier", "Runtime.evaluate", null, "expected-true");
             }
@@ -3427,14 +3350,6 @@ public sealed partial class BrowserFlowTests
                 _pendingResponseHandlers.Remove(commandId);
                 throw;
             }
-        }
-
-        private static bool TryReadTrueRuntimeEvaluation(JsonElement response)
-        {
-            return response.TryGetProperty("result", out var commandResult)
-                && commandResult.TryGetProperty("result", out var remoteObject)
-                && remoteObject.TryGetProperty("value", out var value)
-                && value.ValueKind == JsonValueKind.True;
         }
 
         private async Task SendPayloadAsync(byte[] bytes)

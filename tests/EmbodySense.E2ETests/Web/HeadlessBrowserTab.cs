@@ -91,41 +91,7 @@ internal sealed class HeadlessBrowserTab : IAsyncDisposable
     internal async Task WaitForExpressionAsync(string expression)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(expression);
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-        Exception? lastException = null;
-        while (!timeout.IsCancellationRequested)
-        {
-            try
-            {
-                if (await EvaluateBooleanAsync(expression, timeout.Token).ConfigureAwait(false))
-                {
-                    return;
-                }
-            }
-            catch (OperationCanceledException) when (timeout.IsCancellationRequested)
-            {
-                break;
-            }
-            catch (Exception exception) when (BrowserReadOnlyWait.IsExpectedContextTurnover(exception))
-            {
-                lastException = exception;
-            }
-            catch (Exception exception) when (exception is InvalidOperationException or WebSocketException or JsonException)
-            {
-                lastException = exception;
-            }
-
-            try
-            {
-                await Task.Delay(100, timeout.Token).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (timeout.IsCancellationRequested)
-            {
-                break;
-            }
-        }
-
-        throw new TimeoutException($"Browser tab expression did not become true: {expression}", lastException);
+        await BrowserReadOnlyWait.WaitForTrueAsync(token => EvaluateBooleanAsync(expression, token), TimeSpan.FromSeconds(30), $"Browser tab expression did not become true: {expression}").ConfigureAwait(false);
     }
 
     internal Task<string> EvaluateStringAsync(string expression, CancellationToken cancellationToken = default)
@@ -206,15 +172,7 @@ internal sealed class HeadlessBrowserTab : IAsyncDisposable
             returnByValue = true,
             userGesture
         }, cancellationToken).ConfigureAwait(false);
-        BrowserDevToolsResponse.Validate("Runtime.evaluate", response);
-
-        if (!response.TryGetProperty("result", out var commandResult)
-            || !commandResult.TryGetProperty("result", out var remoteObject))
-        {
-            throw new BrowserDevToolsException("malformed-runtime-result", "Runtime.evaluate", null, "remote-result-missing");
-        }
-
-        return remoteObject.TryGetProperty("value", out var value) ? value.Clone() : default;
+        return BrowserDevToolsResponse.ReadRuntimeEvaluationValue(response);
     }
 
     private async Task<JsonElement> SendCommandAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
