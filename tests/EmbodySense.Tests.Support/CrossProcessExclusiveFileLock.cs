@@ -147,7 +147,12 @@ public sealed class CrossProcessExclusiveFileLock : IDisposable
         try
         {
             Marshal.Copy(new byte[256], 0, buffer, 256);
-            var result = followPath ? Fstat(descriptor, buffer) : Lstat(path, buffer);
+            var result = RuntimeInformation.ProcessArchitecture switch
+            {
+                Architecture.X64 => followPath ? FstatInode64(descriptor, buffer) : LstatInode64(path, buffer),
+                Architecture.Arm64 => followPath ? Fstat(descriptor, buffer) : Lstat(path, buffer),
+                _ => throw new PlatformNotSupportedException("macOS cross-process file locking is not supported for this process architecture.")
+            };
             if (result != 0)
             {
                 throw new IOException("The test fixture could not inspect the cross-process file lock safely.", new Win32Exception(Marshal.GetLastWin32Error()));
@@ -222,8 +227,14 @@ public sealed class CrossProcessExclusiveFileLock : IDisposable
     [DllImport("libc", EntryPoint = "lstat", SetLastError = true)]
     private static extern int Lstat(string path, IntPtr buffer);
 
+    [DllImport("libc", EntryPoint = "lstat$INODE64", SetLastError = true)]
+    private static extern int LstatInode64(string path, IntPtr buffer);
+
     [DllImport("libc", EntryPoint = "fstat", SetLastError = true)]
     private static extern int Fstat(int descriptor, IntPtr buffer);
+
+    [DllImport("libc", EntryPoint = "fstat$INODE64", SetLastError = true)]
+    private static extern int FstatInode64(int descriptor, IntPtr buffer);
 
     [DllImport("libc", EntryPoint = "statx", SetLastError = true)]
     private static extern int Statx(int directoryDescriptor, [MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags, uint mask, out LinuxStatx information);

@@ -48,6 +48,7 @@ $customLoopDefinitionReceiptRetentionTestPath = Join-Path $repoRoot "tests\Embod
 $persistenceEnvironmentCollectionPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Verification\ProcessEnvironmentCollection.cs"
 $persistenceCapabilityCatalogTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\Capabilities\FileCapabilityCatalogTrustProviderTests.cs"
 $windowsFileLockPath = Join-Path $repoRoot "tests\EmbodySense.Tests.Support\WindowsFileLock.cs"
+$crossProcessExclusiveFileLockPath = Join-Path $repoRoot "tests\EmbodySense.Tests.Support\CrossProcessExclusiveFileLock.cs"
 $workspaceActionNativeHostTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Persistence.Tests\WorkspaceActions\WorkspaceActionNativeHostTests.cs"
 $startupRuntimeCollectionPath = Join-Path $repoRoot "tests\EmbodySense.Core.Startup.Tests\Loops\Execution\LoopRuntimeIntegrationCollection.cs"
 $startupNestedProcessTestPath = Join-Path $repoRoot "tests\EmbodySense.Core.Startup.Tests\Runtime\AgentRuntimeFactoryNestedProcessTests.cs"
@@ -229,6 +230,7 @@ $customLoopDefinitionReceiptRetentionTest = Get-Content -LiteralPath $customLoop
 $persistenceEnvironmentCollection = Get-Content -LiteralPath $persistenceEnvironmentCollectionPath -Raw
 $persistenceCapabilityCatalogTest = Get-Content -LiteralPath $persistenceCapabilityCatalogTestPath -Raw
 $windowsFileLock = Get-Content -LiteralPath $windowsFileLockPath -Raw
+$crossProcessExclusiveFileLock = Get-Content -LiteralPath $crossProcessExclusiveFileLockPath -Raw
 $workspaceActionNativeHostTest = Get-Content -LiteralPath $workspaceActionNativeHostTestPath -Raw
 $startupRuntimeCollection = Get-Content -LiteralPath $startupRuntimeCollectionPath -Raw
 $startupNestedProcessTest = Get-Content -LiteralPath $startupNestedProcessTestPath -Raw
@@ -285,6 +287,13 @@ Assert-Contains -Actual $windowsFileLock -Expected 'RedirectStandardError = true
 Assert-Contains -Actual $windowsFileLock -Expected 'RedirectStandardOutput = true' -Message "The external Windows lock fixture must retain PowerShell standard-output evidence."
 Assert-Contains -Actual $windowsFileLock -Expected 'ready_path={_readyPath} lock={_lockPath}' -Message "The external Windows lock timeout must identify its readiness and target lock paths."
 Assert-Contains -Actual $windowsFileLock -Expected 'MaximumProcessEvidenceCharacters = 4_096' -Message "External Windows lock process evidence must remain bounded."
+Assert-Contains -Actual $crossProcessExclusiveFileLock -Expected 'Architecture.X64 => followPath ? FstatInode64(descriptor, buffer) : LstatInode64(path, buffer),' -Message "x64 macOS lock identity inspection must use the inode64 entry points."
+Assert-Contains -Actual $crossProcessExclusiveFileLock -Expected 'Architecture.Arm64 => followPath ? Fstat(descriptor, buffer) : Lstat(path, buffer),' -Message "Arm64 macOS lock identity inspection must retain the unsuffixed entry points."
+Assert-Contains -Actual $crossProcessExclusiveFileLock -Expected 'throw new PlatformNotSupportedException("macOS cross-process file locking is not supported for this process architecture.")' -Message "macOS lock identity inspection must fail explicitly for unsupported process architectures."
+Assert-Contains -Actual $crossProcessExclusiveFileLock -Expected '[DllImport("libc", EntryPoint = "lstat$INODE64", SetLastError = true)]' -Message "x64 macOS path identity inspection must import the inode64 lstat symbol exactly."
+Assert-Contains -Actual $crossProcessExclusiveFileLock -Expected 'private static extern int LstatInode64(string path, IntPtr buffer);' -Message "x64 macOS path identity inspection must retain its inode64 interop declaration."
+Assert-Contains -Actual $crossProcessExclusiveFileLock -Expected '[DllImport("libc", EntryPoint = "fstat$INODE64", SetLastError = true)]' -Message "x64 macOS descriptor identity inspection must import the inode64 fstat symbol exactly."
+Assert-Contains -Actual $crossProcessExclusiveFileLock -Expected 'private static extern int FstatInode64(int descriptor, IntPtr buffer);' -Message "x64 macOS descriptor identity inspection must retain its inode64 interop declaration."
 Assert-Contains -Actual $admissionStoreFixture -Expected '"crash-proof" or "crash-primary" or "crash-trust" => true' -Message "Only the three admitted abrupt-loss modes may omit an impossible child coverage report."
 Assert-Contains -Actual $admissionStoreFixture -Expected '"writer" => false' -Message "Successful cross-process writers must remain distinct from intentional crash workers."
 Assert-Contains -Actual $admissionStoreFixture -Expected 'if (mode == "writer")' -Message "Successful cross-process writers must use the direct apphost route."
