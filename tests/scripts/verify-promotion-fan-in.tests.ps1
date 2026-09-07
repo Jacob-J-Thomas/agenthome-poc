@@ -103,6 +103,7 @@ function Update-TestComponentAuth {
     $evidence.manifestSha256 = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
     Write-TestJson -Path $evidencePath -Value $evidence
     $watchdogEvidence = Get-Content -LiteralPath $watchdogEvidencePath -Raw | ConvertFrom-Json
+    $watchdogEvidence.watchdogLogSha256 = (Get-FileHash -LiteralPath (Join-Path $resultsRoot "watchdog.log") -Algorithm SHA256).Hash.ToLowerInvariant()
     $watchdogEvidence.componentEvidenceSha256 = (Get-FileHash -LiteralPath $evidencePath -Algorithm SHA256).Hash.ToLowerInvariant()
     $watchdogEvidence.componentManifestSha256 = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
     Write-TestJson -Path $watchdogEvidencePath -Value $watchdogEvidence
@@ -419,16 +420,35 @@ try {
     Write-TestJson -Path $macOSResultPath -Value $macOSResultMap
     Update-TestComponentAuth -Root $macOSRoot
     Assert-Throws -Message "macOS JSON provenance tamper" -ExpectedMessage "authoritative raw TRX reconciliation" -Action { Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot -MacOSRoot $macOSRoot }
+
+    New-TestMacOSPlatformComponent -Root $macOSRoot
+    $watchdogPath = Join-Path $macOSRoot "VerificationResults/watchdog.log"
+    $originalWatchdogText = Get-Content -LiteralPath $watchdogPath -Raw
+    $tamperedWatchdogText = $originalWatchdogText + "tampered`n"
+    Assert-True -Condition ($tamperedWatchdogText -cne $originalWatchdogText) -Message "Unauthenticated watchdog tamper must change watchdog evidence."
+    [IO.File]::WriteAllText($watchdogPath, $tamperedWatchdogText, [Text.UTF8Encoding]::new($false))
+    Assert-Throws -Message "unauthenticated watchdog tamper" -ExpectedMessage "Watchdog evidence does not authenticate watchdog.log." -Action { Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot -MacOSRoot $macOSRoot }
+    New-TestMacOSPlatformComponent -Root $macOSRoot
+
     foreach ($phaseCase in @("missing", "duplicate", "failed")) {
         New-TestMacOSPlatformComponent -Root $macOSRoot
         $watchdogPath = Join-Path $macOSRoot "VerificationResults/watchdog.log"
         $watchdogText = Get-Content -LiteralPath $watchdogPath -Raw
-        if ($phaseCase -eq "missing") { $watchdogText = $watchdogText.Replace('VERIFY_PHASE_COMPLETE name=build-macos-platform-contract elapsed_seconds=1 completed_at_utc=2026-01-01T00:00:00.0000000+00:00' + "`n", "") }
-        elseif ($phaseCase -eq "duplicate") { $watchdogText = 'VERIFY_PHASE_COMPLETE name=build-macos-platform-contract elapsed_seconds=1 completed_at_utc=2026-01-01T00:00:00.0000000+00:00' + "`n" + $watchdogText }
-        else { $watchdogText = 'VERIFY_PHASE_FAILED name=build-macos-platform-contract' + "`n" + $watchdogText }
+        $originalWatchdogText = $watchdogText
+        $buildMarker = 'VERIFY_PHASE_COMPLETE name=build-macos-platform-contract elapsed_seconds=1 completed_at_utc=2026-01-01T00:00:00.0000000+00:00' + "`n"
+        $failedBuildMarker = 'VERIFY_PHASE_FAILED name=build-macos-platform-contract' + "`n"
+        $expectedBuildMarkerCount = 1
+        $expectedFailedMarkerCount = 0
+        $expectedMessage = "macOS platform watchdog evidence contains a missing, duplicate, or foreign completed phase marker."
+        if ($phaseCase -eq "missing") { $watchdogText = $watchdogText.Replace($buildMarker, ""); $expectedBuildMarkerCount = 0 }
+        elseif ($phaseCase -eq "duplicate") { $watchdogText = $buildMarker + $watchdogText; $expectedBuildMarkerCount = 2 }
+        else { $watchdogText = $failedBuildMarker + $watchdogText; $expectedFailedMarkerCount = 1; $expectedMessage = "macOS platform watchdog evidence contains a failed or skipped phase marker." }
+        Assert-True -Condition ($watchdogText -cne $originalWatchdogText) -Message "macOS $phaseCase build phase mutation must change watchdog evidence."
+        Assert-True -Condition (@([regex]::Matches($watchdogText, [regex]::Escape($buildMarker))).Count -eq $expectedBuildMarkerCount) -Message "macOS $phaseCase build phase mutation must produce exactly $expectedBuildMarkerCount build marker(s)."
+        Assert-True -Condition (@([regex]::Matches($watchdogText, [regex]::Escape($failedBuildMarker))).Count -eq $expectedFailedMarkerCount) -Message "macOS $phaseCase build phase mutation must produce exactly $expectedFailedMarkerCount failed marker(s)."
         [IO.File]::WriteAllText($watchdogPath, $watchdogText, [Text.UTF8Encoding]::new($false))
         Update-TestComponentAuth -Root $macOSRoot
-        Assert-Throws -Message "macOS $phaseCase phase evidence" -Action { Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot -MacOSRoot $macOSRoot }
+        Assert-Throws -Message "macOS $phaseCase phase evidence" -ExpectedMessage $expectedMessage -Action { Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot -MacOSRoot $macOSRoot }
     }
     New-TestMacOSPlatformComponent -Root $macOSRoot
 
@@ -436,14 +456,32 @@ try {
         New-TestMacOSPlatformComponent -Root $macOSRoot
         $watchdogPath = Join-Path $macOSRoot "VerificationResults/watchdog.log"
         $watchdogText = Get-Content -LiteralPath $watchdogPath -Raw
-        $cleanupMarker = 'VERIFY_PHASE_COMPLETE name=clean-test-results elapsed_seconds=1 completed_at_utc=2026-01-01T00:00:00.0000000+00:00' + [Environment]::NewLine
-        $buildMarker = 'VERIFY_PHASE_COMPLETE name=build-macos-platform-contract elapsed_seconds=1 completed_at_utc=2026-01-01T00:00:00.0000000+00:00' + [Environment]::NewLine
-        if ($cleanupPhaseCase -eq "missing") { $watchdogText = $watchdogText.Replace($cleanupMarker, "") }
-        elseif ($cleanupPhaseCase -eq "duplicate") { $watchdogText = $cleanupMarker + $watchdogText }
+        $originalWatchdogText = $watchdogText
+        $cleanupMarker = 'VERIFY_PHASE_COMPLETE name=clean-test-results elapsed_seconds=1 completed_at_utc=2026-01-01T00:00:00.0000000+00:00' + "`n"
+        $buildMarker = 'VERIFY_PHASE_COMPLETE name=build-macos-platform-contract elapsed_seconds=1 completed_at_utc=2026-01-01T00:00:00.0000000+00:00' + "`n"
+        $expectedCleanupCount = 1
+        $expectedMessage = "macOS platform watchdog phase markers are reordered."
+        if ($cleanupPhaseCase -eq "missing") {
+            $watchdogText = $watchdogText.Replace($cleanupMarker, "")
+            $expectedCleanupCount = 0
+            $expectedMessage = "macOS platform watchdog evidence contains a missing, duplicate, or foreign completed phase marker."
+        }
+        elseif ($cleanupPhaseCase -eq "duplicate") {
+            $watchdogText = $cleanupMarker + $watchdogText
+            $expectedCleanupCount = 2
+            $expectedMessage = "macOS platform watchdog evidence contains a missing, duplicate, or foreign completed phase marker."
+        }
         else { $watchdogText = $watchdogText.Replace($cleanupMarker, "").Replace($buildMarker, $buildMarker + $cleanupMarker) }
+        Assert-True -Condition ($watchdogText -cne $originalWatchdogText) -Message "macOS $cleanupPhaseCase cleanup phase mutation must change watchdog evidence."
+        Assert-True -Condition (@([regex]::Matches($watchdogText, [regex]::Escape($cleanupMarker))).Count -eq $expectedCleanupCount) -Message "macOS $cleanupPhaseCase cleanup phase mutation must produce exactly $expectedCleanupCount cleanup marker(s)."
+        if ($cleanupPhaseCase -eq "reordered") {
+            $buildMarkerIndex = $watchdogText.IndexOf($buildMarker, [StringComparison]::Ordinal)
+            $cleanupMarkerIndex = $watchdogText.IndexOf($cleanupMarker, [StringComparison]::Ordinal)
+            Assert-True -Condition ($buildMarkerIndex -ge 0 -and $buildMarkerIndex -lt $cleanupMarkerIndex) -Message "macOS reordered cleanup phase mutation must place build before cleanup."
+        }
         [IO.File]::WriteAllText($watchdogPath, $watchdogText, [Text.UTF8Encoding]::new($false))
         Update-TestComponentAuth -Root $macOSRoot
-        Assert-Throws -Message "macOS $cleanupPhaseCase cleanup phase evidence" -Action { Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot -MacOSRoot $macOSRoot }
+        Assert-Throws -Message "macOS $cleanupPhaseCase cleanup phase evidence" -ExpectedMessage $expectedMessage -Action { Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot -MacOSRoot $macOSRoot }
     }
     New-TestMacOSPlatformComponent -Root $macOSRoot
 
