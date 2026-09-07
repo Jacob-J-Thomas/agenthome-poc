@@ -56,7 +56,33 @@ public sealed class CrossProcessReadinessDiagnosticsTests
         Assert.Contains("verification/completion children did not finish post-gate decision teardown", failure.Message, StringComparison.Ordinal);
         Assert.Contains("completed(ready=True,result=True)", failure.Message, StringComparison.Ordinal);
         Assert.Contains("verification/completion/post-gate decision-teardown-timeout/completed", failure.Message, StringComparison.Ordinal);
+        Assert.Contains("pre-termination-state=running", failure.Message, StringComparison.Ordinal);
+        Assert.Contains("pre-termination-result=result", failure.Message, StringComparison.Ordinal);
         Assert.True(process.HasExited, "The completion diagnostic did not terminate the retained child tree.");
+    }
+
+    [Fact]
+    public async Task Readiness_failure_retains_a_genuine_early_exit_distinct_from_cleanup_induced_exit()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        using var process = CancellationHostProcess.StartOwned("pipe-holder-child", "1");
+        await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        var child = new CrossProcessReadinessChild("early-exit", process, workspace.File("missing-ready"), workspace.File("missing-result"));
+
+        var wait = CrossProcessReadinessDiagnostics.WaitForChildrenReadyAsync(
+            "verification/early-exit",
+            [child],
+            TimeSpan.FromMilliseconds(100));
+        var failure = await Assert.ThrowsAsync<FailException>(() => wait.WaitAsync(TimeSpan.FromSeconds(10)));
+
+        Assert.Contains("verification/early-exit/readiness-exit/early-exit", failure.Message, StringComparison.Ordinal);
+        Assert.Contains("pre-termination-state=exited pre-termination-exit=0", failure.Message, StringComparison.Ordinal);
+        Assert.Contains("pre-termination-result=<missing>", failure.Message, StringComparison.Ordinal);
     }
 
     [Fact]
