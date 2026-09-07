@@ -18,7 +18,8 @@ internal static class CrossProcessReadinessDiagnostics
     internal static async Task WaitForChildrenReadyAsync(
         string operation,
         IReadOnlyList<CrossProcessReadinessChild> children,
-        TimeSpan timeout)
+        TimeSpan timeout,
+        Func<string, Task<string>>? resultEvidenceReader = null)
     {
         Validate(operation, children, timeout);
         var wait = Stopwatch.StartNew();
@@ -26,13 +27,13 @@ internal static class CrossProcessReadinessDiagnostics
         {
             if (children.Any(child => child.Process.HasExited))
             {
-                var evidence = await StopAndReadChildEvidenceAsync(operation, "readiness-exit", children);
+                var evidence = await StopAndReadChildEvidenceAsync(operation, "readiness-exit", children, resultEvidenceReader);
                 Assert.Fail($"Cross-process {operation} child exited before readiness. {DescribeMarkers(children)}{Environment.NewLine}{evidence}");
             }
 
             if (wait.Elapsed >= timeout)
             {
-                var evidence = await StopAndReadChildEvidenceAsync(operation, "readiness-timeout", children);
+                var evidence = await StopAndReadChildEvidenceAsync(operation, "readiness-timeout", children, resultEvidenceReader);
                 Assert.Fail($"Cross-process {operation} children did not all report ready within {timeout.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture)} seconds. {DescribeMarkers(children)}{Environment.NewLine}{evidence}");
             }
 
@@ -130,31 +131,41 @@ internal static class CrossProcessReadinessDiagnostics
     private static async Task<string> StopAndReadChildEvidenceAsync(
         string operation,
         string stage,
-        IReadOnlyList<CrossProcessReadinessChild> children)
+        IReadOnlyList<CrossProcessReadinessChild> children,
+        Func<string, Task<string>>? resultEvidenceReader = null)
     {
-        var preTerminationEvidence = await Task.WhenAll(children.Select(CapturePreTerminationEvidenceAsync));
-        await Task.WhenAll(children.Select(StopChildProcessAsync));
+        var preTerminationState = children.Select(CapturePreTerminationState).ToArray();
+        string[] resultEvidence;
+        try
+        {
+            resultEvidence = await Task.WhenAll(children.Select(child => ReadChildResultEvidenceAsync(child.ResultPath, resultEvidenceReader)));
+        }
+        finally
+        {
+            await Task.WhenAll(children.Select(StopChildProcessAsync));
+        }
+
+        var preTerminationEvidence = preTerminationState.Zip(resultEvidence).Select(item => new CrossProcessPreTerminationEvidence(item.First.Exited, item.First.ExitCode, item.Second)).ToArray();
         var evidence = await Task.WhenAll(children.Zip(preTerminationEvidence).Select(item => ReadChildEvidenceAsync(operation, stage, item.First, item.Second)));
         return string.Join(Environment.NewLine, evidence);
     }
 
-    private static async Task<CrossProcessPreTerminationEvidence> CapturePreTerminationEvidenceAsync(CrossProcessReadinessChild child)
+    private static CrossProcessPreTerminationState CapturePreTerminationState(CrossProcessReadinessChild child)
     {
-        var exited = child.Process.HasExited;
-        int? exitCode = null;
-        if (exited)
+        try
         {
-            try
+            var exited = child.Process.HasExited;
+            if (!exited)
             {
-                exitCode = child.Process.ExitCode;
+                return new CrossProcessPreTerminationState(false, null);
             }
-            catch (InvalidOperationException)
-            {
-                exited = false;
-            }
-        }
 
-        return new CrossProcessPreTerminationEvidence(exited, exitCode, await ReadChildResultEvidenceAsync(child.ResultPath));
+            return new CrossProcessPreTerminationState(true, child.Process.ExitCode);
+        }
+        catch
+        {
+            return new CrossProcessPreTerminationState(false, null);
+        }
     }
 
     private static async Task StopChildProcessAsync(CrossProcessReadinessChild child)
@@ -166,12 +177,18 @@ internal static class CrossProcessReadinessDiagnostics
         catch (InvalidOperationException) when (child.Process.HasExited)
         {
         }
+        catch
+        {
+        }
 
         try
         {
             await child.Process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
         }
         catch (TimeoutException)
+        {
+        }
+        catch
         {
         }
     }
@@ -207,7 +224,24 @@ internal static class CrossProcessReadinessDiagnostics
         return $"{operation}/{stage}/{child.Label}: pid={child.Process.Id} pre-termination-state={preTerminationState} pre-termination-exit={preTerminationExitCode} pre-termination-result={preTermination.ResultEvidence} state=exited exit={child.Process.ExitCode} ready={File.Exists(child.ReadyPath)} result={File.Exists(child.ResultPath)} stdout={GetChildStreamEvidence(outputTask)} stderr={GetChildStreamEvidence(errorTask)}";
     }
 
-    private static async Task<string> ReadChildResultEvidenceAsync(string path)
+    private static async Task<string> ReadChildResultEvidenceAsync(string path, Func<string, Task<string>>? resultEvidenceReader)
+    {
+        try
+        {
+            var read = resultEvidenceReader is null ? ReadChildResultEvidenceFromFileAsync(path) : resultEvidenceReader(path);
+            return await read.WaitAsync(_childEvidenceReadTimeout);
+        }
+        catch (TimeoutException)
+        {
+            return "<timed-out>";
+        }
+        catch
+        {
+            return "<unavailable>";
+        }
+    }
+
+    private static async Task<string> ReadChildResultEvidenceFromFileAsync(string path)
     {
         if (!File.Exists(path))
         {
@@ -285,4 +319,6 @@ internal static class CrossProcessReadinessDiagnostics
     }
 
     private sealed record CrossProcessPreTerminationEvidence(bool Exited, int? ExitCode, string ResultEvidence);
+
+    private sealed record CrossProcessPreTerminationState(bool Exited, int? ExitCode);
 }

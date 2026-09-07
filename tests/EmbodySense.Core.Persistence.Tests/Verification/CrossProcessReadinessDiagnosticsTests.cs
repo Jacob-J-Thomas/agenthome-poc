@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Reflection;
+using EmbodySense.Core.Application.Loops.EffectAttempts.Models;
 using EmbodySense.Tests.Support;
 using Xunit.Sdk;
 
@@ -86,6 +88,49 @@ public sealed class CrossProcessReadinessDiagnosticsTests
     }
 
     [Fact]
+    public async Task Ordered_release_diagnostic_reader_preserves_delegate_outcomes_when_reporting_fails()
+    {
+        var unavailable = new GovernedLoopEffectAttemptReadResult(GovernedLoopEffectAttemptReadStatus.Unavailable);
+        var unavailableReader = CreateDiagnosticReader((_, _, _, _) => Task.FromResult(unavailable), ThrowingDiagnosticWriter);
+        Assert.Same(unavailable, await ReadDiagnosticAsync(unavailableReader));
+
+        var current = new GovernedLoopEffectAttemptReadResult(GovernedLoopEffectAttemptReadStatus.Current);
+        var currentReader = CreateDiagnosticReader((_, _, _, _) => Task.FromResult(current), ThrowingDiagnosticWriter);
+        Assert.Same(current, await ReadDiagnosticAsync(currentReader));
+
+        var expected = new IOException("canonical read failure");
+        var throwingReader = CreateDiagnosticReader((_, _, _, _) => Task.FromException<GovernedLoopEffectAttemptReadResult>(expected), ThrowingDiagnosticWriter);
+        var exception = await Assert.ThrowsAsync<IOException>(() => ReadDiagnosticAsync(throwingReader));
+        Assert.Same(expected, exception);
+    }
+
+    [Theory]
+    [InlineData(false, "<unavailable>")]
+    [InlineData(true, "<timed-out>")]
+    public async Task Readiness_failure_terminates_owned_children_when_result_evidence_faults_or_stalls(bool stall, string expectedEvidence)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        using var process = CancellationHostProcess.StartOwned("pipe-holder-child", "30000");
+        var child = new CrossProcessReadinessChild("result-evidence", process, workspace.File("missing-ready"), workspace.File("missing-result"));
+        var stalled = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var wait = CrossProcessReadinessDiagnostics.WaitForChildrenReadyAsync(
+            "verification/result-evidence",
+            [child],
+            TimeSpan.FromMilliseconds(100),
+            _ => stall ? stalled.Task : Task.FromException<string>(new IOException("result evidence failure")));
+        var failure = await Assert.ThrowsAsync<FailException>(() => wait.WaitAsync(TimeSpan.FromSeconds(10)));
+
+        Assert.Contains($"pre-termination-result={expectedEvidence}", failure.Message, StringComparison.Ordinal);
+        Assert.True(process.HasExited, "The diagnostic helper did not terminate the owned child after result-evidence capture failed.");
+    }
+
+    [Fact]
     public async Task Readiness_failure_does_not_hang_when_descendant_holds_redirected_pipes()
     {
         if (!OperatingSystem.IsWindows())
@@ -149,4 +194,17 @@ public sealed class CrossProcessReadinessDiagnosticsTests
 
         return false;
     }
+
+    private static object CreateDiagnosticReader(Func<string, string, long, CancellationToken, Task<GovernedLoopEffectAttemptReadResult>> read, Action<string> report)
+    {
+        var hostAssemblyPath = Path.Combine(AppContext.BaseDirectory, "CancellationHost", "EmbodySense.CancellationHost.dll");
+        var readerType = Assembly.LoadFrom(hostAssemblyPath).GetType("EmbodySense.CancellationHost.Persistence.HumanReviewOrderedReleaseProcessDiagnosticReadStore", throwOnError: true)!;
+        return Activator.CreateInstance(readerType, BindingFlags.Instance | BindingFlags.NonPublic, null, [read, report], null)!;
+    }
+
+    private static Task<GovernedLoopEffectAttemptReadResult> ReadDiagnosticAsync(object reader)
+        => (Task<GovernedLoopEffectAttemptReadResult>)reader.GetType().GetMethod("ReadAsync")!.Invoke(reader, ["workspace", "operation", 1L, CancellationToken.None])!;
+
+    private static void ThrowingDiagnosticWriter(string _) => throw new IOException("diagnostic writer failure");
+
 }
