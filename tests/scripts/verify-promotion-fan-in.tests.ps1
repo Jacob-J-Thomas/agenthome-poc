@@ -222,7 +222,7 @@ function New-TestMacOSPlatformComponent {
             $index++
         }
         $count = $assembly.Group.Count
-        $counters = "total=`"$count`" executed=`"$count`" passed=`"$count`" completed=`"$count`" failed=`"0`" error=`"0`" timeout=`"0`" aborted=`"0`" inconclusive=`"0`" passedButRunAborted=`"0`" notRunnable=`"0`" notExecuted=`"0`" disconnected=`"0`" warning=`"0`" inProgress=`"0`" pending=`"0`""
+        $counters = "total=`"$count`" executed=`"$count`" passed=`"$count`" completed=`"0`" failed=`"0`" error=`"0`" timeout=`"0`" aborted=`"0`" inconclusive=`"0`" passedButRunAborted=`"0`" notRunnable=`"0`" notExecuted=`"0`" disconnected=`"0`" warning=`"0`" inProgress=`"0`" pending=`"0`""
         [IO.File]::WriteAllText((Join-Path $assemblyRoot "macos-platform-contract.trx"), "<TestRun xmlns=`"http://microsoft.com/schemas/VisualStudio/TeamTest/2010`"><Results>$($results -join '')</Results><TestDefinitions>$($definitions -join '')</TestDefinitions><TestEntries>$($entries -join '')</TestEntries><ResultSummary outcome=`"Completed`"><Counters $counters /></ResultSummary></TestRun>", [Text.UTF8Encoding]::new($false))
         $phaseNames += @("discover-macos-$($assembly.Assembly)", "macos-$($assembly.Assembly)")
     }
@@ -260,6 +260,25 @@ try {
         & $selectionCase.Mutate $candidate
         Assert-Throws -Message "macOS selection $($selectionCase.Name)" -ExpectedMessage "MacOSPlatformContract" -Action { Assert-MacOSPlatformContractSelection -Selection $candidate }
     }
+    . (Join-Path $repoRoot "scripts\verify-macos-platform-contract.ps1") -NoRun
+    $controlledDiscoveryAssembly = @(Get-MacOSPlatformContractAssemblies -Selection $macOSSelection)[0]
+    $controlledDiscoveryRoot = Join-Path $fixtureRoot "controlled-discovery"
+    New-Item -ItemType Directory -Path $controlledDiscoveryRoot -Force | Out-Null
+    function Invoke-MacOSPlatformContractPhase {
+        param([string]$Name, [string]$FileName, [string[]]$Arguments, [Diagnostics.Stopwatch]$Stopwatch)
+        $outputPath = $Arguments[([Array]::IndexOf($Arguments, "-OutputPath") + 1)]
+        $filter = $Arguments[([Array]::IndexOf($Arguments, "-Filter") + 1)]
+        $tests = @($controlledDiscoveryAssembly.Group | ForEach-Object { [ordered]@{ fullyQualifiedName = $_.Fact; id = "20000000-0000-0000-0000-$([Array]::IndexOf($controlledDiscoveryAssembly.Group, $_).ToString('000000000000'))"; xunitTestCaseUniqueId = "controlled-$($_.Fact)" } })
+        Write-TestJson -Path $outputPath -Value ([ordered]@{ schemaVersion = 1; source = [IO.Path]::GetFullPath($controlledDiscoveryAssembly.TestAssemblyPath); filter = $filter; totalTests = $tests.Count; tests = $tests })
+        Write-Output "VERIFY_PHASE_START name=$Name"
+        Write-Output "VERIFY_PHASE_COMPLETE name=$Name"
+    }
+    $controlledDiscoveryInformationPath = Join-Path $controlledDiscoveryRoot "phase-information.log"
+    $controlledDiscoveryStopwatch = [Diagnostics.Stopwatch]::StartNew()
+    $controlledDiscoveryRecords = @(Invoke-MacOSPlatformContractDiscovery -Assembly $controlledDiscoveryAssembly -Stopwatch $controlledDiscoveryStopwatch -DiscoveryRoot $controlledDiscoveryRoot 6> $controlledDiscoveryInformationPath)
+    $controlledDiscoveryInformation = Get-Content -LiteralPath $controlledDiscoveryInformationPath -Raw
+    Assert-True -Condition ($controlledDiscoveryRecords.Count -eq $controlledDiscoveryAssembly.Group.Count -and @($controlledDiscoveryRecords | Where-Object { $_ -is [pscustomobject] }).Count -eq $controlledDiscoveryAssembly.Group.Count) -Message "Discovery must return only shaped provenance records."
+    Assert-True -Condition ($controlledDiscoveryInformation.Contains("VERIFY_PHASE_START name=discover-macos-$($controlledDiscoveryAssembly.Assembly)") -and $controlledDiscoveryInformation.Contains("VERIFY_PHASE_COMPLETE name=discover-macos-$($controlledDiscoveryAssembly.Assembly)")) -Message "Discovery phase markers must remain visible outside the record return stream."
     $productionNestedLane = Get-Content -LiteralPath (Join-Path $nestedRoot "VerificationResults/required-test-lanes.json") -Raw | ConvertFrom-Json
     $productionNestedCoverage = Get-Content -LiteralPath (Join-Path $nestedRoot "VerificationResults/coverage-manifest.json") -Raw | ConvertFrom-Json
     Assert-True -Condition ($productionNestedLane.lanes[0].name -ceq "EmbodySense.Core.Startup.Tests-nested-process") -Message "Inventory lane identity must match the canonical verifier producer."
@@ -341,6 +360,7 @@ try {
         [pscustomobject]@{ Name = "wrong method provenance"; Mutate = { param($path) $original = Get-Content -LiteralPath $path -Raw; $pattern = [regex]::new('(<TestMethod\b[^>]*\bname=")[^"]+'); $updated = $pattern.Replace($original, '${1}WrongMethod', 1); Assert-True -Condition ($updated -cne $original -and @([regex]::Matches($updated, '<TestMethod\b[^>]*\bname="WrongMethod"')).Count -eq 1) -Message "Method provenance mutation must replace exactly one TestMethod name."; [IO.File]::WriteAllText($path, $updated, [Text.UTF8Encoding]::new($false)) } },
         [pscustomobject]@{ Name = "missing definition"; Mutate = { param($path) $original = Get-Content -LiteralPath $path -Raw; $pattern = [regex]::new('<UnitTest .*?</UnitTest>'); [IO.File]::WriteAllText($path, $pattern.Replace($original, '', 1), [Text.UTF8Encoding]::new($false)) } },
         [pscustomobject]@{ Name = "counter mismatch"; Mutate = { param($path) $original = Get-Content -LiteralPath $path -Raw; $pattern = [regex]::new('(<Counters\b[^>]*\bpassed=")(\d+)'); $matches = @($pattern.Matches($original)); Assert-True -Condition ($matches.Count -eq 1) -Message "Counter mismatch mutation requires one Counters passed attribute."; $evaluator = [Text.RegularExpressions.MatchEvaluator]{ param($match) $match.Groups[1].Value + ([int]$match.Groups[2].Value + 1).ToString([Globalization.CultureInfo]::InvariantCulture) }; $updated = $pattern.Replace($original, $evaluator, 1); Assert-True -Condition ($updated -cne $original) -Message "Counter mismatch mutation must replace exactly one Counters passed value."; [IO.File]::WriteAllText($path, $updated, [Text.UTF8Encoding]::new($false)) } },
+        [pscustomobject]@{ Name = "nonzero completed counter"; Mutate = { param($path) [IO.File]::WriteAllText($path, (Get-Content -LiteralPath $path -Raw).Replace('completed="0"', 'completed="1"'), [Text.UTF8Encoding]::new($false)) } },
         [pscustomobject]@{ Name = "aborted summary"; Mutate = { param($path) [IO.File]::WriteAllText($path, (Get-Content -LiteralPath $path -Raw).Replace('ResultSummary outcome="Completed"', 'ResultSummary outcome="Aborted"'), [Text.UTF8Encoding]::new($false)) } },
         [pscustomobject]@{ Name = "nonzero failure counter"; Mutate = { param($path) [IO.File]::WriteAllText($path, (Get-Content -LiteralPath $path -Raw).Replace('failed="0"', 'failed="1"'), [Text.UTF8Encoding]::new($false)) } }
     )) {
