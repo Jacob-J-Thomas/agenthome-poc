@@ -3318,23 +3318,29 @@ public sealed partial class BrowserFlowTests
                 return await completion.Task.ConfigureAwait(false);
             }
 
+            using var terminalCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _readerFailureState.TerminalCancellationToken);
             try
             {
-                var sendTask = SendPayloadAsync(bytes);
+                var sendTask = SendPayloadAsync(bytes, _readerFailureState.TerminalCancellationToken);
                 _pendingSends[commandId] = sendTask;
                 _ = ObserveSendCompletionAsync(commandId, sendTask);
-                await sendTask.WaitAsync(cancellationToken);
+                await sendTask.WaitAsync(terminalCancellation.Token);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                _readerFailureState.Remove(_pendingCommands, _pendingResponseHandlers, commandId);
+                throw;
             }
             catch (OperationCanceledException)
             {
                 _readerFailureState.Remove(_pendingCommands, _pendingResponseHandlers, commandId);
-                _readerFailureState.ThrowIfTerminal();
+                _readerFailureState.ThrowIfCancellationOrTerminal(cancellationToken);
                 throw;
             }
             catch (Exception exception) when (exception is WebSocketException or IOException or InvalidOperationException or ObjectDisposedException)
             {
                 _readerFailureState.Remove(_pendingCommands, _pendingResponseHandlers, commandId);
-                _readerFailureState.ThrowIfTerminal();
+                _readerFailureState.ThrowIfCancellationOrTerminal(cancellationToken);
                 throw new InvalidOperationException("Browser DevTools command send failed." + Environment.NewLine + FormatOutput(), exception);
             }
 
@@ -3347,18 +3353,18 @@ public sealed partial class BrowserFlowTests
             catch
             {
                 _readerFailureState.Remove(_pendingCommands, _pendingResponseHandlers, commandId);
-                _readerFailureState.ThrowIfTerminal();
+                _readerFailureState.ThrowIfCancellationOrTerminal(cancellationToken);
                 throw;
             }
         }
 
-        private async Task SendPayloadAsync(byte[] bytes)
+        private async Task SendPayloadAsync(byte[] bytes, CancellationToken cancellationToken)
         {
-            await _sendGate.WaitAsync(CancellationToken.None);
+            await _sendGate.WaitAsync(cancellationToken);
             try
             {
-                ThrowIfReaderFailed();
-                await _socket.SendAsync(bytes, WebSocketMessageType.Text, endOfMessage: true, CancellationToken.None);
+                ThrowIfReaderFailed(cancellationToken);
+                await _socket.SendAsync(bytes, WebSocketMessageType.Text, endOfMessage: true, cancellationToken);
             }
             finally
             {
@@ -3657,12 +3663,9 @@ public sealed partial class BrowserFlowTests
             }
         }
 
-        private void ThrowIfReaderFailed()
+        private void ThrowIfReaderFailed(CancellationToken cancellationToken)
         {
-            if (_readerFailureState.TerminalFailure is { } terminalFailure)
-            {
-                throw terminalFailure;
-            }
+            _readerFailureState.ThrowIfCancellationOrTerminal(cancellationToken);
         }
 
         private static string FormatOutput(BoundedProcessOutput output, BoundedProcessOutput error)

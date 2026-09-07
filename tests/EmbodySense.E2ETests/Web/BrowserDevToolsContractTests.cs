@@ -179,10 +179,16 @@ public sealed class BrowserDevToolsContractTests
         var registered = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
         Assert.True(readerFailure.TryRegister(pending, handlers, 1, registered, _ => throw new InvalidOperationException("callback should have been removed")));
         var failure = new BrowserDevToolsException("malformed-envelope", "unknown", null, "response-id-missing");
+        var blockedSend = Task.Delay(Timeout.InfiniteTimeSpan, readerFailure.TerminalCancellationToken);
 
         Assert.Same(failure, readerFailure.TransitionToTerminal(pending, handlers, failure));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => blockedSend);
         var terminalBeforeSendFailure = Assert.Throws<BrowserDevToolsException>(() => readerFailure.ThrowIfTerminal());
         Assert.Same(failure, terminalBeforeSendFailure);
+        using var callerCancellation = new CancellationTokenSource();
+        callerCancellation.Cancel();
+        Assert.Throws<OperationCanceledException>(() => readerFailure.ThrowIfCancellationOrTerminal(callerCancellation.Token));
+        Assert.True(BrowserDevToolsReaderFailure.IsCleanupException(failure));
         var observedRegistered = await Assert.ThrowsAsync<BrowserDevToolsException>(() => registered.Task);
         Assert.Same(failure, observedRegistered);
 

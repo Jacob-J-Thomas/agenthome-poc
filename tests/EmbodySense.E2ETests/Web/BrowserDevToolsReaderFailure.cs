@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Net.WebSockets;
 using System.Text.Json;
 
 namespace EmbodySense.E2ETests.Web;
@@ -6,7 +7,10 @@ namespace EmbodySense.E2ETests.Web;
 internal sealed class BrowserDevToolsReaderFailure
 {
     private readonly object _gate = new();
+    private readonly CancellationTokenSource _terminalCancellation = new();
     private Exception? _terminalFailure;
+
+    public CancellationToken TerminalCancellationToken => _terminalCancellation.Token;
 
     public Exception? TerminalFailure
     {
@@ -25,6 +29,17 @@ internal sealed class BrowserDevToolsReaderFailure
         {
             throw terminalFailure;
         }
+    }
+
+    public void ThrowIfCancellationOrTerminal(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ThrowIfTerminal();
+    }
+
+    public static bool IsCleanupException(Exception exception)
+    {
+        return exception is BrowserDevToolsException or OperationCanceledException or WebSocketException or IOException or InvalidOperationException or ObjectDisposedException;
     }
 
     public bool TryRegister(ConcurrentDictionary<int, TaskCompletionSource<JsonElement>> pendingCommands, PendingBrowserCommandResponses? responseHandlers, int commandId, TaskCompletionSource<JsonElement> completion, Action<JsonElement>? responseHandler)
@@ -93,9 +108,16 @@ internal sealed class BrowserDevToolsReaderFailure
 
     public Exception TransitionToTerminal(ConcurrentDictionary<int, TaskCompletionSource<JsonElement>> pendingCommands, PendingBrowserCommandResponses? responseHandlers, Exception failure)
     {
+        Exception terminalFailure;
+        var cancelTerminalSignal = false;
         lock (_gate)
         {
-            _terminalFailure ??= failure;
+            if (_terminalFailure is null)
+            {
+                _terminalFailure = failure;
+                cancelTerminalSignal = true;
+            }
+
             foreach (var pending in pendingCommands.ToArray())
             {
                 if (pendingCommands.TryRemove(pending.Key, out var completion))
@@ -105,7 +127,14 @@ internal sealed class BrowserDevToolsReaderFailure
                 }
             }
 
-            return _terminalFailure;
+            terminalFailure = _terminalFailure;
         }
+
+        if (cancelTerminalSignal)
+        {
+            _terminalCancellation.Cancel();
+        }
+
+        return terminalFailure;
     }
 }

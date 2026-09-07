@@ -134,7 +134,7 @@ internal sealed class HeadlessBrowserTab : IAsyncDisposable
                 {
                     _ = await SendCommandAsync("Page.close", cancellationToken: timeout.Token).ConfigureAwait(false);
                 }
-                catch (Exception exception) when (exception is OperationCanceledException or WebSocketException or IOException or InvalidOperationException or ObjectDisposedException)
+                catch (Exception exception) when (BrowserDevToolsReaderFailure.IsCleanupException(exception))
                 {
                 }
 
@@ -183,6 +183,8 @@ internal sealed class HeadlessBrowserTab : IAsyncDisposable
             ? null
             : new CancellationTokenSource(TimeSpan.FromSeconds(30));
         var effectiveCancellationToken = commandTimeout?.Token ?? cancellationToken;
+        using var terminalCancellation = CancellationTokenSource.CreateLinkedTokenSource(effectiveCancellationToken, _readerFailureState.TerminalCancellationToken);
+        var sendCancellationToken = terminalCancellation.Token;
         var commandId = Interlocked.Increment(ref _nextCommandId);
         var payload = parameters is null
             ? JsonSerializer.Serialize(new { id = commandId, method }, _jsonOptions)
@@ -195,7 +197,7 @@ internal sealed class HeadlessBrowserTab : IAsyncDisposable
 
         try
         {
-            await _sendGate.WaitAsync(effectiveCancellationToken).ConfigureAwait(false);
+            await _sendGate.WaitAsync(sendCancellationToken).ConfigureAwait(false);
             try
             {
                 if (_readerFailureState.TerminalFailure is { } terminalFailure)
@@ -203,21 +205,26 @@ internal sealed class HeadlessBrowserTab : IAsyncDisposable
                     throw terminalFailure;
                 }
 
-                await _socket.SendAsync(Encoding.UTF8.GetBytes(payload), WebSocketMessageType.Text, true, effectiveCancellationToken).ConfigureAwait(false);
+                await _socket.SendAsync(Encoding.UTF8.GetBytes(payload), WebSocketMessageType.Text, true, sendCancellationToken).ConfigureAwait(false);
             }
             finally
             {
                 _sendGate.Release();
             }
 
-            var response = await completion.Task.WaitAsync(effectiveCancellationToken).ConfigureAwait(false);
+            var response = await completion.Task.WaitAsync(sendCancellationToken).ConfigureAwait(false);
             BrowserDevToolsResponse.Validate(method, response);
             return response;
+        }
+        catch (OperationCanceledException) when (effectiveCancellationToken.IsCancellationRequested)
+        {
+            _readerFailureState.Remove(_pendingCommands, null, commandId);
+            throw;
         }
         catch
         {
             _readerFailureState.Remove(_pendingCommands, null, commandId);
-            _readerFailureState.ThrowIfTerminal();
+            _readerFailureState.ThrowIfCancellationOrTerminal(effectiveCancellationToken);
             throw;
         }
     }
