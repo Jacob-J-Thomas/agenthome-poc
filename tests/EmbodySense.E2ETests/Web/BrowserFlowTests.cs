@@ -652,6 +652,56 @@ public sealed partial class BrowserFlowTests
         Assert.Equal("declaredReadOnlyGetTargets=16", cappedTracker.ReadQualifiedReadOnlyRefusalEvidenceSummary()[0]);
     }
 
+    [Fact]
+    public void Restart_request_provenance_summary_accepts_zero_refusals_and_both_event_orders()
+    {
+        const string Target = "/api/loop-runs?maximumCount=50";
+        const string RequestUrl = "https://127.0.0.1:5001/api/loop-runs?maximumCount=50";
+        var lifecycleTracker = new ExpectedServerRestartRequestTracker("127.0.0.1:5001");
+        lifecycleTracker.DeclareReadOnlyGetTargets([Target]);
+        lifecycleTracker.PrepareExpectedServerRestart();
+        lifecycleTracker.FreezeExpectedServerRestart();
+        lifecycleTracker.MarkExpectedReplacementServerStarting();
+        lifecycleTracker.EndExpectedServerRestart();
+        var lifecycleSummary = lifecycleTracker.ReadQualifiedReadOnlyRefusalEvidenceSummary();
+        AssertExpectedRestartProvenanceSummary(lifecycleSummary, [Target]);
+        Assert.DoesNotContain(lifecycleSummary, entry => entry.StartsWith("requestId=", StringComparison.Ordinal));
+
+        var mixedTracker = new ExpectedServerRestartRequestTracker("127.0.0.1:5001");
+        mixedTracker.DeclareReadOnlyGetTargets([Target]);
+        mixedTracker.Track("failure-before-log", RequestUrl, "GET");
+        mixedTracker.Track("log-before-failure", RequestUrl, "GET");
+        mixedTracker.BeginExpectedServerRestart();
+        Assert.True(mixedTracker.ProcessLoadingFailed("failure-before-log", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+        Assert.True(mixedTracker.IsExpectedServerRestartLogEntry("failure-before-log", "network", "Failed to load resource: net::ERR_CONNECTION_REFUSED", null));
+        Assert.True(mixedTracker.IsExpectedServerRestartLogEntry("log-before-failure", "network", "Failed to load resource: net::ERR_CONNECTION_REFUSED", RequestUrl));
+        Assert.True(mixedTracker.ProcessLoadingFailed("log-before-failure", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+        mixedTracker.EndExpectedServerRestart();
+        var mixedSummary = mixedTracker.ReadQualifiedReadOnlyRefusalEvidenceSummary();
+        AssertExpectedRestartProvenanceSummary(mixedSummary, [Target]);
+        Assert.Equal(2, mixedSummary.Count(entry => entry.StartsWith("requestId=", StringComparison.Ordinal)));
+        Assert.Contains(mixedSummary, entry => entry.Contains("rejectionReason=accepted-at-freeze", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Restart_request_provenance_summary_rejects_malformed_unknown_wrong_method_and_undeclared_rows()
+    {
+        const string Target = "/api/loop-runs?maximumCount=50";
+        var invalidRows = new[]
+        {
+            "requestId=missing-fields; generation=1; method=GET",
+            "unexpected=row",
+            "requestId=wrong-method; generation=1; method=POST; target=/api/loop-runs?maximumCount=50",
+            "requestId=wrong-target; generation=1; method=GET; target=/api/loop-runs/quota",
+            "provenanceTrace sequence=1; phase=2; generation=1; requestId=bad; declaredTargetIndex=0; methodPresent=True; method=GET; cachedMatch=False; currentMatch=True; frozenSnapshot=True; active=True; rejectionReason=unknown"
+        };
+
+        foreach (var invalidRow in invalidRows)
+        {
+            Assert.False(TryValidateExpectedRestartProvenanceSummary(["declaredReadOnlyGetTargets=1", invalidRow], [Target], out _), invalidRow);
+        }
+    }
+
     [InstalledBrowserFact]
     public async Task Default_chat_recovers_in_place_after_process_restart_and_preserves_unsaved_draft()
     {
@@ -681,7 +731,8 @@ public sealed partial class BrowserFlowTests
             await ClickAsync(browser, "#chatNav");
 
             app.AssertHealthy();
-            browser.DeclareReadOnlyGetTargets(["/api/loop-runs?maximumCount=50", "/api/loop-runs?maximumCount=50&loopId=default-conversation", "/api/loop-runs/quota", "/api/loop-operations/posture?maximumQueueEntries=50&maximumSchedules=50&maximumWakes=50&maximumRuns=50"]);
+            string[] expectedRestartReadOnlyGetTargets = ["/api/loop-runs?maximumCount=50", "/api/loop-runs?maximumCount=50&loopId=default-conversation", "/api/loop-runs/quota", "/api/loop-operations/posture?maximumQueueEntries=50&maximumSchedules=50&maximumWakes=50&maximumRuns=50"];
+            browser.DeclareReadOnlyGetTargets(expectedRestartReadOnlyGetTargets);
             await browser.BeginExpectedServerRestartAsync();
             await app.DisposeAsync();
             app = null;
@@ -699,8 +750,7 @@ public sealed partial class BrowserFlowTests
             Directory.CreateDirectory(restartProvenanceDirectory);
             var restartProvenancePath = Path.Combine(restartProvenanceDirectory, "expected-restart-qualified-refusals.txt");
             var restartProvenance = await browser.WriteExpectedRestartProvenanceAsync(restartProvenancePath);
-            Assert.Equal("declaredReadOnlyGetTargets=4", restartProvenance[0]);
-            Assert.All(restartProvenance.Skip(1), evidence => Assert.Contains("; method=GET; target=/api/", evidence, StringComparison.Ordinal));
+            AssertExpectedRestartProvenanceSummary(restartProvenance, expectedRestartReadOnlyGetTargets);
             Assert.Equal(restartProvenance, await File.ReadAllLinesAsync(restartProvenancePath));
             await browser.WaitForExpressionAsync("document.getElementById('transcript').textContent.includes('browser-first-turn') && document.getElementById('transcript').textContent.includes('browser response: browser-first-turn')");
             Assert.Equal(1, await browser.EvaluateInt32Async("Array.from(document.querySelectorAll('#transcript .message.user')).filter(message => message.textContent.includes('browser-first-turn')).length"));
@@ -1764,6 +1814,215 @@ public sealed partial class BrowserFlowTests
             await WriteFailureDiagnosticsAsync(nameof(Incompatible_runtime_is_visible_and_restores_chat_controls_after_rejection), browser, app);
             throw;
         }
+    }
+
+    private static void AssertExpectedRestartProvenanceSummary(IReadOnlyList<string> summary, IReadOnlyList<string> declaredTargets)
+    {
+        Assert.True(TryValidateExpectedRestartProvenanceSummary(summary, declaredTargets, out var failure), failure);
+    }
+
+    private static bool TryValidateExpectedRestartProvenanceSummary(IReadOnlyList<string> summary, IReadOnlyList<string> declaredTargets, out string failure)
+    {
+        if (summary.Count == 0)
+        {
+            return FailExpectedRestartProvenanceValidation("The expected-restart provenance summary is empty.", out failure);
+        }
+
+        if (declaredTargets.Distinct(StringComparer.Ordinal).Count() != declaredTargets.Count)
+        {
+            return FailExpectedRestartProvenanceValidation("The expected declared-target contract contains duplicates.", out failure);
+        }
+
+        var expectedHeader = "declaredReadOnlyGetTargets=" + declaredTargets.Count;
+        if (!string.Equals(summary[0], expectedHeader, StringComparison.Ordinal))
+        {
+            return FailExpectedRestartProvenanceValidation($"Expected provenance header '{expectedHeader}', but found '{summary[0]}'.", out failure);
+        }
+
+        long traceSequence = 0;
+        var traceStarted = false;
+        var traceTruncated = false;
+        for (var index = 1; index < summary.Count; index++)
+        {
+            var row = summary[index];
+            if (row.Contains('\r') || row.Contains('\n'))
+            {
+                return FailExpectedRestartProvenanceValidation($"Provenance row {index} contains a line break.", out failure);
+            }
+
+            if (row.StartsWith("requestId=", StringComparison.Ordinal))
+            {
+                if (traceStarted)
+                {
+                    return FailExpectedRestartProvenanceValidation($"Qualified refusal row {index} appears after the bounded trace.", out failure);
+                }
+
+                if (!TryValidateQualifiedRestartRefusal(row, declaredTargets, out failure))
+                {
+                    return false;
+                }
+
+                continue;
+            }
+
+            traceStarted = true;
+            if (string.Equals(row, "provenanceTrace=truncated", StringComparison.Ordinal))
+            {
+                if (traceTruncated || traceSequence != 128 || index != summary.Count - 1)
+                {
+                    return FailExpectedRestartProvenanceValidation("The bounded provenance trace has a misplaced or duplicate truncation marker.", out failure);
+                }
+
+                traceTruncated = true;
+                continue;
+            }
+
+            if (!TryValidateExpectedRestartTrace(row, declaredTargets.Count, ref traceSequence, out failure))
+            {
+                return false;
+            }
+        }
+
+        failure = string.Empty;
+        return true;
+    }
+
+    private static bool TryValidateQualifiedRestartRefusal(string row, IReadOnlyList<string> declaredTargets, out string failure)
+    {
+        if (!TryReadExpectedRestartFields(row, ["requestId", "generation", "method", "target"], out var fields)
+            || string.IsNullOrEmpty(fields[0])
+            || !long.TryParse(fields[1], NumberStyles.None, CultureInfo.InvariantCulture, out var generation)
+            || generation <= 0)
+        {
+            return FailExpectedRestartProvenanceValidation("A qualified refusal row is malformed.", out failure);
+        }
+
+        if (!string.Equals(fields[2], "GET", StringComparison.Ordinal))
+        {
+            return FailExpectedRestartProvenanceValidation("A qualified refusal row does not prove the exact GET method.", out failure);
+        }
+
+        if (!declaredTargets.Contains(fields[3], StringComparer.Ordinal))
+        {
+            return FailExpectedRestartProvenanceValidation("A qualified refusal row names an undeclared target.", out failure);
+        }
+
+        failure = string.Empty;
+        return true;
+    }
+
+    private static bool TryValidateExpectedRestartTrace(string row, int declaredTargetCount, ref long traceSequence, out string failure)
+    {
+        string[] expectedFields = ["provenanceTrace sequence", "phase", "generation", "requestId", "declaredTargetIndex", "methodPresent", "method", "cachedMatch", "currentMatch", "frozenSnapshot", "active", "rejectionReason"];
+        if (!TryReadExpectedRestartFields(row, expectedFields, out var fields)
+            || !long.TryParse(fields[0], NumberStyles.None, CultureInfo.InvariantCulture, out var sequence)
+            || sequence != traceSequence + 1
+            || !int.TryParse(fields[1], NumberStyles.None, CultureInfo.InvariantCulture, out var phase)
+            || phase is < 0 or > 3
+            || !long.TryParse(fields[2], NumberStyles.None, CultureInfo.InvariantCulture, out var generation)
+            || generation < 0
+            || string.IsNullOrEmpty(fields[3])
+            || fields[3].Length > 96
+            || !int.TryParse(fields[4], NumberStyles.Integer, CultureInfo.InvariantCulture, out var declaredTargetIndex)
+            || declaredTargetIndex < -1
+            || declaredTargetIndex >= declaredTargetCount
+            || !TryParseExpectedRestartBoolean(fields[5], out var methodPresent)
+            || fields[6] is not ("missing" or "GET" or "other")
+            || methodPresent == string.Equals(fields[6], "missing", StringComparison.Ordinal)
+            || !TryParseExpectedRestartBoolean(fields[7], out var cachedMatch)
+            || !TryParseExpectedRestartBoolean(fields[8], out var currentMatch)
+            || !TryParseExpectedRestartBoolean(fields[9], out var frozenSnapshot)
+            || !TryParseExpectedRestartBoolean(fields[10], out _)
+            || currentMatch != (declaredTargetIndex >= 0)
+            || !IsExpectedRestartTraceReason(fields[11]))
+        {
+            return FailExpectedRestartProvenanceValidation("A bounded provenance trace row is malformed or violates its declared-target contract.", out failure);
+        }
+
+        var lifecycle = fields[11].StartsWith("lifecycle-", StringComparison.Ordinal);
+        if (lifecycle && (!string.Equals(fields[3], "none", StringComparison.Ordinal) || declaredTargetIndex != -1 || methodPresent || cachedMatch || currentMatch || frozenSnapshot))
+        {
+            return FailExpectedRestartProvenanceValidation("A lifecycle trace row contains request-specific provenance.", out failure);
+        }
+
+        if (string.Equals(fields[11], "accepted-at-freeze", StringComparison.Ordinal)
+            && (!string.Equals(fields[6], "GET", StringComparison.Ordinal) || !currentMatch || !frozenSnapshot))
+        {
+            return FailExpectedRestartProvenanceValidation("An accepted-at-freeze row lacks exact frozen GET provenance.", out failure);
+        }
+
+        traceSequence = sequence;
+        failure = string.Empty;
+        return true;
+    }
+
+    private static bool TryReadExpectedRestartFields(string row, IReadOnlyList<string> expectedNames, out string[] values)
+    {
+        var parts = row.Split("; ", StringSplitOptions.None);
+        values = new string[expectedNames.Count];
+        if (parts.Length != expectedNames.Count)
+        {
+            return false;
+        }
+
+        for (var index = 0; index < expectedNames.Count; index++)
+        {
+            var prefix = expectedNames[index] + "=";
+            if (!parts[index].StartsWith(prefix, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            values[index] = parts[index][prefix.Length..];
+        }
+
+        return true;
+    }
+
+    private static bool TryParseExpectedRestartBoolean(string value, out bool result)
+    {
+        if (string.Equals(value, bool.TrueString, StringComparison.Ordinal))
+        {
+            result = true;
+            return true;
+        }
+
+        if (string.Equals(value, bool.FalseString, StringComparison.Ordinal))
+        {
+            result = false;
+            return true;
+        }
+
+        result = false;
+        return false;
+    }
+
+    private static bool IsExpectedRestartTraceReason(string value)
+    {
+        return value is "tracked"
+            or "replacement-start"
+            or "completed"
+            or "accepted-at-freeze"
+            or "not-declared-at-freeze"
+            or "missing-method"
+            or "method-not-get"
+            or "declaration-added"
+            or "declaration-updated"
+            or "declaration-removed"
+            or "post-freeze-declaration-added"
+            or "post-freeze-declaration-unchanged"
+            or "post-freeze-declaration-removed"
+            or "lifecycle-prepare"
+            or "lifecycle-successful-freeze-active"
+            or "lifecycle-replacement-start"
+            or "lifecycle-end"
+            or "lifecycle-abort";
+    }
+
+    private static bool FailExpectedRestartProvenanceValidation(string message, out string failure)
+    {
+        failure = message;
+        return false;
     }
 
     private static int GetFreePort()

@@ -100,7 +100,7 @@ internal sealed class ExpectedServerRestartRequestTracker
                 {
                     var declaredTargetIndex = GetDeclaredTargetIndex(request.Value);
                     var currentMatch = declaredTargetIndex >= 0;
-                    var isGet = IsGetMethod(provenance.Method);
+                    var isGet = HasExactGetVerb(provenance.Method);
                     if (provenance.IsDeclaredReadOnlyGetTarget || currentMatch)
                     {
                         RecordProvenanceTrace(request.Key, declaredTargetIndex, provenance.Method, provenance.IsDeclaredReadOnlyGetTarget, currentMatch, frozenSnapshot: true, active: false, currentMatch ? isGet ? "accepted-at-freeze" : GetMethodRejectionReason(provenance.Method) : "not-declared-at-freeze");
@@ -178,7 +178,7 @@ internal sealed class ExpectedServerRestartRequestTracker
 
             var expectedServerRestart = Volatile.Read(ref _expectedServerRestart);
             var declaredTargetIndex = GetDeclaredTargetIndex(url);
-            var declaredReadOnlyGetTarget = declaredTargetIndex >= 0 && IsGetMethod(method);
+            var declaredReadOnlyGetTarget = declaredTargetIndex >= 0 && HasExactGetVerb(method);
             _requestUrls[requestId] = url;
             _terminalCorrelations.Remove(requestId);
             _requestProvenance[requestId] = new RestartRequestProvenance(
@@ -485,7 +485,7 @@ internal sealed class ExpectedServerRestartRequestTracker
         return _declaredReadOnlyGetTargets.FindIndex(target => string.Equals(target, uri.PathAndQuery, StringComparison.Ordinal));
     }
 
-    private static bool IsGetMethod(string? method)
+    private static bool HasExactGetVerb(string? method)
     {
         return string.Equals(method, "GET", StringComparison.Ordinal);
     }
@@ -535,10 +535,10 @@ internal sealed class ExpectedServerRestartRequestTracker
 
         if (!provenance.IsDeclaredReadOnlyGetTarget && currentMatch)
         {
-            return provenance.LiveAtSuccessfulFreeze ? "post-freeze-declaration-added" : IsGetMethod(provenance.Method) ? "declaration-added" : GetMethodRejectionReason(provenance.Method);
+            return provenance.LiveAtSuccessfulFreeze ? "post-freeze-declaration-added" : HasExactGetVerb(provenance.Method) ? "declaration-added" : GetMethodRejectionReason(provenance.Method);
         }
 
-        return provenance.LiveAtSuccessfulFreeze ? "post-freeze-declaration-unchanged" : IsGetMethod(provenance.Method) ? "declaration-updated" : GetMethodRejectionReason(provenance.Method);
+        return provenance.LiveAtSuccessfulFreeze ? "post-freeze-declaration-unchanged" : HasExactGetVerb(provenance.Method) ? "declaration-updated" : GetMethodRejectionReason(provenance.Method);
     }
 
     private void RecordProvenanceTrace(string requestId, int declaredTargetIndex, string? method, bool cachedMatch, bool currentMatch, bool frozenSnapshot, bool active, string rejectionReason)
@@ -566,7 +566,7 @@ internal sealed class ExpectedServerRestartRequestTracker
 
     private static string NormalizeTraceMethod(string? method)
     {
-        return method is null ? "missing" : IsGetMethod(method) ? "GET" : "other";
+        return method is null ? "missing" : HasExactGetVerb(method) ? "GET" : "other";
     }
 
     private bool IsExactQualifiedReadOnlyGetRoute(string? suppliedUrl, string? correlatedRequestUrl)
