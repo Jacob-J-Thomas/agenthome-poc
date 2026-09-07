@@ -234,14 +234,14 @@ internal sealed class HeadlessBrowserTab : IAsyncDisposable
             {
                 using var document = await ReadMessageAsync().ConfigureAwait(false);
                 var root = document.RootElement;
-                if (root.TryGetProperty("id", out var id) && id.TryGetInt32(out var commandId)
+                if (BrowserDevToolsEnvelope.TryReadCommandId(root, out var commandId)
                     && _pendingCommands.TryRemove(commandId, out var completion))
                 {
                     completion.TrySetResult(root.Clone());
                 }
             }
         }
-        catch (Exception exception) when (exception is WebSocketException or IOException or InvalidOperationException or ObjectDisposedException)
+        catch (Exception exception) when (exception is WebSocketException or IOException or InvalidOperationException or JsonException or ObjectDisposedException)
         {
             failure = exception;
             if (Volatile.Read(ref _disposed) == 0)
@@ -278,7 +278,7 @@ internal sealed class HeadlessBrowserTab : IAsyncDisposable
         }
         while (!result.EndOfMessage);
 
-        return JsonDocument.Parse(builder.ToString());
+        return BrowserDevToolsEnvelope.Parse(builder.ToString());
     }
 
     private static async Task CloseTargetAsync(int debugPort, string targetId)

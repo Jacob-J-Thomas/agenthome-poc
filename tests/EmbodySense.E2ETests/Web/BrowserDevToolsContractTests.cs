@@ -50,11 +50,15 @@ public sealed class BrowserDevToolsContractTests
     {
         using var validBoolean = JsonDocument.Parse("{\"result\":{\"result\":{\"type\":\"boolean\",\"value\":true}}}");
         using var undefinedAction = JsonDocument.Parse("{\"result\":{\"result\":{\"type\":\"undefined\"}}}");
+        using var functionAction = JsonDocument.Parse("{\"result\":{\"result\":{\"type\":\"function\"}}}");
+        using var symbolAction = JsonDocument.Parse("{\"result\":{\"result\":{\"type\":\"symbol\"}}}");
         using var malformedBoolean = JsonDocument.Parse("{\"result\":{\"result\":{\"type\":\"boolean\",\"value\":\"true\"}}}");
         using var malformedUndefined = JsonDocument.Parse("{\"result\":{\"result\":{\"type\":\"undefined\",\"value\":true}}}");
 
         Assert.Equal(JsonValueKind.True, BrowserDevToolsResponse.ReadRuntimeEvaluationValue(validBoolean.RootElement).ValueKind);
         Assert.Equal(JsonValueKind.Undefined, BrowserDevToolsResponse.ReadRuntimeEvaluationValue(undefinedAction.RootElement).ValueKind);
+        Assert.Equal(JsonValueKind.Undefined, BrowserDevToolsResponse.ReadRuntimeEvaluationValue(functionAction.RootElement).ValueKind);
+        Assert.Equal(JsonValueKind.Undefined, BrowserDevToolsResponse.ReadRuntimeEvaluationValue(symbolAction.RootElement).ValueKind);
         Assert.Throws<BrowserDevToolsException>(() => BrowserDevToolsResponse.ReadRuntimeEvaluationValue(malformedBoolean.RootElement));
         Assert.Throws<BrowserDevToolsException>(() => BrowserDevToolsResponse.ReadRuntimeEvaluationValue(malformedUndefined.RootElement));
     }
@@ -110,6 +114,29 @@ public sealed class BrowserDevToolsContractTests
         handlers.Remove(4);
         Assert.Equal(0, handlers.Count);
         Assert.Equal(1, callbackCount);
+    }
+
+    [Fact]
+    public void Browser_devtools_envelopes_require_integral_response_ids_and_restart_callbacks_respect_abort_generation()
+    {
+        using var staleResponse = JsonDocument.Parse("{\"id\":99,\"result\":{}}");
+        using var missingResponseId = JsonDocument.Parse("{\"result\":{}}");
+        using var fractionalResponseId = JsonDocument.Parse("{\"id\":1.5,\"result\":{}}");
+        using var eventEnvelope = JsonDocument.Parse("{\"method\":\"Network.loadingFailed\",\"params\":{}}");
+
+        Assert.True(BrowserDevToolsEnvelope.TryReadCommandId(staleResponse.RootElement, out var staleId));
+        Assert.Equal(99, staleId);
+        Assert.False(BrowserDevToolsEnvelope.TryReadCommandId(eventEnvelope.RootElement, out _));
+        Assert.Throws<BrowserDevToolsException>(() => BrowserDevToolsEnvelope.TryReadCommandId(missingResponseId.RootElement, out _));
+        Assert.Throws<BrowserDevToolsException>(() => BrowserDevToolsEnvelope.TryReadCommandId(fractionalResponseId.RootElement, out _));
+        Assert.Throws<JsonException>(() => BrowserDevToolsEnvelope.Parse("{invalid-json"));
+
+        var transitions = new List<string>();
+        var guard = new BrowserRestartBarrierGuard();
+        var generation = guard.Prepare(() => transitions.Add("prepare"));
+        guard.Abort(() => transitions.Add("abort"));
+        guard.RunIfCurrent(generation, () => transitions.Add("freeze"));
+        Assert.Equal(["prepare", "abort"], transitions);
     }
 
     [Fact]

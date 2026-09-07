@@ -2890,6 +2890,7 @@ public sealed partial class BrowserFlowTests
         private readonly byte[] _buffer = new byte[65536];
         private readonly Task _readerTask;
         private readonly ExpectedServerRestartRequestTracker _requestTracker;
+        private readonly BrowserRestartBarrierGuard _restartBarrierGuard = new();
         private Exception? _readerFailure;
         private int _acceptNextJavaScriptDialog;
         private int _nextCommandId;
@@ -3056,16 +3057,16 @@ public sealed partial class BrowserFlowTests
 
         public async Task BeginExpectedServerRestartAsync(CancellationToken cancellationToken = default)
         {
-            _requestTracker.PrepareExpectedServerRestart();
+            var generation = _restartBarrierGuard.Prepare(_requestTracker.PrepareExpectedServerRestart);
             using var barrierTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             barrierTimeout.CancelAfter(TimeSpan.FromSeconds(5));
             try
             {
-                _ = await EvaluateAsync("true", barrierTimeout.Token, responseHandler: FreezeExpectedServerRestartAtBarrierResponse);
+                _ = await EvaluateAsync("true", barrierTimeout.Token, responseHandler: response => FreezeExpectedServerRestartAtBarrierResponse(response, generation));
             }
             catch
             {
-                _requestTracker.AbortExpectedServerRestart();
+                _restartBarrierGuard.Abort(_requestTracker.AbortExpectedServerRestart);
                 throw;
             }
         }
@@ -3082,15 +3083,16 @@ public sealed partial class BrowserFlowTests
 
         public async Task EndExpectedServerRestartAsync(CancellationToken cancellationToken = default)
         {
+            var generation = _restartBarrierGuard.ReadGeneration();
             using var barrierTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             barrierTimeout.CancelAfter(TimeSpan.FromSeconds(5));
             try
             {
-                _ = await EvaluateAsync("true", barrierTimeout.Token, responseHandler: EndExpectedServerRestartAtBarrierResponse);
+                _ = await EvaluateAsync("true", barrierTimeout.Token, responseHandler: response => EndExpectedServerRestartAtBarrierResponse(response, generation));
             }
             catch
             {
-                _requestTracker.AbortExpectedServerRestart();
+                _restartBarrierGuard.Abort(_requestTracker.AbortExpectedServerRestart);
                 throw;
             }
         }
@@ -3274,24 +3276,24 @@ public sealed partial class BrowserFlowTests
             return BrowserDevToolsResponse.ReadRuntimeEvaluationValue(response);
         }
 
-        private void FreezeExpectedServerRestartAtBarrierResponse(JsonElement response)
+        private void FreezeExpectedServerRestartAtBarrierResponse(JsonElement response, long generation)
         {
             if (!BrowserDevToolsResponse.IsTrueRuntimeEvaluation(response))
             {
                 throw new BrowserDevToolsException("invalid-barrier", "Runtime.evaluate", null, "expected-true");
             }
 
-            _requestTracker.FreezeExpectedServerRestart();
+            _restartBarrierGuard.RunIfCurrent(generation, _requestTracker.FreezeExpectedServerRestart);
         }
 
-        private void EndExpectedServerRestartAtBarrierResponse(JsonElement response)
+        private void EndExpectedServerRestartAtBarrierResponse(JsonElement response, long generation)
         {
             if (!BrowserDevToolsResponse.IsTrueRuntimeEvaluation(response))
             {
                 throw new BrowserDevToolsException("invalid-barrier", "Runtime.evaluate", null, "expected-true");
             }
 
-            _requestTracker.EndExpectedServerRestart();
+            _restartBarrierGuard.RunIfCurrent(generation, _requestTracker.EndExpectedServerRestart);
         }
 
         private async Task<JsonElement> SendCommandAsync(string method, object? parameters = null, CancellationToken cancellationToken = default, Action<JsonElement>? responseHandler = null)
@@ -3390,7 +3392,7 @@ public sealed partial class BrowserFlowTests
                 {
                     using var document = await ReadMessageAsync(CancellationToken.None);
                     var root = document.RootElement;
-                    if (root.TryGetProperty("id", out var id) && id.TryGetInt32(out var commandId))
+                    if (BrowserDevToolsEnvelope.TryReadCommandId(root, out var commandId))
                     {
                         if (_pendingCommands.TryRemove(commandId, out var completion))
                         {
@@ -3411,7 +3413,7 @@ public sealed partial class BrowserFlowTests
                     RecordDiagnosticEvent(root);
                 }
             }
-            catch (Exception exception) when (exception is WebSocketException or IOException or InvalidOperationException or ObjectDisposedException)
+            catch (Exception exception) when (exception is WebSocketException or IOException or InvalidOperationException or JsonException or ObjectDisposedException)
             {
                 failure = exception;
                 if (Volatile.Read(ref _disposed) == 0)
@@ -3458,7 +3460,7 @@ public sealed partial class BrowserFlowTests
                 builder.Append(Encoding.UTF8.GetString(_buffer, 0, result.Count));
             } while (!result.EndOfMessage);
 
-            return JsonDocument.Parse(builder.ToString());
+            return BrowserDevToolsEnvelope.Parse(builder.ToString());
         }
 
         private string FormatOutput()

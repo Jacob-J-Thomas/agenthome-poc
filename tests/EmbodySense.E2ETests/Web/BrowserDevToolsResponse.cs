@@ -76,6 +76,12 @@ internal static class BrowserDevToolsResponse
             return default;
         }
 
+        if ((string.Equals(type, "function", StringComparison.Ordinal) || string.Equals(type, "symbol", StringComparison.Ordinal))
+            && !remoteObject.TryGetProperty("value", out _))
+        {
+            return default;
+        }
+
         if (!remoteObject.TryGetProperty("value", out var value) || !IsValidRemoteValue(type, value))
         {
             throw new BrowserDevToolsException("malformed-runtime-result", "Runtime.evaluate", null, "remote-value-invalid");
