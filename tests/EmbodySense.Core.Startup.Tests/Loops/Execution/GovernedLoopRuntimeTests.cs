@@ -4294,6 +4294,10 @@ internal static partial class GovernedLoopRuntimeTests
             {
                 await File.WriteAllTextAsync(commandPath, """
                     @echo off
+                    if "%~1"=="--version" (
+                        echo codex-cli compatible-governed-test
+                        exit /b 0
+                    )
                     node "%~dp0fake-governed-codex.js" %*
                     """);
             }
