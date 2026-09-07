@@ -2303,8 +2303,9 @@ public sealed partial class BrowserFlowTests
     private static async Task SubmitMessageAsync(HeadlessBrowserSession browser, string message)
     {
         var jsonMessage = JsonSerializer.Serialize(message);
+        var priorUserMessageCount = await browser.EvaluateInt32Async("Array.from(document.querySelectorAll('#transcript .message.user')).filter((item) => item.querySelector('.message-content')?.textContent === " + jsonMessage + ").length");
         await browser.EvaluateAsync("(() => { const input = document.getElementById('messageInput'); input.value = " + jsonMessage + "; document.getElementById('messageForm').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); })()");
-        await browser.WaitForExpressionAsync("document.getElementById('messageInput').value === '' && document.getElementById('sendButton').disabled && !document.getElementById('cancelButton').disabled");
+        await browser.WaitForExpressionAsync("Array.from(document.querySelectorAll('#transcript .message.user')).filter((item) => item.querySelector('.message-content')?.textContent === " + jsonMessage + ").length === " + (priorUserMessageCount + 1));
     }
 
     private static async Task AssertChatRequestRegistryEmptyAsync(HeadlessBrowserSession browser)
