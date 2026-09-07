@@ -106,6 +106,10 @@ internal sealed class HeadlessBrowserTab : IAsyncDisposable
             {
                 break;
             }
+            catch (Exception exception) when (BrowserReadOnlyWait.IsExpectedContextTurnover(exception))
+            {
+                lastException = exception;
+            }
             catch (Exception exception) when (exception is InvalidOperationException or WebSocketException or JsonException)
             {
                 lastException = exception;
@@ -202,16 +206,12 @@ internal sealed class HeadlessBrowserTab : IAsyncDisposable
             returnByValue = true,
             userGesture
         }, cancellationToken).ConfigureAwait(false);
-        if (response.TryGetProperty("exceptionDetails", out var exceptionDetails))
-        {
-            throw new InvalidOperationException("Browser tab evaluation failed: " + exceptionDetails.GetRawText());
-        }
+        BrowserDevToolsResponse.Validate("Runtime.evaluate", response);
 
         if (!response.TryGetProperty("result", out var commandResult)
             || !commandResult.TryGetProperty("result", out var remoteObject))
         {
-            var detail = response.TryGetProperty("error", out var error) ? error.GetRawText() : response.GetRawText();
-            throw new InvalidOperationException("Browser tab command failed: " + detail);
+            throw new BrowserDevToolsException("malformed-runtime-result", "Runtime.evaluate", null, "remote-result-missing");
         }
 
         return remoteObject.TryGetProperty("value", out var value) ? value.Clone() : default;
@@ -256,7 +256,9 @@ internal sealed class HeadlessBrowserTab : IAsyncDisposable
                 _sendGate.Release();
             }
 
-            return await completion.Task.WaitAsync(effectiveCancellationToken).ConfigureAwait(false);
+            var response = await completion.Task.WaitAsync(effectiveCancellationToken).ConfigureAwait(false);
+            BrowserDevToolsResponse.Validate(method, response);
+            return response;
         }
         catch
         {

@@ -108,6 +108,40 @@ public sealed partial class BrowserFlowTests
     }
 
     [Fact]
+    public void Browser_devtools_response_rejects_malformed_protocol_and_runtime_exception_envelopes()
+    {
+        using var malformed = JsonDocument.Parse("{}");
+        using var protocolError = JsonDocument.Parse("{\"result\":{},\"error\":{\"code\":-32000,\"message\":\"Cannot find context with specified id\"}}");
+        using var runtimeException = JsonDocument.Parse("{\"result\":{\"exceptionDetails\":{\"text\":\"boom\"}}}");
+        using var valid = JsonDocument.Parse("{\"result\":{}}");
+
+        Assert.Throws<BrowserDevToolsException>(() => BrowserDevToolsResponse.Validate("Runtime.evaluate", malformed.RootElement));
+        var exception = Assert.Throws<BrowserDevToolsException>(() => BrowserDevToolsResponse.Validate("Runtime.evaluate", protocolError.RootElement));
+        Assert.Equal("protocol-error", exception.Category);
+        Assert.Equal(-32000, exception.Code);
+        Assert.Throws<BrowserDevToolsException>(() => BrowserDevToolsResponse.Validate("Runtime.evaluate", runtimeException.RootElement));
+        BrowserDevToolsResponse.Validate("Page.enable", valid.RootElement);
+    }
+
+    [Fact]
+    public async Task Browser_read_only_wait_and_failure_diagnostics_are_narrow_and_best_effort()
+    {
+        var expected = new BrowserDevToolsException("protocol-error", "Runtime.evaluate", -32000, "Cannot find context with specified id");
+        var nearMatch = new BrowserDevToolsException("protocol-error", "Runtime.evaluate", -32000, "Cannot find context with a specified id");
+        Assert.True(BrowserReadOnlyWait.IsExpectedContextTurnover(expected));
+        Assert.False(BrowserReadOnlyWait.IsExpectedContextTurnover(nearMatch));
+        Assert.False(BrowserReadOnlyWait.IsExpectedContextTurnover(new BrowserDevToolsException("protocol-error", "Page.reload", -32000, "Cannot find context with specified id")));
+
+        var invoked = 0;
+        await BrowserFailureDiagnostics.TryWriteAsync(() =>
+        {
+            invoked++;
+            return Task.FromException(new IOException("diagnostic writer unavailable"));
+        });
+        Assert.Equal(1, invoked);
+    }
+
+    [Fact]
     public void Effect_reconciliation_catalog_recovery_requires_the_exact_visible_settled_refresh_state()
     {
         const string Unavailable = EffectReconciliationCatalogRecoveryContract.TemporaryUnavailableMessage;
@@ -2790,25 +2824,29 @@ public sealed partial class BrowserFlowTests
     private static async Task WriteFailureDiagnosticsAsync(string scenario, HeadlessBrowserSession? browser, ExternalWebApplicationProcess? app, string? retiredServerOutput = null, string? profileMutationLifecycle = null)
     {
         var directory = GetBrowserE2EArtifactDirectory(scenario);
-        Directory.CreateDirectory(directory);
+        await BrowserFailureDiagnostics.TryWriteAsync(() =>
+        {
+            Directory.CreateDirectory(directory);
+            return Task.CompletedTask;
+        });
         if (browser is not null)
         {
-            await browser.WriteDiagnosticsAsync(directory);
+            await BrowserFailureDiagnostics.TryWriteAsync(() => browser.WriteDiagnosticsAsync(directory));
         }
 
         if (app is not null)
         {
-            await app.WriteDiagnosticsAsync(directory);
+            await BrowserFailureDiagnostics.TryWriteAsync(() => app.WriteDiagnosticsAsync(directory));
         }
 
         if (!string.IsNullOrWhiteSpace(retiredServerOutput))
         {
-            await File.WriteAllTextAsync(Path.Combine(directory, "retired-server-output.txt"), retiredServerOutput);
+            await BrowserFailureDiagnostics.TryWriteAsync(() => File.WriteAllTextAsync(Path.Combine(directory, "retired-server-output.txt"), retiredServerOutput));
         }
 
         if (!string.IsNullOrWhiteSpace(profileMutationLifecycle))
         {
-            await File.WriteAllTextAsync(Path.Combine(directory, "profile-mutation-lifecycle.json"), profileMutationLifecycle);
+            await BrowserFailureDiagnostics.TryWriteAsync(() => File.WriteAllTextAsync(Path.Combine(directory, "profile-mutation-lifecycle.json"), profileMutationLifecycle));
         }
     }
 
@@ -3013,6 +3051,10 @@ public sealed partial class BrowserFlowTests
                 {
                     break;
                 }
+                catch (Exception exception) when (BrowserReadOnlyWait.IsExpectedContextTurnover(exception))
+                {
+                    lastException = exception;
+                }
                 catch (Exception exception) when (exception is InvalidOperationException or WebSocketException or JsonException)
                 {
                     lastException = exception;
@@ -3202,8 +3244,12 @@ public sealed partial class BrowserFlowTests
 
         public async Task WriteDiagnosticsAsync(string directory)
         {
-            Directory.CreateDirectory(directory);
-            await File.WriteAllTextAsync(Path.Combine(directory, "browser-process.txt"), FormatOutput());
+            await BrowserFailureDiagnostics.TryWriteAsync(() =>
+            {
+                Directory.CreateDirectory(directory);
+                return Task.CompletedTask;
+            });
+            await BrowserFailureDiagnostics.TryWriteAsync(() => File.WriteAllTextAsync(Path.Combine(directory, "browser-process.txt"), FormatOutput()));
             try
             {
                 using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
@@ -3211,19 +3257,19 @@ public sealed partial class BrowserFlowTests
                 var base64 = screenshot.GetProperty("result").GetProperty("data").GetString();
                 if (!string.IsNullOrWhiteSpace(base64))
                 {
-                    await File.WriteAllBytesAsync(Path.Combine(directory, "page.png"), Convert.FromBase64String(base64));
+                    await BrowserFailureDiagnostics.TryWriteAsync(() => File.WriteAllBytesAsync(Path.Combine(directory, "page.png"), Convert.FromBase64String(base64)));
                 }
 
                 var html = (await EvaluateAsync("document.documentElement.outerHTML", timeout.Token)).GetString() ?? "";
-                await File.WriteAllTextAsync(Path.Combine(directory, "page.html"), html);
+                await BrowserFailureDiagnostics.TryWriteAsync(() => File.WriteAllTextAsync(Path.Combine(directory, "page.html"), html));
             }
             catch (Exception exception)
             {
-                await File.WriteAllTextAsync(Path.Combine(directory, "capture-error.txt"), exception.ToString());
+                await BrowserFailureDiagnostics.TryWriteAsync(() => File.WriteAllTextAsync(Path.Combine(directory, "capture-error.txt"), exception.GetType().Name));
             }
 
-            await File.WriteAllLinesAsync(Path.Combine(directory, "browser-events.txt"), GetDiagnosticsSnapshot());
-            await File.WriteAllLinesAsync(Path.Combine(directory, "expected-restart-qualified-refusals.txt"), _requestTracker.ReadQualifiedReadOnlyRefusalEvidenceSummary());
+            await BrowserFailureDiagnostics.TryWriteAsync(() => File.WriteAllLinesAsync(Path.Combine(directory, "browser-events.txt"), GetDiagnosticsSnapshot()));
+            await BrowserFailureDiagnostics.TryWriteAsync(() => File.WriteAllLinesAsync(Path.Combine(directory, "expected-restart-qualified-refusals.txt"), _requestTracker.ReadQualifiedReadOnlyRefusalEvidenceSummary()));
         }
 
         public async Task<IReadOnlyList<string>> WriteExpectedRestartProvenanceAsync(string filePath)
@@ -3294,18 +3340,12 @@ public sealed partial class BrowserFlowTests
                 returnByValue = true,
                 userGesture
             }, cancellationToken, responseHandler);
-            if (response.TryGetProperty("exceptionDetails", out var exceptionDetails))
-            {
-                throw new InvalidOperationException("Browser evaluation failed: " + exceptionDetails.GetRawText());
-            }
+            BrowserDevToolsResponse.Validate("Runtime.evaluate", response);
 
             if (!response.TryGetProperty("result", out var commandResult)
                 || !commandResult.TryGetProperty("result", out var remoteObject))
             {
-                var detail = response.TryGetProperty("error", out var error)
-                    ? error.GetRawText()
-                    : response.GetRawText();
-                throw new InvalidOperationException("Browser evaluation command failed: " + detail);
+                throw new BrowserDevToolsException("malformed-runtime-result", "Runtime.evaluate", null, "remote-result-missing");
             }
 
             return remoteObject.TryGetProperty("value", out var value) ? value.Clone() : default;
@@ -3313,11 +3353,9 @@ public sealed partial class BrowserFlowTests
 
         private void FreezeExpectedServerRestartAtBarrierResponse(JsonElement response)
         {
-            if (response.TryGetProperty("exceptionDetails", out _)
-                || !response.TryGetProperty("result", out var commandResult)
-                || !commandResult.TryGetProperty("result", out _))
+            if (!TryReadTrueRuntimeEvaluation(response))
             {
-                throw new InvalidOperationException("Browser restart receive-loop barrier command failed: " + response.GetRawText());
+                throw new BrowserDevToolsException("invalid-barrier", "Runtime.evaluate", null, "expected-true");
             }
 
             _requestTracker.FreezeExpectedServerRestart();
@@ -3325,11 +3363,9 @@ public sealed partial class BrowserFlowTests
 
         private void EndExpectedServerRestartAtBarrierResponse(JsonElement response)
         {
-            if (response.TryGetProperty("exceptionDetails", out _)
-                || !response.TryGetProperty("result", out var commandResult)
-                || !commandResult.TryGetProperty("result", out _))
+            if (!TryReadTrueRuntimeEvaluation(response))
             {
-                throw new InvalidOperationException("Browser restart completion barrier command failed: " + response.GetRawText());
+                throw new BrowserDevToolsException("invalid-barrier", "Runtime.evaluate", null, "expected-true");
             }
 
             _requestTracker.EndExpectedServerRestart();
@@ -3354,7 +3390,11 @@ public sealed partial class BrowserFlowTests
             {
                 if (responseHandler is not null)
                 {
-                    _pendingResponseHandlers.Add(commandId, responseHandler);
+                    _pendingResponseHandlers.Add(commandId, response =>
+                    {
+                        BrowserDevToolsResponse.Validate(method, response);
+                        responseHandler(response);
+                    });
                 }
 
                 var sendTask = SendPayloadAsync(bytes);
@@ -3377,7 +3417,9 @@ public sealed partial class BrowserFlowTests
 
             try
             {
-                return await completion.Task.WaitAsync(cancellationToken);
+                var response = await completion.Task.WaitAsync(cancellationToken);
+                BrowserDevToolsResponse.Validate(method, response);
+                return response;
             }
             catch
             {
@@ -3385,6 +3427,14 @@ public sealed partial class BrowserFlowTests
                 _pendingResponseHandlers.Remove(commandId);
                 throw;
             }
+        }
+
+        private static bool TryReadTrueRuntimeEvaluation(JsonElement response)
+        {
+            return response.TryGetProperty("result", out var commandResult)
+                && commandResult.TryGetProperty("result", out var remoteObject)
+                && remoteObject.TryGetProperty("value", out var value)
+                && value.ValueKind == JsonValueKind.True;
         }
 
         private async Task SendPayloadAsync(byte[] bytes)
