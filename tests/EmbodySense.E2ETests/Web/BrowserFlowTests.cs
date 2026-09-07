@@ -469,6 +469,22 @@ public sealed partial class BrowserFlowTests
     }
 
     [Fact]
+    public void Restart_request_tracking_reports_removed_declarations_as_not_declared_at_freeze()
+    {
+        const string FormerTarget = "/api/loop-runs?maximumCount=50";
+        const string ReplacementTarget = "/api/loop-runs/quota";
+        const string RequestUrl = "https://127.0.0.1:5001/api/loop-runs?maximumCount=50";
+        var tracker = new ExpectedServerRestartRequestTracker("127.0.0.1:5001");
+        tracker.DeclareReadOnlyGetTargets([FormerTarget]);
+        tracker.Track("removed-target", RequestUrl, "GET");
+        tracker.DeclareReadOnlyGetTargets([ReplacementTarget]);
+        tracker.PrepareExpectedServerRestart();
+        tracker.FreezeExpectedServerRestart();
+        Assert.False(tracker.ProcessLoadingFailed("removed-target", canceled: false, "net::ERR_CONNECTION_REFUSED"));
+        Assert.Contains(tracker.ReadQualifiedReadOnlyRefusalEvidenceSummary(), entry => entry.Contains("rejectionReason=not-declared-at-freeze", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Restart_request_tracking_traces_declared_target_method_rejections_without_qualifying_them()
     {
         const string Target = "/api/loop-runs?maximumCount=50";

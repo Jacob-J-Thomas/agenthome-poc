@@ -103,7 +103,7 @@ internal sealed class ExpectedServerRestartRequestTracker
                     var isGet = IsGetMethod(provenance.Method);
                     if (provenance.IsDeclaredReadOnlyGetTarget || currentMatch)
                     {
-                        RecordProvenanceTrace(request.Key, declaredTargetIndex, provenance.Method, provenance.IsDeclaredReadOnlyGetTarget, currentMatch, frozenSnapshot: true, active: false, currentMatch && isGet ? "accepted-at-freeze" : GetMethodRejectionReason(provenance.Method));
+                        RecordProvenanceTrace(request.Key, declaredTargetIndex, provenance.Method, provenance.IsDeclaredReadOnlyGetTarget, currentMatch, frozenSnapshot: true, active: false, currentMatch ? isGet ? "accepted-at-freeze" : GetMethodRejectionReason(provenance.Method) : "not-declared-at-freeze");
                     }
 
                     _requestProvenance[request.Key] = provenance with
@@ -516,7 +516,7 @@ internal sealed class ExpectedServerRestartRequestTracker
             var currentMatch = declaredTargetIndex >= 0;
             if (request.Value.IsDeclaredReadOnlyGetTarget || currentMatch)
             {
-                RecordProvenanceTrace(request.Key, declaredTargetIndex, request.Value.Method, request.Value.IsDeclaredReadOnlyGetTarget, currentMatch, request.Value.LiveAtSuccessfulFreeze, phase == Active, request.Value.LiveAtSuccessfulFreeze ? "post-freeze-declaration" : IsGetMethod(request.Value.Method) ? "declaration-updated" : GetMethodRejectionReason(request.Value.Method));
+                RecordProvenanceTrace(request.Key, declaredTargetIndex, request.Value.Method, request.Value.IsDeclaredReadOnlyGetTarget, currentMatch, request.Value.LiveAtSuccessfulFreeze, phase == Active, GetDeclarationTransitionReason(request.Value, currentMatch));
             }
         }
     }
@@ -524,6 +524,21 @@ internal sealed class ExpectedServerRestartRequestTracker
     private void RecordLifecycleTransition(string transition)
     {
         RecordProvenanceTrace("none", -1, null, cachedMatch: false, currentMatch: false, frozenSnapshot: false, active: Volatile.Read(ref _expectedServerRestart) == Active, "lifecycle-" + transition);
+    }
+
+    private static string GetDeclarationTransitionReason(RestartRequestProvenance provenance, bool currentMatch)
+    {
+        if (provenance.IsDeclaredReadOnlyGetTarget && !currentMatch)
+        {
+            return provenance.LiveAtSuccessfulFreeze ? "post-freeze-declaration-removed" : "declaration-removed";
+        }
+
+        if (!provenance.IsDeclaredReadOnlyGetTarget && currentMatch)
+        {
+            return provenance.LiveAtSuccessfulFreeze ? "post-freeze-declaration-added" : IsGetMethod(provenance.Method) ? "declaration-added" : GetMethodRejectionReason(provenance.Method);
+        }
+
+        return provenance.LiveAtSuccessfulFreeze ? "post-freeze-declaration-unchanged" : IsGetMethod(provenance.Method) ? "declaration-updated" : GetMethodRejectionReason(provenance.Method);
     }
 
     private void RecordProvenanceTrace(string requestId, int declaredTargetIndex, string? method, bool cachedMatch, bool currentMatch, bool frozenSnapshot, bool active, string rejectionReason)
