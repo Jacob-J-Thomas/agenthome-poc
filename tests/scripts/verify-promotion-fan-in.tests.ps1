@@ -32,6 +32,24 @@ function Write-TestJson {
     [IO.File]::WriteAllText($Path, ($Value | ConvertTo-Json -Depth 16), [Text.UTF8Encoding]::new($false))
 }
 
+function Rewrite-TestTrxAssemblyPaths {
+    param([string]$Text, [string]$ProducerPrefix)
+
+    $attributePattern = [regex]::new('(?<attribute>storage|codeBase)="[^"]*?(?<suffix>tests[\\/][^"\\/]+[\\/]bin[\\/]Release[\\/]net10\.0[\\/][^"\\/]+\.dll)"')
+    $expectedAttributeCount = @([regex]::Matches($Text, '(?:storage|codeBase)="')).Count
+    $matches = @($attributePattern.Matches($Text))
+    Assert-True -Condition ($expectedAttributeCount -gt 0 -and $matches.Count -eq $expectedAttributeCount) -Message "TRX assembly path rewrite must match every storage and codeBase attribute exactly once."
+    $replacements = [Collections.Generic.List[string]]::new()
+    $evaluator = [Text.RegularExpressions.MatchEvaluator]{
+        param($match)
+        $replacements.Add($match.Value)
+        return $match.Groups["attribute"].Value + '="' + $ProducerPrefix + '/' + $match.Groups["suffix"].Value.Replace('\', '/') + '"'
+    }
+    $updated = $attributePattern.Replace($Text, $evaluator)
+    Assert-True -Condition ($replacements.Count -eq $expectedAttributeCount -and $updated -cne $Text) -Message "TRX assembly path rewrite must replace every matched attribute and change bytes."
+    return $updated
+}
+
 function Copy-TestMacOSPlatformSelection {
     param([object[]]$Selection)
 
@@ -338,12 +356,21 @@ try {
     }
     New-TestMacOSPlatformComponent -Root $macOSRoot
 
-    $assemblyPathPattern = '(storage|codeBase)="[^"]*(tests/[^"/]+(?:/[^"/]+)*/bin/Release/net10\.0/[^"/]+\.dll)"'
+    foreach ($separatorCase in @(
+        [pscustomobject]@{ Name = "POSIX"; Path = "/host/repository/tests/Fixture.Tests/bin/Release/net10.0/Fixture.Tests.dll" },
+        [pscustomobject]@{ Name = "Windows"; Path = 'C:\host\repository\tests\Fixture.Tests\bin\Release\net10.0\Fixture.Tests.dll' },
+        [pscustomobject]@{ Name = "mixed"; Path = 'C:\host/repository\tests/Fixture.Tests\bin/Release\net10.0/Fixture.Tests.dll' }
+    )) {
+        $fixtureTrx = '<UnitTest storage="' + $separatorCase.Path + '" codeBase="' + $separatorCase.Path + '" />'
+        $rewrittenFixtureTrx = Rewrite-TestTrxAssemblyPaths -Text $fixtureTrx -ProducerPrefix "/foreign/producer"
+        $expectedFixtureTrx = '<UnitTest storage="/foreign/producer/tests/Fixture.Tests/bin/Release/net10.0/Fixture.Tests.dll" codeBase="/foreign/producer/tests/Fixture.Tests/bin/Release/net10.0/Fixture.Tests.dll" />'
+        Assert-True -Condition ($rewrittenFixtureTrx -ceq $expectedFixtureTrx) -Message "$($separatorCase.Name) TRX assembly path rewrite must rewrite exactly storage and codeBase."
+    }
+
     $foreignChangeCount = 0
     foreach ($foreignTrx in @(Get-ChildItem -LiteralPath (Join-Path $macOSRoot "VerificationResults/MacOSPlatformContract") -Recurse -Filter "*.trx" -File)) {
         $foreignOriginal = Get-Content -LiteralPath $foreignTrx.FullName -Raw
-        $foreignText = [regex]::Replace($foreignOriginal, $assemblyPathPattern, '$1="/foreign/producer/$2"')
-        Assert-True -Condition ($foreignText -cne $foreignOriginal) -Message "Foreign producer path substitution must change storage or codeBase evidence."
+        $foreignText = Rewrite-TestTrxAssemblyPaths -Text $foreignOriginal -ProducerPrefix "/foreign/producer"
         $foreignChangeCount++
         [IO.File]::WriteAllText($foreignTrx.FullName, $foreignText, [Text.UTF8Encoding]::new($false))
     }
@@ -361,8 +388,6 @@ try {
         [pscustomobject]@{ Name = "malformed XML"; Mutate = { param($path) [IO.File]::WriteAllText($path, '<TestRun', [Text.UTF8Encoding]::new($false)) } },
         [pscustomobject]@{ Name = "oversized XML"; Mutate = { param($path) [IO.File]::AppendAllText($path, ('x' * 1048577), [Text.UTF8Encoding]::new($false)) } },
         [pscustomobject]@{ Name = "wrong storage and codeBase"; Mutate = { param($path) [IO.File]::WriteAllText($path, (Get-Content -LiteralPath $path -Raw).Replace('.dll', '-wrong.dll'), [Text.UTF8Encoding]::new($false)) } },
-        [pscustomobject]@{ Name = "dot foreign producer path"; Mutate = { param($path) $original = Get-Content -LiteralPath $path -Raw; $updated = [regex]::Replace($original, $assemblyPathPattern, '$1="/foreign/./producer/$2"'); Assert-True -Condition ($updated -cne $original) -Message "Dot-path substitution must change storage or codeBase evidence."; [IO.File]::WriteAllText($path, $updated, [Text.UTF8Encoding]::new($false)) } },
-        [pscustomobject]@{ Name = "dotdot foreign producer path"; Mutate = { param($path) $original = Get-Content -LiteralPath $path -Raw; $updated = [regex]::Replace($original, $assemblyPathPattern, '$1="/foreign/../producer/$2"'); Assert-True -Condition ($updated -cne $original) -Message "Dotdot-path substitution must change storage or codeBase evidence."; [IO.File]::WriteAllText($path, $updated, [Text.UTF8Encoding]::new($false)) } },
         [pscustomobject]@{ Name = "empty result identifier"; Mutate = { param($path) $original = Get-Content -LiteralPath $path -Raw; $pattern = [regex]::new('(<UnitTestResult [^>]*executionId=")[^"]+'); [IO.File]::WriteAllText($path, $pattern.Replace($original, '$1', 1), [Text.UTF8Encoding]::new($false)) } },
         [pscustomobject]@{ Name = "malformed result identifier"; Mutate = { param($path) $original = Get-Content -LiteralPath $path -Raw; $pattern = [regex]::new('(<UnitTestResult [^>]*testId=")[^"]+'); [IO.File]::WriteAllText($path, $pattern.Replace($original, '${1}not-a-guid', 1), [Text.UTF8Encoding]::new($false)) } },
         [pscustomobject]@{ Name = "empty GUID"; Mutate = { param($path) $original = Get-Content -LiteralPath $path -Raw; $pattern = [regex]::new('(<UnitTestResult [^>]*testId=")[^"]+'); [IO.File]::WriteAllText($path, $pattern.Replace($original, '${1}00000000-0000-0000-0000-000000000000', 1), [Text.UTF8Encoding]::new($false)) } },
@@ -385,6 +410,19 @@ try {
         & $rawCase.Mutate $rawTrx.FullName
         Update-TestComponentAuth -Root $macOSRoot
         Assert-Throws -Message "macOS raw TRX $($rawCase.Name)" -Action { Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot -MacOSRoot $macOSRoot }
+    }
+    foreach ($unsafeProducerCase in @(
+        [pscustomobject]@{ Name = "dot"; Prefix = "/foreign/./producer" },
+        [pscustomobject]@{ Name = "dotdot"; Prefix = "/foreign/../producer" }
+    )) {
+        New-TestMacOSPlatformComponent -Root $macOSRoot
+        foreach ($unsafeTrx in @(Get-ChildItem -LiteralPath (Join-Path $macOSRoot "VerificationResults/MacOSPlatformContract") -Recurse -Filter "*.trx" -File)) {
+            $unsafeOriginal = Get-Content -LiteralPath $unsafeTrx.FullName -Raw
+            $unsafeText = Rewrite-TestTrxAssemblyPaths -Text $unsafeOriginal -ProducerPrefix $unsafeProducerCase.Prefix
+            [IO.File]::WriteAllText($unsafeTrx.FullName, $unsafeText, [Text.UTF8Encoding]::new($false))
+        }
+        Update-TestComponentAuth -Root $macOSRoot
+        Assert-Throws -Message "macOS $($unsafeProducerCase.Name) foreign producer path" -ExpectedMessage "MacOSPlatformContract TRX storage contains an unsafe assembly path." -Action { Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot -MacOSRoot $macOSRoot }
     }
     New-TestMacOSPlatformComponent -Root $macOSRoot
     $duplicateDefinitionTrx = Get-ChildItem -LiteralPath (Join-Path $macOSRoot "VerificationResults/MacOSPlatformContract") -Recurse -Filter "*.trx" -File | Select-Object -First 1
