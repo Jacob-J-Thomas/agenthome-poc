@@ -333,12 +333,13 @@ public sealed partial class BrowserFlowTests
     private static async Task OpenHumanReviewAsync(HeadlessBrowserSession browser)
     {
         await ClickAsync(browser, "[data-testid=\"human-review-nav\"]");
-        await browser.WaitForExpressionAsync("!document.getElementById('humanReviewView').hidden && document.getElementById('humanReviewListStatus').textContent.length > 0");
+        await browser.WaitForExpressionAsync("!document.getElementById('humanReviewView').hidden && !document.getElementById('humanReviewRefreshButton').disabled && document.getElementById('humanReviewListStatus').textContent.length > 0");
     }
 
     private static async Task SelectHumanReviewAsync(HeadlessBrowserSession browser, string runId)
     {
         var selector = JsonSerializer.Serialize($"[data-testid=\"human-review-item\"][data-run-id=\"{runId}\"]");
+        await browser.WaitForExpressionAsync($"!document.getElementById('humanReviewRefreshButton').disabled && document.querySelector({selector}) !== null");
         await browser.EvaluateWithUserGestureAsync($"(() => {{ const item = document.querySelector({selector}); if (!item) throw new Error('Human Review item was not rendered: ' + {JsonSerializer.Serialize(runId)}); item.click(); }})()");
         await browser.WaitForExpressionAsync("document.getElementById('humanReviewDetailPanel').hidden === false && document.getElementById('humanReviewDetailStatus').textContent.includes('Canonical state reread')");
     }

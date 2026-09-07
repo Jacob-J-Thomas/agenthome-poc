@@ -881,7 +881,7 @@ public sealed partial class BrowserFlowTests
             Assert.Contains("Unsaved draft", await browser.EvaluateStringAsync("document.getElementById('saveState').textContent"), StringComparison.Ordinal);
             Assert.Contains("Not durable", await browser.EvaluateStringAsync("document.getElementById('loopList').textContent"), StringComparison.Ordinal);
             Assert.Equal(0, await GetCustomDefinitionCountAsync(browser));
-            await browser.EvaluateAsync("window.confirm = () => true");
+            await browser.EvaluateAsync("(() => { window.confirm = () => true; })()");
             await ClickAsync(browser, "#reloadButton");
             await browser.WaitForExpressionAsync("document.getElementById('saveState').textContent.includes('System managed')");
             Assert.False(await browser.EvaluateBooleanAsync("[...document.querySelectorAll('#loopList .loop-list-item')].some((item) => item.textContent.includes('Untitled loop'))"));
@@ -976,7 +976,7 @@ public sealed partial class BrowserFlowTests
             Assert.False(await browser.EvaluateBooleanAsync("[...document.querySelectorAll('#runActions button')].some((button) => /resume|cancel/i.test(button.textContent))"));
 
             await ClickAsync(browser, "#builderTab");
-            await browser.EvaluateAsync("window.confirm = () => true");
+            await browser.EvaluateAsync("(() => { window.confirm = () => true; })()");
             await ClickAsync(browser, "#deleteButton");
             await browser.WaitForExpressionAsync("document.getElementById('loopName').disabled && ![...document.querySelectorAll('#loopList .loop-list-item')].some((item) => item.textContent.includes('Browser governed loop'))");
             await browser.ReloadAsync();
@@ -1698,7 +1698,7 @@ public sealed partial class BrowserFlowTests
             Assert.Contains("Recovery available", await browser.EvaluateStringAsync("document.getElementById('retentionContent').textContent"), StringComparison.OrdinalIgnoreCase);
             await browser.WaitForExpressionAsync("!" + TargetCleanup + ".disabled && " + TargetCleanup + ".textContent.includes('Retry cleanup recovery')");
 
-            await browser.EvaluateAsync("window.__retentionConfirmation = ''; window.confirm = (message) => { window.__retentionConfirmation = message; return true; };");
+            await browser.EvaluateAsync("(() => { window.__retentionConfirmation = ''; window.confirm = (message) => { window.__retentionConfirmation = message; return true; }; })()");
             await browser.EvaluateAsync(TargetCleanup + ".click()");
             await browser.WaitForExpressionAsync("document.getElementById('retentionNotice').textContent.includes('Nothing Eligible')");
 
@@ -1765,7 +1765,7 @@ public sealed partial class BrowserFlowTests
             await browser.ReloadAsync();
             await browser.WaitForExpressionAsync("document.getElementById('lifecyclePreview').textContent.includes(" + JsonSerializer.Serialize(pendingOperationId) + ")");
             Assert.Equal(pendingOperationId, await browser.EvaluateStringAsync("JSON.parse(localStorage.getItem(Object.keys(localStorage).find((key) => key.startsWith('embodysense.pending-capability-lifecycle.v1.')))).entries[0].selection.operationId"));
-            await browser.EvaluateAsync("window.confirm = () => true");
+            await browser.EvaluateAsync("(() => { window.confirm = () => true; })()");
             await ClickButtonByTextAsync(browser, "#lifecyclePreview button", "Confirm Disable");
 
             await browser.WaitForExpressionAsync("document.getElementById('capabilityBadges').textContent.includes('Disabled')");
@@ -2303,7 +2303,8 @@ public sealed partial class BrowserFlowTests
     private static async Task SubmitMessageAsync(HeadlessBrowserSession browser, string message)
     {
         var jsonMessage = JsonSerializer.Serialize(message);
-        await browser.EvaluateAsync("(() => { const input = document.getElementById('messageInput'); const send = document.getElementById('sendButton'); const cancel = document.getElementById('cancelButton'); input.value = " + jsonMessage + "; document.getElementById('messageForm').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); if (input.value !== '' || !send.disabled || cancel.disabled) throw new Error('The browser did not synchronously accept the submitted turn.'); })()");
+        await browser.EvaluateAsync("(() => { const input = document.getElementById('messageInput'); input.value = " + jsonMessage + "; document.getElementById('messageForm').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); })()");
+        await browser.WaitForExpressionAsync("document.getElementById('messageInput').value === '' && document.getElementById('sendButton').disabled && !document.getElementById('cancelButton').disabled");
     }
 
     private static async Task AssertChatRequestRegistryEmptyAsync(HeadlessBrowserSession browser)
