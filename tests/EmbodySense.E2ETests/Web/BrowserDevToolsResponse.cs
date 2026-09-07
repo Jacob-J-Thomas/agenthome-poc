@@ -31,7 +31,7 @@ internal static class BrowserDevToolsResponse
                 throw new BrowserDevToolsException("malformed-envelope", method, null, "error-shape-invalid");
             }
 
-            throw new BrowserDevToolsException("protocol-error", method, code, ReadTurnoverMessage(message));
+            throw new BrowserDevToolsException("protocol-error", method, code, ReadSafeMessage(message));
         }
 
         if (!hasResult || result.ValueKind != JsonValueKind.Object)
@@ -122,12 +122,19 @@ internal static class BrowserDevToolsResponse
         return source.TryGetProperty(propertyName, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
     }
 
-    private static string ReadTurnoverMessage(string message)
+    private static string ReadSafeMessage(string message)
     {
-        return string.Equals(message, "Cannot find context with specified id", StringComparison.Ordinal)
-            || string.Equals(message, "Execution context was destroyed.", StringComparison.Ordinal)
-            ? message
-            : "protocol-error";
+        return message switch
+        {
+            "Cannot find context with specified id" => message,
+            "Execution context was destroyed." => message,
+            "Cannot find default execution context" => "default-context-unavailable",
+            "Inspected target navigated or closed" => "target-navigated-or-closed",
+            "Target crashed" => "target-crashed",
+            "Promise was collected" => "promise-collected",
+            "Tearing down inspector/session/context" => "inspector-session-context-teardown",
+            _ => "protocol-error"
+        };
     }
 
     private static bool IsValidRemoteValue(string type, JsonElement value)

@@ -7,7 +7,7 @@ namespace EmbodySense.E2ETests.Web;
 public sealed class BrowserDevToolsContractTests
 {
     [Fact]
-    public void Browser_devtools_response_accepts_only_exact_turnover_protocol_errors()
+    public async Task Browser_devtools_response_accepts_only_exact_turnover_protocol_errors()
     {
         using var firstTurnover = JsonDocument.Parse("{\"id\":1,\"error\":{\"code\":-32000,\"message\":\"Cannot find context with specified id\"}}");
         using var secondTurnover = JsonDocument.Parse("{\"id\":2,\"error\":{\"code\":-32000,\"message\":\"Execution context was destroyed.\"}}");
@@ -24,6 +24,48 @@ public sealed class BrowserDevToolsContractTests
         Assert.Equal("protocol-error", near.SafeMessage);
         AssertMalformedConflictingAndSecretShapedEnvelopes();
         AssertRuntimeRemoteObjectShape();
+        await AssertDiagnosticOnlyTerminalErrorsAsync();
+    }
+
+    private static async Task AssertDiagnosticOnlyTerminalErrorsAsync()
+    {
+        foreach (var (message, safeMessage) in new[]
+        {
+            ("Cannot find default execution context", "default-context-unavailable"),
+            ("Inspected target navigated or closed", "target-navigated-or-closed"),
+            ("Target crashed", "target-crashed"),
+            ("Promise was collected", "promise-collected"),
+            ("Tearing down inspector/session/context", "inspector-session-context-teardown")
+        })
+        {
+            using var envelope = JsonDocument.Parse(JsonSerializer.Serialize(new { error = new { code = -32000, message } }));
+            var exception = Assert.Throws<BrowserDevToolsException>(() => BrowserDevToolsResponse.Validate("Runtime.evaluate", envelope.RootElement));
+            Assert.Equal("protocol-error", exception.Category);
+            Assert.Equal("Runtime.evaluate", exception.Method);
+            Assert.Equal(-32000, exception.Code);
+            Assert.Equal(safeMessage, exception.SafeMessage);
+            Assert.False(BrowserReadOnlyWait.IsExpectedContextTurnover(exception));
+            await AssertTerminalOnFirstAttemptAsync(exception);
+        }
+
+        foreach (var message in new[]
+        {
+            "unknown diagnostic",
+            "cannot find default execution context",
+            " Cannot find default execution context",
+            "prefix Cannot find default execution context",
+            "Cannot find default execution context suffix",
+            "Target crashed token=secret-value"
+        })
+        {
+            using var envelope = JsonDocument.Parse(JsonSerializer.Serialize(new { error = new { code = -32000, message } }));
+            var exception = Assert.Throws<BrowserDevToolsException>(() => BrowserDevToolsResponse.Validate("Runtime.evaluate", envelope.RootElement));
+            Assert.Equal("protocol-error", exception.Category);
+            Assert.Equal("Runtime.evaluate", exception.Method);
+            Assert.Equal(-32000, exception.Code);
+            Assert.Equal("protocol-error", exception.SafeMessage);
+            Assert.DoesNotContain("secret-value", exception.Message, StringComparison.Ordinal);
+        }
     }
 
     private static void AssertMalformedConflictingAndSecretShapedEnvelopes()
