@@ -374,13 +374,70 @@ exit $ExitCode
     Assert-True -Condition ($invalidDiagnosticResults.Count -eq 1 -and -not $invalidDiagnosticResults[0].TimedOut -and $invalidDiagnosticResults[0].ExitCode -eq 0) -Message "An unavailable parent diagnostic target must not change a normal child result."
     Assert-Contains -Actual (Get-Content -Raw (Join-Path $scenarioRoot "invalid-diagnostic-target.log")) -Expected "probe=invalid-diagnostic-target" -Message "An unavailable parent diagnostic target must not suppress normal child output."
 
-    $nearDeadlineDiagnosticPath = Join-Path $scenarioRoot "near-deadline-parent-lifecycle.jsonl"
-    Reset-VerificationParallelPhaseState
-    Add-VerificationParallelPhase -Name "exited-near-deadline" -FileName $powerShellExecutable -Arguments ($baseArguments + @("exited-near-deadline", "2500", "0")) -TimeoutSeconds 3 -WorkingDirectory $scenarioRoot -OutputPath (Join-Path $scenarioRoot "exited-near-deadline.log") -ParentDiagnosticPath $nearDeadlineDiagnosticPath
-    $nearDeadlineResults = @(Invoke-VerificationParallelPhases -MaximumResourceCapacity 1)
-    Assert-True -Condition ($nearDeadlineResults.Count -eq 1 -and -not $nearDeadlineResults[0].TimedOut) -Message "An exited-near-deadline phase must remain a normal exit within its existing budget."
-    $nearDeadlineDiagnostics = @(Get-Content -LiteralPath $nearDeadlineDiagnosticPath | ConvertFrom-Json)
-    Assert-True -Condition (@($nearDeadlineDiagnostics | Where-Object { $_.event -ceq "completion-observed" -and $_.observedHasExited -and -not $_.terminationRequested }).Count -eq 1) -Message "Near-deadline diagnostics must show that the parent observed a natural child exit before requesting termination."
+    $savedParentDiagnosticWriter = (Get-Command Write-VerificationParallelParentDiagnostic -CommandType Function).ScriptBlock
+    try {
+        function Write-VerificationParallelParentDiagnostic {
+            param(
+                [Parameter(Mandatory = $true)] [object]$Entry,
+                [Parameter(Mandatory = $true)] [ValidateNotNullOrEmpty()] [string]$Event,
+                [Parameter(Mandatory = $true)] [bool]$TerminationRequested
+            )
+
+            $controlledElapsedMilliseconds = switch ($Entry.Phase.Name) {
+                "exited-near-deadline-2999" { 2999; break }
+                "exited-near-deadline-3000" { 3000; break }
+                "exited-near-deadline-3001" { 3001; break }
+                default { $null }
+            }
+            if ($Event -ceq "process-started" -and $null -ne $controlledElapsedMilliseconds) {
+                if (-not $Entry.Process.WaitForExit(5000)) {
+                    throw "The zero-delay near-deadline child did not provide a natural-exit readiness witness within five seconds."
+                }
+
+                $controlledStopwatch = [pscustomobject]@{ Elapsed = [TimeSpan]::FromMilliseconds($controlledElapsedMilliseconds); IsStopped = $false }
+                $controlledStopwatch | Add-Member -MemberType ScriptMethod -Name Stop -Value { $this.IsStopped = $true }
+                $Entry.Stopwatch = $controlledStopwatch
+            }
+
+            & $savedParentDiagnosticWriter @PSBoundParameters
+        }
+
+        foreach ($nearDeadlineCase in @(
+            [pscustomobject]@{ Name = "exited-near-deadline-2999"; ExpectedElapsedMilliseconds = 2999; ExpectedTimedOut = $false }
+            [pscustomobject]@{ Name = "exited-near-deadline-3000"; ExpectedElapsedMilliseconds = 3000; ExpectedTimedOut = $true }
+            [pscustomobject]@{ Name = "exited-near-deadline-3001"; ExpectedElapsedMilliseconds = 3001; ExpectedTimedOut = $true }
+        )) {
+            $nearDeadlineDiagnosticPath = Join-Path $scenarioRoot "$($nearDeadlineCase.Name)-parent-lifecycle.jsonl"
+            $nearDeadlineOutputPath = Join-Path $scenarioRoot "$($nearDeadlineCase.Name).log"
+            Reset-VerificationParallelPhaseState
+            Add-VerificationParallelPhase -Name $nearDeadlineCase.Name -FileName $powerShellExecutable -Arguments ($baseArguments + @($nearDeadlineCase.Name, "0", "0")) -TimeoutSeconds 3 -WorkingDirectory $scenarioRoot -OutputPath $nearDeadlineOutputPath -ParentDiagnosticPath $nearDeadlineDiagnosticPath
+            if ($nearDeadlineCase.ExpectedTimedOut) {
+                try {
+                    Invoke-VerificationParallelPhases -MaximumResourceCapacity 1 | Out-Null
+                    throw "Expected aggregate timeout for controlled elapsed $($nearDeadlineCase.ExpectedElapsedMilliseconds) milliseconds."
+                }
+                catch {
+                    Assert-Contains -Actual $_.Exception.Message -Expected "'$($nearDeadlineCase.Name)' timed out" -Message "A controlled elapsed value at or beyond the unchanged deadline must fail the aggregate."
+                }
+            }
+            else {
+                $nearDeadlineResults = @(Invoke-VerificationParallelPhases -MaximumResourceCapacity 1)
+                Assert-True -Condition ($nearDeadlineResults.Count -eq 1 -and -not $nearDeadlineResults[0].TimedOut -and $nearDeadlineResults[0].ExitCode -eq 0) -Message "A controlled elapsed value below the unchanged deadline must remain a normal exit."
+            }
+
+            $nearDeadlineDiagnostics = @(Get-Content -LiteralPath $nearDeadlineDiagnosticPath | ConvertFrom-Json)
+            Assert-True -Condition (@($nearDeadlineDiagnostics | Where-Object { $_.event -ceq "process-started" -and $_.observedHasExited -and -not $_.terminationRequested }).Count -eq 1) -Message "Near-deadline diagnostics must show a natural child exit readiness witness."
+            Assert-True -Condition (@($nearDeadlineDiagnostics | Where-Object { $_.event -ceq "completion-observed" -and $_.observedHasExited -and -not $_.terminationRequested }).Count -eq 1) -Message "Near-deadline diagnostics must show that the parent observed a natural child exit before requesting termination."
+            Assert-True -Condition (@($nearDeadlineDiagnostics | Where-Object { $_.event -in @("before-termination-request", "after-termination-request") }).Count -eq 0) -Message "A naturally exited near-deadline child must not record termination events."
+            Assert-True -Condition (@($nearDeadlineDiagnostics | Where-Object { $_.terminationRequested }).Count -eq 0) -Message "A naturally exited near-deadline child must retain a false termination-requested flag."
+            Assert-True -Condition (@($nearDeadlineDiagnostics | Where-Object { $_.event -ceq "after-output-drain" -and $_.observedHasExited -and $_.standardOutputCompleted -and $_.standardErrorCompleted -and -not $_.terminationRequested }).Count -eq 1) -Message "Near-deadline diagnostics must retain completed redirected streams after natural exit."
+            Assert-True -Condition (@($nearDeadlineDiagnostics | Where-Object { $_.monotonicElapsedMilliseconds -ne $nearDeadlineCase.ExpectedElapsedMilliseconds }).Count -eq 0) -Message "Near-deadline diagnostics must retain the exact controlled elapsed evidence."
+            Assert-Contains -Actual (Get-Content -Raw -LiteralPath $nearDeadlineOutputPath) -Expected "probe=$($nearDeadlineCase.Name)" -Message "Near-deadline output must remain retained after natural child exit."
+        }
+    }
+    finally {
+        Set-Item -Path Function:\Write-VerificationParallelParentDiagnostic -Value $savedParentDiagnosticWriter
+    }
 
     $weightedProbePath = Join-Path $scenarioRoot "weighted-probe.ps1"
     @'
