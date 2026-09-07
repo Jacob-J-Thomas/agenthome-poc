@@ -32,6 +32,16 @@ function Write-TestJson {
     [IO.File]::WriteAllText($Path, ($Value | ConvertTo-Json -Depth 16), [Text.UTF8Encoding]::new($false))
 }
 
+function Copy-TestMacOSPlatformSelection {
+    param([object[]]$Selection)
+
+    return @($Selection | ForEach-Object {
+        $copy = [ordered]@{}
+        foreach ($property in $_.PSObject.Properties) { $copy[$property.Name] = $property.Value }
+        [pscustomobject]$copy
+    })
+}
+
 function Get-TestPackages {
     return @(Get-ChildItem -LiteralPath (Join-Path $repoRoot "src") -Directory -Recurse | Where-Object { Test-Path (Join-Path $_.FullName ($_.Name + ".csproj")) } | Sort-Object Name | ForEach-Object Name)
 }
@@ -54,6 +64,22 @@ function Write-TestCoverageReport {
     }
     $xml = "<?xml version=`"1.0`" encoding=`"utf-8`"?><coverage><packages>$($packageNodes -join '')</packages></coverage>"
     [IO.File]::WriteAllText($Path, $xml, [Text.UTF8Encoding]::new($false))
+}
+
+function Set-TestCoveragePackageLines {
+    param([string]$Root, [string]$PackageName, [int[]]$Hits)
+
+    $sourceFile = Get-TestSourceFile -PackageName $PackageName
+    $relativeFile = [IO.Path]::GetRelativePath($repoRoot, $sourceFile.FullName).Replace([IO.Path]::DirectorySeparatorChar, "/")
+    $lines = @($Hits | ForEach-Object -Begin { $number = 1 } -Process { $line = "<line number=`"$number`" hits=`"$_`" />"; $number++; $line }) -join ''
+    $replacement = "<package name=`"$PackageName`"><classes><class filename=`"$relativeFile`"><lines>$lines</lines></class></classes></package>"
+    $pattern = '<package name="' + [regex]::Escape($PackageName) + '"><classes><class filename="[^"]+"><lines>.*?</lines></class></classes></package>'
+    foreach ($coverageFile in @(Get-ChildItem -LiteralPath (Join-Path $Root "VerificationResults") -Recurse -Filter "*.cobertura.xml" -File)) {
+        $xml = Get-Content -LiteralPath $coverageFile.FullName -Raw
+        $updated = [regex]::Replace($xml, $pattern, $replacement, [Text.RegularExpressions.RegexOptions]::Singleline)
+        if ($updated -ceq $xml) { throw "Test fixture did not replace coverage for $PackageName." }
+        [IO.File]::WriteAllText($coverageFile.FullName, $updated, [Text.UTF8Encoding]::new($false))
+    }
 }
 
 function Write-TestTrx {
@@ -165,30 +191,49 @@ function New-TestMacOSPlatformComponent {
     param([string]$Root)
 
     if (Test-Path -LiteralPath $Root) { Remove-Item -LiteralPath $Root -Recurse -Force }
-    $resultsRoot = Join-Path $Root "VerificationResults"
-    $platformRoot = Join-Path $resultsRoot "MacOSPlatformContract"
+    $receiptRoot = Join-Path $Root "VerificationResults"
+    $platformRoot = Join-Path $receiptRoot "MacOSPlatformContract"
     New-Item -ItemType Directory -Path $platformRoot -Force | Out-Null
     $selection = @(Get-FanInMacOSPlatformContractSelection)
+    . (Join-Path $repoRoot "scripts\verify-macos-platform-contract.ps1") -NoRun
+    $assemblies = @(Get-MacOSPlatformContractAssemblies -Selection $selection)
     $facts = [Collections.Generic.List[object]]::new()
-    foreach ($assembly in @($selection | Group-Object Project)) {
-        $assemblyName = [IO.Path]::GetFileNameWithoutExtension($assembly.Name)
-        $assemblyRoot = Join-Path $platformRoot $assemblyName
+    $discoveries = [Collections.Generic.List[object]]::new()
+    $phaseNames = @("build-macos-platform-contract")
+    $index = 1
+    foreach ($assembly in $assemblies) {
+        $assemblyRoot = Join-Path $platformRoot $assembly.Assembly
         New-Item -ItemType Directory -Path $assemblyRoot -Force | Out-Null
-        $rows = @($assembly.Group | ForEach-Object { "<UnitTestResult testName=`"$($_.Fact)`" outcome=`"Passed`" />" })
-        [IO.File]::WriteAllText((Join-Path $assemblyRoot "macos-platform-contract.trx"), "<TestRun><Results>$($rows -join '')</Results></TestRun>", [Text.UTF8Encoding]::new($false))
+        $results = [Collections.Generic.List[string]]::new()
+        $definitions = [Collections.Generic.List[string]]::new()
+        $entries = [Collections.Generic.List[string]]::new()
         foreach ($entry in $assembly.Group) {
-            $fact = [ordered]@{ project = $entry.Project; source = $entry.Source; assembly = $assemblyName; fact = $entry.Fact; outcome = "Passed"; trx = "MacOSPlatformContract/$assemblyName/macos-platform-contract.trx" }
+            $testId = "00000000-0000-0000-0000-$($index.ToString('000000000000'))"
+            $executionId = "10000000-0000-0000-0000-$($index.ToString('000000000000'))"
+            $parts = $entry.Fact -split '\.'
+            $class = $parts[0..($parts.Count - 2)] -join "."
+            $results.Add("<UnitTestResult testName=`"$($entry.Fact)`" testId=`"$testId`" executionId=`"$executionId`" outcome=`"Passed`" />")
+            $definitions.Add("<UnitTest name=`"$($entry.Fact)`" storage=`"$($assembly.TestAssemblyPath)`" id=`"$testId`"><Execution id=`"$executionId`" /><TestMethod className=`"$class`" name=`"$($parts[-1])`" codeBase=`"$($assembly.TestAssemblyPath)`" /></UnitTest>")
+            $entries.Add("<TestEntry testId=`"$testId`" executionId=`"$executionId`" />")
+            $discoveries.Add([pscustomobject][ordered]@{ project = $assembly.Project; assembly = $assembly.Assembly; fact = $entry.Fact; testId = $testId; xunitTestCaseUniqueId = "fixture-$testId"; testAssembly = [IO.Path]::GetRelativePath($repoRoot, $assembly.TestAssemblyPath).Replace([IO.Path]::DirectorySeparatorChar, "/") })
+            $fact = [ordered]@{ project = $entry.Project; source = $entry.Source; assembly = $assembly.Assembly; fact = $entry.Fact; outcome = "Passed"; testId = $testId; executionId = $executionId; xunitTestCaseUniqueId = "fixture-$testId"; trx = "MacOSPlatformContract/$($assembly.Assembly)/macos-platform-contract.trx" }
             if ($null -ne $entry.PSObject.Properties["HelperSource"]) { $fact.helperSource = $entry.HelperSource }
-            $facts.Add($fact)
+            $facts.Add([pscustomobject]$fact)
+            $index++
         }
+        $count = $assembly.Group.Count
+        $counters = "total=`"$count`" executed=`"$count`" passed=`"$count`" completed=`"$count`" failed=`"0`" error=`"0`" timeout=`"0`" aborted=`"0`" inconclusive=`"0`" passedButRunAborted=`"0`" notRunnable=`"0`" notExecuted=`"0`" disconnected=`"0`" warning=`"0`" inProgress=`"0`" pending=`"0`""
+        [IO.File]::WriteAllText((Join-Path $assemblyRoot "macos-platform-contract.trx"), "<TestRun xmlns=`"http://microsoft.com/schemas/VisualStudio/TeamTest/2010`"><Results>$($results -join '')</Results><TestDefinitions>$($definitions -join '')</TestDefinitions><TestEntries>$($entries -join '')</TestEntries><ResultSummary outcome=`"Completed`"><Counters $counters /></ResultSummary></TestRun>", [Text.UTF8Encoding]::new($false))
+        $phaseNames += @("discover-macos-$($assembly.Assembly)", "macos-$($assembly.Assembly)")
     }
-    Write-TestJson -Path (Join-Path $platformRoot "macos-platform-contract-results.json") -Value ([ordered]@{ schemaVersion = 1; facts = @($facts) })
-    [IO.File]::WriteAllText((Join-Path $resultsRoot "watchdog.log"), "VERIFY_COMPLETE schema_version=1 component=macos-platform-contract status=passed elapsed_seconds=1`n", [Text.UTF8Encoding]::new($false))
-    $evidencePath = Join-Path $resultsRoot "verification-component-evidence.json"
-    $manifestPath = Join-Path $resultsRoot "verification-component-manifest.json"
-    $watchdogEvidencePath = Join-Path $resultsRoot "verification-watchdog-evidence.json"
+    Write-TestJson -Path (Join-Path $platformRoot "macos-platform-contract-results.json") -Value ([ordered]@{ schemaVersion = 1; discoveries = @($discoveries | Sort-Object fact); facts = @($facts | Sort-Object fact) })
+    $phaseMarkers = @($phaseNames | ForEach-Object { "VERIFY_PHASE_COMPLETE name=$_ elapsed_seconds=1 completed_at_utc=2026-01-01T00:00:00.0000000+00:00`n" })
+    [IO.File]::WriteAllText((Join-Path $receiptRoot "watchdog.log"), "$($phaseMarkers -join '')VERIFY_COMPLETE schema_version=1 component=macos-platform-contract status=passed elapsed_seconds=1`n", [Text.UTF8Encoding]::new($false))
+    $evidencePath = Join-Path $receiptRoot "verification-component-evidence.json"
+    $manifestPath = Join-Path $receiptRoot "verification-component-manifest.json"
+    $watchdogEvidencePath = Join-Path $receiptRoot "verification-watchdog-evidence.json"
     Write-TestJson -Path $evidencePath -Value ([ordered]@{ schemaVersion = 1; component = "macos-platform-contract"; repositoryHead = "head"; githubRunId = "run"; githubRunAttempt = "attempt"; laneCount = 6; inventoryComplete = $true; coverageComplete = $false; staticContractCount = 0; frontendComplete = $false; formatComplete = $false; diffComplete = $false; manifestSha256 = "" })
-    Write-TestJson -Path $watchdogEvidencePath -Value ([ordered]@{ schemaVersion = 1; component = "macos-platform-contract"; mode = "promotion"; repositoryHead = "head"; githubRunId = "run"; githubRunAttempt = "attempt"; deadlineSeconds = 600; elapsedSeconds = 1; exitCode = 0; completionMarkerCount = 1; status = "passed"; watchdogLogSha256 = (Get-FileHash -LiteralPath (Join-Path $resultsRoot "watchdog.log") -Algorithm SHA256).Hash.ToLowerInvariant(); componentEvidenceSha256 = ""; componentManifestSha256 = "" })
+    Write-TestJson -Path $watchdogEvidencePath -Value ([ordered]@{ schemaVersion = 1; component = "macos-platform-contract"; mode = "promotion"; repositoryHead = "head"; githubRunId = "run"; githubRunAttempt = "attempt"; deadlineSeconds = 600; elapsedSeconds = 1; exitCode = 0; completionMarkerCount = 1; status = "passed"; watchdogLogSha256 = (Get-FileHash -LiteralPath (Join-Path $receiptRoot "watchdog.log") -Algorithm SHA256).Hash.ToLowerInvariant(); componentEvidenceSha256 = ""; componentManifestSha256 = "" })
     Update-TestComponentAuth -Root $Root
 }
 
@@ -203,6 +248,18 @@ try {
     New-TestComponent -Root $nestedRoot -Component "nested-process"
     New-TestComponent -Root $staticRoot -Component "static-contracts"
     New-TestMacOSPlatformComponent -Root $macOSRoot
+    $macOSSelection = @(Get-FanInMacOSPlatformContractSelection)
+    foreach ($selectionCase in @(
+        [pscustomobject]@{ Name = "wrong project"; Mutate = { param($items) $items[0].Project = "tests/Wrong/Wrong.csproj" } },
+        [pscustomobject]@{ Name = "missing project fact"; Mutate = { param($items) $items[14].Project = $items[0].Project } },
+        [pscustomobject]@{ Name = "duplicate fact"; Mutate = { param($items) $items[1].Fact = $items[0].Fact } },
+        [pscustomobject]@{ Name = "substituted fact"; Mutate = { param($items) $items[0].Fact = "EmbodySense.Cli.Command.Tests.ConsoleAgentRuntimeHostTests.NotSelected" } },
+        [pscustomobject]@{ Name = "one-backslash project"; Mutate = { param($items) $items[0].Project = $items[0].Project.Replace('/', '\') } }
+    )) {
+        $candidate = @(Copy-TestMacOSPlatformSelection -Selection $macOSSelection)
+        & $selectionCase.Mutate $candidate
+        Assert-Throws -Message "macOS selection $($selectionCase.Name)" -ExpectedMessage "MacOSPlatformContract" -Action { Assert-MacOSPlatformContractSelection -Selection $candidate }
+    }
     $productionNestedLane = Get-Content -LiteralPath (Join-Path $nestedRoot "VerificationResults/required-test-lanes.json") -Raw | ConvertFrom-Json
     $productionNestedCoverage = Get-Content -LiteralPath (Join-Path $nestedRoot "VerificationResults/coverage-manifest.json") -Raw | ConvertFrom-Json
     Assert-True -Condition ($productionNestedLane.lanes[0].name -ceq "EmbodySense.Core.Startup.Tests-nested-process") -Message "Inventory lane identity must match the canonical verifier producer."
@@ -222,7 +279,122 @@ try {
     $macOSResultMap.facts[0].outcome = "NotExecuted"
     Write-TestJson -Path $macOSResultPath -Value $macOSResultMap
     Update-TestComponentAuth -Root $macOSRoot
-    Assert-Throws -Message "non-passing macOS result" -ExpectedMessage "macOS platform result map is incomplete" -Action { Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot -MacOSRoot $macOSRoot }
+    Assert-Throws -Message "non-passing macOS result" -ExpectedMessage "authoritative raw TRX reconciliation" -Action { Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot -MacOSRoot $macOSRoot }
+    New-TestMacOSPlatformComponent -Root $macOSRoot
+
+    foreach ($discoveryCase in @(
+        [pscustomobject]@{ Name = "empty fact"; Mutate = { param($map) $map.discoveries[0].fact = "" } },
+        [pscustomobject]@{ Name = "duplicate fact"; Mutate = { param($map) $map.discoveries[1].fact = $map.discoveries[0].fact } },
+        [pscustomobject]@{ Name = "empty test ID"; Mutate = { param($map) $map.discoveries[0].testId = "" } },
+        [pscustomobject]@{ Name = "duplicate test ID"; Mutate = { param($map) $map.discoveries[1].testId = $map.discoveries[0].testId } },
+        [pscustomobject]@{ Name = "empty xUnit ID"; Mutate = { param($map) $map.discoveries[0].xunitTestCaseUniqueId = "" } },
+        [pscustomobject]@{ Name = "duplicate xUnit ID"; Mutate = { param($map) $map.discoveries[1].xunitTestCaseUniqueId = $map.discoveries[0].xunitTestCaseUniqueId } },
+        [pscustomobject]@{ Name = "wrong project"; Mutate = { param($map) $map.discoveries[0].project = "tests/Wrong/Wrong.csproj" } },
+        [pscustomobject]@{ Name = "wrong assembly"; Mutate = { param($map) $map.discoveries[0].assembly = "WrongAssembly" } },
+        [pscustomobject]@{ Name = "rooted test assembly"; Mutate = { param($map) $map.discoveries[0].testAssembly = "/foreign/tests/Wrong.dll" } },
+        [pscustomobject]@{ Name = "dotdot test assembly"; Mutate = { param($map) $map.discoveries[0].testAssembly = "tests/../Wrong.dll" } }
+    )) {
+        New-TestMacOSPlatformComponent -Root $macOSRoot
+        $discoveryMap = Get-Content -LiteralPath $macOSResultPath -Raw | ConvertFrom-Json
+        & $discoveryCase.Mutate $discoveryMap
+        Write-TestJson -Path $macOSResultPath -Value $discoveryMap
+        Update-TestComponentAuth -Root $macOSRoot
+        Assert-Throws -Message "macOS discovery $($discoveryCase.Name)" -ExpectedMessage "discovery" -Action { Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot -MacOSRoot $macOSRoot }
+    }
+    New-TestMacOSPlatformComponent -Root $macOSRoot
+
+    $assemblyPathPattern = '(storage|codeBase)="[^"]*(tests/[^"/]+(?:/[^"/]+)*/bin/Release/net10\.0/[^"/]+\.dll)"'
+    $foreignChangeCount = 0
+    foreach ($foreignTrx in @(Get-ChildItem -LiteralPath (Join-Path $macOSRoot "VerificationResults/MacOSPlatformContract") -Recurse -Filter "*.trx" -File)) {
+        $foreignOriginal = Get-Content -LiteralPath $foreignTrx.FullName -Raw
+        $foreignText = [regex]::Replace($foreignOriginal, $assemblyPathPattern, '$1="/foreign/producer/$2"')
+        Assert-True -Condition ($foreignText -cne $foreignOriginal) -Message "Foreign producer path substitution must change storage or codeBase evidence."
+        $foreignChangeCount++
+        [IO.File]::WriteAllText($foreignTrx.FullName, $foreignText, [Text.UTF8Encoding]::new($false))
+    }
+    Assert-True -Condition ($foreignChangeCount -gt 0) -Message "Foreign producer fixture must contain at least one storage or codeBase assembly path."
+    Update-TestComponentAuth -Root $macOSRoot
+    $foreignBindingOutput = Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot -MacOSRoot $macOSRoot
+    Assert-True -Condition ([string]::Join([Environment]::NewLine, @($foreignBindingOutput)).Contains("macos=macos-platform-contract")) -Message "Foreign macOS producer paths must bind lexically to the selected assembly suffix."
+    New-TestMacOSPlatformComponent -Root $macOSRoot
+
+    foreach ($rawCase in @(
+        [pscustomobject]@{ Name = "failed raw result"; Mutate = { param($path) [IO.File]::WriteAllText($path, (Get-Content -LiteralPath $path -Raw).Replace('outcome="Passed"', 'outcome="Failed"'), [Text.UTF8Encoding]::new($false)) } },
+        [pscustomobject]@{ Name = "not-executed raw result"; Mutate = { param($path) [IO.File]::WriteAllText($path, (Get-Content -LiteralPath $path -Raw).Replace('outcome="Passed"', 'outcome="NotExecuted"'), [Text.UTF8Encoding]::new($false)) } },
+        [pscustomobject]@{ Name = "wrong namespace"; Mutate = { param($path) [IO.File]::WriteAllText($path, (Get-Content -LiteralPath $path -Raw).Replace('http://microsoft.com/schemas/VisualStudio/TeamTest/2010', 'urn:wrong'), [Text.UTF8Encoding]::new($false)) } },
+        [pscustomobject]@{ Name = "DTD"; Mutate = { param($path) [IO.File]::WriteAllText($path, '<!DOCTYPE TestRun [<!ENTITY xxe "blocked">]>' + (Get-Content -LiteralPath $path -Raw), [Text.UTF8Encoding]::new($false)) } },
+        [pscustomobject]@{ Name = "malformed XML"; Mutate = { param($path) [IO.File]::WriteAllText($path, '<TestRun', [Text.UTF8Encoding]::new($false)) } },
+        [pscustomobject]@{ Name = "oversized XML"; Mutate = { param($path) [IO.File]::AppendAllText($path, ('x' * 1048577), [Text.UTF8Encoding]::new($false)) } },
+        [pscustomobject]@{ Name = "wrong storage and codeBase"; Mutate = { param($path) [IO.File]::WriteAllText($path, (Get-Content -LiteralPath $path -Raw).Replace('.dll', '-wrong.dll'), [Text.UTF8Encoding]::new($false)) } },
+        [pscustomobject]@{ Name = "dot foreign producer path"; Mutate = { param($path) $original = Get-Content -LiteralPath $path -Raw; $updated = [regex]::Replace($original, $assemblyPathPattern, '$1="/foreign/./producer/$2"'); Assert-True -Condition ($updated -cne $original) -Message "Dot-path substitution must change storage or codeBase evidence."; [IO.File]::WriteAllText($path, $updated, [Text.UTF8Encoding]::new($false)) } },
+        [pscustomobject]@{ Name = "dotdot foreign producer path"; Mutate = { param($path) $original = Get-Content -LiteralPath $path -Raw; $updated = [regex]::Replace($original, $assemblyPathPattern, '$1="/foreign/../producer/$2"'); Assert-True -Condition ($updated -cne $original) -Message "Dotdot-path substitution must change storage or codeBase evidence."; [IO.File]::WriteAllText($path, $updated, [Text.UTF8Encoding]::new($false)) } },
+        [pscustomobject]@{ Name = "empty result identifier"; Mutate = { param($path) $original = Get-Content -LiteralPath $path -Raw; $pattern = [regex]::new('(<UnitTestResult [^>]*executionId=")[^"]+'); [IO.File]::WriteAllText($path, $pattern.Replace($original, '$1', 1), [Text.UTF8Encoding]::new($false)) } },
+        [pscustomobject]@{ Name = "malformed result identifier"; Mutate = { param($path) $original = Get-Content -LiteralPath $path -Raw; $pattern = [regex]::new('(<UnitTestResult [^>]*testId=")[^"]+'); [IO.File]::WriteAllText($path, $pattern.Replace($original, '${1}not-a-guid', 1), [Text.UTF8Encoding]::new($false)) } },
+        [pscustomobject]@{ Name = "empty GUID"; Mutate = { param($path) $original = Get-Content -LiteralPath $path -Raw; $pattern = [regex]::new('(<UnitTestResult [^>]*testId=")[^"]+'); [IO.File]::WriteAllText($path, $pattern.Replace($original, '${1}00000000-0000-0000-0000-000000000000', 1), [Text.UTF8Encoding]::new($false)) } },
+        [pscustomobject]@{ Name = "empty results"; Mutate = { param($path) [IO.File]::WriteAllText($path, [regex]::Replace((Get-Content -LiteralPath $path -Raw), '<Results>.*?</Results>', '<Results></Results>', [Text.RegularExpressions.RegexOptions]::Singleline), [Text.UTF8Encoding]::new($false)) } },
+        [pscustomobject]@{ Name = "missing result"; Mutate = { param($path) $original = Get-Content -LiteralPath $path -Raw; $pattern = [regex]::new('<UnitTestResult [^>]*/>'); [IO.File]::WriteAllText($path, $pattern.Replace($original, '', 1), [Text.UTF8Encoding]::new($false)) } },
+        [pscustomobject]@{ Name = "duplicate result"; Mutate = { param($path) $text = Get-Content -LiteralPath $path -Raw; $match = [regex]::Match($text, '<UnitTestResult [^>]*/>'); [IO.File]::WriteAllText($path, $text.Replace($match.Value, $match.Value + $match.Value), [Text.UTF8Encoding]::new($false)) } },
+        [pscustomobject]@{ Name = "unexpected result child"; Mutate = { param($path) [IO.File]::WriteAllText($path, (Get-Content -LiteralPath $path -Raw).Replace('<Results>', '<Results><UnexpectedResult />'), [Text.UTF8Encoding]::new($false)) } },
+        [pscustomobject]@{ Name = "unexpected definition child"; Mutate = { param($path) [IO.File]::WriteAllText($path, (Get-Content -LiteralPath $path -Raw).Replace('<TestDefinitions>', '<TestDefinitions><UnexpectedDefinition />'), [Text.UTF8Encoding]::new($false)) } },
+        [pscustomobject]@{ Name = "unexpected entry child"; Mutate = { param($path) [IO.File]::WriteAllText($path, (Get-Content -LiteralPath $path -Raw).Replace('<TestEntries>', '<TestEntries><UnexpectedEntry />'), [Text.UTF8Encoding]::new($false)) } },
+        [pscustomobject]@{ Name = "wrong class provenance"; Mutate = { param($path) $original = Get-Content -LiteralPath $path -Raw; $pattern = [regex]::new('(className=")[^"]+'); [IO.File]::WriteAllText($path, $pattern.Replace($original, '${1}Wrong.Class', 1), [Text.UTF8Encoding]::new($false)) } },
+        [pscustomobject]@{ Name = "wrong method provenance"; Mutate = { param($path) $original = Get-Content -LiteralPath $path -Raw; $pattern = [regex]::new('(<TestMethod\b[^>]*\bname=")[^"]+'); $updated = $pattern.Replace($original, '${1}WrongMethod', 1); Assert-True -Condition ($updated -cne $original -and @([regex]::Matches($updated, '<TestMethod\b[^>]*\bname="WrongMethod"')).Count -eq 1) -Message "Method provenance mutation must replace exactly one TestMethod name."; [IO.File]::WriteAllText($path, $updated, [Text.UTF8Encoding]::new($false)) } },
+        [pscustomobject]@{ Name = "missing definition"; Mutate = { param($path) $original = Get-Content -LiteralPath $path -Raw; $pattern = [regex]::new('<UnitTest .*?</UnitTest>'); [IO.File]::WriteAllText($path, $pattern.Replace($original, '', 1), [Text.UTF8Encoding]::new($false)) } },
+        [pscustomobject]@{ Name = "counter mismatch"; Mutate = { param($path) $original = Get-Content -LiteralPath $path -Raw; $pattern = [regex]::new('(<Counters\b[^>]*\bpassed=")(\d+)'); $matches = @($pattern.Matches($original)); Assert-True -Condition ($matches.Count -eq 1) -Message "Counter mismatch mutation requires one Counters passed attribute."; $evaluator = [Text.RegularExpressions.MatchEvaluator]{ param($match) $match.Groups[1].Value + ([int]$match.Groups[2].Value + 1).ToString([Globalization.CultureInfo]::InvariantCulture) }; $updated = $pattern.Replace($original, $evaluator, 1); Assert-True -Condition ($updated -cne $original) -Message "Counter mismatch mutation must replace exactly one Counters passed value."; [IO.File]::WriteAllText($path, $updated, [Text.UTF8Encoding]::new($false)) } },
+        [pscustomobject]@{ Name = "aborted summary"; Mutate = { param($path) [IO.File]::WriteAllText($path, (Get-Content -LiteralPath $path -Raw).Replace('ResultSummary outcome="Completed"', 'ResultSummary outcome="Aborted"'), [Text.UTF8Encoding]::new($false)) } },
+        [pscustomobject]@{ Name = "nonzero failure counter"; Mutate = { param($path) [IO.File]::WriteAllText($path, (Get-Content -LiteralPath $path -Raw).Replace('failed="0"', 'failed="1"'), [Text.UTF8Encoding]::new($false)) } }
+    )) {
+        New-TestMacOSPlatformComponent -Root $macOSRoot
+        $rawTrx = Get-ChildItem -LiteralPath (Join-Path $macOSRoot "VerificationResults/MacOSPlatformContract") -Recurse -Filter "*.trx" -File | Select-Object -First 1
+        & $rawCase.Mutate $rawTrx.FullName
+        Update-TestComponentAuth -Root $macOSRoot
+        Assert-Throws -Message "macOS raw TRX $($rawCase.Name)" -Action { Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot -MacOSRoot $macOSRoot }
+    }
+    New-TestMacOSPlatformComponent -Root $macOSRoot
+    $duplicateDefinitionTrx = Get-ChildItem -LiteralPath (Join-Path $macOSRoot "VerificationResults/MacOSPlatformContract") -Recurse -Filter "*.trx" -File | Select-Object -First 1
+    $duplicateDefinitionText = Get-Content -LiteralPath $duplicateDefinitionTrx.FullName -Raw
+    $definitionMatch = [regex]::Match($duplicateDefinitionText, '<UnitTest .*?</UnitTest>')
+    [IO.File]::WriteAllText($duplicateDefinitionTrx.FullName, $duplicateDefinitionText.Replace($definitionMatch.Value, $definitionMatch.Value + $definitionMatch.Value), [Text.UTF8Encoding]::new($false))
+    Update-TestComponentAuth -Root $macOSRoot
+    Assert-Throws -Message "macOS duplicate definition" -Action { Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot -MacOSRoot $macOSRoot }
+
+    New-TestMacOSPlatformComponent -Root $macOSRoot
+    $crossedIdentifierTrx = Get-ChildItem -LiteralPath (Join-Path $macOSRoot "VerificationResults/MacOSPlatformContract") -Recurse -Filter "*.trx" -File | Select-Object -First 1
+    $crossedIdentifierPattern = [regex]::new('(<UnitTestResult [^>]*executionId=")[^"]+')
+    $crossedIdentifierText = $crossedIdentifierPattern.Replace((Get-Content -LiteralPath $crossedIdentifierTrx.FullName -Raw), '${1}ffffffff-ffff-ffff-ffff-ffffffffffff', 1)
+    [IO.File]::WriteAllText($crossedIdentifierTrx.FullName, $crossedIdentifierText, [Text.UTF8Encoding]::new($false))
+    Update-TestComponentAuth -Root $macOSRoot
+    Assert-Throws -Message "macOS crossed execution identifier" -Action { Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot -MacOSRoot $macOSRoot }
+
+    New-TestMacOSPlatformComponent -Root $macOSRoot
+    $duplicateExecutionTrxs = @(Get-ChildItem -LiteralPath (Join-Path $macOSRoot "VerificationResults/MacOSPlatformContract") -Recurse -Filter "*.trx" -File | Sort-Object FullName)
+    $firstExecution = [regex]::Match((Get-Content -LiteralPath $duplicateExecutionTrxs[0].FullName -Raw), 'executionId="([^"]+)"').Groups[1].Value
+    $secondExecution = [regex]::Match((Get-Content -LiteralPath $duplicateExecutionTrxs[1].FullName -Raw), 'executionId="([^"]+)"').Groups[1].Value
+    Assert-True -Condition ($firstExecution -cne $secondExecution) -Message "Cross-assembly duplicate execution fixture requires distinct source execution IDs."
+    $secondExecutionOriginal = Get-Content -LiteralPath $duplicateExecutionTrxs[1].FullName -Raw
+    $secondExecutionText = $secondExecutionOriginal.Replace($secondExecution, $firstExecution)
+    Assert-True -Condition ($secondExecutionText -cne $secondExecutionOriginal) -Message "Cross-assembly duplicate execution fixture must alter the second TRX."
+    [IO.File]::WriteAllText($duplicateExecutionTrxs[1].FullName, $secondExecutionText, [Text.UTF8Encoding]::new($false))
+    Update-TestComponentAuth -Root $macOSRoot
+    Assert-Throws -Message "macOS duplicate execution across assemblies" -ExpectedMessage "duplicate test execution identifiers" -Action { Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot -MacOSRoot $macOSRoot }
+
+    New-TestMacOSPlatformComponent -Root $macOSRoot
+    $macOSResultMap = Get-Content -LiteralPath $macOSResultPath -Raw | ConvertFrom-Json
+    $macOSResultMap.facts[0].testId = "ffffffff-ffff-ffff-ffff-ffffffffffff"
+    Write-TestJson -Path $macOSResultPath -Value $macOSResultMap
+    Update-TestComponentAuth -Root $macOSRoot
+    Assert-Throws -Message "macOS JSON provenance tamper" -ExpectedMessage "authoritative raw TRX reconciliation" -Action { Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot -MacOSRoot $macOSRoot }
+    foreach ($phaseCase in @("missing", "duplicate", "failed")) {
+        New-TestMacOSPlatformComponent -Root $macOSRoot
+        $watchdogPath = Join-Path $macOSRoot "VerificationResults/watchdog.log"
+        $watchdogText = Get-Content -LiteralPath $watchdogPath -Raw
+        if ($phaseCase -eq "missing") { $watchdogText = $watchdogText.Replace('VERIFY_PHASE_COMPLETE name=build-macos-platform-contract elapsed_seconds=1 completed_at_utc=2026-01-01T00:00:00.0000000+00:00' + "`n", "") }
+        elseif ($phaseCase -eq "duplicate") { $watchdogText = 'VERIFY_PHASE_COMPLETE name=build-macos-platform-contract elapsed_seconds=1 completed_at_utc=2026-01-01T00:00:00.0000000+00:00' + "`n" + $watchdogText }
+        else { $watchdogText = 'VERIFY_PHASE_FAILED name=build-macos-platform-contract' + "`n" + $watchdogText }
+        [IO.File]::WriteAllText($watchdogPath, $watchdogText, [Text.UTF8Encoding]::new($false))
+        Update-TestComponentAuth -Root $macOSRoot
+        Assert-Throws -Message "macOS $phaseCase phase evidence" -Action { Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot -MacOSRoot $macOSRoot }
+    }
     New-TestMacOSPlatformComponent -Root $macOSRoot
 
     $nestedCoverageManifestPath = Join-Path $nestedRoot "VerificationResults/coverage-manifest.json"
@@ -386,6 +558,35 @@ try {
     Update-TestCoverageAuth -Root $nestedRoot
     Update-TestComponentAuth -Root $nestedRoot
     Assert-Throws -Message "uncovered generated source retains coverage denominator" -ExpectedMessage "must be greater than the unchanged 90% floor" -Action { Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot }
+
+    New-TestComponent -Root $solutionRoot -Component "solution"
+    New-TestComponent -Root $nestedRoot -Component "nested-process"
+    $coverageBoundaryPackage = "EmbodySense.Core.Common"
+    Set-TestCoveragePackageLines -Root $solutionRoot -PackageName $coverageBoundaryPackage -Hits @(1, 1, 1, 1, 1, 1, 1, 1, 1, 0)
+    Set-TestCoveragePackageLines -Root $nestedRoot -PackageName $coverageBoundaryPackage -Hits @(1, 1, 1, 1, 1, 1, 1, 1, 1, 0)
+    foreach ($coverageRoot in @($solutionRoot, $nestedRoot)) { Update-TestCoverageAuth -Root $coverageRoot; Update-TestComponentAuth -Root $coverageRoot }
+    Assert-Throws -Message "exact-90 combined coverage" -ExpectedMessage "must be greater than the unchanged 90% floor" -Action { Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot -MacOSRoot $macOSRoot }
+
+    New-TestComponent -Root $solutionRoot -Component "solution"
+    New-TestComponent -Root $nestedRoot -Component "nested-process"
+    Set-TestCoveragePackageLines -Root $solutionRoot -PackageName $coverageBoundaryPackage -Hits @(1, 1, 1, 1, 1, 1, 1, 1, 1, 1)
+    Set-TestCoveragePackageLines -Root $nestedRoot -PackageName $coverageBoundaryPackage -Hits @(1, 1, 1, 1, 1, 1, 1, 1, 1, 1)
+    foreach ($coverageRoot in @($solutionRoot, $nestedRoot)) { Update-TestCoverageAuth -Root $coverageRoot; Update-TestComponentAuth -Root $coverageRoot }
+    $fullCoverageOutput = Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot -MacOSRoot $macOSRoot
+    Assert-True -Condition ([string]::Join("`n", @($fullCoverageOutput)).Contains("lanes=10 projects=9")) -Message "A combined 10/10 package must pass the strict fan-in coverage floor."
+
+    New-TestComponent -Root $solutionRoot -Component "solution"
+    New-TestComponent -Root $nestedRoot -Component "nested-process"
+    Set-TestCoveragePackageLines -Root $solutionRoot -PackageName $coverageBoundaryPackage -Hits @(1, 1, 1, 1, 1, 1, 1, 1, 0, 0)
+    Set-TestCoveragePackageLines -Root $nestedRoot -PackageName $coverageBoundaryPackage -Hits @(0, 0, 0, 0, 0, 0, 0, 0, 1, 1)
+    foreach ($coverageRoot in @($solutionRoot, $nestedRoot)) { Update-TestCoverageAuth -Root $coverageRoot; Update-TestComponentAuth -Root $coverageRoot }
+    $complementaryCoverageOutput = Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot -MacOSRoot $macOSRoot
+    Assert-True -Condition ([string]::Join("`n", @($complementaryCoverageOutput)).Contains("lanes=10 projects=9")) -Message "Complementary 8/10 child coverage must union to a passing 10/10 package."
+
+    New-TestComponent -Root $solutionRoot -Component "solution"
+    New-TestComponent -Root $nestedRoot -Component "nested-process"
+    foreach ($coverageRoot in @($solutionRoot, $nestedRoot)) { Set-TestCoveragePackageLines -Root $coverageRoot -PackageName $coverageBoundaryPackage -Hits @(1, 1, 1, 1, 1, 1, 1, 1, 0, 0); Update-TestCoverageAuth -Root $coverageRoot; Update-TestComponentAuth -Root $coverageRoot }
+    Assert-Throws -Message "common-gap partial coverage" -ExpectedMessage "must be greater than the unchanged 90% floor" -Action { Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot -MacOSRoot $macOSRoot }
 
     New-TestComponent -Root $solutionRoot -Component "solution"
     New-TestComponent -Root $nestedRoot -Component "nested-process"

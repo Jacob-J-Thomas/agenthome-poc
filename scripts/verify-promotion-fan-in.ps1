@@ -288,18 +288,26 @@ function Assert-FanInMacOSPlatformEvidence {
     $manifestPaths = @($manifest.files | ForEach-Object { [string]$_.path })
     $trxPaths = @($manifestPaths | Where-Object { $_ -match '^MacOSPlatformContract/[^/]+/macos-platform-contract\.trx$' })
     Assert-FanInCondition -Condition ($manifestPaths.Count -eq 7 -and $trxPaths.Count -eq 6 -and $manifestPaths -contains "MacOSPlatformContract/macos-platform-contract-results.json") -Message "macOS platform receipt must contain one result map and six real TRX files."
-    $result = Read-FanInJsonFile -Path (Join-Path $ResultsRoot "MacOSPlatformContract/macos-platform-contract-results.json") -Description "macOS platform result map"
+    $macOSResultsRoot = Join-Path $ResultsRoot "MacOSPlatformContract"
+    $result = Read-FanInJsonFile -Path (Join-Path $macOSResultsRoot "macos-platform-contract-results.json") -Description "macOS platform result map"
     $facts = @($result.facts)
     $selection = @(Get-FanInMacOSPlatformContractSelection)
-    Assert-FanInCondition -Condition ($result.schemaVersion -eq 1 -and $facts.Count -eq 15 -and $selection.Count -eq 15 -and @($facts | Group-Object fact | Where-Object Count -ne 1).Count -eq 0 -and @($facts | Group-Object assembly).Count -eq 6 -and @($facts | Where-Object { [string]$_.outcome -cne "Passed" }).Count -eq 0) -Message "macOS platform result map is incomplete, duplicated, skipped, or failed."
-    foreach ($expected in $selection) {
-        $assembly = [IO.Path]::GetFileNameWithoutExtension($expected.Project)
-        $matches = @($facts | Where-Object { [string]$_.project -ceq $expected.Project -and [string]$_.source -ceq $expected.Source -and [string]$_.assembly -ceq $assembly -and [string]$_.fact -ceq $expected.Fact -and [string]$_.outcome -ceq "Passed" -and [string]$_.trx -ceq "MacOSPlatformContract/$assembly/macos-platform-contract.trx" })
-        if ($null -ne $expected.PSObject.Properties["HelperSource"]) {
-            $matches = @($matches | Where-Object { $null -ne $_.PSObject.Properties["helperSource"] -and [string]$_.helperSource -ceq $expected.HelperSource })
-        }
-        Assert-FanInCondition -Condition ($matches.Count -eq 1) -Message "macOS platform result map does not authenticate the exact source/project/assembly/FQN mapping for '$($expected.Fact)'."
-    }
+    $properties = @($result.PSObject.Properties.Name | Sort-Object)
+    Assert-FanInCondition -Condition ($result.schemaVersion -eq 1 -and (($properties -join "|") -ceq ((@("discoveries", "facts", "schemaVersion") | Sort-Object) -join "|"))) -Message "macOS platform result map schema is not exact."
+    Assert-FanInCondition -Condition ($facts.Count -eq 15 -and @($result.discoveries).Count -eq 15 -and $selection.Count -eq 15 -and @($facts | Group-Object fact | Where-Object Count -ne 1).Count -eq 0 -and @($facts | Group-Object assembly).Count -eq 6) -Message "macOS platform result map is incomplete or duplicated."
+    $derivedFacts = @(& {
+        . (Join-Path $PSScriptRoot "verify-macos-platform-contract.ps1") -NoRun
+        Read-MacOSPlatformContractResults -Selection $selection -Discoveries @($result.discoveries) -ContractResultsRoot $macOSResultsRoot
+    })
+    $declaredText = (@($facts | Sort-Object fact) | ConvertTo-Json -Depth 12 -Compress)
+    $derivedText = (@($derivedFacts | Sort-Object fact) | ConvertTo-Json -Depth 12 -Compress)
+    Assert-FanInCondition -Condition ($declaredText -ceq $derivedText) -Message "macOS platform result map does not match the authoritative raw TRX reconciliation."
+    $phaseNames = @("build-macos-platform-contract") + @($selection | Group-Object Project | ForEach-Object { $assembly = [IO.Path]::GetFileNameWithoutExtension($_.Name); @("discover-macos-$assembly", "macos-$assembly") })
+    $watchdogFile = Get-FanInSingleFile -Root $ResultsRoot -Name "watchdog.log" -Description "macOS platform watchdog evidence"
+    $phaseMarkers = @([regex]::Matches((Get-Content -LiteralPath $watchdogFile.FullName -Raw), '(?m)^VERIFY_PHASE_COMPLETE name=(?<name>[^ ]+) elapsed_seconds=[0-9]+(?:\.[0-9]+)? completed_at_utc=\S+\r?$') | ForEach-Object { $_.Groups["name"].Value })
+    Assert-FanInCondition -Condition ($phaseMarkers.Count -eq $phaseNames.Count -and (@($phaseMarkers | Where-Object { $phaseNames -notcontains $_ }).Count -eq 0)) -Message "macOS platform watchdog evidence contains a missing, duplicate, or foreign completed phase marker."
+    for ($index = 0; $index -lt $phaseNames.Count; $index++) { Assert-FanInCondition -Condition ($phaseMarkers[$index] -ceq $phaseNames[$index]) -Message "macOS platform watchdog phase markers are reordered." }
+    Assert-FanInCondition -Condition (-not [regex]::IsMatch((Get-Content -LiteralPath $watchdogFile.FullName -Raw), '(?m)^VERIFY_PHASE_(?:FAILED|SKIPPED)\b')) -Message "macOS platform watchdog evidence contains a failed or skipped phase marker."
 }
 
 function Read-FanInComponent {

@@ -214,10 +214,6 @@ jobs:
         with:
           global-json-file: global.json
 
-      - name: Build macOS platform contract
-        shell: pwsh
-        run: dotnet build EmbodySense.sln -c Release /p:RestoreIgnoreFailedSources=true
-
       - name: Verify macOS platform contract
         shell: pwsh
         run: ./scripts/verify-with-watchdog.ps1 -Configuration Release -DeadlineSeconds 600 -VerificationComponent MacOSPlatformContract
