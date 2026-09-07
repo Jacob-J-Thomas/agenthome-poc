@@ -366,9 +366,9 @@ public sealed partial class BrowserFlowTests
         await tab.WaitForExpressionAsync("document.getElementById('workspaceStatus').textContent.includes('Initialized') && !document.getElementById('effectReconciliationNav').disabled");
         await tab.EvaluateWithUserGestureAsync("document.getElementById('effectReconciliationNav').click()");
         var caseIdJson = JsonSerializer.Serialize(caseId);
-        await tab.WaitForExpressionAsync("!document.getElementById('effectReconciliationView').hidden && document.getElementById('effectReconciliationListStatus').textContent.includes('canonical state')");
-        await tab.WaitForExpressionAsync($"document.getElementById('effectReconciliationList').textContent.includes({caseIdJson})");
-        await tab.EvaluateWithUserGestureAsync($"(() => {{ const item = [...document.querySelectorAll('#effectReconciliationList button')].find((candidate) => candidate.textContent.includes({caseIdJson})); if (!item) throw new Error('Effect Reconciliation case was not rendered.'); item.click(); }})()");
+        await tab.WaitForExpressionAsync("!document.getElementById('effectReconciliationView').hidden && document.getElementById('effectReconciliationList').getAttribute('aria-busy') === 'false' && document.getElementById('effectReconciliationListStatus').textContent.includes('canonical state')");
+        await tab.WaitForExpressionAsync($"[...document.querySelectorAll('#effectReconciliationList button')].some((candidate) => candidate.querySelector('.effect-reconciliation-list-id')?.textContent === {caseIdJson})");
+        await tab.EvaluateWithUserGestureAsync($"(() => {{ const item = [...document.querySelectorAll('#effectReconciliationList button')].find((candidate) => candidate.querySelector('.effect-reconciliation-list-id')?.textContent === {caseIdJson}); if (!item) throw new Error('Effect Reconciliation case was not rendered.'); item.click(); }})()");
         await tab.WaitForExpressionAsync($"!document.getElementById('effectReconciliationDetailPanel').hidden && document.getElementById('effectReconciliationIdentity').textContent.includes({caseIdJson}) && document.getElementById('effectReconciliationDetailStatus').textContent.includes('successfully')");
     }
 

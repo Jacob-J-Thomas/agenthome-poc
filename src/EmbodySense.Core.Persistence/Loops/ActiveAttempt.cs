@@ -9,7 +9,7 @@ internal sealed class ActiveAttempt
 {
     private readonly CancellationTokenSource _cancellation;
     private readonly CancellationToken _competingCancellationToken;
-    private int _signalQueued;
+    private int _signalRequested;
     private int _routedSignalDelivered;
 
     /// <summary>
@@ -38,14 +38,16 @@ internal sealed class ActiveAttempt
     public TaskCompletionSource<CustomLoopAttemptCancellationResult> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     /// <summary>
-    /// Queues at most one asynchronous cancellation signal without invoking callbacks under the host lock.
+    /// Delivers at most one cancellation signal without invoking callbacks under the host lock.
     /// </summary>
     public void Signal()
     {
-        if (Interlocked.Exchange(ref _signalQueued, 1) == 0)
+        if (Interlocked.Exchange(ref _signalRequested, 1) != 0)
         {
-            ThreadPool.UnsafeQueueUserWorkItem(static attempt => attempt.DeliverSignal(), this, preferLocal: false);
+            return;
         }
+
+        DeliverSignal();
     }
 
     /// <summary>
@@ -89,12 +91,12 @@ internal sealed class ActiveAttempt
             return new CustomLoopAttemptCancellationResult(CustomLoopAttemptCancellationStatus.SignalDelivered, "The cancellation signal was delivered, but the active operation completed or the acknowledgement window elapsed without confirmed provider interruption.");
         }
 
-        var status = Volatile.Read(ref _signalQueued) == 0 ? CustomLoopAttemptCancellationStatus.NoActiveAttempt : CustomLoopAttemptCancellationStatus.OwnerUnavailable;
+        var status = Volatile.Read(ref _signalRequested) == 0 ? CustomLoopAttemptCancellationStatus.NoActiveAttempt : CustomLoopAttemptCancellationStatus.OwnerUnavailable;
         var detail = status == CustomLoopAttemptCancellationStatus.NoActiveAttempt
             ? "The active operation completed before cancellation was routed."
             : _competingCancellationToken.IsCancellationRequested
                 ? "A caller or deadline cancellation competed with the routed signal, so routed delivery could not be proved."
-                : "The cancellation signal was queued, but delivery was not observed before the active operation completed or the acknowledgement window elapsed.";
+                : "The cancellation signal was requested, but delivery was not observed before the active operation completed or the acknowledgement window elapsed.";
         return new CustomLoopAttemptCancellationResult(status, detail);
     }
 
@@ -116,16 +118,17 @@ internal sealed class ActiveAttempt
             }
 
             Volatile.Write(ref _routedSignalDelivered, 1);
-            _cancellation.Cancel();
+            var callbackCompletion = _cancellation.CancelAsync();
+            _ = callbackCompletion.ContinueWith(
+                static completed => _ = completed.Exception,
+                CancellationToken.None,
+                TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
         }
         catch (ObjectDisposedException)
         {
             Volatile.Write(ref _routedSignalDelivered, 0);
             CompleteWithoutConfirmedInterruption();
-        }
-        catch (AggregateException)
-        {
-            // The cancellation state is already visible even when a provider callback fails.
         }
     }
 }

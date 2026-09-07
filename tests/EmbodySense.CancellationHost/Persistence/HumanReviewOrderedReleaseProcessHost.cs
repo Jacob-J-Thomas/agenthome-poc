@@ -1,6 +1,7 @@
 using EmbodySense.Core.Application.HumanReview;
 using EmbodySense.Core.Application.HumanReview.Models;
 using EmbodySense.Core.Application.Loops;
+using EmbodySense.Core.Application.Loops.EffectAttempts;
 using EmbodySense.Core.Application.Loops.Models;
 using EmbodySense.Core.Application.Loops.Execution.Custom.Models;
 using EmbodySense.Core.Application.Loops.Sequential.Models;
@@ -115,7 +116,17 @@ internal static class HumanReviewOrderedReleaseProcessHost
         if (current is null || intent is null) return 2;
         var releaseStore = new HumanReviewOrderedReleaseRaceGateStore(store, readyPath, releasePath);
 
-        return await ReleaseEffectAsync(paths, store, attempts, current, intent, markerPath, resultPath, crashAfterMarker: false, releaseStore: releaseStore);
+        return await ReleaseEffectAsync(
+            paths,
+            store,
+            attempts,
+            current,
+            intent,
+            markerPath,
+            resultPath,
+            crashAfterMarker: false,
+            releaseStore: releaseStore,
+            attemptReads: new HumanReviewOrderedReleaseProcessDiagnosticReadStore(attempts));
     }
 
     internal static async Task<int> RunEffectOwnerBarrierAsync(string workspaceRoot, string runId, string markerPath, string ownerReadyPath, string ownerReleasePath, string resultPath)
@@ -152,11 +163,12 @@ internal static class HumanReviewOrderedReleaseProcessHost
         bool crashAfterMarker,
         string? ownerReadyPath = null,
         string? ownerReleasePath = null,
-        ICustomLoopRunStore? releaseStore = null)
+        ICustomLoopRunStore? releaseStore = null,
+        IGovernedLoopEffectAttemptReadStore? attemptReads = null)
     {
         var timeProvider = new HumanReviewOrderedReleaseProcessTimeProvider(intent.ReleaseAtUtc);
         var runtime = HumanReviewOrderedReleaseProcessRuntimeFactory.Create(store, paths, markerPath, timeProvider, crashAfterMarker, ownerReadyPath, ownerReleasePath);
-        var evidence = new CanonicalHumanReviewEffectEvidenceSource(store, attempts);
+        var evidence = new CanonicalHumanReviewEffectEvidenceSource(store, attemptReads ?? attempts);
         var result = await new HumanReviewOrderedReleaseService(
             releaseStore ?? store,
             new HumanReviewOrderedReleaseProcessContextResolver(),

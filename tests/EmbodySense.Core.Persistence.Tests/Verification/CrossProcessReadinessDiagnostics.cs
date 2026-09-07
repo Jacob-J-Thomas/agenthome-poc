@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Text;
 
 namespace EmbodySense.Core.Persistence.Tests.Verification;
 
@@ -17,7 +18,8 @@ internal static class CrossProcessReadinessDiagnostics
     internal static async Task WaitForChildrenReadyAsync(
         string operation,
         IReadOnlyList<CrossProcessReadinessChild> children,
-        TimeSpan timeout)
+        TimeSpan timeout,
+        Func<string, Task<string>>? resultEvidenceReader = null)
     {
         Validate(operation, children, timeout);
         var wait = Stopwatch.StartNew();
@@ -25,13 +27,13 @@ internal static class CrossProcessReadinessDiagnostics
         {
             if (children.Any(child => child.Process.HasExited))
             {
-                var evidence = await StopAndReadChildEvidenceAsync(operation, "readiness-exit", children);
+                var evidence = await StopAndReadChildEvidenceAsync(operation, "readiness-exit", children, resultEvidenceReader);
                 Assert.Fail($"Cross-process {operation} child exited before readiness. {DescribeMarkers(children)}{Environment.NewLine}{evidence}");
             }
 
             if (wait.Elapsed >= timeout)
             {
-                var evidence = await StopAndReadChildEvidenceAsync(operation, "readiness-timeout", children);
+                var evidence = await StopAndReadChildEvidenceAsync(operation, "readiness-timeout", children, resultEvidenceReader);
                 Assert.Fail($"Cross-process {operation} children did not all report ready within {timeout.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture)} seconds. {DescribeMarkers(children)}{Environment.NewLine}{evidence}");
             }
 
@@ -129,11 +131,41 @@ internal static class CrossProcessReadinessDiagnostics
     private static async Task<string> StopAndReadChildEvidenceAsync(
         string operation,
         string stage,
-        IReadOnlyList<CrossProcessReadinessChild> children)
+        IReadOnlyList<CrossProcessReadinessChild> children,
+        Func<string, Task<string>>? resultEvidenceReader = null)
     {
-        await Task.WhenAll(children.Select(StopChildProcessAsync));
-        var evidence = await Task.WhenAll(children.Select(child => ReadChildEvidenceAsync(operation, stage, child)));
+        var preTerminationState = children.Select(CapturePreTerminationState).ToArray();
+        string[] resultEvidence;
+        try
+        {
+            resultEvidence = await Task.WhenAll(children.Select(child => ReadChildResultEvidenceAsync(child.ResultPath, resultEvidenceReader)));
+        }
+        finally
+        {
+            await Task.WhenAll(children.Select(StopChildProcessAsync));
+        }
+
+        var preTerminationEvidence = preTerminationState.Zip(resultEvidence).Select(item => new CrossProcessPreTerminationEvidence(item.First.Exited, item.First.ExitCode, item.Second)).ToArray();
+        var evidence = await Task.WhenAll(children.Zip(preTerminationEvidence).Select(item => ReadChildEvidenceAsync(operation, stage, item.First, item.Second)));
         return string.Join(Environment.NewLine, evidence);
+    }
+
+    private static CrossProcessPreTerminationState CapturePreTerminationState(CrossProcessReadinessChild child)
+    {
+        try
+        {
+            var exited = child.Process.HasExited;
+            if (!exited)
+            {
+                return new CrossProcessPreTerminationState(false, null);
+            }
+
+            return new CrossProcessPreTerminationState(true, child.Process.ExitCode);
+        }
+        catch
+        {
+            return new CrossProcessPreTerminationState(false, null);
+        }
     }
 
     private static async Task StopChildProcessAsync(CrossProcessReadinessChild child)
@@ -145,6 +177,9 @@ internal static class CrossProcessReadinessDiagnostics
         catch (InvalidOperationException) when (child.Process.HasExited)
         {
         }
+        catch
+        {
+        }
 
         try
         {
@@ -153,16 +188,22 @@ internal static class CrossProcessReadinessDiagnostics
         catch (TimeoutException)
         {
         }
+        catch
+        {
+        }
     }
 
     private static async Task<string> ReadChildEvidenceAsync(
         string operation,
         string stage,
-        CrossProcessReadinessChild child)
+        CrossProcessReadinessChild child,
+        CrossProcessPreTerminationEvidence preTermination)
     {
+        var preTerminationState = preTermination.Exited ? "exited" : "running";
+        var preTerminationExitCode = preTermination.ExitCode?.ToString(CultureInfo.InvariantCulture) ?? "<unavailable>";
         if (!child.Process.HasExited)
         {
-            return $"{operation}/{stage}/{child.Label}: pid={child.Process.Id} state=still-running exit=<unavailable> ready={File.Exists(child.ReadyPath)} result={File.Exists(child.ResultPath)} stdout=<unavailable> stderr=<unavailable>";
+            return $"{operation}/{stage}/{child.Label}: pid={child.Process.Id} pre-termination-state={preTerminationState} pre-termination-exit={preTerminationExitCode} pre-termination-result={preTermination.ResultEvidence} state=still-running exit=<unavailable> ready={File.Exists(child.ReadyPath)} result={File.Exists(child.ResultPath)} stdout=<unavailable> stderr=<unavailable>";
         }
 
         using var fallbackCancellation = child.EvidenceCancellation is null ? new CancellationTokenSource() : null;
@@ -180,7 +221,66 @@ internal static class CrossProcessReadinessDiagnostics
             await drainTask.WaitAsync(_childEvidenceReadTimeout);
         }
 
-        return $"{operation}/{stage}/{child.Label}: pid={child.Process.Id} state=exited exit={child.Process.ExitCode} ready={File.Exists(child.ReadyPath)} result={File.Exists(child.ResultPath)} stdout={GetChildStreamEvidence(outputTask)} stderr={GetChildStreamEvidence(errorTask)}";
+        return $"{operation}/{stage}/{child.Label}: pid={child.Process.Id} pre-termination-state={preTerminationState} pre-termination-exit={preTerminationExitCode} pre-termination-result={preTermination.ResultEvidence} state=exited exit={child.Process.ExitCode} ready={File.Exists(child.ReadyPath)} result={File.Exists(child.ResultPath)} stdout={GetChildStreamEvidence(outputTask)} stderr={GetChildStreamEvidence(errorTask)}";
+    }
+
+    private static async Task<string> ReadChildResultEvidenceAsync(string path, Func<string, Task<string>>? resultEvidenceReader)
+    {
+        try
+        {
+            var read = resultEvidenceReader is null ? ReadChildResultEvidenceFromFileAsync(path) : resultEvidenceReader(path);
+            return await read.WaitAsync(_childEvidenceReadTimeout);
+        }
+        catch (TimeoutException)
+        {
+            return "<timed-out>";
+        }
+        catch
+        {
+            return "<unavailable>";
+        }
+    }
+
+    private static async Task<string> ReadChildResultEvidenceFromFileAsync(string path)
+    {
+        if (!File.Exists(path))
+        {
+            return "<missing>";
+        }
+
+        try
+        {
+            await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, MaximumChildEvidenceCharacters, useAsync: true);
+            var truncated = stream.Length > MaximumChildEvidenceCharacters;
+            if (truncated)
+            {
+                stream.Seek(-MaximumChildEvidenceCharacters, SeekOrigin.End);
+            }
+
+            var buffer = new byte[checked((int)Math.Min(stream.Length, MaximumChildEvidenceCharacters))];
+            var totalRead = 0;
+            while (totalRead < buffer.Length)
+            {
+                var read = await stream.ReadAsync(buffer.AsMemory(totalRead));
+                if (read == 0)
+                {
+                    break;
+                }
+
+                totalRead += read;
+            }
+
+            var result = Encoding.UTF8.GetString(buffer, 0, totalRead);
+            return truncated ? "<truncated>" + result : result;
+        }
+        catch (IOException)
+        {
+            return "<unavailable>";
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return "<unavailable>";
+        }
     }
 
     private static async Task<string> ReadChildStreamAsync(Task<string> readTask)
@@ -217,4 +317,8 @@ internal static class CrossProcessReadinessDiagnostics
             ? evidence
             : "<truncated>" + evidence[^MaximumChildEvidenceCharacters..];
     }
+
+    private sealed record CrossProcessPreTerminationEvidence(bool Exited, int? ExitCode, string ResultEvidence);
+
+    private sealed record CrossProcessPreTerminationState(bool Exited, int? ExitCode);
 }

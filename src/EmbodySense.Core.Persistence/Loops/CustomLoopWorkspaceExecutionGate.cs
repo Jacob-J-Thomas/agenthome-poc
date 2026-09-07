@@ -23,6 +23,7 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
     private readonly WorkspacePaths _paths;
     private readonly string _workspaceKey;
     private readonly ICustomLoopCancellationBrokerLifecycleObserver? _brokerLifecycleObserver;
+    private readonly TimeProvider _acknowledgementTimeProvider;
     private WorkspaceHost? _host;
     private bool _disposed;
 
@@ -31,7 +32,7 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
     /// </summary>
     /// <param name="paths">The paths.</param>
     public CustomLoopWorkspaceExecutionGate(WorkspacePaths paths)
-        : this(paths, null)
+        : this(paths, null, TimeProvider.System)
     {
     }
 
@@ -41,11 +42,27 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
     /// <param name="paths">The paths.</param>
     /// <param name="brokerLifecycleObserver">The optional in-process observer for bounded broker lifecycle transitions.</param>
     public CustomLoopWorkspaceExecutionGate(WorkspacePaths paths, ICustomLoopCancellationBrokerLifecycleObserver? brokerLifecycleObserver)
+        : this(paths, brokerLifecycleObserver, TimeProvider.System)
+    {
+    }
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="CustomLoopWorkspaceExecutionGate"/> class with a local broker lifecycle observer and acknowledgement timer source.
+    /// </summary>
+    /// <remarks>
+    /// A process shares one workspace host. A gate that attaches to an existing local host uses that host's established timer source rather than replacing its ownership or timing configuration.
+    /// </remarks>
+    /// <param name="paths">The paths.</param>
+    /// <param name="brokerLifecycleObserver">The optional in-process observer for bounded broker lifecycle transitions.</param>
+    /// <param name="acknowledgementTimeProvider">The monotonic timer source used when this gate creates the shared local host.</param>
+    public CustomLoopWorkspaceExecutionGate(WorkspacePaths paths, ICustomLoopCancellationBrokerLifecycleObserver? brokerLifecycleObserver, TimeProvider acknowledgementTimeProvider)
     {
         ArgumentNullException.ThrowIfNull(paths);
+        ArgumentNullException.ThrowIfNull(acknowledgementTimeProvider);
         _paths = paths;
         _workspaceKey = CanonicalWorkspaceKey(paths.RootPath);
         _brokerLifecycleObserver = brokerLifecycleObserver;
+        _acknowledgementTimeProvider = acknowledgementTimeProvider;
 
         lock (_hostsSync)
         {
@@ -403,7 +420,7 @@ public sealed class CustomLoopWorkspaceExecutionGate : ICustomLoopWorkspaceExecu
         WorkspaceHost host;
         try
         {
-            host = new WorkspaceHost(_paths, _workspaceKey, ownership, RetireFaultedHost, _brokerLifecycleObserver);
+            host = new WorkspaceHost(_paths, _workspaceKey, ownership, RetireFaultedHost, _brokerLifecycleObserver, _acknowledgementTimeProvider);
         }
         catch
         {

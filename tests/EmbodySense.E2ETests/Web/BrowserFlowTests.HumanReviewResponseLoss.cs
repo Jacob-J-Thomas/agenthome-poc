@@ -355,12 +355,13 @@ public sealed partial class BrowserFlowTests
     private static async Task OpenHumanReviewResponseLossAsync(HeadlessBrowserSession browser)
     {
         await ClickAsync(browser, "[data-testid=\"human-review-nav\"]");
-        await browser.WaitForExpressionAsync("!document.getElementById('humanReviewView').hidden && document.getElementById('humanReviewListStatus').textContent.length > 0");
+        await browser.WaitForExpressionAsync("!document.getElementById('humanReviewView').hidden && !document.getElementById('humanReviewRefreshButton').disabled && document.getElementById('humanReviewListStatus').textContent.length > 0");
     }
 
     private static async Task SelectHumanReviewResponseLossAsync(HeadlessBrowserSession browser, string runId)
     {
         var selector = JsonSerializer.Serialize($"[data-testid=\"human-review-item\"][data-run-id=\"{runId}\"]");
+        await browser.WaitForExpressionAsync($"!document.getElementById('humanReviewRefreshButton').disabled && document.querySelector({selector}) !== null");
         await browser.EvaluateWithUserGestureAsync($"(() => {{ const item = document.querySelector({selector}); if (!item) throw new Error('Response-loss Human Review item was not rendered.'); item.click(); }})()");
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
         while (!timeout.IsCancellationRequested)

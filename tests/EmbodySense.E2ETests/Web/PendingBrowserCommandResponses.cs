@@ -7,6 +7,8 @@ internal sealed class PendingBrowserCommandResponses
 {
     private readonly ConcurrentDictionary<int, Action<JsonElement>> _handlers = new();
 
+    internal int Count => _handlers.Count;
+
     public void Add(int commandId, Action<JsonElement> handler)
     {
         ArgumentNullException.ThrowIfNull(handler);

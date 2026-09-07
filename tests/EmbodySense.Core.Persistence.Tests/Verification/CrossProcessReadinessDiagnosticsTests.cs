@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using EmbodySense.CancellationHost.Persistence;
+using EmbodySense.Core.Application.Loops.EffectAttempts.Models;
 using EmbodySense.Tests.Support;
 using Xunit.Sdk;
 
@@ -56,7 +58,76 @@ public sealed class CrossProcessReadinessDiagnosticsTests
         Assert.Contains("verification/completion children did not finish post-gate decision teardown", failure.Message, StringComparison.Ordinal);
         Assert.Contains("completed(ready=True,result=True)", failure.Message, StringComparison.Ordinal);
         Assert.Contains("verification/completion/post-gate decision-teardown-timeout/completed", failure.Message, StringComparison.Ordinal);
+        Assert.Contains("pre-termination-state=running", failure.Message, StringComparison.Ordinal);
+        Assert.Contains("pre-termination-result=result", failure.Message, StringComparison.Ordinal);
         Assert.True(process.HasExited, "The completion diagnostic did not terminate the retained child tree.");
+    }
+
+    [Fact]
+    public async Task Readiness_failure_retains_a_genuine_early_exit_distinct_from_cleanup_induced_exit()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        using var process = CancellationHostProcess.StartOwned("pipe-holder-child", "1");
+        await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        var child = new CrossProcessReadinessChild("early-exit", process, workspace.File("missing-ready"), workspace.File("missing-result"));
+
+        var wait = CrossProcessReadinessDiagnostics.WaitForChildrenReadyAsync(
+            "verification/early-exit",
+            [child],
+            TimeSpan.FromMilliseconds(100));
+        var failure = await Assert.ThrowsAsync<FailException>(() => wait.WaitAsync(TimeSpan.FromSeconds(10)));
+
+        Assert.Contains("verification/early-exit/readiness-exit/early-exit", failure.Message, StringComparison.Ordinal);
+        Assert.Contains("pre-termination-state=exited pre-termination-exit=0", failure.Message, StringComparison.Ordinal);
+        Assert.Contains("pre-termination-result=<missing>", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Ordered_release_diagnostic_reader_preserves_delegate_outcomes_when_reporting_fails()
+    {
+        var unavailable = new GovernedLoopEffectAttemptReadResult(GovernedLoopEffectAttemptReadStatus.Unavailable);
+        var unavailableReader = new HumanReviewOrderedReleaseProcessDiagnosticReadStore((_, _, _, _) => Task.FromResult(unavailable), ThrowingDiagnosticWriter);
+        Assert.Same(unavailable, await unavailableReader.ReadAsync("workspace", "operation", 1L));
+
+        var current = new GovernedLoopEffectAttemptReadResult(GovernedLoopEffectAttemptReadStatus.Current);
+        var currentReader = new HumanReviewOrderedReleaseProcessDiagnosticReadStore((_, _, _, _) => Task.FromResult(current), ThrowingDiagnosticWriter);
+        Assert.Same(current, await currentReader.ReadAsync("workspace", "operation", 1L));
+
+        var expected = new IOException("canonical read failure");
+        var throwingReader = new HumanReviewOrderedReleaseProcessDiagnosticReadStore((_, _, _, _) => Task.FromException<GovernedLoopEffectAttemptReadResult>(expected), ThrowingDiagnosticWriter);
+        var exception = await Assert.ThrowsAsync<IOException>(() => throwingReader.ReadAsync("workspace", "operation", 1L));
+        Assert.Same(expected, exception);
+    }
+
+    [Theory]
+    [InlineData(false, "<unavailable>")]
+    [InlineData(true, "<timed-out>")]
+    public async Task Readiness_failure_terminates_owned_children_when_result_evidence_faults_or_stalls(bool stall, string expectedEvidence)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var workspace = new TestWorkspace();
+        using var process = CancellationHostProcess.StartOwned("pipe-holder-child", "30000");
+        var child = new CrossProcessReadinessChild("result-evidence", process, workspace.File("missing-ready"), workspace.File("missing-result"));
+        var stalled = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var wait = CrossProcessReadinessDiagnostics.WaitForChildrenReadyAsync(
+            "verification/result-evidence",
+            [child],
+            TimeSpan.FromMilliseconds(100),
+            _ => stall ? stalled.Task : Task.FromException<string>(new IOException("result evidence failure")));
+        var failure = await Assert.ThrowsAsync<FailException>(() => wait.WaitAsync(TimeSpan.FromSeconds(10)));
+
+        Assert.Contains($"pre-termination-result={expectedEvidence}", failure.Message, StringComparison.Ordinal);
+        Assert.True(process.HasExited, "The diagnostic helper did not terminate the owned child after result-evidence capture failed.");
     }
 
     [Fact]
@@ -123,4 +194,7 @@ public sealed class CrossProcessReadinessDiagnosticsTests
 
         return false;
     }
+
+    private static void ThrowingDiagnosticWriter(string diagnostic) => throw new IOException("diagnostic writer failure");
+
 }
