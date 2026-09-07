@@ -395,16 +395,15 @@ try {
     $staleWriteTimeUtc = $minimumWriteTimeUtc.AddDays(-2)
 
     $passingRepository = New-FixtureRepository -ScenarioRoot $scenarioRoot -Name "passing"
-    $onePrimaryClass = New-CoverageClass -Name "Fixture.One.Primary" -FileName "src/Fixture.One/File.cs" -Lines @(New-CoverageLines -Hits @(1, 1, 1, 1, 1, 1, 1, 1, 0, 0))
-    $twoPrimaryClass = New-CoverageClass -Name "Fixture.Two.Primary" -FileName "src/Fixture.Two/File.cs" -Lines @(New-CoverageLines -Hits @(1, 1, 1, 1, 1, 1, 1, 1, 1, 0))
-    $primaryPackages = @(
-        (New-CoveragePackage -Name "Fixture.One" -Classes @($onePrimaryClass)),
-        (New-CoveragePackage -Name "Fixture.Two" -Classes @($twoPrimaryClass))
+    $aboveThresholdPackages = @(
+        (New-CoveragePackage -Name "Fixture.One" -Classes @((New-CoverageClass -Name "Fixture.One.Above" -FileName "src/Fixture.One/File.cs" -Lines @(New-CoverageLines -Hits @(1, 1, 1, 1, 1, 1, 1, 1, 1, 1))))),
+        (New-CoveragePackage -Name "Fixture.Two" -Classes @((New-CoverageClass -Name "Fixture.Two.Above" -FileName "src/Fixture.Two/File.cs" -Lines @(New-CoverageLines -Hits @(1, 1, 1, 1, 1, 1, 1, 1, 1, 1)))))
     )
-    $oneManifestClass = New-CoverageClass -Name "Fixture.One.Manifest" -FileName "src/Fixture.One/File.cs" -Lines @(New-CoverageLines -Hits @(1, 1, 1, 1, 1, 1, 1, 1, 1, 0))
+    $oneManifestClass = New-CoverageClass -Name "Fixture.One.Manifest" -FileName "src/Fixture.One/File.cs" -Lines @(New-CoverageLines -Hits @(1, 1, 1, 1, 1, 1, 1, 1, 1, 1))
+    $twoManifestClass = New-CoverageClass -Name "Fixture.Two.Manifest" -FileName "src/Fixture.Two/File.cs" -Lines @(New-CoverageLines -Hits @(1, 1, 1, 1, 1, 1, 1, 1, 1, 1))
     $manifestGeneratorPackages = @(
         (New-CoveragePackage -Name "Fixture.One" -Classes @($oneManifestClass)),
-        (New-CoveragePackage -Name "Fixture.Two" -Classes @($twoPrimaryClass))
+        (New-CoveragePackage -Name "Fixture.Two" -Classes @($twoManifestClass))
     )
 
     $canonicalOnlyRepository = New-FixtureRepository -ScenarioRoot $scenarioRoot -Name "manifest-generator-canonical"
@@ -619,7 +618,7 @@ try {
     Assert-True -Condition ($badTypeResult.ExitCode -ne 0) -Message "A string substituted for a schema-1 integer must fail closed."
     Assert-Contains -Actual $badTypeResult.Output -Expected "non-negative schema-1 integer" -Message "Typed-schema failures must be actionable."
 
-    Write-CoverageReport -RepositoryRoot $passingRepository -Name "primary" -Packages $primaryPackages -LastWriteTimeUtc $freshWriteTimeUtc
+    Write-CoverageReport -RepositoryRoot $passingRepository -Name "primary" -Packages $aboveThresholdPackages -LastWriteTimeUtc $freshWriteTimeUtc
 
     $oneAliasClass = New-CoverageClass -Name "Fixture.One.Alias" -FileName (Join-Path $passingRepository "src\Fixture.One\File.cs") -Lines @(
         (New-CoverageLine -Number 1 -Hits 0),
@@ -634,11 +633,17 @@ try {
     $stalePackage = New-CoveragePackage -Name "Fixture.One" -Classes @($oneStaleClass)
     Write-CoverageReport -RepositoryRoot $passingRepository -Name "stale" -Packages @($stalePackage) -LastWriteTimeUtc $staleWriteTimeUtc
 
-    $passingResult = Invoke-CoverageVerification -RepositoryRoot $passingRepository -MinimumWriteTimeUtc $minimumWriteTimeUtc
+    $passingSummaryPath = Join-Path $passingRepository "coverage-summary-passing.json"
+    $passingResult = Invoke-CoverageVerification -RepositoryRoot $passingRepository -MinimumWriteTimeUtc $minimumWriteTimeUtc -ReportPath $passingSummaryPath
     Assert-True -Condition ($passingResult.ExitCode -eq 0) -Message "Fresh complete coverage fixtures should pass. Actual: $($passingResult.Output)"
-    Assert-Contains -Actual $passingResult.Output -Expected "Fixture.One: 90%" -Message "Path aliases and duplicate lines must merge by maximum hits."
-    Assert-Contains -Actual $passingResult.Output -Expected "Fixture.Two: 90%" -Message "Every expected package must be evaluated."
-    Assert-NotContains -Actual $passingResult.Output -Unexpected "Fixture.One: 100%" -Message "Reports older than the supplied minimum write time must be ignored."
+    Assert-Contains -Actual $passingResult.Output -Expected "Fixture.One: 100%" -Message "Path aliases and duplicate lines must merge by maximum hits."
+    Assert-Contains -Actual $passingResult.Output -Expected "Fixture.Two: 100%" -Message "Every expected package must be evaluated."
+    Assert-Contains -Actual $passingResult.Output -Expected "VERIFY_COVERAGE_REPORT reports=2 packages=2" -Message "Only the two fresh reports must enter the selected inventory."
+    $passingSummary = Get-Content -LiteralPath $passingSummaryPath -Raw | ConvertFrom-Json
+    $passingReportPaths = @($passingSummary.reports | ForEach-Object { [IO.Path]::GetFullPath([string]$_) })
+    $staleReportPath = [IO.Path]::GetFullPath((Join-Path $passingRepository "tests\Fixture.Tests\TestResults\stale\coverage.cobertura.xml"))
+    Assert-True -Condition ($passingSummary.schemaVersion -eq 1 -and $passingReportPaths.Count -eq 2) -Message "The selected-inventory summary must be schema 1 and contain exactly the two fresh reports."
+    Assert-True -Condition ($passingReportPaths -cnotcontains $staleReportPath) -Message "The selected-inventory summary must exclude the stale report path."
 
     Assert-Contains -Actual (Get-Content -LiteralPath (Join-Path $passingRepository "scripts\verify-coverage.ps1") -Raw) -Expected '[ValidateRange(1, 2)] [int]$MaximumCoverageWorkers = 2' -Message "Production coverage verification must default to two workers and reject larger hosted fan-out before execution."
 
@@ -658,13 +663,13 @@ try {
     $complexResultsRoot = Join-Path $complexRepository "tests\Fixture.Tests\TestResults"
     for ($reportIndex = 0; $reportIndex -lt 4; $reportIndex++) {
         $oneHits = switch ($reportIndex) {
-            0 { @(1, 0, 1, 1, 1, 1, 1, 1, 1, 0) }
+            0 { @(1, 0, 1, 1, 1, 1, 1, 1, 1, 1) }
             1 { @(3, 2, 1, 1, 1, 1, 1, 1, 1, 0) }
             2 { @(2, 1, 1, 1, 1, 1, 1, 1, 1, 0) }
             default { @(0, 0, 1, 1, 1, 1, 1, 1, 1, 0) }
         }
         $twoHits = switch ($reportIndex) {
-            0 { @(1, 1, 1, 1, 1, 1, 1, 1, 1, 0) }
+            0 { @(1, 1, 1, 1, 1, 1, 1, 1, 1, 1) }
             1 { @(1, 1, 1, 1, 1, 1, 1, 1, 1, 0) }
             2 { @(1, 1, 1, 1, 1, 1, 1, 1, 1, 0) }
             default { @(0, 0, 1, 1, 1, 1, 1, 1, 1, 0) }
@@ -773,7 +778,7 @@ try {
     }
 
     $manifestRepository = New-FixtureRepository -ScenarioRoot $scenarioRoot -Name "manifest-passing"
-    Write-CoverageReport -RepositoryRoot $manifestRepository -Name "primary" -Packages $primaryPackages -LastWriteTimeUtc $freshWriteTimeUtc
+    Write-CoverageReport -RepositoryRoot $manifestRepository -Name "primary" -Packages $aboveThresholdPackages -LastWriteTimeUtc $freshWriteTimeUtc
     $manifestAliasClass = New-CoverageClass -Name "Fixture.One.Alias" -FileName (Join-Path $manifestRepository "src\Fixture.One\File.cs") -Lines @((New-CoverageLine -Number 1 -Hits 0), (New-CoverageLine -Number 9 -Hits 7))
     Write-CoverageReport -RepositoryRoot $manifestRepository -Name "alias" -Packages @((New-CoveragePackage -Name "Fixture.One" -Classes @($manifestAliasClass))) -LastWriteTimeUtc $freshWriteTimeUtc
     $manifestResultsRoot = Join-Path $manifestRepository "tests\Fixture.Tests\TestResults"
@@ -795,7 +800,7 @@ try {
     Assert-Contains -Actual $unexpectedManifestResult.Output -Expected "missing, stale, or unexpected reports" -Message "Unexpected-report diagnostics must be actionable."
 
     $duplicateManifestRepository = New-FixtureRepository -ScenarioRoot $scenarioRoot -Name "duplicate-manifest"
-    Write-CoverageReport -RepositoryRoot $duplicateManifestRepository -Name "primary" -Packages $primaryPackages -LastWriteTimeUtc $freshWriteTimeUtc
+    Write-CoverageReport -RepositoryRoot $duplicateManifestRepository -Name "primary" -Packages $aboveThresholdPackages -LastWriteTimeUtc $freshWriteTimeUtc
     $duplicateResultsRoot = Join-Path $duplicateManifestRepository "tests\Fixture.Tests\TestResults"
     $duplicateManifestPath = Join-Path $duplicateResultsRoot "coverage-manifest.json"
     Write-FixtureCoverageManifest -ResultsRoot $duplicateResultsRoot -ManifestPath $duplicateManifestPath -MinimumWriteTimeUtc $minimumWriteTimeUtc
@@ -833,11 +838,26 @@ try {
     $separator = [IO.Path]::DirectorySeparatorChar
     $expectedGap = "COVERAGE_GAP package=Fixture.One uncovered=2 total=10 file=SRC${separator}FIXTURE.ONE${separator}FILE.CS lines=9,10"
     Assert-Contains -Actual $failingResult.Output -Expected $expectedGap -Message "Coverage gaps must remain stable and actionable."
-    Assert-Contains -Actual $failingResult.Output -Expected "Fixture.One line coverage 80% is below 90%" -Message "Below-threshold diagnostics must preserve the enforced threshold."
+    Assert-Contains -Actual $failingResult.Output -Expected "Fixture.One line coverage 80% must be greater than 90%" -Message "Below-threshold diagnostics must preserve the strict enforced threshold."
     $failingExternalResult = Invoke-CoverageVerification -RepositoryRoot $failingRepository -MinimumWriteTimeUtc $minimumWriteTimeUtc -ExternalProcess
     Assert-True -Condition ($failingExternalResult.ExitCode -ne 0) -Message "The external coverage-verifier entry point must preserve the failing in-process contract."
     Assert-Contains -Actual $failingExternalResult.Output -Expected $expectedGap -Message "The external coverage-verifier entry point must preserve actionable gap evidence."
-    Assert-Contains -Actual $failingExternalResult.Output -Expected "Fixture.One line coverage 80% is below 90%" -Message "The external coverage-verifier entry point must preserve the immutable threshold failure."
+    Assert-Contains -Actual $failingExternalResult.Output -Expected "Fixture.One line coverage 80% must be greater than 90%" -Message "The external coverage-verifier entry point must preserve the immutable strict threshold failure."
+
+    $equalRepository = New-FixtureRepository -ScenarioRoot $scenarioRoot -Name "equal-threshold"
+    $equalPackages = @(
+        (New-CoveragePackage -Name "Fixture.One" -Classes @((New-CoverageClass -Name "Fixture.One.Equal" -FileName "src/Fixture.One/File.cs" -Lines @(New-CoverageLines -Hits @(1, 1, 1, 1, 1, 1, 1, 1, 1, 0))))),
+        (New-CoveragePackage -Name "Fixture.Two" -Classes @((New-CoverageClass -Name "Fixture.Two.Equal" -FileName "src/Fixture.Two/File.cs" -Lines @(New-CoverageLines -Hits @(1, 1, 1, 1, 1, 1, 1, 1, 1, 0)))))
+    )
+    Write-CoverageReport -RepositoryRoot $equalRepository -Name "equal" -Packages $equalPackages -LastWriteTimeUtc $freshWriteTimeUtc
+    $equalResult = Invoke-CoverageVerification -RepositoryRoot $equalRepository -MinimumWriteTimeUtc $minimumWriteTimeUtc
+    Assert-True -Condition ($equalResult.ExitCode -ne 0) -Message "Exactly 90% standalone coverage must fail the greater-than-90 contract."
+    Assert-Contains -Actual $equalResult.Output -Expected "Fixture.One line coverage 90% must be greater than 90%" -Message "Equal-threshold diagnostics must state the strict coverage contract."
+
+    $aboveRepository = New-FixtureRepository -ScenarioRoot $scenarioRoot -Name "above-threshold"
+    Write-CoverageReport -RepositoryRoot $aboveRepository -Name "above" -Packages $aboveThresholdPackages -LastWriteTimeUtc $freshWriteTimeUtc
+    $aboveResult = Invoke-CoverageVerification -RepositoryRoot $aboveRepository -MinimumWriteTimeUtc $minimumWriteTimeUtc
+    Assert-True -Condition ($aboveResult.ExitCode -eq 0) -Message "Coverage above 90% must pass the strict standalone contract. Actual: $($aboveResult.Output)"
 
     $failingCollectSummaryPath = Join-Path $failingRepository "coverage-summary-collect-only.json"
     $failingCollectResult = Invoke-CoverageVerification -RepositoryRoot $failingRepository -MinimumWriteTimeUtc $minimumWriteTimeUtc -ReportPath $failingCollectSummaryPath -CollectOnly
@@ -848,7 +868,7 @@ try {
     Assert-True -Condition (@($failingCollectSummary.packages).Count -eq 2 -and @($failingCollectSummary.failures).Count -eq 0) -Message "Collect-only coverage summaries must include observed packages and no falsely claimed failure."
 
     $missingRepository = New-FixtureRepository -ScenarioRoot $scenarioRoot -Name "missing-package"
-    $onePassingClass = New-CoverageClass -Name "Fixture.One.Passing" -FileName "src/Fixture.One/File.cs" -Lines @(New-CoverageLines -Hits @(1, 1, 1, 1, 1, 1, 1, 1, 1, 0))
+    $onePassingClass = New-CoverageClass -Name "Fixture.One.Passing" -FileName "src/Fixture.One/File.cs" -Lines @(New-CoverageLines -Hits @(1, 1, 1, 1, 1, 1, 1, 1, 1, 1))
     $onePassingPackage = New-CoveragePackage -Name "Fixture.One" -Classes @($onePassingClass)
     Write-CoverageReport -RepositoryRoot $missingRepository -Name "missing" -Packages @($onePassingPackage) -LastWriteTimeUtc $freshWriteTimeUtc
 
@@ -858,12 +878,12 @@ try {
     $missingCollectSummaryPath = Join-Path $missingRepository "coverage-summary-collect-only.json"
     $missingCollectResult = Invoke-CoverageVerification -RepositoryRoot $missingRepository -MinimumWriteTimeUtc $minimumWriteTimeUtc -ReportPath $missingCollectSummaryPath -CollectOnly
     Assert-True -Condition ($missingCollectResult.ExitCode -eq 0) -Message "Collect-only coverage must tolerate an absent production package for a partial component. Actual: $($missingCollectResult.Output)"
-    Assert-Contains -Actual $missingCollectResult.Output -Expected "Fixture.One: 90%" -Message "Collect-only coverage must report the package that was actually observed."
+    Assert-Contains -Actual $missingCollectResult.Output -Expected "Fixture.One: 100%" -Message "Collect-only coverage must report the package that was actually observed."
     $missingCollectSummary = Get-Content -LiteralPath $missingCollectSummaryPath -Raw | ConvertFrom-Json
     Assert-True -Condition (@($missingCollectSummary.packages).Count -eq 1 -and [string]$missingCollectSummary.packages[0].package -ceq "Fixture.One" -and @($missingCollectSummary.failures).Count -eq 0) -Message "Collect-only summaries must not invent an absent package or failure."
 
     $collectMissingRepository = New-FixtureRepository -ScenarioRoot $scenarioRoot -Name "collect-only-missing-report"
-    Write-CoverageReport -RepositoryRoot $collectMissingRepository -Name "primary" -Packages $primaryPackages -LastWriteTimeUtc $freshWriteTimeUtc
+    Write-CoverageReport -RepositoryRoot $collectMissingRepository -Name "primary" -Packages $aboveThresholdPackages -LastWriteTimeUtc $freshWriteTimeUtc
     $collectMissingResultsRoot = Join-Path $collectMissingRepository "tests\Fixture.Tests\TestResults"
     $collectMissingManifestPath = Join-Path $collectMissingResultsRoot "coverage-manifest.json"
     Write-FixtureCoverageManifest -ResultsRoot $collectMissingResultsRoot -ManifestPath $collectMissingManifestPath -MinimumWriteTimeUtc $minimumWriteTimeUtc
@@ -874,7 +894,7 @@ try {
     Assert-Contains -Actual $collectMissingResult.Output -Expected "missing or is not a leaf" -Message "Collect-only missing-report diagnostics must identify the authenticated inventory failure."
 
     $collectTamperedRepository = New-FixtureRepository -ScenarioRoot $scenarioRoot -Name "collect-only-tampered-report"
-    Write-CoverageReport -RepositoryRoot $collectTamperedRepository -Name "primary" -Packages $primaryPackages -LastWriteTimeUtc $freshWriteTimeUtc
+    Write-CoverageReport -RepositoryRoot $collectTamperedRepository -Name "primary" -Packages $aboveThresholdPackages -LastWriteTimeUtc $freshWriteTimeUtc
     $collectTamperedResultsRoot = Join-Path $collectTamperedRepository "tests\Fixture.Tests\TestResults"
     $collectTamperedManifestPath = Join-Path $collectTamperedResultsRoot "coverage-manifest.json"
     Write-FixtureCoverageManifest -ResultsRoot $collectTamperedResultsRoot -ManifestPath $collectTamperedManifestPath -MinimumWriteTimeUtc $minimumWriteTimeUtc
@@ -887,7 +907,7 @@ try {
     Assert-Contains -Actual $collectTamperedResult.Output -Expected "evidence does not match its fresh immutable byte snapshot" -Message "Collect-only tamper diagnostics must identify the authenticated byte mismatch."
 
     $collectStaleRepository = New-FixtureRepository -ScenarioRoot $scenarioRoot -Name "collect-only-stale-report"
-    Write-CoverageReport -RepositoryRoot $collectStaleRepository -Name "primary" -Packages $primaryPackages -LastWriteTimeUtc $staleWriteTimeUtc
+    Write-CoverageReport -RepositoryRoot $collectStaleRepository -Name "primary" -Packages $aboveThresholdPackages -LastWriteTimeUtc $staleWriteTimeUtc
     $collectStaleResultsRoot = Join-Path $collectStaleRepository "tests\Fixture.Tests\TestResults"
     $collectStaleManifestPath = Join-Path $collectStaleResultsRoot "coverage-manifest.json"
     Write-FixtureCoverageManifest -ResultsRoot $collectStaleResultsRoot -ManifestPath $collectStaleManifestPath -MinimumWriteTimeUtc $minimumWriteTimeUtc

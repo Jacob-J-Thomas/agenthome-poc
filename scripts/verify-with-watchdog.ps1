@@ -10,7 +10,7 @@ param(
     [ValidateSet("Debug", "Release")]
     [string]$Configuration = "Release",
 
-    [ValidateSet("Full", "Solution", "StaticContracts", "NestedProcess")]
+    [ValidateSet("Full", "Solution", "StaticContracts", "NestedProcess", "MacOSPlatformContract")]
     [string]$VerificationComponent = "Full",
 
     [ValidateRange(1, 8)]
@@ -30,6 +30,7 @@ $verificationComponentName = switch ($VerificationComponent) {
     "Solution" { "solution"; break }
     "StaticContracts" { "static-contracts"; break }
     "NestedProcess" { "nested-process"; break }
+    "MacOSPlatformContract" { "macos-platform-contract"; break }
 }
 $resultsRoot = Join-Path $repoRoot $(if ($Qualification) { "tests\QualificationResults" } else { "tests\VerificationResults" })
 $watchdogLogPath = Join-Path $resultsRoot "watchdog.log"

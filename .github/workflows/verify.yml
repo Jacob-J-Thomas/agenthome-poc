@@ -195,10 +195,56 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  verify-macos-platform-contract:
+    name: verify-macos-platform-contract
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    concurrency:
+      group: verify-macos-platform-contract-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
+    runs-on: macos-15
+    # The component owns one aggregate 600-second verifier budget; this 15-minute job retains setup and upload headroom.
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install pinned .NET SDK
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+
+      - name: Verify macOS platform contract
+        shell: pwsh
+        run: ./scripts/verify-with-watchdog.ps1 -Configuration Release -DeadlineSeconds 600 -VerificationComponent MacOSPlatformContract
+
+      - name: Upload macOS platform diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: verification-macos-platform-diagnostics-${{ github.run_attempt }}
+          path: tests/VerificationResults/**
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload macOS platform receipt
+        if: success()
+        uses: actions/upload-artifact@v7
+        with:
+          name: verification-macos-platform-receipt-${{ github.run_attempt }}
+          path: |
+            tests/VerificationResults/verification-component-evidence.json
+            tests/VerificationResults/verification-component-manifest.json
+            tests/VerificationResults/verification-watchdog-evidence.json
+            tests/VerificationResults/watchdog.log
+            tests/VerificationResults/MacOSPlatformContract/**
+          if-no-files-found: error
+          retention-days: 30
+
   verify:
     name: verify
     if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
-    needs: [verify-solution, verify-nested-process, verify-contracts]
+    needs: [verify-solution, verify-nested-process, verify-contracts, verify-macos-platform-contract]
     runs-on: windows-latest
     # The protected fan-in downloads only the small authenticated receipt bundles; full diagnostics remain separate.
     timeout-minutes: 5
@@ -229,6 +275,12 @@ jobs:
           name: verification-nested-process-receipt-${{ github.run_attempt }}
           path: fan-in/nested
 
+      - name: Download macOS platform evidence
+        uses: actions/download-artifact@v7
+        with:
+          name: verification-macos-platform-receipt-${{ github.run_attempt }}
+          path: fan-in/macos
+
       - name: Authenticate complete verification evidence
         shell: pwsh
-        run: ./scripts/verify-promotion-fan-in.ps1 -SolutionArtifactRoot ./fan-in/solution -NestedArtifactRoot ./fan-in/nested -StaticArtifactRoot ./fan-in/static -ExpectedHead '${{ github.sha }}' -ExpectedRunId '${{ github.run_id }}' -ExpectedRunAttempt '${{ github.run_attempt }}' -SolutionResult '${{ needs.verify-solution.result }}' -NestedResult '${{ needs.verify-nested-process.result }}' -StaticResult '${{ needs.verify-contracts.result }}'
+        run: ./scripts/verify-promotion-fan-in.ps1 -SolutionArtifactRoot ./fan-in/solution -NestedArtifactRoot ./fan-in/nested -StaticArtifactRoot ./fan-in/static -MacOSArtifactRoot ./fan-in/macos -ExpectedHead '${{ github.sha }}' -ExpectedRunId '${{ github.run_id }}' -ExpectedRunAttempt '${{ github.run_attempt }}' -SolutionResult '${{ needs.verify-solution.result }}' -NestedResult '${{ needs.verify-nested-process.result }}' -StaticResult '${{ needs.verify-contracts.result }}' -MacOSResult '${{ needs.verify-macos-platform-contract.result }}'

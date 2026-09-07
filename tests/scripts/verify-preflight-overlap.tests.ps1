@@ -7,9 +7,11 @@ $phaseScriptPath = Join-Path $repoRoot "scripts\verification-phase.ps1"
 $parallelScriptPath = Join-Path $repoRoot "scripts\verification-parallel.ps1"
 $scheduleScriptPath = Join-Path $repoRoot "scripts\verification-schedule.ps1"
 $frontendScriptPath = Join-Path $repoRoot "scripts\verify-frontend.ps1"
+$verifyWorkflowPath = Join-Path $repoRoot ".github\workflows\verify.yml"
 $verifyScript = Get-Content -LiteralPath $verifyScriptPath -Raw
 $scheduleScript = Get-Content -LiteralPath $scheduleScriptPath -Raw
 $frontendScript = Get-Content -LiteralPath $frontendScriptPath -Raw
+$verifyWorkflow = Get-Content -LiteralPath $verifyWorkflowPath -Raw
 $powerShellExecutable = (Get-Process -Id $PID).Path
 $assertionCount = 0
 
@@ -48,7 +50,10 @@ function Normalize-ConsoleDiagnostic {
 . $scheduleScriptPath
 
 Assert-Contains -Actual $verifyScript -Expected '$normalPullRequestVerification = $VerificationComponent -eq "Full" -and $VerificationTier -eq "PullRequest" -and -not $BrowserE2EOnly' -Message "Only the complete pull-request verifier may use the full preflight."
-Assert-Contains -Actual $verifyScript -Expected '[ValidateSet("Full", "Solution", "StaticContracts", "NestedProcess")]' -Message "Hosted verification must expose explicit full, solution, static, and nested-process component modes."
+Assert-Contains -Actual $verifyScript -Expected '[ValidateSet("Full", "Solution", "StaticContracts", "NestedProcess", "MacOSPlatformContract")]' -Message "Hosted verification must expose explicit full, solution, static, nested-process, and macOS component modes."
+Assert-Contains -Actual $verifyScript -Expected 'if ($VerificationComponent -eq "MacOSPlatformContract") {' -Message "The macOS component must bypass the Windows preflight and required-gate topology."
+Assert-Contains -Actual $verifyScript -Expected 'Write-VerificationComponentEvidence -Component "macos-platform-contract"' -Message "The macOS component must reuse canonical receipt evidence without entering static contracts."
+Assert-True -Condition ($verifyWorkflow.IndexOf('verify-macos-platform-contract:', [StringComparison]::Ordinal) -ge 0 -and $verifyWorkflow.IndexOf('needs: [verify-solution, verify-nested-process, verify-contracts, verify-macos-platform-contract]', [StringComparison]::Ordinal) -ge 0) -Message "Promotion fan-in must require the macOS component without changing the three Windows component identities."
 Assert-Contains -Actual $verifyScript -Expected 'Invoke-StaticVerificationContracts' -Message "The separate static child must have one serial execution owner."
 Assert-Contains -Actual $verifyScript -Expected '$preflightProcessHeavyWeight = [Math]::Max(1, [int][Math]::Ceiling($preflightResourceCapacity / 2.0))' -Message "The preflight build weight must adapt safely to the explicit four-process capacity."
 Assert-Contains -Actual $verifyScript -Expected 'Add-VerificationParallelPhase -Name "build-pullrequest" -FileName "dotnet" -Arguments $buildArguments -TimeoutSeconds 900 -WorkingDirectory $repoRoot -OutputPath (Join-Path $verificationLogsPath "build-pullrequest.log") -EstimatedDurationSeconds 90 -Weight $preflightProcessHeavyWeight -ResourceClass "ProcessHeavy"' -Message "The canonical build must be a bounded, logged, process-heavy preflight phase."
