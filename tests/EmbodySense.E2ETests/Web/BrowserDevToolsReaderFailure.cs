@@ -39,7 +39,7 @@ internal sealed class BrowserDevToolsReaderFailure
 
     public static bool IsCleanupException(Exception exception)
     {
-        return exception is BrowserDevToolsException or OperationCanceledException or WebSocketException or IOException or InvalidOperationException or ObjectDisposedException;
+        return exception is BrowserDevToolsException or JsonException or OperationCanceledException or WebSocketException or IOException or InvalidOperationException or ObjectDisposedException;
     }
 
     public bool TryRegister(ConcurrentDictionary<int, TaskCompletionSource<JsonElement>> pendingCommands, PendingBrowserCommandResponses? responseHandlers, int commandId, TaskCompletionSource<JsonElement> completion, Action<JsonElement>? responseHandler)

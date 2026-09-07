@@ -3251,7 +3251,7 @@ public sealed partial class BrowserFlowTests
                 {
                     await Task.WhenAll(pendingSends).WaitAsync(TimeSpan.FromSeconds(2));
                 }
-                catch (Exception exception) when (exception is TimeoutException or WebSocketException or IOException or InvalidOperationException or ObjectDisposedException)
+                catch (Exception exception) when (exception is TimeoutException || BrowserDevToolsReaderFailure.IsCleanupException(exception))
                 {
                 }
             }

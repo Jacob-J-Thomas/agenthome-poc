@@ -189,6 +189,9 @@ public sealed class BrowserDevToolsContractTests
         callerCancellation.Cancel();
         Assert.Throws<OperationCanceledException>(() => readerFailure.ThrowIfCancellationOrTerminal(callerCancellation.Token));
         Assert.True(BrowserDevToolsReaderFailure.IsCleanupException(failure));
+        Assert.True(BrowserDevToolsReaderFailure.IsCleanupException(new JsonException("malformed DevTools JSON")));
+        Assert.True(BrowserDevToolsReaderFailure.IsCleanupException(new OperationCanceledException("terminal send cancelled")));
+        Assert.False(BrowserDevToolsReaderFailure.IsCleanupException(new ArgumentException("unexpected")));
         var observedRegistered = await Assert.ThrowsAsync<BrowserDevToolsException>(() => registered.Task);
         Assert.Same(failure, observedRegistered);
 
