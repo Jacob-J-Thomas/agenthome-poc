@@ -5,6 +5,8 @@ param(
 
     [string]$NestedArtifactRoot = "",
 
+    [string]$MacOSArtifactRoot = "",
+
     [string]$ExpectedHead = "",
 
     [string]$ExpectedRunId = "",
@@ -19,6 +21,9 @@ param(
 
     [ValidateSet("success", "failure", "cancelled", "skipped")]
     [string]$NestedResult = "success",
+
+    [ValidateSet("success", "failure", "cancelled", "skipped")]
+    [string]$MacOSResult = "success",
 
     [switch]$NoRun
 )
@@ -107,7 +112,7 @@ function Assert-FanInWatchdogEvidence {
     $expectedProperties = @("schemaVersion", "component", "mode", "repositoryHead", "githubRunId", "githubRunAttempt", "deadlineSeconds", "elapsedSeconds", "exitCode", "completionMarkerCount", "status", "watchdogLogSha256", "componentEvidenceSha256", "componentManifestSha256")
     $actualProperties = @($watchdogEvidence.PSObject.Properties.Name | Sort-Object)
     Assert-FanInCondition -Condition ((@($expectedProperties | Sort-Object) -join "|") -ceq ($actualProperties -join "|")) -Message "Watchdog evidence schema is not exact."
-    $expectedDeadlineSeconds = if ($Component -ceq "solution") { 1500 } elseif ($Component -ceq "static-contracts" -or $Component -ceq "nested-process") { 600 } else { throw "Unsupported fan-in component: $Component" }
+    $expectedDeadlineSeconds = if ($Component -ceq "solution") { 1500 } elseif ($Component -ceq "static-contracts" -or $Component -ceq "nested-process" -or $Component -ceq "macos-platform-contract") { 600 } else { throw "Unsupported fan-in component: $Component" }
     $elapsedSeconds = [double]$watchdogEvidence.elapsedSeconds
     Assert-FanInCondition -Condition ($watchdogEvidence.schemaVersion -eq 1 -and [string]$watchdogEvidence.component -ceq $Component -and [string]$watchdogEvidence.mode -ceq "promotion" -and [string]$watchdogEvidence.repositoryHead -ceq $ExpectedHead -and [string]$watchdogEvidence.githubRunId -ceq $ExpectedRunId -and [string]$watchdogEvidence.githubRunAttempt -ceq $ExpectedRunAttempt -and [int]$watchdogEvidence.deadlineSeconds -eq $expectedDeadlineSeconds -and $elapsedSeconds -ge 0 -and $elapsedSeconds -le $expectedDeadlineSeconds -and [int]$watchdogEvidence.exitCode -eq 0 -and [int]$watchdogEvidence.completionMarkerCount -eq 1 -and [string]$watchdogEvidence.status -ceq "passed") -Message "Watchdog evidence identity, status, or measured bounds are invalid for '$Component'."
 
@@ -268,6 +273,35 @@ function Assert-FanInStaticEvidence {
     Assert-FanInCondition -Condition ([int]$Evidence.staticContractCount -eq 8 -and [bool]$Evidence.frontendComplete -and [bool]$Evidence.formatComplete -and [bool]$Evidence.diffComplete) -Message "Static component evidence is incomplete."
 }
 
+function Get-FanInMacOSPlatformContractSelection {
+    return @(& {
+        . (Join-Path $PSScriptRoot "verify-macos-platform-contract.ps1") -NoRun
+        Get-MacOSPlatformContractSelection
+    })
+}
+
+function Assert-FanInMacOSPlatformEvidence {
+    param([string]$ResultsRoot, [object]$Evidence)
+
+    Assert-FanInCondition -Condition ([int]$Evidence.laneCount -eq 6 -and [bool]$Evidence.inventoryComplete -and -not [bool]$Evidence.coverageComplete -and [int]$Evidence.staticContractCount -eq 0 -and -not [bool]$Evidence.frontendComplete -and -not [bool]$Evidence.formatComplete -and -not [bool]$Evidence.diffComplete) -Message "macOS platform evidence must authenticate only its six-assembly inventory subset."
+    $manifest = Read-FanInJsonFile -Path (Join-Path $ResultsRoot "verification-component-manifest.json") -Description "macOS platform component manifest"
+    $manifestPaths = @($manifest.files | ForEach-Object { [string]$_.path })
+    $trxPaths = @($manifestPaths | Where-Object { $_ -match '^MacOSPlatformContract/[^/]+/macos-platform-contract\.trx$' })
+    Assert-FanInCondition -Condition ($manifestPaths.Count -eq 7 -and $trxPaths.Count -eq 6 -and $manifestPaths -contains "MacOSPlatformContract/macos-platform-contract-results.json") -Message "macOS platform receipt must contain one result map and six real TRX files."
+    $result = Read-FanInJsonFile -Path (Join-Path $ResultsRoot "MacOSPlatformContract/macos-platform-contract-results.json") -Description "macOS platform result map"
+    $facts = @($result.facts)
+    $selection = @(Get-FanInMacOSPlatformContractSelection)
+    Assert-FanInCondition -Condition ($result.schemaVersion -eq 1 -and $facts.Count -eq 15 -and $selection.Count -eq 15 -and @($facts | Group-Object fact | Where-Object Count -ne 1).Count -eq 0 -and @($facts | Group-Object assembly).Count -eq 6 -and @($facts | Where-Object { [string]$_.outcome -cne "Passed" }).Count -eq 0) -Message "macOS platform result map is incomplete, duplicated, skipped, or failed."
+    foreach ($expected in $selection) {
+        $assembly = [IO.Path]::GetFileNameWithoutExtension($expected.Project)
+        $matches = @($facts | Where-Object { [string]$_.project -ceq $expected.Project -and [string]$_.source -ceq $expected.Source -and [string]$_.assembly -ceq $assembly -and [string]$_.fact -ceq $expected.Fact -and [string]$_.outcome -ceq "Passed" -and [string]$_.trx -ceq "MacOSPlatformContract/$assembly/macos-platform-contract.trx" })
+        if ($null -ne $expected.PSObject.Properties["HelperSource"]) {
+            $matches = @($matches | Where-Object { $null -ne $_.PSObject.Properties["helperSource"] -and [string]$_.helperSource -ceq $expected.HelperSource })
+        }
+        Assert-FanInCondition -Condition ($matches.Count -eq 1) -Message "macOS platform result map does not authenticate the exact source/project/assembly/FQN mapping for '$($expected.Fact)'."
+    }
+}
+
 function Read-FanInComponent {
     param([string]$ArtifactRoot, [string]$Component, [string]$ExpectedHead, [string]$ExpectedRunId, [string]$ExpectedRunAttempt)
 
@@ -285,6 +319,9 @@ function Read-FanInComponent {
     }
     elseif ($Component -ceq "nested-process") {
         Assert-FanInNestedEvidence -ResultsRoot $resultsRoot -Evidence $evidence
+    }
+    elseif ($Component -ceq "macos-platform-contract") {
+        Assert-FanInMacOSPlatformEvidence -ResultsRoot $resultsRoot -Evidence $evidence
     }
     else {
         Assert-FanInStaticEvidence -ResultsRoot $resultsRoot -Evidence $evidence
@@ -497,7 +534,7 @@ function Invoke-FanInCoverageAggregate {
         }
         Assert-FanInCondition -Condition ($totalLines -gt 0) -Message "Coverage aggregate has no executable lines for production package '$packageName'."
         $lineRate = $coveredLines / $totalLines
-        Assert-FanInCondition -Condition ($lineRate -ge 0.90) -Message "Combined coverage for production package '$packageName' is $([Math]::Round($lineRate * 100, 2))%, below the unchanged 90% floor."
+        Assert-FanInCondition -Condition ($lineRate -gt 0.90) -Message "Combined coverage for production package '$packageName' is $([Math]::Round($lineRate * 100, 2))% and must be greater than the unchanged 90% floor."
         $summaries.Add([ordered]@{ package = $packageName; coveredLines = $coveredLines; totalLines = $totalLines; lineRate = [Math]::Round($lineRate, 8); percent = [Math]::Round($lineRate * 100, 2) })
     }
     return [pscustomobject]@{ ReportCount = $reportCount; PackageCount = $summaries.Count; Packages = @($summaries) }
@@ -583,19 +620,22 @@ function Invoke-VerificationPromotionFanIn {
         [string]$SolutionResult,
         [string]$StaticResult,
         [string]$NestedArtifactRoot,
-        [string]$NestedResult
+        [string]$NestedResult,
+        [string]$MacOSArtifactRoot,
+        [string]$MacOSResult
     )
 
-    Assert-FanInCondition -Condition ($SolutionResult -ceq "success" -and $StaticResult -ceq "success" -and $NestedResult -ceq "success") -Message "All three hosted verification children must succeed before fan-in."
+    Assert-FanInCondition -Condition ($SolutionResult -ceq "success" -and $StaticResult -ceq "success" -and $NestedResult -ceq "success" -and $MacOSResult -ceq "success") -Message "All four hosted verification children must succeed before fan-in."
     $solution = Read-FanInComponent -ArtifactRoot $SolutionArtifactRoot -Component "solution" -ExpectedHead $ExpectedHead -ExpectedRunId $ExpectedRunId -ExpectedRunAttempt $ExpectedRunAttempt
     $nested = Read-FanInComponent -ArtifactRoot $NestedArtifactRoot -Component "nested-process" -ExpectedHead $ExpectedHead -ExpectedRunId $ExpectedRunId -ExpectedRunAttempt $ExpectedRunAttempt
     $static = Read-FanInComponent -ArtifactRoot $StaticArtifactRoot -Component "static-contracts" -ExpectedHead $ExpectedHead -ExpectedRunId $ExpectedRunId -ExpectedRunAttempt $ExpectedRunAttempt
+    $macOS = Read-FanInComponent -ArtifactRoot $MacOSArtifactRoot -Component "macos-platform-contract" -ExpectedHead $ExpectedHead -ExpectedRunId $ExpectedRunId -ExpectedRunAttempt $ExpectedRunAttempt
     $inventory = Invoke-FanInInventoryAggregate -Components @($solution, $nested)
     $coverage = Invoke-FanInCoverageAggregate -Components @($solution, $nested) -RepositoryRoot (Split-Path -Parent $PSScriptRoot)
-    Write-Output "VERIFY_PROMOTION_FAN_IN schema_version=1 status=passed solution=solution nested=nested-process static=static-contracts lanes=$($inventory.LaneCount) projects=$($inventory.ProjectCount) tests=$($inventory.ExpectedTestCount) coverage_reports=$($coverage.ReportCount) coverage_packages=$($coverage.PackageCount)"
+    Write-Output "VERIFY_PROMOTION_FAN_IN schema_version=1 status=passed solution=solution nested=nested-process static=static-contracts macos=macos-platform-contract lanes=$($inventory.LaneCount) projects=$($inventory.ProjectCount) tests=$($inventory.ExpectedTestCount) coverage_reports=$($coverage.ReportCount) coverage_packages=$($coverage.PackageCount)"
 }
 
 if (-not $NoRun) {
-    Assert-FanInCondition -Condition (-not [string]::IsNullOrWhiteSpace($SolutionArtifactRoot) -and -not [string]::IsNullOrWhiteSpace($NestedArtifactRoot) -and -not [string]::IsNullOrWhiteSpace($StaticArtifactRoot) -and -not [string]::IsNullOrWhiteSpace($ExpectedHead) -and -not [string]::IsNullOrWhiteSpace($ExpectedRunId) -and -not [string]::IsNullOrWhiteSpace($ExpectedRunAttempt)) -Message "Promotion fan-in requires all three artifact roots and exact run identity."
-    Invoke-VerificationPromotionFanIn -SolutionArtifactRoot $SolutionArtifactRoot -NestedArtifactRoot $NestedArtifactRoot -StaticArtifactRoot $StaticArtifactRoot -ExpectedHead $ExpectedHead -ExpectedRunId $ExpectedRunId -ExpectedRunAttempt $ExpectedRunAttempt -SolutionResult $SolutionResult -NestedResult $NestedResult -StaticResult $StaticResult
+    Assert-FanInCondition -Condition (-not [string]::IsNullOrWhiteSpace($SolutionArtifactRoot) -and -not [string]::IsNullOrWhiteSpace($NestedArtifactRoot) -and -not [string]::IsNullOrWhiteSpace($StaticArtifactRoot) -and -not [string]::IsNullOrWhiteSpace($MacOSArtifactRoot) -and -not [string]::IsNullOrWhiteSpace($ExpectedHead) -and -not [string]::IsNullOrWhiteSpace($ExpectedRunId) -and -not [string]::IsNullOrWhiteSpace($ExpectedRunAttempt)) -Message "Promotion fan-in requires all four artifact roots and exact run identity."
+    Invoke-VerificationPromotionFanIn -SolutionArtifactRoot $SolutionArtifactRoot -NestedArtifactRoot $NestedArtifactRoot -StaticArtifactRoot $StaticArtifactRoot -MacOSArtifactRoot $MacOSArtifactRoot -ExpectedHead $ExpectedHead -ExpectedRunId $ExpectedRunId -ExpectedRunAttempt $ExpectedRunAttempt -SolutionResult $SolutionResult -NestedResult $NestedResult -StaticResult $StaticResult -MacOSResult $MacOSResult
 }

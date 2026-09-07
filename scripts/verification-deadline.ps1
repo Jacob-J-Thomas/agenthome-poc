@@ -19,7 +19,7 @@ function Get-VerificationCompletionMarkerCount {
         [AllowEmptyString()]
         [string]$StandardOutput,
 
-        [ValidateSet("", "solution", "static-contracts", "nested-process")]
+        [ValidateSet("", "solution", "static-contracts", "nested-process", "macos-platform-contract")]
         [string]$ExpectedComponent = ""
     )
 

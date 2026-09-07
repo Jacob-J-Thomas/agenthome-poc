@@ -315,7 +315,7 @@ foreach ($expectedPackage in $expectedPackages) {
         percent = $percent
     })
 
-    if ($lineRate -lt $threshold) {
+    if ($lineRate -le $threshold) {
         $normalizedRepoRoot = [IO.Path]::GetFullPath($repoRoot).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar).ToUpperInvariant()
         $packageFiles.GetEnumerator() |
             ForEach-Object {
@@ -344,7 +344,7 @@ foreach ($expectedPackage in $expectedPackages) {
             }
 
         if (-not $CollectOnly) {
-            $failures += "{0} line coverage {1}% is below {2}%" -f $expectedPackage, $percent, ($threshold * 100)
+            $failures += "{0} line coverage {1}% must be greater than {2}%" -f $expectedPackage, $percent, ($threshold * 100)
         }
     }
 }

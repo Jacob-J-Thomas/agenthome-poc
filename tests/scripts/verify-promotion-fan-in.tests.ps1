@@ -157,19 +157,52 @@ function New-TestComponent {
 }
 
 function Invoke-TestFanIn {
-    param([string]$SolutionRoot, [string]$NestedRoot, [string]$StaticRoot, [string]$ExpectedHead = "head", [string]$ExpectedRunId = "run", [string]$ExpectedRunAttempt = "attempt", [string]$NestedResult = "success")
-    Invoke-VerificationPromotionFanIn -SolutionArtifactRoot $SolutionRoot -NestedArtifactRoot $NestedRoot -StaticArtifactRoot $StaticRoot -ExpectedHead $ExpectedHead -ExpectedRunId $ExpectedRunId -ExpectedRunAttempt $ExpectedRunAttempt -SolutionResult "success" -NestedResult $NestedResult -StaticResult "success"
+    param([string]$SolutionRoot, [string]$NestedRoot, [string]$StaticRoot, [string]$MacOSRoot = $macOSRoot, [string]$ExpectedHead = "head", [string]$ExpectedRunId = "run", [string]$ExpectedRunAttempt = "attempt", [string]$NestedResult = "success", [string]$MacOSResult = "success")
+    Invoke-VerificationPromotionFanIn -SolutionArtifactRoot $SolutionRoot -NestedArtifactRoot $NestedRoot -StaticArtifactRoot $StaticRoot -MacOSArtifactRoot $MacOSRoot -ExpectedHead $ExpectedHead -ExpectedRunId $ExpectedRunId -ExpectedRunAttempt $ExpectedRunAttempt -SolutionResult "success" -NestedResult $NestedResult -StaticResult "success" -MacOSResult $MacOSResult
+}
+
+function New-TestMacOSPlatformComponent {
+    param([string]$Root)
+
+    if (Test-Path -LiteralPath $Root) { Remove-Item -LiteralPath $Root -Recurse -Force }
+    $resultsRoot = Join-Path $Root "VerificationResults"
+    $platformRoot = Join-Path $resultsRoot "MacOSPlatformContract"
+    New-Item -ItemType Directory -Path $platformRoot -Force | Out-Null
+    $selection = @(Get-FanInMacOSPlatformContractSelection)
+    $facts = [Collections.Generic.List[object]]::new()
+    foreach ($assembly in @($selection | Group-Object Project)) {
+        $assemblyName = [IO.Path]::GetFileNameWithoutExtension($assembly.Name)
+        $assemblyRoot = Join-Path $platformRoot $assemblyName
+        New-Item -ItemType Directory -Path $assemblyRoot -Force | Out-Null
+        $rows = @($assembly.Group | ForEach-Object { "<UnitTestResult testName=`"$($_.Fact)`" outcome=`"Passed`" />" })
+        [IO.File]::WriteAllText((Join-Path $assemblyRoot "macos-platform-contract.trx"), "<TestRun><Results>$($rows -join '')</Results></TestRun>", [Text.UTF8Encoding]::new($false))
+        foreach ($entry in $assembly.Group) {
+            $fact = [ordered]@{ project = $entry.Project; source = $entry.Source; assembly = $assemblyName; fact = $entry.Fact; outcome = "Passed"; trx = "MacOSPlatformContract/$assemblyName/macos-platform-contract.trx" }
+            if ($null -ne $entry.PSObject.Properties["HelperSource"]) { $fact.helperSource = $entry.HelperSource }
+            $facts.Add($fact)
+        }
+    }
+    Write-TestJson -Path (Join-Path $platformRoot "macos-platform-contract-results.json") -Value ([ordered]@{ schemaVersion = 1; facts = @($facts) })
+    [IO.File]::WriteAllText((Join-Path $resultsRoot "watchdog.log"), "VERIFY_COMPLETE schema_version=1 component=macos-platform-contract status=passed elapsed_seconds=1`n", [Text.UTF8Encoding]::new($false))
+    $evidencePath = Join-Path $resultsRoot "verification-component-evidence.json"
+    $manifestPath = Join-Path $resultsRoot "verification-component-manifest.json"
+    $watchdogEvidencePath = Join-Path $resultsRoot "verification-watchdog-evidence.json"
+    Write-TestJson -Path $evidencePath -Value ([ordered]@{ schemaVersion = 1; component = "macos-platform-contract"; repositoryHead = "head"; githubRunId = "run"; githubRunAttempt = "attempt"; laneCount = 6; inventoryComplete = $true; coverageComplete = $false; staticContractCount = 0; frontendComplete = $false; formatComplete = $false; diffComplete = $false; manifestSha256 = "" })
+    Write-TestJson -Path $watchdogEvidencePath -Value ([ordered]@{ schemaVersion = 1; component = "macos-platform-contract"; mode = "promotion"; repositoryHead = "head"; githubRunId = "run"; githubRunAttempt = "attempt"; deadlineSeconds = 600; elapsedSeconds = 1; exitCode = 0; completionMarkerCount = 1; status = "passed"; watchdogLogSha256 = (Get-FileHash -LiteralPath (Join-Path $resultsRoot "watchdog.log") -Algorithm SHA256).Hash.ToLowerInvariant(); componentEvidenceSha256 = ""; componentManifestSha256 = "" })
+    Update-TestComponentAuth -Root $Root
 }
 
 $fixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ("embodysense-promotion-fan-in-" + [Guid]::NewGuid().ToString("N"))
 $solutionRoot = Join-Path $fixtureRoot "solution"
 $nestedRoot = Join-Path $fixtureRoot "nested"
 $staticRoot = Join-Path $fixtureRoot "static"
+$macOSRoot = Join-Path $fixtureRoot "macos"
 New-Item -ItemType Directory -Path $fixtureRoot -Force | Out-Null
 try {
     New-TestComponent -Root $solutionRoot -Component "solution"
     New-TestComponent -Root $nestedRoot -Component "nested-process"
     New-TestComponent -Root $staticRoot -Component "static-contracts"
+    New-TestMacOSPlatformComponent -Root $macOSRoot
     $productionNestedLane = Get-Content -LiteralPath (Join-Path $nestedRoot "VerificationResults/required-test-lanes.json") -Raw | ConvertFrom-Json
     $productionNestedCoverage = Get-Content -LiteralPath (Join-Path $nestedRoot "VerificationResults/coverage-manifest.json") -Raw | ConvertFrom-Json
     Assert-True -Condition ($productionNestedLane.lanes[0].name -ceq "EmbodySense.Core.Startup.Tests-nested-process") -Message "Inventory lane identity must match the canonical verifier producer."
@@ -179,9 +212,18 @@ try {
     $browserLane = @($productionSolutionLanes.lanes | Where-Object { $_.projectName -ceq "EmbodySense.E2ETests" })
     Assert-True -Condition ($ordinaryLane.Count -eq 1 -and $ordinaryLane[0].filter -ceq "(VerificationTier!=Stress)") -Message "Empty additional exclusions must preserve the canonical ordinary-project filter."
     Assert-True -Condition ($browserLane.Count -eq 1 -and $browserLane[0].filter -ceq "(FullyQualifiedName!~BrowserFlowTests)&(VerificationTier!=Stress)") -Message "The required inventory must retain the canonical BrowserFlowTests exclusion."
-    $output = Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot
+    $output = Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot -MacOSRoot $macOSRoot
     $outputText = [string]::Join("`n", @($output | ForEach-Object { [string]$_ }))
     Assert-True -Condition $outputText.Contains("lanes=10 projects=9") -Message "The successful fan-in did not prove the ten-lane nine-project aggregate."
+    Assert-True -Condition $outputText.Contains("macos=macos-platform-contract") -Message "The successful fan-in did not authenticate the required macOS component."
+    Assert-Throws -Message "skipped macOS child" -ExpectedMessage "All four hosted verification children must succeed" -Action { Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot -MacOSRoot $macOSRoot -MacOSResult "skipped" }
+    $macOSResultPath = Join-Path $macOSRoot "VerificationResults/MacOSPlatformContract/macos-platform-contract-results.json"
+    $macOSResultMap = Get-Content -LiteralPath $macOSResultPath -Raw | ConvertFrom-Json
+    $macOSResultMap.facts[0].outcome = "NotExecuted"
+    Write-TestJson -Path $macOSResultPath -Value $macOSResultMap
+    Update-TestComponentAuth -Root $macOSRoot
+    Assert-Throws -Message "non-passing macOS result" -ExpectedMessage "macOS platform result map is incomplete" -Action { Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot -MacOSRoot $macOSRoot }
+    New-TestMacOSPlatformComponent -Root $macOSRoot
 
     $nestedCoverageManifestPath = Join-Path $nestedRoot "VerificationResults/coverage-manifest.json"
     $nestedCoverageManifest = Get-Content -LiteralPath $nestedCoverageManifestPath -Raw | ConvertFrom-Json
@@ -199,7 +241,7 @@ try {
     Write-TestJson -Path $nestedCoverageSummaryPath -Value $nestedCoverageSummary
     Write-TestJson -Path $nestedCoverageManifestPath -Value $nestedCoverageManifest
     Update-TestComponentAuth -Root $nestedRoot
-    $windowsOutput = Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot
+    $windowsOutput = Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot -MacOSRoot $macOSRoot
     Assert-True -Condition ([string]::Join("`n", @($windowsOutput)).Contains("lanes=10 projects=9")) -Message "Windows-origin receipts must retain their declared root across separator and case normalization."
 
     foreach ($property in @("path", "trxPath")) {
@@ -343,7 +385,7 @@ try {
     [IO.File]::WriteAllText($nestedCoverage.FullName, $uncoveredGeneratedText, [Text.UTF8Encoding]::new($false))
     Update-TestCoverageAuth -Root $nestedRoot
     Update-TestComponentAuth -Root $nestedRoot
-    Assert-Throws -Message "uncovered generated source retains coverage denominator" -ExpectedMessage "below the unchanged 90% floor" -Action { Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot }
+    Assert-Throws -Message "uncovered generated source retains coverage denominator" -ExpectedMessage "must be greater than the unchanged 90% floor" -Action { Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot }
 
     New-TestComponent -Root $solutionRoot -Component "solution"
     New-TestComponent -Root $nestedRoot -Component "nested-process"
@@ -358,7 +400,7 @@ try {
         Update-TestCoverageAuth -Root $coverageRoot
         Update-TestComponentAuth -Root $coverageRoot
     }
-    Assert-Throws -Message "combined coverage below floor" -ExpectedMessage "below the unchanged 90% floor" -Action { Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot }
+    Assert-Throws -Message "combined coverage below floor" -ExpectedMessage "must be greater than the unchanged 90% floor" -Action { Invoke-TestFanIn -SolutionRoot $solutionRoot -NestedRoot $nestedRoot -StaticRoot $staticRoot }
 
     New-TestComponent -Root $solutionRoot -Component "solution"
     New-TestComponent -Root $nestedRoot -Component "nested-process"

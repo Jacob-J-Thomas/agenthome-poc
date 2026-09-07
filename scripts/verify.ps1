@@ -3,7 +3,7 @@ param(
     [switch]$SkipRestore,
     [switch]$RunBrowserE2E,
     [switch]$BrowserE2EOnly,
-    [ValidateSet("Full", "Solution", "StaticContracts", "NestedProcess")]
+    [ValidateSet("Full", "Solution", "StaticContracts", "NestedProcess", "MacOSPlatformContract")]
     [string]$VerificationComponent = "Full",
     [ValidateRange(1, 8)]
     [int]$MaximumTestWorkers = [Math]::Min(8, [Math]::Max(1, [int][Math]::Floor([Environment]::ProcessorCount * 1.5))),
@@ -77,6 +77,9 @@ if ($VerificationComponent -ne "Full" -and ($VerificationTier -ne "PullRequest" 
 
 if (($VerificationComponent -eq "StaticContracts" -or $VerificationComponent -eq "NestedProcess") -and -not $runningOnWindows) {
     throw "The $VerificationComponent verification component is reserved for the hosted Windows verifier."
+}
+if ($VerificationComponent -eq "MacOSPlatformContract" -and (-not [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::OSX) -or [Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne [Runtime.InteropServices.Architecture]::Arm64 -or [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture -ne [Runtime.InteropServices.Architecture]::Arm64)) {
+    throw "MacOSPlatformContract requires an ARM64 macOS host and ARM64 PowerShell runtime."
 }
 
 if ($VerificationTier -eq "Stress" -and ($RunBrowserE2E -or $BrowserE2EOnly)) {
@@ -311,7 +314,7 @@ function Invoke-StaticVerificationContracts {
 
 function Write-VerificationComponentEvidence {
     param(
-        [Parameter(Mandatory = $true)] [ValidateSet("solution", "static-contracts", "nested-process")] [string]$Component,
+        [Parameter(Mandatory = $true)] [ValidateSet("solution", "static-contracts", "nested-process", "macos-platform-contract")] [string]$Component,
         [Parameter(Mandatory = $true)] [string[]]$ManifestPaths,
         [int]$LaneCount = 0,
         [bool]$InventoryComplete = $false,
@@ -386,6 +389,20 @@ try {
     $cleanupStarted.Stop()
     $script:LastCompletedVerificationPhase = "clean-test-results"
     Write-Output "VERIFY_PHASE_COMPLETE name=clean-test-results elapsed_seconds=$([Math]::Round($cleanupStarted.Elapsed.TotalSeconds, 3)) completed_at_utc=$([DateTimeOffset]::UtcNow.ToString("O"))"
+
+    if ($VerificationComponent -eq "MacOSPlatformContract") {
+        $macOSResultsPath = Join-Path $verificationResultsPath "MacOSPlatformContract"
+        & (Join-Path $PSScriptRoot "verify-macos-platform-contract.ps1") -Configuration $Configuration -ResultsRoot $macOSResultsPath -AggregateDeadlineSeconds 600
+        $macOSManifestPaths = @((Get-ChildItem -LiteralPath $macOSResultsPath -Recurse -Filter "*.trx" -File | Sort-Object FullName | ForEach-Object FullName) + (Join-Path $macOSResultsPath "macos-platform-contract-results.json"))
+        if ($macOSManifestPaths.Count -ne 7) {
+            throw "MacOSPlatformContract requires six TRX files and one exact fact-result map."
+        }
+        Write-VerificationComponentEvidence -Component "macos-platform-contract" -ManifestPaths $macOSManifestPaths -LaneCount 6 -InventoryComplete $true
+        $verificationStopwatch.Stop()
+        $elapsedText = $verificationStopwatch.Elapsed.TotalSeconds.ToString("0.###", [Globalization.CultureInfo]::InvariantCulture)
+        Write-Output "VERIFY_COMPLETE schema_version=1 component=macos-platform-contract status=passed elapsed_seconds=$elapsedText"
+        return
+    }
 
     $buildArguments = @("build")
     if ($SkipRestore) {
