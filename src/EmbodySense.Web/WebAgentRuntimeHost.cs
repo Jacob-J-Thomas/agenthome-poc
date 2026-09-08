@@ -247,6 +247,20 @@ public sealed class WebAgentRuntimeHost : IAsyncDisposable, IWebLoopRuntimeInvok
         }
     }
 
+    internal bool TrySetReconciledGovernedLoopBackgroundPosture(WebGovernedLoopBackgroundPosture posture)
+    {
+        lock (_backgroundStopGate)
+        {
+            if (_hostShutdownSignaled)
+            {
+                return false;
+            }
+
+            Volatile.Write(ref _governedLoopBackgroundPosture, (int)posture);
+            return true;
+        }
+    }
+
     /// <summary>
     /// Signals process shutdown to host-owned governed operations before their retained runtime is drained or released.
     /// </summary>

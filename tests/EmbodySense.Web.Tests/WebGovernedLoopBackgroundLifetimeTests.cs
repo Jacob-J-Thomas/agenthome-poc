@@ -368,10 +368,19 @@ public sealed class WebGovernedLoopBackgroundLifetimeTests
             using var shutdownDeadline = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
             await app.StopAsync(shutdownDeadline.Token).WaitAsync(TimeSpan.FromSeconds(10));
 
-            // Reproduce the exact late projection from a reconciliation admitted before shutdown without delaying the
+            // Reproduce late reconciliation projections from an operation admitted before shutdown without delaying the
             // real hosted lifetime or replacing its canonical runtime.
-            SetGovernedLoopBackgroundPosture(runtimeHost, WebGovernedLoopBackgroundPosture.Ready);
-            Assert.Equal(WebGovernedLoopBackgroundPosture.Draining, runtimeHost.GetStatus().BackgroundPosture);
+            foreach (var latePosture in new[]
+                     {
+                         WebGovernedLoopBackgroundPosture.Ready,
+                         WebGovernedLoopBackgroundPosture.Degraded,
+                         WebGovernedLoopBackgroundPosture.Unavailable
+                     })
+            {
+                Assert.False(TrySetReconciledGovernedLoopBackgroundPosture(runtimeHost, latePosture));
+                Assert.Equal(WebGovernedLoopBackgroundPosture.Draining, runtimeHost.GetStatus().BackgroundPosture);
+            }
+
             Assert.False(turn.IsCompleted);
 
             var rejected = runtimeHost.SendMessageAsync("reject new work during Web shutdown", (_, _) => Task.CompletedTask);
@@ -763,6 +772,6 @@ public sealed class WebGovernedLoopBackgroundLifetimeTests
         return port;
     }
 
-    [UnsafeAccessor(UnsafeAccessorKind.Method, Name = "SetGovernedLoopBackgroundPosture")]
-    private static extern void SetGovernedLoopBackgroundPosture(WebAgentRuntimeHost instance, WebGovernedLoopBackgroundPosture posture);
+    [UnsafeAccessor(UnsafeAccessorKind.Method, Name = "TrySetReconciledGovernedLoopBackgroundPosture")]
+    private static extern bool TrySetReconciledGovernedLoopBackgroundPosture(WebAgentRuntimeHost instance, WebGovernedLoopBackgroundPosture posture);
 }
