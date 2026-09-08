@@ -185,7 +185,7 @@ public sealed partial class BrowserFlowTests
         const string WorkspaceInitializedExpression = "document.getElementById('workspaceStatus')?.textContent?.includes('Initialized') === true";
         const string LegacyWorkspaceInitializedExpression = "document.getElementById('workspaceStatus').textContent.includes('Initialized')";
         const string MissingWorkspaceStatusExpression = "(() => { document.getElementById('workspaceStatus')?.remove(); return document.getElementById('workspaceStatus') === null; })()";
-        const string NonInitializedWorkspaceStatusExpression = "(() => { const workspaceStatus = document.getElementById('workspaceStatus'); if (!workspaceStatus) return false; workspaceStatus.textContent = 'Needs initialization'; return workspaceStatus.textContent === 'Needs initialization'; })()";
+        const string NonInitializedWorkspaceStatusExpression = "(() => { const workspaceStatus = document.getElementById('workspaceStatus'); if (!workspaceStatus) return false; workspaceStatus.textContent = 'Needs initialization'; return workspaceStatus.textContent === 'Needs initialization' && !(" + WorkspaceInitializedExpression + "); })()";
         using var workspace = new TestWorkspace();
         using var serverAccount = new BrowserServerAccountDirectory(workspace.ServerStatePath);
         var codexExecutable = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
@@ -220,7 +220,6 @@ public sealed partial class BrowserFlowTests
             await tab.ReloadAsync();
             await tab.WaitForExpressionAsync("document.getElementById('workspaceStatus') !== null");
             Assert.True(await tab.EvaluateBooleanAsync(NonInitializedWorkspaceStatusExpression));
-            Assert.False(await tab.EvaluateBooleanAsync(WorkspaceInitializedExpression));
             await tab.ReloadAsync();
             await tab.WaitForExpressionAsync(WorkspaceInitializedExpression);
             Assert.True(await tab.EvaluateBooleanAsync(WorkspaceInitializedExpression));
