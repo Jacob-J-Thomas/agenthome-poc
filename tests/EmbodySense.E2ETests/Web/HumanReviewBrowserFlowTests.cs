@@ -16,6 +16,12 @@ namespace EmbodySense.E2ETests.Web;
 public sealed partial class BrowserFlowTests
 {
     private const string HumanReviewBrowserProfileId = "org.example/model-profile/human-review";
+    private const string HumanReviewWorkspaceNeedsInitializationExpression = "document.getElementById('workspaceStatus')?.textContent?.includes('Needs initialization') === true";
+    private const string HumanReviewWorkspaceInitializedExpression = "document.getElementById('workspaceStatus')?.textContent?.includes('Initialized') === true";
+    private const string HumanReviewWorkspaceStatusSelectionExpression = "(" + HumanReviewWorkspaceNeedsInitializationExpression + ") || (" + HumanReviewWorkspaceInitializedExpression + ")";
+    private const string HumanReviewCompatibleConfigurationExpression = "document.getElementById('configContent')?.textContent?.includes('compatible-test') === true";
+    private const string HumanReviewInitializedWorkspaceStateExpression = "!(" + HumanReviewWorkspaceNeedsInitializationExpression + ") && (" + HumanReviewWorkspaceInitializedExpression + ") && (" + HumanReviewWorkspaceStatusSelectionExpression + ")";
+    private const string HumanReviewReadyWorkspaceStateExpression = "(" + HumanReviewInitializedWorkspaceStateExpression + ") && (" + HumanReviewCompatibleConfigurationExpression + ")";
 
     [InstalledBrowserFact]
     public async Task Human_review_browser_exposes_redacted_detail_and_all_four_visible_decisions()
@@ -182,6 +188,11 @@ public sealed partial class BrowserFlowTests
     [InstalledBrowserFact]
     public async Task Human_review_browser_uses_two_same_profile_tabs_for_one_exact_decision_operation()
     {
+        const string LegacyWorkspaceInitializedExpression = "document.getElementById('workspaceStatus').textContent.includes('Initialized')";
+        const string MissingWorkspaceStatusExpression = "(() => { document.getElementById('workspaceStatus')?.remove(); return document.getElementById('workspaceStatus') === null && !(" + HumanReviewWorkspaceNeedsInitializationExpression + ") && !(" + HumanReviewWorkspaceInitializedExpression + ") && !(" + HumanReviewWorkspaceStatusSelectionExpression + "); })()";
+        const string LoadingWorkspaceStatusExpression = "(() => { const workspaceStatus = document.getElementById('workspaceStatus'); if (!workspaceStatus) return false; workspaceStatus.textContent = 'Loading workspace'; return workspaceStatus.textContent === 'Loading workspace' && !(" + HumanReviewWorkspaceNeedsInitializationExpression + ") && !(" + HumanReviewWorkspaceInitializedExpression + ") && !(" + HumanReviewWorkspaceStatusSelectionExpression + "); })()";
+        const string NeedsInitializationWorkspaceStatusExpression = "(() => { const workspaceStatus = document.getElementById('workspaceStatus'); if (!workspaceStatus) return false; workspaceStatus.textContent = 'Needs initialization'; return " + HumanReviewWorkspaceNeedsInitializationExpression + " && !(" + HumanReviewWorkspaceInitializedExpression + ") && (" + HumanReviewWorkspaceStatusSelectionExpression + "); })()";
+        const string MissingConfigurationExpression = "(() => { document.getElementById('configContent')?.remove(); return document.getElementById('configContent') === null && !(" + HumanReviewCompatibleConfigurationExpression + "); })()";
         using var workspace = new TestWorkspace();
         using var serverAccount = new BrowserServerAccountDirectory(workspace.ServerStatePath);
         var codexExecutable = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
@@ -202,7 +213,30 @@ public sealed partial class BrowserFlowTests
             await OpenHumanReviewAsync(browser);
             await SelectHumanReviewAsync(browser, runId);
             await using var tab = await browser.OpenTabAsync(app.BaseUrl);
-            await tab.WaitForExpressionAsync("document.getElementById('workspaceStatus').textContent.includes('Initialized')");
+            await tab.WaitForExpressionAsync("document.getElementById('workspaceStatus') !== null");
+            Assert.True(await tab.EvaluateBooleanAsync(MissingWorkspaceStatusExpression));
+            var legacyException = await Assert.ThrowsAsync<BrowserDevToolsException>(async () =>
+            {
+                _ = await tab.EvaluateBooleanAsync(LegacyWorkspaceInitializedExpression);
+            });
+            Assert.Equal("runtime-exception", legacyException.Category);
+            Assert.Equal("Runtime.evaluate", legacyException.Method);
+            Assert.Null(legacyException.Code);
+            Assert.Equal("runtime-exception", legacyException.SafeMessage);
+            await tab.ReloadAsync();
+            await tab.WaitForExpressionAsync("document.getElementById('workspaceStatus') !== null");
+            Assert.True(await tab.EvaluateBooleanAsync(LoadingWorkspaceStatusExpression));
+            Assert.True(await tab.EvaluateBooleanAsync(MissingWorkspaceStatusExpression));
+            await tab.ReloadAsync();
+            await tab.WaitForExpressionAsync("document.getElementById('workspaceStatus') !== null");
+            Assert.True(await tab.EvaluateBooleanAsync(NeedsInitializationWorkspaceStatusExpression));
+            await tab.ReloadAsync();
+            await tab.WaitForExpressionAsync(HumanReviewWorkspaceInitializedExpression);
+            Assert.True(await tab.EvaluateBooleanAsync(HumanReviewInitializedWorkspaceStateExpression));
+            Assert.True(await tab.EvaluateBooleanAsync(MissingConfigurationExpression));
+            await tab.ReloadAsync();
+            await tab.WaitForExpressionAsync(HumanReviewReadyWorkspaceStateExpression);
+            Assert.True(await tab.EvaluateBooleanAsync(HumanReviewReadyWorkspaceStateExpression));
             await tab.EvaluateWithUserGestureAsync("document.querySelector('[data-testid=\\\"human-review-nav\\\"]').click()");
             await tab.WaitForExpressionAsync("document.querySelector('[data-testid=\\\"human-review-item\\\"]') !== null");
             await tab.EvaluateWithUserGestureAsync("document.querySelector('[data-testid=\\\"human-review-item\\\"]').click()");
@@ -215,7 +249,7 @@ public sealed partial class BrowserFlowTests
             await WaitForCanonicalHumanReviewAsync(browser, "approved", 1);
             await WaitForCanonicalHumanReviewAsync(tab, "approved", 1);
             await tab.ReloadAsync();
-            await tab.WaitForExpressionAsync("document.getElementById('workspaceStatus').textContent.includes('Initialized')");
+            await tab.WaitForExpressionAsync(HumanReviewWorkspaceInitializedExpression);
             await tab.EvaluateWithUserGestureAsync("document.querySelector('[data-testid=\\\"human-review-nav\\\"]').click()");
             await tab.WaitForExpressionAsync("document.querySelector('[data-testid=\\\"human-review-item\\\"]') !== null");
             await tab.EvaluateWithUserGestureAsync("document.querySelector('[data-testid=\\\"human-review-item\\\"]').click()");
@@ -434,15 +468,15 @@ public sealed partial class BrowserFlowTests
 
     private static async Task InitializeWorkspaceAsyncIfNeededAsync(HeadlessBrowserSession browser)
     {
-        var status = await browser.EvaluateStringAsync("document.getElementById('workspaceStatus')?.textContent ?? ''");
-        if (status.Contains("Needs initialization", StringComparison.Ordinal))
+        await browser.WaitForExpressionAsync(HumanReviewWorkspaceStatusSelectionExpression);
+        if (await browser.EvaluateBooleanAsync(HumanReviewWorkspaceNeedsInitializationExpression))
         {
             await InitializeWorkspaceAsync(browser);
         }
         else
         {
-            await browser.WaitForExpressionAsync("document.getElementById('workspaceStatus').textContent.includes('Initialized')");
-            await browser.WaitForExpressionAsync("document.getElementById('configContent').textContent.includes('compatible-test')");
+            await browser.WaitForExpressionAsync(HumanReviewWorkspaceInitializedExpression);
+            await browser.WaitForExpressionAsync(HumanReviewCompatibleConfigurationExpression);
         }
     }
 

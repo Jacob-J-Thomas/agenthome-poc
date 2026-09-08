@@ -3207,11 +3207,19 @@ public sealed partial class BrowserFlowTests
 
             await BrowserFailureDiagnostics.TryWriteAsync(() => File.WriteAllLinesAsync(Path.Combine(directory, "browser-events.txt"), GetDiagnosticsSnapshot()));
             await BrowserFailureDiagnostics.TryWriteAsync(() => File.WriteAllLinesAsync(Path.Combine(directory, "expected-restart-qualified-refusals.txt"), _requestTracker.ReadQualifiedReadOnlyRefusalEvidenceSummary()));
+            await BrowserFailureDiagnostics.TryWriteAsync(() => File.WriteAllLinesAsync(Path.Combine(directory, "rejected-network-failure-provenance.txt"), _requestTracker.ReadRejectedLoadingFailureEvidence()));
         }
 
         public async Task<IReadOnlyList<string>> WriteExpectedRestartProvenanceAsync(string filePath)
         {
             var evidence = _requestTracker.ReadQualifiedReadOnlyRefusalEvidenceSummary();
+            await File.WriteAllLinesAsync(filePath, evidence);
+            return evidence;
+        }
+
+        public async Task<IReadOnlyList<string>> WriteRejectedNetworkFailureEvidenceAsync(string filePath)
+        {
+            var evidence = _requestTracker.ReadRejectedLoadingFailureEvidence();
             await File.WriteAllLinesAsync(filePath, evidence);
             return evidence;
         }

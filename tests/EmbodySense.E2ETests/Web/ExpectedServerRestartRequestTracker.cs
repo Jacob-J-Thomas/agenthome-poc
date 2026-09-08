@@ -7,6 +7,7 @@ internal sealed class ExpectedServerRestartRequestTracker
     private const int MaxTrackedSameAuthorityRequests = 1024;
     private const int MaxDeclaredReadOnlyGetTargets = 16;
     private const int MaxProvenanceTraceEntries = 128;
+    private const int MaxRejectedLoadingFailureEvidenceEntries = 32;
     private const int MaxTraceRequestIdLength = 96;
     private const int Idle = 0;
     private const int Preparing = 1;
@@ -22,11 +23,14 @@ internal sealed class ExpectedServerRestartRequestTracker
     private readonly List<string> _qualifiedReadOnlyRefusalEvidence = [];
     private readonly HashSet<string> _qualifiedReadOnlyRefusalEvidenceKeys = new(StringComparer.Ordinal);
     private readonly List<string> _provenanceTrace = [];
+    private readonly List<string> _rejectedLoadingFailureEvidence = [];
     private readonly object _gate = new();
     private int _expectedServerRestart;
     private long _restartGeneration;
     private long _provenanceTraceSequence;
+    private long _rejectedLoadingFailureEvidenceSequence;
     private bool _provenanceTraceTruncated;
+    private bool _rejectedLoadingFailureEvidenceTruncated;
 
     public ExpectedServerRestartRequestTracker(string targetAuthority)
     {
@@ -73,8 +77,11 @@ internal sealed class ExpectedServerRestartRequestTracker
             _qualifiedReadOnlyRefusalEvidence.Clear();
             _qualifiedReadOnlyRefusalEvidenceKeys.Clear();
             _provenanceTrace.Clear();
+            _rejectedLoadingFailureEvidence.Clear();
             _provenanceTraceSequence = 0;
+            _rejectedLoadingFailureEvidenceSequence = 0;
             _provenanceTraceTruncated = false;
+            _rejectedLoadingFailureEvidenceTruncated = false;
             Interlocked.Exchange(ref _expectedServerRestart, Preparing);
             RecordLifecycleTransition("prepare");
         }
@@ -184,6 +191,7 @@ internal sealed class ExpectedServerRestartRequestTracker
             _requestProvenance[requestId] = new RestartRequestProvenance(
                 method,
                 _restartGeneration,
+                GetLifecyclePhaseName(expectedServerRestart),
                 LiveAtSuccessfulFreeze: false,
                 BeganDuringActiveOutage: expectedServerRestart == Active,
                 IsDeclaredReadOnlyGetTarget: declaredReadOnlyGetTarget,
@@ -223,6 +231,11 @@ internal sealed class ExpectedServerRestartRequestTracker
         {
             if (requestId is null)
             {
+                if (!canceled)
+                {
+                    RecordRejectedLoadingFailureEvidence(null, null, default, hasProvenance: false, capturedAtRestart: false, beganDuringOutage: false, canceled: canceled, errorText: errorText);
+                }
+
                 return canceled;
             }
 
@@ -232,16 +245,25 @@ internal sealed class ExpectedServerRestartRequestTracker
             var hasTerminalCorrelation = _terminalCorrelations.TryGetValue(requestId, out terminalCorrelation);
             if (!hasCurrentRequest && !hasTerminalCorrelation)
             {
+                if (!canceled)
+                {
+                    RecordRejectedLoadingFailureEvidence(requestId, null, default, hasProvenance: false, capturedAtRestart: false, beganDuringOutage: false, canceled: canceled, errorText: errorText);
+                }
+
                 return canceled;
             }
 
             var requestUrl = hasCurrentRequest ? currentRequestUrl! : terminalCorrelation.RequestUrl;
             var beganDuringOutage = (hasCurrentRequest && _expectedServerRestartRequests.ContainsKey(requestId))
                 || (hasTerminalCorrelation && terminalCorrelation.BeganDuringOutage);
+            var evidenceBeganDuringOutage = (hasCurrentProvenance && currentProvenance.BeganDuringActiveOutage)
+                || (hasTerminalCorrelation && terminalCorrelation.BeganDuringActiveOutage);
             var capturedAtRestart = (hasCurrentRequest && _capturedExpectedServerRestartRequests.ContainsKey(requestId))
                 || (hasTerminalCorrelation && terminalCorrelation.CapturedAtRestart);
             var qualifiedReadOnlyRefusal = (hasCurrentProvenance && IsQualifiedReadOnlyRefusal(currentProvenance))
                 || (hasTerminalCorrelation && terminalCorrelation.QualifiedReadOnlyRefusal && terminalCorrelation.Generation == _restartGeneration);
+            var hasProvenance = hasCurrentProvenance || hasTerminalCorrelation;
+            var provenance = hasCurrentProvenance ? currentProvenance : CreateTerminalProvenance(terminalCorrelation);
             RemoveUnderLock(requestId);
             if (canceled)
             {
@@ -254,6 +276,7 @@ internal sealed class ExpectedServerRestartRequestTracker
             if (!canCorrelate
                 || !capturedAtRestart && !qualifiedReadOnlyRefusal && !ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartUrl(requestUrl, _targetAuthority))
             {
+                RecordRejectedLoadingFailureEvidence(requestId, requestUrl, provenance, hasProvenance, capturedAtRestart, evidenceBeganDuringOutage, canceled: false, errorText: errorText);
                 _terminalCorrelations.Remove(requestId);
                 return false;
             }
@@ -276,6 +299,7 @@ internal sealed class ExpectedServerRestartRequestTracker
                 _terminalCorrelations[requestId] = new RestartRequestCorrelation(
                     requestUrl,
                     beganDuringOutage,
+                    hasCurrentProvenance ? currentProvenance.BeganDuringActiveOutage : terminalCorrelation.BeganDuringActiveOutage,
                     capturedAtRestart,
                     FailureObserved: true,
                     LogObserved: false,
@@ -291,6 +315,7 @@ internal sealed class ExpectedServerRestartRequestTracker
                 RecordQualifiedReadOnlyRefusalEvidence(requestId, new RestartRequestCorrelation(
                     requestUrl,
                     beganDuringOutage,
+                    hasCurrentProvenance ? currentProvenance.BeganDuringActiveOutage : terminalCorrelation.BeganDuringActiveOutage,
                     capturedAtRestart,
                     FailureObserved: true,
                     LogObserved: false,
@@ -298,6 +323,11 @@ internal sealed class ExpectedServerRestartRequestTracker
                     RequestMethod: hasCurrentProvenance ? currentProvenance.Method : terminalCorrelation.RequestMethod,
                     PathAndQuery: GetPathAndQuery(requestUrl),
                     _restartGeneration));
+            }
+
+            if (!expected)
+            {
+                RecordRejectedLoadingFailureEvidence(requestId, requestUrl, provenance, hasProvenance, capturedAtRestart, evidenceBeganDuringOutage, canceled: false, errorText: errorText);
             }
 
             return expected;
@@ -398,6 +428,7 @@ internal sealed class ExpectedServerRestartRequestTracker
                 _terminalCorrelations[requestId] = new RestartRequestCorrelation(
                     correlatedRequestUrl!,
                     beganDuringOutage,
+                    hasCurrentProvenance && currentProvenance.BeganDuringActiveOutage,
                     capturedAtRestart,
                     FailureObserved: false,
                     LogObserved: expected,
@@ -416,6 +447,7 @@ internal sealed class ExpectedServerRestartRequestTracker
                     RecordQualifiedReadOnlyRefusalEvidence(requestId, new RestartRequestCorrelation(
                         correlatedRequestUrl!,
                         beganDuringOutage,
+                        hasCurrentProvenance && currentProvenance.BeganDuringActiveOutage,
                         capturedAtRestart,
                         FailureObserved: false,
                         LogObserved: true,
@@ -451,6 +483,14 @@ internal sealed class ExpectedServerRestartRequestTracker
         lock (_gate)
         {
             return ["declaredReadOnlyGetTargets=" + _declaredReadOnlyGetTargets.Count, .. _qualifiedReadOnlyRefusalEvidence, .. _provenanceTrace];
+        }
+    }
+
+    public IReadOnlyList<string> ReadRejectedLoadingFailureEvidence()
+    {
+        lock (_gate)
+        {
+            return ["rejectedNetworkFailures retainedCount=" + _rejectedLoadingFailureEvidenceSequence + "; truncated=" + _rejectedLoadingFailureEvidenceTruncated, .. _rejectedLoadingFailureEvidence];
         }
     }
 
@@ -558,15 +598,90 @@ internal sealed class ExpectedServerRestartRequestTracker
         _provenanceTrace.Add($"provenanceTrace sequence={_provenanceTraceSequence}; phase={Volatile.Read(ref _expectedServerRestart)}; generation={_restartGeneration}; requestId={SanitizeTraceRequestId(requestId)}; declaredTargetIndex={declaredTargetIndex}; methodPresent={method is not null}; method={NormalizeTraceMethod(method)}; cachedMatch={cachedMatch}; currentMatch={currentMatch}; frozenSnapshot={frozenSnapshot}; active={active}; rejectionReason={rejectionReason}");
     }
 
+    private void RecordRejectedLoadingFailureEvidence(string? requestId, string? requestUrl, RestartRequestProvenance provenance, bool hasProvenance, bool capturedAtRestart, bool beganDuringOutage, bool canceled, string? errorText)
+    {
+        if (_rejectedLoadingFailureEvidence.Count >= MaxRejectedLoadingFailureEvidenceEntries)
+        {
+            if (!_rejectedLoadingFailureEvidenceTruncated)
+            {
+                _rejectedLoadingFailureEvidence.Add("rejectedNetworkFailure=truncated");
+                _rejectedLoadingFailureEvidenceTruncated = true;
+            }
+
+            return;
+        }
+
+        _rejectedLoadingFailureEvidenceSequence++;
+        var failurePhase = Volatile.Read(ref _expectedServerRestart);
+        var sameAuthority = requestUrl is not null && IsTargetAuthority(requestUrl);
+        _rejectedLoadingFailureEvidence.Add($"rejectedNetworkFailure sequence={_rejectedLoadingFailureEvidenceSequence}; requestId={SanitizeEvidenceRequestId(requestId ?? "missing")}; method={NormalizeTraceMethod(hasProvenance ? provenance.Method : null)}; sameAuthority={sameAuthority}; declaredSafeRoute={GetSafeRouteIdentifier(requestUrl, provenance, hasProvenance)}; restartGeneration={(hasProvenance ? provenance.Generation : _restartGeneration)}; creationPhase={(hasProvenance ? provenance.CreationPhase : "unknown")}; failurePhase={GetLifecyclePhaseName(failurePhase)}; capturedAtFreeze={capturedAtRestart}; beganDuringOutage={beganDuringOutage}; replacementStarted={failurePhase == ReplacementStarting}; canceled={canceled}; errorCode={NormalizeRecognizedErrorCode(errorText)}; provenanceExisted={hasProvenance}");
+    }
+
     private static string SanitizeTraceRequestId(string requestId)
     {
         var normalized = requestId.Replace('\r', '_').Replace('\n', '_');
         return normalized.Length <= MaxTraceRequestIdLength ? normalized : normalized[..MaxTraceRequestIdLength];
     }
 
+    private static string SanitizeEvidenceRequestId(string requestId)
+    {
+        var sanitized = string.Concat(requestId.Take(MaxTraceRequestIdLength).Select(value => char.IsAsciiLetterOrDigit(value) || value is '.' or '-' or '_' or ':' ? value : '_'));
+        return string.IsNullOrEmpty(sanitized) ? "missing" : sanitized;
+    }
+
     private static string NormalizeTraceMethod(string? method)
     {
         return method is null ? "missing" : HasExactGetVerb(method) ? "GET" : "other";
+    }
+
+    private static string NormalizeRecognizedErrorCode(string? errorText)
+    {
+        return errorText is "net::ERR_CONNECTION_REFUSED" or "net::ERR_CONNECTION_RESET" or "net::ERR_INVALID_HTTP_RESPONSE"
+            ? errorText
+            : "unrecognized";
+    }
+
+    private static string GetLifecyclePhaseName(int phase)
+    {
+        return phase switch
+        {
+            Idle => "idle",
+            Preparing => "preparing",
+            Active => "active-outage",
+            ReplacementStarting => "replacement-started",
+            _ => "unknown"
+        };
+    }
+
+    private string GetSafeRouteIdentifier(string? requestUrl, RestartRequestProvenance provenance, bool hasProvenance)
+    {
+        if (hasProvenance && provenance.IsDeclaredReadOnlyGetTarget)
+        {
+            return "route-" + provenance.DeclaredTargetIndex;
+        }
+
+        if (!ExpectedServerRestartDiagnosticClassifier.IsExpectedServerRestartUrl(requestUrl, _targetAuthority)
+            || !Uri.TryCreate(requestUrl, UriKind.Absolute, out var requestUri))
+        {
+            return "redacted-unknown";
+        }
+
+        return string.Equals(requestUri.AbsolutePath, "/api/session", StringComparison.OrdinalIgnoreCase)
+            ? "built-in-session"
+            : "built-in-hub";
+    }
+
+    private RestartRequestProvenance CreateTerminalProvenance(RestartRequestCorrelation correlation)
+    {
+        var declaredTargetIndex = GetDeclaredTargetIndex(correlation.RequestUrl);
+        return new RestartRequestProvenance(
+            correlation.RequestMethod,
+            correlation.Generation,
+            "unknown",
+            LiveAtSuccessfulFreeze: correlation.CapturedAtRestart,
+            BeganDuringActiveOutage: correlation.BeganDuringActiveOutage,
+            IsDeclaredReadOnlyGetTarget: declaredTargetIndex >= 0 && HasExactGetVerb(correlation.RequestMethod),
+            DeclaredTargetIndex: declaredTargetIndex);
     }
 
     private bool IsExactQualifiedReadOnlyGetRoute(string? suppliedUrl, string? correlatedRequestUrl)
@@ -659,6 +774,7 @@ internal sealed class ExpectedServerRestartRequestTracker
     private readonly record struct RestartRequestCorrelation(
         string RequestUrl,
         bool BeganDuringOutage,
+        bool BeganDuringActiveOutage,
         bool CapturedAtRestart,
         bool FailureObserved,
         bool LogObserved,
@@ -670,6 +786,7 @@ internal sealed class ExpectedServerRestartRequestTracker
     private readonly record struct RestartRequestProvenance(
         string? Method,
         long Generation,
+        string CreationPhase,
         bool LiveAtSuccessfulFreeze,
         bool BeganDuringActiveOutage,
         bool IsDeclaredReadOnlyGetTarget,

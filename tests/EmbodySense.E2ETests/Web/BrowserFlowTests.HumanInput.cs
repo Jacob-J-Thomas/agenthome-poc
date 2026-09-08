@@ -224,6 +224,9 @@ public sealed partial class BrowserFlowTests
             Assert.False(await browser.EvaluateBooleanAsync("Object.keys(localStorage).some(key => key.toLowerCase().includes('human-input') || key.toLowerCase().includes('operation'))"));
             app.AssertHealthy();
             await browser.AssertHealthyAsync();
+            var restartEvidenceDirectory = GetBrowserE2EArtifactDirectory(nameof(Human_input_browser_rereads_after_reload_reconnect_and_external_process_restart_without_persisting_operations));
+            Directory.CreateDirectory(restartEvidenceDirectory);
+            await browser.WriteRejectedNetworkFailureEvidenceAsync(Path.Combine(restartEvidenceDirectory, "rejected-network-failure-provenance.txt"));
         }
         catch
         {

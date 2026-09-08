@@ -61,10 +61,7 @@ internal sealed class WebGovernedLoopBackgroundHostedService : BackgroundService
             catch (Exception)
             {
                 _startCompleted = false;
-                if (Volatile.Read(ref _stopRequested) == 0)
-                {
-                    _host.SetGovernedLoopBackgroundPosture(WebGovernedLoopBackgroundPosture.Unavailable);
-                }
+                _host.TrySetReconciledGovernedLoopBackgroundPosture(WebGovernedLoopBackgroundPosture.Unavailable);
             }
             finally
             {
@@ -87,14 +84,14 @@ internal sealed class WebGovernedLoopBackgroundHostedService : BackgroundService
         if (_startRetryBlocked)
         {
             var blockedStatus = await _host.ReadGovernedLoopLocalBackgroundForProcessAsync().ConfigureAwait(false);
-            _host.SetGovernedLoopBackgroundPosture(ToPosture(blockedStatus.Readiness));
+            _host.TrySetReconciledGovernedLoopBackgroundPosture(ToPosture(blockedStatus.Readiness));
             return;
         }
 
         if (!_startCompleted)
         {
             var start = await _host.StartGovernedLoopLocalBackgroundForProcessAsync().ConfigureAwait(false);
-            _host.SetGovernedLoopBackgroundPosture(ToPosture(start.Readiness));
+            _host.TrySetReconciledGovernedLoopBackgroundPosture(ToPosture(start.Readiness));
             _startCompleted = start.Readiness == AgentRuntimeGovernedLoopBackgroundReadiness.Ready
                 && start.Ownership == AgentRuntimeGovernedLoopBackgroundOwnership.Local;
             _startRetryBlocked = !start.RetryAllowed;
@@ -102,7 +99,7 @@ internal sealed class WebGovernedLoopBackgroundHostedService : BackgroundService
         }
 
         var status = await _host.ReadGovernedLoopLocalBackgroundForProcessAsync().ConfigureAwait(false);
-        _host.SetGovernedLoopBackgroundPosture(ToPosture(status.Readiness));
+        _host.TrySetReconciledGovernedLoopBackgroundPosture(ToPosture(status.Readiness));
         if (status.Readiness != AgentRuntimeGovernedLoopBackgroundReadiness.Ready
             || status.Ownership != AgentRuntimeGovernedLoopBackgroundOwnership.Local)
         {

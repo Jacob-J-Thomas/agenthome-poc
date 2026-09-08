@@ -70,11 +70,11 @@ Each Bolt follows `$aidlc-pipeline`:
 2. Implement the smallest coherent patch and pass repository gates before model review.
 3. Request one stable full review, group findings by root cause, and batch accepted in-scope fixes.
 4. Request one targeted re-review of the fix delta. A third targeted pass is allowed only for a new credible P0 or P1 introduced by the fixes.
-5. Require human authorization for any later review pass, a fourth replacement implementation attempt, a material subsystem or architecture expansion, or merge.
+5. Without an explicit standing selected-goal delegation from the current owner, require human authorization for any later review pass, a fourth replacement implementation attempt, a material subsystem or architecture expansion, or merge. A standing delegation may allow the accountable goal lead to own finite bounded recovery, later review, evidence-based acceptance, and exact-green merge decisions without repeated prompts, but it preserves required checks, branch protection, independent review, and the owner's stop and scope authority. A finite recovery extension still requires an independent causal assessment, a changed falsifiable hypothesis, unchanged scope and invariants, a named write set, explicit attempt and time caps, preserved evidence, and a named verifier and reviewer; it cannot waive a gate, permit an unbounded retry, or authorize future goals.
 
 P0/P1 findings normally return to the current PR. Concrete P2/P3 findings default to deduplicated parentless Finding issues when authorized. Unsupported, duplicate, stale, inherited, or already issue-linked observations create no new work.
 
-The implementation loop ends as `READY`, `QUEUED`, `BLOCKED`, or `FAILED`. `BLOCKED` is the human-intervention handoff and must name the required action, owner, and exit evidence. `QUEUED` covers unmet technical prerequisites or campaign position. It does not keep opening replacement PRs or descendant issues to make visible progress. Merge, Phase completion, UOW acceptance, architecture alternatives, and exceptional budget extensions remain human decisions suitable for weekend review.
+The implementation loop ends as `READY`, `QUEUED`, `BLOCKED`, or `FAILED`. `BLOCKED` is the human-intervention handoff and must name the required action, owner, and exit evidence. `QUEUED` covers unmet technical prerequisites or campaign position. It does not keep opening replacement PRs or descendant issues to make visible progress. Under an explicit standing selected-goal delegation, the accountable lead may own finite recovery, Bolt/UOW/Phase acceptance, and exact-green merge decisions; human oversight remains visible through the conversation, checks, reviews, issues, and retained artifacts, while the owner retains stop and scope authority. Without standing delegation, those decisions require explicit human authorization. Architecture alternatives, material scope expansion, and any recovery extension that lacks the finite-extension requirements remain owner decisions.
 
 ## Pull-request rules
 
@@ -82,7 +82,7 @@ The implementation loop ends as `READY`, `QUEUED`, `BLOCKED`, or `FAILED`. `BLOC
 - Use `Fixes #...` only for the Bolt implemented by the PR. Use `Tracks #...` for its UOW and Phase.
 - Keep one root-cause disposition ledger: `FIX-IN-PR`, `DEFER-ISSUE`, `NO-CHANGE`, or `DUPLICATE-STALE`.
 - Record exact base/head SHAs and executable verification. A restack without a changed effective patch does not consume another review pass.
-- Never merge without explicit user authority and a current green head.
+- Never merge without a current exact-green head, complete required checks and independent review, and either explicit human authorization or an explicit standing selected-goal delegation to the accountable goal lead. A standing delegation does not authorize a future goal, a waived gate, or an unbounded recovery.
 
 ## Read-only audit
 
