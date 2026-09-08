@@ -182,6 +182,9 @@ public sealed partial class BrowserFlowTests
     [InstalledBrowserFact]
     public async Task Human_review_browser_uses_two_same_profile_tabs_for_one_exact_decision_operation()
     {
+        const string WorkspaceInitializedExpression = "document.getElementById('workspaceStatus')?.textContent?.includes('Initialized') === true";
+        const string MissingWorkspaceStatusExpression = "(() => { document.getElementById('workspaceStatus')?.remove(); return " + WorkspaceInitializedExpression + "; })()";
+        const string NonInitializedWorkspaceStatusExpression = "(() => { const workspaceStatus = document.getElementById('workspaceStatus'); if (workspaceStatus) workspaceStatus.textContent = 'Needs initialization'; return " + WorkspaceInitializedExpression + "; })()";
         using var workspace = new TestWorkspace();
         using var serverAccount = new BrowserServerAccountDirectory(workspace.ServerStatePath);
         var codexExecutable = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
@@ -202,7 +205,14 @@ public sealed partial class BrowserFlowTests
             await OpenHumanReviewAsync(browser);
             await SelectHumanReviewAsync(browser, runId);
             await using var tab = await browser.OpenTabAsync(app.BaseUrl);
-            await tab.WaitForExpressionAsync("document.getElementById('workspaceStatus').textContent.includes('Initialized')");
+            await tab.WaitForExpressionAsync("document.getElementById('workspaceStatus') !== null");
+            Assert.False(await tab.EvaluateBooleanAsync(MissingWorkspaceStatusExpression));
+            await tab.ReloadAsync();
+            await tab.WaitForExpressionAsync("document.getElementById('workspaceStatus') !== null");
+            Assert.False(await tab.EvaluateBooleanAsync(NonInitializedWorkspaceStatusExpression));
+            await tab.ReloadAsync();
+            await tab.WaitForExpressionAsync(WorkspaceInitializedExpression);
+            Assert.True(await tab.EvaluateBooleanAsync(WorkspaceInitializedExpression));
             await tab.EvaluateWithUserGestureAsync("document.querySelector('[data-testid=\\\"human-review-nav\\\"]').click()");
             await tab.WaitForExpressionAsync("document.querySelector('[data-testid=\\\"human-review-item\\\"]') !== null");
             await tab.EvaluateWithUserGestureAsync("document.querySelector('[data-testid=\\\"human-review-item\\\"]').click()");
@@ -215,7 +225,7 @@ public sealed partial class BrowserFlowTests
             await WaitForCanonicalHumanReviewAsync(browser, "approved", 1);
             await WaitForCanonicalHumanReviewAsync(tab, "approved", 1);
             await tab.ReloadAsync();
-            await tab.WaitForExpressionAsync("document.getElementById('workspaceStatus').textContent.includes('Initialized')");
+            await tab.WaitForExpressionAsync(WorkspaceInitializedExpression);
             await tab.EvaluateWithUserGestureAsync("document.querySelector('[data-testid=\\\"human-review-nav\\\"]').click()");
             await tab.WaitForExpressionAsync("document.querySelector('[data-testid=\\\"human-review-item\\\"]') !== null");
             await tab.EvaluateWithUserGestureAsync("document.querySelector('[data-testid=\\\"human-review-item\\\"]').click()");
