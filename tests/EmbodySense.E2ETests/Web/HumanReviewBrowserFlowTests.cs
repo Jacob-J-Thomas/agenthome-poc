@@ -183,8 +183,9 @@ public sealed partial class BrowserFlowTests
     public async Task Human_review_browser_uses_two_same_profile_tabs_for_one_exact_decision_operation()
     {
         const string WorkspaceInitializedExpression = "document.getElementById('workspaceStatus')?.textContent?.includes('Initialized') === true";
-        const string MissingWorkspaceStatusExpression = "(() => { document.getElementById('workspaceStatus')?.remove(); return " + WorkspaceInitializedExpression + "; })()";
-        const string NonInitializedWorkspaceStatusExpression = "(() => { const workspaceStatus = document.getElementById('workspaceStatus'); if (workspaceStatus) workspaceStatus.textContent = 'Needs initialization'; return " + WorkspaceInitializedExpression + "; })()";
+        const string LegacyWorkspaceInitializedExpression = "document.getElementById('workspaceStatus').textContent.includes('Initialized')";
+        const string MissingWorkspaceStatusExpression = "(() => { document.getElementById('workspaceStatus')?.remove(); return document.getElementById('workspaceStatus') === null; })()";
+        const string NonInitializedWorkspaceStatusExpression = "(() => { const workspaceStatus = document.getElementById('workspaceStatus'); if (!workspaceStatus) return false; workspaceStatus.textContent = 'Needs initialization'; return workspaceStatus.textContent === 'Needs initialization'; })()";
         using var workspace = new TestWorkspace();
         using var serverAccount = new BrowserServerAccountDirectory(workspace.ServerStatePath);
         var codexExecutable = await FakeCodexExecutable.CreateCompatibleAsync(workspace, "gpt-test");
@@ -206,10 +207,20 @@ public sealed partial class BrowserFlowTests
             await SelectHumanReviewAsync(browser, runId);
             await using var tab = await browser.OpenTabAsync(app.BaseUrl);
             await tab.WaitForExpressionAsync("document.getElementById('workspaceStatus') !== null");
-            Assert.False(await tab.EvaluateBooleanAsync(MissingWorkspaceStatusExpression));
+            Assert.True(await tab.EvaluateBooleanAsync(MissingWorkspaceStatusExpression));
+            var legacyException = await Assert.ThrowsAsync<BrowserDevToolsException>(async () =>
+            {
+                _ = await tab.EvaluateBooleanAsync(LegacyWorkspaceInitializedExpression);
+            });
+            Assert.Equal("runtime-exception", legacyException.Category);
+            Assert.Equal("Runtime.evaluate", legacyException.Method);
+            Assert.Null(legacyException.Code);
+            Assert.Equal("runtime-exception", legacyException.SafeMessage);
+            Assert.False(await tab.EvaluateBooleanAsync(WorkspaceInitializedExpression));
             await tab.ReloadAsync();
             await tab.WaitForExpressionAsync("document.getElementById('workspaceStatus') !== null");
-            Assert.False(await tab.EvaluateBooleanAsync(NonInitializedWorkspaceStatusExpression));
+            Assert.True(await tab.EvaluateBooleanAsync(NonInitializedWorkspaceStatusExpression));
+            Assert.False(await tab.EvaluateBooleanAsync(WorkspaceInitializedExpression));
             await tab.ReloadAsync();
             await tab.WaitForExpressionAsync(WorkspaceInitializedExpression);
             Assert.True(await tab.EvaluateBooleanAsync(WorkspaceInitializedExpression));
