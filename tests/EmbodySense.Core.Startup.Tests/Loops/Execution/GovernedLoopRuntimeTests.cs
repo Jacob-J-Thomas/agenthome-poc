@@ -175,11 +175,7 @@ internal static partial class GovernedLoopRuntimeTests
             var probeStages = ReadManagedRuntimeProbeStages(probeStageDirectory);
             AssertMandatoryManagedRuntimeProbeStages(probeStages, Stopwatch.GetElapsedTime(probeStartedAt));
             var snapshotRoot = Path.Combine(Path.GetTempPath(), "embodysense-model-profile-snapshots");
-            var orphanedSnapshots = Directory.Exists(snapshotRoot)
-                ? Directory.GetDirectories(snapshotRoot)
-                    .Where(directory => File.Exists(Path.Combine(directory, Path.GetFileName(managedProbeExecutable))))
-                    .ToArray()
-                : Array.Empty<string>();
+            var orphanedSnapshots = SelectManagedRuntimeProbeSnapshotDirectories(snapshotRoot, Path.GetFileName(managedProbeExecutable));
             Assert.Empty(orphanedSnapshots);
 
             using var store = new CustomLoopRunStore(fixture.Paths);
@@ -706,6 +702,43 @@ internal static partial class GovernedLoopRuntimeTests
             missing.Length == 0,
             $"The external model host reached its crash boundary without mandatory managed probe stages: {string.Join(',', missing)}; {FormatManagedRuntimeProbeDiagnostics(elapsed, observedStages)}.");
     }
+
+    internal static void Model_crash_snapshot_selection_is_bound_to_the_exact_fixture_probe()
+    {
+        using var workspace = new TestWorkspace();
+        var snapshotRoot = workspace.File("model-profile-snapshots");
+        var fixtureExecutableIdentity = CreateManagedRuntimeProbeExecutableIdentity();
+        var otherFixtureExecutableIdentity = CreateManagedRuntimeProbeExecutableIdentity();
+        var genericCodexExecutableIdentity = OperatingSystem.IsWindows() ? "codex.cmd" : "codex";
+        Assert.NotEqual(fixtureExecutableIdentity, otherFixtureExecutableIdentity);
+
+        var genericCodexSnapshot = Path.Combine(snapshotRoot, "generic-codex");
+        var otherFixtureSnapshot = Path.Combine(snapshotRoot, "other-fixture-probe");
+        var fixtureSnapshot = Path.Combine(snapshotRoot, "this-fixture-probe");
+        Directory.CreateDirectory(genericCodexSnapshot);
+        Directory.CreateDirectory(otherFixtureSnapshot);
+        Directory.CreateDirectory(fixtureSnapshot);
+        File.WriteAllText(Path.Combine(genericCodexSnapshot, genericCodexExecutableIdentity), string.Empty);
+        File.WriteAllText(Path.Combine(otherFixtureSnapshot, otherFixtureExecutableIdentity), string.Empty);
+        File.WriteAllText(Path.Combine(fixtureSnapshot, fixtureExecutableIdentity), string.Empty);
+
+        Assert.Equal([fixtureSnapshot], SelectManagedRuntimeProbeSnapshotDirectories(snapshotRoot, fixtureExecutableIdentity));
+    }
+
+    private static IReadOnlyList<string> SelectManagedRuntimeProbeSnapshotDirectories(string snapshotRoot, string executableIdentity)
+    {
+        if (string.IsNullOrWhiteSpace(snapshotRoot) || string.IsNullOrWhiteSpace(executableIdentity) || !Directory.Exists(snapshotRoot))
+        {
+            return [];
+        }
+
+        return Directory.GetDirectories(snapshotRoot)
+            .Where(directory => File.Exists(Path.Combine(directory, executableIdentity)))
+            .ToArray();
+    }
+
+    private static string CreateManagedRuntimeProbeExecutableIdentity()
+        => $"codex-runtime-probe-{Guid.NewGuid():N}";
 
     private static string FormatManagedRuntimeProbeDiagnostics(
         TimeSpan elapsed,
@@ -3130,7 +3163,7 @@ internal static partial class GovernedLoopRuntimeTests
                 RelativeDirectory,
                 "codex-runtime-probe",
                 ConfigurationFileName,
-                "codex");
+                CreateManagedRuntimeProbeExecutableIdentity());
         }
 
         internal static async Task<ModelProfileRuntimeProvider> CreateExactTestProviderAsync(string workspacePath)
