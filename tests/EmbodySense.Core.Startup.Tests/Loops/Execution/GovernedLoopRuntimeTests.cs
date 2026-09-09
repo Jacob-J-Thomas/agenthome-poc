@@ -122,7 +122,7 @@ internal static partial class GovernedLoopRuntimeTests
     private const string ConfiguredModelProfileCapabilityId = "org.embodysense/model-profile/codex";
     private const string ModelProfileCapabilityId = "org.example/model-profile/exact-bounded-test";
     private const string ScheduleTriggerCapabilityId = "org.embodysense/triggers/time";
-    private static readonly ImmutableArray<string> _waitRestartProbeStages =
+    private static readonly ImmutableArray<string> _managedRuntimeProbeStages =
     [
         "process-started",
         "version-started",
@@ -160,17 +160,24 @@ internal static partial class GovernedLoopRuntimeTests
                 $"prove the exact {boundary} restart boundary");
             var inputPath = Path.Combine(fixture.Paths.RootPath, $"model-crash-{boundary}.json");
             var markerPath = Path.Combine(fixture.Paths.RootPath, $"model-crash-{boundary}.marker");
+            var probeStageDirectory = Path.Combine(fixture.Paths.RootPath, $"model-crash-{boundary}-probe-stages");
             await File.WriteAllTextAsync(inputPath, JsonSerializer.Serialize(ModelCrashInvocation.From(input)));
+            Directory.CreateDirectory(probeStageDirectory);
+            Assert.Empty(ReadManagedRuntimeProbeStages(probeStageDirectory));
+            var managedProbeExecutable = await fixture.CreateManagedRuntimeProbeExecutableAsync(probeStageDirectory);
 
-            using var child = StartModelCrashChild(fixture, inputPath, markerPath, boundary);
-            await WaitForModelCrashBoundaryAsync(child, markerPath, boundary);
+            using var child = StartModelCrashChild(fixture, inputPath, markerPath, boundary, managedProbeExecutable);
+            var probeStartedAt = Stopwatch.GetTimestamp();
+            await WaitForModelCrashBoundaryAsync(child, markerPath, boundary, probeStageDirectory);
             child.Kill(entireProcessTree: true);
             await child.WaitForExitAsync();
             Assert.NotEqual(0, child.ExitCode);
+            var probeStages = ReadManagedRuntimeProbeStages(probeStageDirectory);
+            AssertMandatoryManagedRuntimeProbeStages(probeStages, Stopwatch.GetElapsedTime(probeStartedAt));
             var snapshotRoot = Path.Combine(Path.GetTempPath(), "embodysense-model-profile-snapshots");
             var orphanedSnapshots = Directory.Exists(snapshotRoot)
                 ? Directory.GetDirectories(snapshotRoot)
-                    .Where(directory => File.Exists(Path.Combine(directory, Path.GetFileName(fixture.CodexPath))))
+                    .Where(directory => File.Exists(Path.Combine(directory, Path.GetFileName(managedProbeExecutable))))
                     .ToArray()
                 : Array.Empty<string>();
             Assert.Empty(orphanedSnapshots);
@@ -308,7 +315,8 @@ internal static partial class GovernedLoopRuntimeTests
         GovernedRuntimeFixture fixture,
         string inputPath,
         string markerPath,
-        GovernedModelPrimaryExecutionBoundary boundary)
+        GovernedModelPrimaryExecutionBoundary boundary,
+        string managedProbeExecutable)
     {
         var startInfo = new ProcessStartInfo("dotnet")
         {
@@ -326,7 +334,7 @@ internal static partial class GovernedLoopRuntimeTests
         startInfo.Environment[ModelCrashChildMode] = "1";
         startInfo.Environment[ModelCrashWorkspace] = fixture.Paths.RootPath;
         startInfo.Environment[ModelCrashTrustRoot] = fixture.TrustRootPath;
-        startInfo.Environment[ModelCrashCodexPath] = fixture.CodexPath;
+        startInfo.Environment[ModelCrashCodexPath] = managedProbeExecutable;
         startInfo.Environment[ModelCrashInputPath] = inputPath;
         startInfo.Environment[ModelCrashMarkerPath] = markerPath;
         startInfo.Environment[ModelCrashBoundary] = boundary.ToString();
@@ -337,15 +345,17 @@ internal static partial class GovernedLoopRuntimeTests
     private static async Task WaitForModelCrashBoundaryAsync(
         Process child,
         string markerPath,
-        GovernedModelPrimaryExecutionBoundary boundary)
+        GovernedModelPrimaryExecutionBoundary boundary,
+        string probeStageDirectory)
     {
+        var probeStartedAt = Stopwatch.GetTimestamp();
         var deadline = DateTimeOffset.UtcNow.AddSeconds(20);
         while (!File.Exists(markerPath) && DateTimeOffset.UtcNow < deadline)
         {
             if (child.HasExited)
             {
                 throw new Xunit.Sdk.XunitException(
-                    $"The external model host exited before {boundary}.{Environment.NewLine}{await child.StandardError.ReadToEndAsync()}{Environment.NewLine}{await child.StandardOutput.ReadToEndAsync()}");
+                    $"The external model host exited before {boundary}; {FormatManagedRuntimeProbeDiagnostics(Stopwatch.GetElapsedTime(probeStartedAt), ReadManagedRuntimeProbeStages(probeStageDirectory))}.{Environment.NewLine}{await child.StandardError.ReadToEndAsync()}{Environment.NewLine}{await child.StandardOutput.ReadToEndAsync()}");
             }
             await Task.Delay(25);
         }
@@ -355,7 +365,8 @@ internal static partial class GovernedLoopRuntimeTests
             {
                 child.Kill(entireProcessTree: true);
             }
-            throw new Xunit.Sdk.XunitException($"The external model host did not reach {boundary} within 20 seconds.");
+            throw new Xunit.Sdk.XunitException(
+                $"The external model host did not reach {boundary} within 20 seconds; {FormatManagedRuntimeProbeDiagnostics(Stopwatch.GetElapsedTime(probeStartedAt), ReadManagedRuntimeProbeStages(probeStageDirectory))}.");
         }
     }
 
@@ -432,8 +443,8 @@ internal static partial class GovernedLoopRuntimeTests
 
         var probeSidecarPath = Path.Combine(fixture.Paths.RootPath, "wait-restart-probe-sidecar");
         Directory.CreateDirectory(probeSidecarPath);
-        Assert.Empty(ReadWaitRestartProbeStages(probeSidecarPath));
-        var managedProbeExecutable = await fixture.CreateManagedWaitRestartProbeExecutableAsync(probeSidecarPath);
+        Assert.Empty(ReadManagedRuntimeProbeStages(probeSidecarPath));
+        var managedProbeExecutable = await fixture.CreateManagedRuntimeProbeExecutableAsync(probeSidecarPath);
         using var child = StartWaitRestartChild(fixture, runId, managedProbeExecutable, probeSidecarPath);
         var standardOutput = child.StandardOutput.ReadToEndAsync();
         var standardError = child.StandardError.ReadToEndAsync();
@@ -451,13 +462,13 @@ internal static partial class GovernedLoopRuntimeTests
         }
 
         Assert.True(child.ExitCode == 0, await standardError + Environment.NewLine + await standardOutput);
-        var probeStages = ReadWaitRestartProbeStages(probeSidecarPath);
+        var probeStages = ReadManagedRuntimeProbeStages(probeSidecarPath);
         Assert.Equal(
             "child-elapsed-ms=12; tool-version=not-observed; stages=initialize-started",
-            FormatWaitRestartProbeDiagnostics(
+            FormatManagedRuntimeProbeDiagnostics(
                 TimeSpan.FromMilliseconds(12.4),
                 ["initialize-started", "ignored-stage", "prompt=do-not-retain"]));
-        foreach (var stage in _waitRestartProbeStages.Where(stage => stage is not "thread-start-completed"))
+        foreach (var stage in _managedRuntimeProbeStages.Where(stage => stage is not "thread-start-completed"))
         {
             Assert.Contains(stage, probeStages);
         }
@@ -633,9 +644,9 @@ internal static partial class GovernedLoopRuntimeTests
         catch (Exception exception)
         {
             var primaryFailure = DescribeWaitRestartPrimaryFailure(exception);
-            var probeDiagnostics = FormatWaitRestartProbeDiagnostics(
+            var probeDiagnostics = FormatManagedRuntimeProbeDiagnostics(
                 Stopwatch.GetElapsedTime(startedAt),
-                ReadWaitRestartProbeStages(probeSidecarPath!));
+                ReadManagedRuntimeProbeStages(probeSidecarPath!));
             var supplementalDiagnostics = await ReadWaitRestartSupplementalDiagnosticsAsync(paths, store, runId!);
             throw new Xunit.Sdk.XunitException(
                 $"The external governed Wait restart host failed: {primaryFailure}; {probeDiagnostics}; {supplementalDiagnostics}");
@@ -673,22 +684,35 @@ internal static partial class GovernedLoopRuntimeTests
             ?? throw new InvalidOperationException("The external governed Wait restart host did not start.");
     }
 
-    private static IReadOnlyList<string> ReadWaitRestartProbeStages(string probeSidecarPath)
+    private static IReadOnlyList<string> ReadManagedRuntimeProbeStages(string probeSidecarPath)
     {
         if (string.IsNullOrWhiteSpace(probeSidecarPath) || !Directory.Exists(probeSidecarPath))
         {
             return [];
         }
 
-        return _waitRestartProbeStages.Where(stage => File.Exists(Path.Combine(probeSidecarPath, stage))).ToArray();
+        return _managedRuntimeProbeStages.Where(stage => File.Exists(Path.Combine(probeSidecarPath, stage))).ToArray();
     }
 
-    private static string FormatWaitRestartProbeDiagnostics(
+    private static void AssertMandatoryManagedRuntimeProbeStages(
+        IReadOnlyList<string> observedStages,
+        TimeSpan elapsed)
+    {
+        var observed = observedStages.ToHashSet(StringComparer.Ordinal);
+        var missing = _managedRuntimeProbeStages
+            .Where(stage => stage is not "thread-start-completed" && !observed.Contains(stage))
+            .ToArray();
+        Assert.True(
+            missing.Length == 0,
+            $"The external model host reached its crash boundary without mandatory managed probe stages: {string.Join(',', missing)}; {FormatManagedRuntimeProbeDiagnostics(elapsed, observedStages)}.");
+    }
+
+    private static string FormatManagedRuntimeProbeDiagnostics(
         TimeSpan elapsed,
         IEnumerable<string> observedStages)
     {
         var allowed = observedStages.ToHashSet(StringComparer.Ordinal);
-        var stages = _waitRestartProbeStages.Where(allowed.Contains).ToArray();
+        var stages = _managedRuntimeProbeStages.Where(allowed.Contains).ToArray();
         var elapsedMilliseconds = Math.Clamp((long)Math.Floor(elapsed.TotalMilliseconds), 0, 120_000);
         var renderedStages = stages.Length == 0 ? "none" : string.Join(',', stages);
         var toolVersion = allowed.Contains("version-completed") ? WaitRestartProbeToolVersion : "not-observed";
@@ -3077,9 +3101,9 @@ internal static partial class GovernedLoopRuntimeTests
                 ? int.Parse(File.ReadAllText(_providerCounterPath), System.Globalization.CultureInfo.InvariantCulture)
                 : 0;
 
-        internal async Task<string> CreateManagedWaitRestartProbeExecutableAsync(string protocolStageMarkerPath)
+        internal async Task<string> CreateManagedRuntimeProbeExecutableAsync(string protocolStageMarkerPath)
         {
-            const string RelativeDirectory = "managed-wait-restart-probe";
+            const string RelativeDirectory = "managed-runtime-probe";
             const string ConfigurationFileName = "probe-config.json";
             var configurationPath = _workspace.File(Path.Combine(RelativeDirectory, ConfigurationFileName));
             Directory.CreateDirectory(Path.GetDirectoryName(configurationPath)!);

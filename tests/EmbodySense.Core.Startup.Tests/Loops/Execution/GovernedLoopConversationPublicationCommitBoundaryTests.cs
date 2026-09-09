@@ -262,16 +262,19 @@ public sealed class GovernedLoopConversationPublicationCommitBoundaryTests
         try
         {
             SynchronizationContext.SetSynchronizationContext(null);
-            execution = CreateBoundary(effect, fixture).CommitAsync(token =>
-            {
-                appendStarted.TrySetResult();
-                if (!releaseAppendHandoff.Wait(TimeSpan.FromSeconds(5)))
+            execution = Task.Factory.StartNew(() => CreateBoundary(effect, fixture).CommitAsync(token =>
                 {
-                    throw new TimeoutException("The test did not release the synchronous append handoff.");
-                }
+                    appendStarted.TrySetResult();
+                    if (!releaseAppendHandoff.Wait(TimeSpan.FromSeconds(5)))
+                    {
+                        throw new TimeoutException("The test did not release the synchronous append handoff.");
+                    }
 
-                return CompleteAppendAfterCancellationAsync(token, () => appendCount++);
-            });
+                    return CompleteAppendAfterCancellationAsync(token, () => appendCount++);
+                }),
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default).Unwrap();
         }
         finally
         {
