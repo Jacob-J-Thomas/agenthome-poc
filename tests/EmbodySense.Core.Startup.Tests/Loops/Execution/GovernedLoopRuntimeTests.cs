@@ -124,17 +124,15 @@ internal static partial class GovernedLoopRuntimeTests
     private const string ScheduleTriggerCapabilityId = "org.embodysense/triggers/time";
     private static readonly ImmutableArray<string> _waitRestartProbeStages =
     [
-        "version-wrapper-entry",
-        "version-node-entry",
-        "tool-version",
-        "app-server-wrapper-entry",
-        "app-server-node-entry",
-        "initialize-received",
-        "initialize-replied",
-        "model-list-received",
-        "model-list-replied",
-        "thread-start-received",
-        "thread-start-replied",
+        "process-started",
+        "version-started",
+        "version-completed",
+        "initialize-started",
+        "initialize-completed",
+        "model-list-started",
+        "model-list-completed",
+        "thread-start-started",
+        "thread-start-completed",
     ];
 
     internal static async Task Model_attempt_crash_windows_are_durable_and_never_redispatch_across_external_restart()
@@ -435,7 +433,8 @@ internal static partial class GovernedLoopRuntimeTests
         var probeSidecarPath = Path.Combine(fixture.Paths.RootPath, "wait-restart-probe-sidecar");
         Directory.CreateDirectory(probeSidecarPath);
         Assert.Empty(ReadWaitRestartProbeStages(probeSidecarPath));
-        using var child = StartWaitRestartChild(fixture, runId, probeSidecarPath);
+        var managedProbeExecutable = await fixture.CreateManagedWaitRestartProbeExecutableAsync(probeSidecarPath);
+        using var child = StartWaitRestartChild(fixture, runId, managedProbeExecutable, probeSidecarPath);
         var standardOutput = child.StandardOutput.ReadToEndAsync();
         var standardError = child.StandardError.ReadToEndAsync();
         using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(120)))
@@ -454,19 +453,11 @@ internal static partial class GovernedLoopRuntimeTests
         Assert.True(child.ExitCode == 0, await standardError + Environment.NewLine + await standardOutput);
         var probeStages = ReadWaitRestartProbeStages(probeSidecarPath);
         Assert.Equal(
-            "child-elapsed-ms=12; tool-version=not-observed; stages=initialize-received",
+            "child-elapsed-ms=12; tool-version=not-observed; stages=initialize-started",
             FormatWaitRestartProbeDiagnostics(
                 TimeSpan.FromMilliseconds(12.4),
-                ["initialize-received", "ignored-stage", "prompt=do-not-retain"],
-                toolVersionObserved: false));
-        Assert.Contains("version-wrapper-entry", probeStages);
-        Assert.Contains("tool-version", probeStages);
-        if (!OperatingSystem.IsWindows())
-        {
-            Assert.Contains("version-node-entry", probeStages);
-        }
-
-        foreach (var stage in _waitRestartProbeStages.Where(stage => stage is not "version-wrapper-entry" and not "version-node-entry" and not "tool-version"))
+                ["initialize-started", "ignored-stage", "prompt=do-not-retain"]));
+        foreach (var stage in _waitRestartProbeStages.Where(stage => stage is not "thread-start-completed"))
         {
             Assert.Contains(stage, probeStages);
         }
@@ -644,15 +635,18 @@ internal static partial class GovernedLoopRuntimeTests
             var primaryFailure = DescribeWaitRestartPrimaryFailure(exception);
             var probeDiagnostics = FormatWaitRestartProbeDiagnostics(
                 Stopwatch.GetElapsedTime(startedAt),
-                ReadWaitRestartProbeStages(probeSidecarPath!),
-                File.Exists(Path.Combine(probeSidecarPath!, "tool-version")));
+                ReadWaitRestartProbeStages(probeSidecarPath!));
             var supplementalDiagnostics = await ReadWaitRestartSupplementalDiagnosticsAsync(paths, store, runId!);
             throw new Xunit.Sdk.XunitException(
                 $"The external governed Wait restart host failed: {primaryFailure}; {probeDiagnostics}; {supplementalDiagnostics}");
         }
     }
 
-    private static Process StartWaitRestartChild(GovernedRuntimeFixture fixture, string runId, string probeSidecarPath)
+    private static Process StartWaitRestartChild(
+        GovernedRuntimeFixture fixture,
+        string runId,
+        string managedProbeExecutable,
+        string probeSidecarPath)
     {
         var startInfo = new ProcessStartInfo("dotnet")
         {
@@ -672,7 +666,7 @@ internal static partial class GovernedLoopRuntimeTests
         startInfo.Environment[WaitRestartChildMode] = "1";
         startInfo.Environment[WaitRestartWorkspace] = fixture.Paths.RootPath;
         startInfo.Environment[WaitRestartTrustRoot] = fixture.TrustRootPath;
-        startInfo.Environment[WaitRestartCodexPath] = fixture.CodexPath;
+        startInfo.Environment[WaitRestartCodexPath] = managedProbeExecutable;
         startInfo.Environment[WaitRestartRunId] = runId;
         startInfo.Environment[WaitRestartProbeSidecar] = probeSidecarPath;
         return Process.Start(startInfo)
@@ -691,14 +685,13 @@ internal static partial class GovernedLoopRuntimeTests
 
     private static string FormatWaitRestartProbeDiagnostics(
         TimeSpan elapsed,
-        IEnumerable<string> observedStages,
-        bool toolVersionObserved)
+        IEnumerable<string> observedStages)
     {
         var allowed = observedStages.ToHashSet(StringComparer.Ordinal);
         var stages = _waitRestartProbeStages.Where(allowed.Contains).ToArray();
         var elapsedMilliseconds = Math.Clamp((long)Math.Floor(elapsed.TotalMilliseconds), 0, 120_000);
         var renderedStages = stages.Length == 0 ? "none" : string.Join(',', stages);
-        var toolVersion = toolVersionObserved ? WaitRestartProbeToolVersion : "not-observed";
+        var toolVersion = allowed.Contains("version-completed") ? WaitRestartProbeToolVersion : "not-observed";
         return $"child-elapsed-ms={elapsedMilliseconds}; tool-version={toolVersion}; stages={renderedStages}";
     }
 
@@ -3083,6 +3076,38 @@ internal static partial class GovernedLoopRuntimeTests
             => File.Exists(_providerCounterPath)
                 ? int.Parse(File.ReadAllText(_providerCounterPath), System.Globalization.CultureInfo.InvariantCulture)
                 : 0;
+
+        internal async Task<string> CreateManagedWaitRestartProbeExecutableAsync(string protocolStageMarkerPath)
+        {
+            const string RelativeDirectory = "managed-wait-restart-probe";
+            const string ConfigurationFileName = "probe-config.json";
+            var configurationPath = _workspace.File(Path.Combine(RelativeDirectory, ConfigurationFileName));
+            Directory.CreateDirectory(Path.GetDirectoryName(configurationPath)!);
+            var configuration = new
+            {
+                version = WaitRestartProbeToolVersion,
+                advertisedModels = new[] { "test-model" },
+                failAppServer = false,
+                versionExitCode = 0,
+                omitModelCatalog = false,
+                requestBeforeInitialize = false,
+                versionDelayMilliseconds = 0,
+                protocolStageDelayMilliseconds = 0,
+                protocolStageMarkerPath = (string?)null,
+                modelPageSize = int.MaxValue,
+                legacyThreadStartShape = false,
+                managedStageMarkerDirectory = protocolStageMarkerPath,
+            };
+            await File.WriteAllTextAsync(
+                configurationPath,
+                JsonSerializer.Serialize(configuration, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+            return await CancellationHostExecutable.CreateAsync(
+                _workspace,
+                RelativeDirectory,
+                "codex-runtime-probe",
+                ConfigurationFileName,
+                "codex");
+        }
 
         internal static async Task<ModelProfileRuntimeProvider> CreateExactTestProviderAsync(string workspacePath)
             => (await TestExactModelProfile.CreateAsync(workspacePath)).Provider;
