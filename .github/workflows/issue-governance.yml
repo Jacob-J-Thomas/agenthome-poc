@@ -16,15 +16,19 @@ concurrency:
 
 jobs:
   audit:
-    name: Audit active issue hierarchy
+    name: Audit governed campaign hierarchy
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
 
-      - name: Audit issue hierarchy and dependencies
+      - name: Test issue governance audit contracts
+        shell: pwsh
+        run: ./tests/scripts/audit-issue-hierarchy.tests.ps1
+
+      - name: Audit governed campaign hierarchy
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: ./scripts/audit-issue-hierarchy.ps1 -Repository $env:GITHUB_REPOSITORY -Campaign 332 -Phase 523
+        run: ./scripts/audit-issue-hierarchy.ps1 -Repository $env:GITHUB_REPOSITORY
