@@ -2151,7 +2151,7 @@ public sealed class GovernedLoopEffectReconciliationCaseStore : IGovernedLoopEff
             cancellationToken.ThrowIfCancellationRequested();
             try
             {
-                return new FileStream(lockPath, FileMode.Open, FileAccess.Read, FileShare.None, bufferSize: 1, FileOptions.WriteThrough);
+                return new FileStream(lockPath, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 1, FileOptions.WriteThrough);
             }
             catch (FileNotFoundException)
             {

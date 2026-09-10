@@ -215,6 +215,62 @@ public sealed class GovernedLoopEffectReconciliationCaseStoreCoverageTests
     }
 
     [Fact]
+    public async Task Shared_reconciliation_readers_return_canonical_cases_and_exclude_writers()
+    {
+        using var readerWorkspace = new TestWorkspace();
+        var readerScenario = await CreateScenarioAsync(readerWorkspace);
+        var readerStore = new GovernedLoopEffectReconciliationCaseStore(readerScenario.EffectStore);
+        var resolved = Resolved(readerScenario.Open, readerScenario.Attempt);
+        Assert.Equal(GovernedLoopEffectReconciliationCaseMutationStatus.Applied, (await readerStore.CompareExchangeAsync(Mutation(readerScenario.Open, "open"))).Status);
+        Assert.Equal(GovernedLoopEffectReconciliationCaseMutationStatus.Applied, (await readerStore.CompareExchangeAsync(Mutation(resolved.Assessed, "assess", expectedVersion: 1, expectedHash: readerScenario.Open.ContentHash))).Status);
+        Assert.Equal(GovernedLoopEffectReconciliationCaseMutationStatus.Applied, (await readerStore.CompareExchangeAsync(Mutation(resolved.Disposed, "dispose", expectedVersion: 2, expectedHash: resolved.Assessed.ContentHash))).Status);
+        Assert.Equal(GovernedLoopEffectReconciliationCaseMutationStatus.Applied, (await readerStore.CompareExchangeAsync(Mutation(resolved.Case, "resolve", expectedVersion: 3, expectedHash: resolved.Disposed.ContentHash, successor: resolved.Successor))).Status);
+
+        var reference = Reference(resolved.Case);
+        var resolutionRequest = new GovernedLoopEffectReconciliationResolutionReadRequest(reference, resolved.Case.Binding);
+        var lockPath = Path.Combine(readerScenario.Paths.GovernedLoopEffectAttemptsPath, ".custom-loop-mutations.lock");
+        await using (var simulatedReader = new FileStream(lockPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+            var page = await readerStore.ListAsync(new(10));
+            Assert.Equal(GovernedLoopEffectReconciliationCaseListStatus.Ready, page.Status);
+            var summary = Assert.Single(page.Cases);
+            Assert.Equal(resolved.Case.CaseId, summary.CaseId);
+            Assert.Equal(resolved.Case.CaseVersion, summary.CaseVersion);
+            Assert.Equal(resolved.Case.ContentHash, summary.ContentHash);
+            Assert.Equal(resolved.Case.Binding.ContentHash, summary.BindingHash);
+            Assert.Equal(GovernedLoopEffectReconciliationCaseSummaryStatus.Resolved, summary.Status);
+
+            var read = await ((IGovernedLoopEffectReconciliationCaseStore)readerStore).ReadAsync(new(reference));
+            Assert.Equal(GovernedLoopEffectReconciliationCaseReadStatus.Found, read.Status);
+            Assert.NotNull(read.Case);
+            Assert.Equal(reference, Reference(read.Case));
+
+            var resolution = await ((IGovernedLoopEffectReconciliationResolutionReader)readerStore).ReadAsync(resolutionRequest);
+            Assert.Equal(GovernedLoopEffectReconciliationResolutionReadStatus.Found, resolution.Status);
+            Assert.NotNull(resolved.Case.Resolution);
+            Assert.NotNull(resolution.Resolution);
+            Assert.Equal(resolved.Case.Resolution.ContentHash, resolution.Resolution.ContentHash);
+            Assert.True(await readerStore.ProbeStorageAvailabilityAsync());
+        }
+
+        using var mutationWorkspace = new TestWorkspace();
+        var mutationScenario = await CreateScenarioAsync(mutationWorkspace);
+        var mutationStore = new GovernedLoopEffectReconciliationCaseStore(mutationScenario.EffectStore);
+        Assert.Equal(GovernedLoopEffectReconciliationCaseMutationStatus.Applied, (await mutationStore.CompareExchangeAsync(Mutation(mutationScenario.Open, "open"))).Status);
+        var beforeMutation = ArtifactSnapshot(mutationScenario.Paths);
+        var mutationLockPath = Path.Combine(mutationScenario.Paths.GovernedLoopEffectAttemptsPath, ".custom-loop-mutations.lock");
+        var assessed = Assessed(mutationScenario.Open);
+        await using (var simulatedReader = new FileStream(mutationLockPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+            var blocked = await mutationStore.CompareExchangeAsync(Mutation(assessed, "assess", expectedVersion: 1, expectedHash: mutationScenario.Open.ContentHash));
+            Assert.Equal(GovernedLoopEffectReconciliationCaseMutationStatus.Unavailable, blocked.Status);
+            Assert.Equal(beforeMutation, ArtifactSnapshot(mutationScenario.Paths));
+        }
+
+        Assert.Equal(GovernedLoopEffectReconciliationCaseMutationStatus.Applied, (await mutationStore.CompareExchangeAsync(Mutation(assessed, "assess", expectedVersion: 1, expectedHash: mutationScenario.Open.ContentHash))).Status);
+    }
+
+    [Fact]
     public async Task Valid_pending_create_journal_is_observed_without_replaying_or_mutating_it()
     {
         using var workspace = new TestWorkspace();
@@ -552,6 +608,12 @@ public sealed class GovernedLoopEffectReconciliationCaseStoreCoverageTests
 
     private static GovernedLoopEffectReconciliationCaseMutationRequest Mutation(GovernedLoopEffectReconciliationCase replacement, string purpose, string? operationId = null, long? expectedVersion = null, string? expectedHash = null, GovernedLoopEffectAttempt? successor = null)
         => new(operationId ?? $"mutation-{purpose}", PersistenceHash("request", operationId ?? $"mutation-{purpose}"), purpose, expectedVersion, expectedHash, replacement.Binding, replacement, successor);
+
+    private static string[] ArtifactSnapshot(WorkspacePaths paths)
+        => Directory.EnumerateFiles(paths.GovernedLoopEffectAttemptsPath)
+            .OrderBy(Path.GetFileName, StringComparer.Ordinal)
+            .Select(path => Path.GetFileName(path) + ":" + Convert.ToBase64String(File.ReadAllBytes(path)))
+            .ToArray();
 
     private static GovernedLoopEffectReconciliationCaseReference Reference(GovernedLoopEffectReconciliationCase value)
         => new(value.CaseId, value.CaseVersion, value.ContentHash, value.Binding.ContentHash);

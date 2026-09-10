@@ -158,9 +158,9 @@ public sealed partial class AgentRuntimeHumanReviewTests
 
     private static async Task<(CustomLoopRunRecord Run, GovernedLoopEffectAttempt Attempt, GovernedLoopEffectAttemptStore Store)> SeedPreDispatchEffectAsync(TestWorkspace workspace, string runId, string workspaceId)
     {
-        var blueprint = await HumanReviewRecoveryCanonicalRunFactory.CreateApprovedRunAsync(runId, "admission-" + runId, "sequential-loop-" + runId, workspaceId: workspaceId);
-        var request = blueprint.HumanReview!.Request;
         var now = DateTimeOffset.UtcNow;
+        var blueprint = await HumanReviewRecoveryCanonicalRunFactory.CreateApprovedRunAsync(runId, "admission-" + runId, "sequential-loop-" + runId, materializedAtUtc: now.AddMinutes(-5), workspaceId: workspaceId);
+        var request = blueprint.HumanReview!.Request;
         var timing = new CommonHumanReviewTiming(request.Timing.CreatedAtUtc, now, now.AddHours(1));
         blueprint = blueprint with { HumanReview = blueprint.HumanReview with { Request = HumanReviewContractHash.ApplyRequest(request with { Timing = timing }) } };
         request = CreatePreDispatchRequestWithEffect(blueprint, out var attempt);

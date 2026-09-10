@@ -32,8 +32,10 @@ internal static class CodexRuntimeProbeHost
             return 2;
         }
 
+        await RecordStageAsync(configuration, "process-started");
         if (commandArguments.Contains("--version", StringComparer.Ordinal))
         {
+            await RecordStageAsync(configuration, "version-started");
             await DelayAsync(configuration.VersionDelayMilliseconds);
             if (configuration.VersionExitCode != 0)
             {
@@ -42,6 +44,7 @@ internal static class CodexRuntimeProbeHost
             }
 
             await Console.Out.WriteLineAsync(configuration.Version);
+            await RecordStageAsync(configuration, "version-completed");
             return 0;
         }
 
@@ -65,9 +68,8 @@ internal static class CodexRuntimeProbeHost
             switch (method)
             {
                 case "initialize":
-                    await MarkStageAsync(configuration.ProtocolStageMarkerPath, "initialize-started");
+                    await RecordStageAsync(configuration, "initialize-started");
                     await DelayAsync(configuration.ProtocolStageDelayMilliseconds);
-                    await MarkStageAsync(configuration.ProtocolStageMarkerPath, "initialize-completed");
                     if (configuration.RequestBeforeInitialize)
                     {
                         await WriteAsync(new { id = 99, method = "unsupported/probe", @params = new { } });
@@ -79,31 +81,35 @@ internal static class CodexRuntimeProbeHost
                         }
                     }
                     await WriteAsync(new { id, result = new { } });
+                    await RecordStageAsync(configuration, "initialize-completed");
                     break;
 
                 case "initialized":
                     break;
 
                 case "model/list":
-                    await MarkStageAsync(configuration.ProtocolStageMarkerPath, "model-list-started");
+                    await RecordStageAsync(configuration, "model-list-started");
                     await DelayAsync(configuration.ProtocolStageDelayMilliseconds);
-                    await MarkStageAsync(configuration.ProtocolStageMarkerPath, "model-list-completed");
                     var offset = ReadCursorOffset(root);
                     var page = configuration.AdvertisedModels.Skip(offset).Take(configuration.ModelPageSize).ToArray();
                     if (configuration.OmitModelCatalog)
                     {
                         await WriteAsync(new { id, result = new { } });
+                        await RecordStageAsync(configuration, "model-list-completed");
                         break;
                     }
                     var nextOffset = checked(offset + page.Length);
                     var nextCursor = nextOffset < configuration.AdvertisedModels.Length ? nextOffset.ToString(System.Globalization.CultureInfo.InvariantCulture) : null;
                     await WriteAsync(new { id, result = new { data = page.Select(model => new { id = model, model }).ToArray(), nextCursor } });
+                    await RecordStageAsync(configuration, "model-list-completed");
                     break;
 
                 case "thread/start":
+                    await RecordStageAsync(configuration, "thread-start-started");
                     if (configuration.LegacyThreadStartShape)
                     {
                         await WriteAsync(new { id, result = new { thread = new { id = "thread-probe" } } });
+                        await RecordStageAsync(configuration, "thread-start-completed");
                         break;
                     }
 
@@ -112,6 +118,7 @@ internal static class CodexRuntimeProbeHost
                         : configuration.AdvertisedModels.FirstOrDefault() ?? "externally-configured";
                     var requestedProvider = root.GetProperty("params").GetProperty("modelProvider").GetString() ?? string.Empty;
                     await WriteAsync(new { id, result = new { model = requestedModel, modelProvider = requestedProvider, thread = new { id = "thread-probe", modelProvider = requestedProvider } } });
+                    await RecordStageAsync(configuration, "thread-start-completed");
                     break;
             }
         }
@@ -122,8 +129,32 @@ internal static class CodexRuntimeProbeHost
     private static Task DelayAsync(int delayMilliseconds)
         => delayMilliseconds == 0 ? Task.CompletedTask : Task.Delay(delayMilliseconds);
 
+    private static async Task RecordStageAsync(CodexRuntimeProbeConfiguration configuration, string stage)
+    {
+        await MarkStageAsync(configuration.ProtocolStageMarkerPath, stage);
+        await MarkManagedStageAsync(configuration.ManagedStageMarkerDirectory, stage);
+    }
+
     private static Task MarkStageAsync(string? markerPath, string stage)
-        => string.IsNullOrWhiteSpace(markerPath) ? Task.CompletedTask : File.AppendAllTextAsync(markerPath, stage + Environment.NewLine);
+    {
+        if (string.IsNullOrWhiteSpace(markerPath))
+        {
+            return Task.CompletedTask;
+        }
+
+        return File.AppendAllTextAsync(markerPath, stage + Environment.NewLine);
+    }
+
+    private static Task MarkManagedStageAsync(string? markerDirectory, string stage)
+    {
+        if (string.IsNullOrWhiteSpace(markerDirectory))
+        {
+            return Task.CompletedTask;
+        }
+
+        Directory.CreateDirectory(markerDirectory);
+        return File.WriteAllTextAsync(Path.Combine(markerDirectory, stage), "1");
+    }
 
     private static int ReadCursorOffset(JsonElement root)
     {
@@ -176,5 +207,6 @@ internal static class CodexRuntimeProbeHost
         int ProtocolStageDelayMilliseconds,
         string? ProtocolStageMarkerPath,
         int ModelPageSize,
-        bool LegacyThreadStartShape);
+        bool LegacyThreadStartShape,
+        string? ManagedStageMarkerDirectory);
 }

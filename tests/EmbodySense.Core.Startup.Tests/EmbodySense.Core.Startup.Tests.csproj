@@ -16,6 +16,7 @@
     <ProjectReference Include="..\..\src\EmbodySense.Core.Common\EmbodySense.Core.Common.csproj" />
     <ProjectReference Include="..\..\src\EmbodySense.Core.Persistence\EmbodySense.Core.Persistence.csproj" />
     <ProjectReference Include="..\..\src\EmbodySense.Core.Startup\EmbodySense.Core.Startup.csproj" />
+    <ProjectReference Include="..\EmbodySense.CancellationHost\EmbodySense.CancellationHost.csproj" ReferenceOutputAssembly="false" AdditionalProperties="Configuration=$(Configuration)" />
     <ProjectReference Include="..\EmbodySense.Tests.Support\EmbodySense.Tests.Support.csproj" />
   </ItemGroup>
 
@@ -52,5 +53,7 @@
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
   </PropertyGroup>
+
+  <Import Project="..\EmbodySense.CancellationHost\CancellationHostTestFixture.targets" />
 
 </Project>

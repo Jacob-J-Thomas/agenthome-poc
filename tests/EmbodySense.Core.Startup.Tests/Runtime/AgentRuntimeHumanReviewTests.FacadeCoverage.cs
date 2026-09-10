@@ -220,9 +220,9 @@ public sealed partial class AgentRuntimeHumanReviewTests
 
     private static async Task<CustomLoopRunRecord> CreateLivePendingBlueprintAsync(string runId)
     {
-        var blueprint = await HumanReviewRecoveryCanonicalRunFactory.CreateApprovedRunAsync(runId, "admission-" + runId);
-        var request = blueprint.HumanReview!.Request;
         var now = DateTimeOffset.UtcNow;
+        var blueprint = await HumanReviewRecoveryCanonicalRunFactory.CreateApprovedRunAsync(runId, "admission-" + runId, materializedAtUtc: now.AddMinutes(-5));
+        var request = blueprint.HumanReview!.Request;
         var timing = new CommonHumanReviewTiming(request.Timing.CreatedAtUtc, now, now.AddHours(1));
         return blueprint with { HumanReview = blueprint.HumanReview with { Request = HumanReviewContractHash.ApplyRequest(request with { Timing = timing }) } };
     }
